@@ -48,6 +48,11 @@ impl Http {
             // or sandboxed network the same way curl does.
             .proxy(ureq::Proxy::try_from_env())
             .timeout_global(Some(Duration::from_secs(30)))
+            // Handle error statuses ourselves rather than letting ureq turn
+            // them into errors that have already discarded the body. These
+            // services put the useful part of the message in the body — an
+            // AcoustID rejection is a bare "HTTP 400" without it.
+            .http_status_as_error(false)
             .build()
             .into();
 
@@ -89,28 +94,36 @@ impl Http {
     /// MusicBrainz answers with 503 rather than 429 when it wants a client to
     /// back off, and expects the client to wait and try again rather than
     /// treat it as a hard failure.
-    fn with_retry<T>(
+    fn with_retry(
         &self,
         url: &str,
-        mut attempt: impl FnMut() -> Result<T, ureq::Error>,
-    ) -> Result<T> {
+        mut attempt: impl FnMut() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
         let mut backoff = Duration::from_millis(500);
-        let mut last_error = None;
+        let mut last_status = 0;
 
         for _ in 0..=MAX_RETRIES {
             self.throttle(url);
-            match attempt() {
-                Ok(value) => return Ok(value),
-                Err(e) if is_backoff(&e) => {
-                    last_error = Some(e);
-                    std::thread::sleep(backoff);
-                    backoff *= 2;
-                }
-                Err(e) => return Err(describe(e, url)),
+            let mut response =
+                attempt().map_err(|e| anyhow::anyhow!("could not reach {url}: {e}"))?;
+
+            let status = response.status().as_u16();
+            if (200..300).contains(&status) {
+                return Ok(response);
             }
+            if is_backoff(status) {
+                last_status = status;
+                std::thread::sleep(backoff);
+                backoff *= 2;
+                continue;
+            }
+            return Err(status_error(url, status, &mut response));
         }
 
-        Err(describe(last_error.expect("the loop only exits here after an error"), url))
+        Err(anyhow::anyhow!(
+            "{url} is still rate limiting us (HTTP {last_status}) after {MAX_RETRIES} retries; \
+             raise the interval between requests and try again"
+        ))
     }
 
     /// GET a URL and return the body as text.
@@ -191,20 +204,42 @@ fn is_not_found(error: &anyhow::Error) -> bool {
 }
 
 /// Statuses that mean "try again later" rather than "this failed".
-fn is_backoff(error: &ureq::Error) -> bool {
-    matches!(error, ureq::Error::StatusCode(429) | ureq::Error::StatusCode(503))
+fn is_backoff(status: u16) -> bool {
+    matches!(status, 429 | 503)
 }
 
-/// Turn a transport error into something that says what to do about it.
-fn describe(error: ureq::Error, url: &str) -> anyhow::Error {
-    match &error {
-        ureq::Error::StatusCode(code) if is_backoff(&error) => anyhow::anyhow!(
-            "{url} is still rate limiting us (HTTP {code}) after {MAX_RETRIES} retries; \
-             raise the interval between requests and try again"
-        ),
-        // Formatted so `is_not_found` can recognise a 404 downstream.
-        ureq::Error::StatusCode(code) => anyhow::anyhow!("{url} returned HTTP {code}"),
-        _ => anyhow::anyhow!("could not reach {url}: {error}"),
+/// Build an error for a failed status, keeping whatever the service said.
+///
+/// The status alone is close to useless for diagnosis: AcoustID answers a bad
+/// key with HTTP 400 and puts "invalid API key" in the body, and reporting
+/// only the 400 sends you looking for a malformed request instead.
+fn status_error(
+    url: &str,
+    status: u16,
+    response: &mut ureq::http::Response<ureq::Body>,
+) -> anyhow::Error {
+    let body = response.body_mut().read_to_string().unwrap_or_default();
+    // Formatted so `is_not_found` can recognise a 404 downstream.
+    match service_message(&body) {
+        Some(message) => anyhow::anyhow!("{url} returned HTTP {status}: {message}"),
+        None => anyhow::anyhow!("{url} returned HTTP {status}"),
+    }
+}
+
+/// Pull a human-readable message out of a JSON error body.
+///
+/// AcoustID nests it as `{"error": {"message": ...}}` while MusicBrainz uses a
+/// plain `{"error": "..."}`, so both shapes are accepted.
+fn service_message(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = value.get("error")?;
+    let message = error.get("message").and_then(|m| m.as_str()).or_else(|| error.as_str())?;
+
+    let message = message.trim();
+    if message.is_empty() {
+        None
+    } else {
+        Some(message.to_string())
     }
 }
 
@@ -307,20 +342,38 @@ mod tests {
     }
 
     #[test]
-    fn recognises_a_not_found_error() {
-        let err = describe(ureq::Error::StatusCode(404), "https://x.example/a");
-        assert!(is_not_found(&err), "404 was not recognised: {err}");
-
-        let other = describe(ureq::Error::StatusCode(500), "https://x.example/a");
-        assert!(!is_not_found(&other));
+    fn recognises_backoff_statuses() {
+        assert!(is_backoff(429));
+        assert!(is_backoff(503));
+        assert!(!is_backoff(404));
+        assert!(!is_backoff(400));
     }
 
     #[test]
-    fn rate_limit_errors_explain_what_to_do() {
-        let err = describe(ureq::Error::StatusCode(503), "https://x.example/a");
-        assert!(err.to_string().contains("raise the interval"), "{err}");
-        assert!(is_backoff(&ureq::Error::StatusCode(429)));
-        assert!(!is_backoff(&ureq::Error::StatusCode(404)));
+    fn recognises_a_not_found_error() {
+        let err = anyhow::anyhow!("https://x.example/a returned HTTP 404");
+        assert!(is_not_found(&err), "404 was not recognised: {err}");
+        assert!(!is_not_found(&anyhow::anyhow!("https://x.example/a returned HTTP 500")));
+    }
+
+    #[test]
+    fn keeps_the_message_a_service_puts_in_its_error_body() {
+        // AcoustID's shape. Losing this leaves you debugging a bare HTTP 400
+        // when the real answer is that the key is wrong.
+        let acoustid = r#"{"error": {"code": 4, "message": "invalid API key"}, "status": "error"}"#;
+        assert_eq!(service_message(acoustid).as_deref(), Some("invalid API key"));
+
+        // MusicBrainz's shape.
+        let musicbrainz = r#"{"help": "...", "error": "Not Found"}"#;
+        assert_eq!(service_message(musicbrainz).as_deref(), Some("Not Found"));
+    }
+
+    #[test]
+    fn copes_with_error_bodies_it_cannot_read() {
+        assert_eq!(service_message("<html>gateway timeout</html>"), None);
+        assert_eq!(service_message(""), None);
+        assert_eq!(service_message(r#"{"status": "ok"}"#), None);
+        assert_eq!(service_message(r#"{"error": "   "}"#), None);
     }
 
     #[test]
