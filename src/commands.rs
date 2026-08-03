@@ -8,12 +8,13 @@ use rayon::prelude::*;
 
 use crate::audio::decode::decode_file;
 use crate::audio::encode::{write_file, Codec, EncodeOptions};
-use crate::cli::{AnalyzeArgs, NormalizeArgs, NormalizeMode, StemsArgs};
+use crate::cli::{AnalyzeArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, StemsArgs, TagArgs};
 use crate::discover;
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
 use crate::stems::{demucs, dsp, Backend, StemSet};
+use crate::tag::{acoustid, coverart, fingerprint, musicbrainz, Metadata, TagOutcome};
 
 /// Outcome of a batch: how many files worked, and the failures.
 pub struct Outcome {
@@ -398,6 +399,172 @@ fn write_stems(
         written.push(format!("wrote {}", out.display()));
     }
     Ok(written)
+}
+
+// -- tag -------------------------------------------------------------------
+
+pub fn tag(args: &TagArgs) -> Result<()> {
+    let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+
+    // Fingerprinting is local and CPU-bound, so it runs across every core
+    // before any network work starts.
+    let fingerprints: Vec<Result<fingerprint::Fingerprint>> = files
+        .par_iter()
+        .map(|path| {
+            let audio = decode_file(path)?;
+            fingerprint::fingerprint(&audio)
+        })
+        .collect();
+
+    if args.print_fingerprint {
+        let results = fingerprints
+            .into_iter()
+            .map(|r| r.map(|fp| vec![format!("{} {}", fp.duration_secs, fp.compressed)]))
+            .collect();
+        let (lines, outcome) = partition(&files, results);
+        for (path, line) in files.iter().zip(lines) {
+            println!("{}\t{line}", path.display());
+        }
+        return outcome.report();
+    }
+
+    let key = args.acoustid_key.clone().unwrap_or_default();
+    let mut lookup = Lookup::new(key, args)?;
+
+    let mut failures = Vec::new();
+    let mut matched = 0usize;
+    let mut unmatched = 0usize;
+
+    // The network phase is sequential: MusicBrainz allows roughly one request
+    // per second, so there is nothing to gain from parallelism and a real risk
+    // of being blocked for ignoring the limit.
+    for (path, fingerprint) in files.iter().zip(fingerprints) {
+        let result = fingerprint.and_then(|fp| tag_one(path, &fp, args, &mut lookup));
+        match result {
+            Ok(Some(line)) => {
+                matched += 1;
+                println!("{line}");
+            }
+            Ok(None) => {
+                unmatched += 1;
+                println!("{}: no confident match", path.display());
+            }
+            Err(e) => failures.push((path.clone(), e)),
+        }
+    }
+
+    eprintln!("{matched} tagged, {unmatched} unmatched, {} failed", failures.len());
+    Outcome { processed: files.len(), failures }.report()
+}
+
+/// The three services, plus the caches that keep repeated lookups off the
+/// network when a whole album is being tagged at once.
+struct Lookup {
+    acoustid: acoustid::Client,
+    musicbrainz: musicbrainz::Client,
+    cover: Option<coverart::Client>,
+    recordings: BTreeMap<String, musicbrainz::Recording>,
+    covers: BTreeMap<String, Option<coverart::CoverArt>>,
+}
+
+impl Lookup {
+    fn new(key: String, args: &TagArgs) -> Result<Self> {
+        Ok(Self {
+            acoustid: acoustid::Client::new(key, acoustid::DEFAULT_MIN_INTERVAL),
+            musicbrainz: musicbrainz::Client::new(std::time::Duration::from_millis(
+                args.musicbrainz_interval,
+            )),
+            cover: args.cover_art.then(|| {
+                coverart::Client::new(coverart::DEFAULT_MIN_INTERVAL, args.max_cover_bytes)
+            }),
+            recordings: BTreeMap::new(),
+            covers: BTreeMap::new(),
+        })
+    }
+
+    fn recording(&mut self, mbid: &str) -> Result<musicbrainz::Recording> {
+        if let Some(cached) = self.recordings.get(mbid) {
+            return Ok(cached.clone());
+        }
+        let recording = self.musicbrainz.lookup_recording(mbid)?;
+        self.recordings.insert(mbid.to_string(), recording.clone());
+        Ok(recording)
+    }
+
+    /// Cover art for a release, fetched once however many tracks share it.
+    fn cover_art(&mut self, release_mbid: &str) -> Result<Option<coverart::CoverArt>> {
+        let Some(client) = self.cover.as_mut() else { return Ok(None) };
+        if let Some(cached) = self.covers.get(release_mbid) {
+            return Ok(cached.clone());
+        }
+        let art = client.front(release_mbid)?;
+        self.covers.insert(release_mbid.to_string(), art.clone());
+        Ok(art)
+    }
+}
+
+/// Identify and tag one file. `Ok(None)` means no confident match.
+fn tag_one(
+    path: &Path,
+    fingerprint: &fingerprint::Fingerprint,
+    args: &TagArgs,
+    lookup: &mut Lookup,
+) -> Result<Option<String>> {
+    let candidates = lookup.acoustid.lookup(fingerprint)?;
+    let Some(best) = candidates.first() else {
+        return Ok(None);
+    };
+
+    if best.score < args.min_score && args.on_ambiguous == OnAmbiguous::Skip {
+        return Ok(None);
+    }
+
+    let recording = lookup.recording(&best.recording_mbid)?;
+    let metadata = Metadata::from_musicbrainz(&recording, Some(&best.acoustid));
+
+    let art = match metadata.release_mbid.as_deref() {
+        Some(release) => lookup.cover_art(release)?,
+        None => None,
+    };
+
+    let mut line = format!("{}: {} (score {:.2})", path.display(), metadata.describe(), best.score);
+    if best.score < args.min_score {
+        line.push_str(" [below --min-score]");
+    }
+
+    if args.dry_run {
+        line.push_str(" [dry run]");
+        return Ok(Some(line));
+    }
+
+    let outcome = crate::tag::write_tags(path, &metadata, args.on_existing, art.as_ref())?;
+    line.push_str(&summarize_tagging(&outcome));
+    Ok(Some(line))
+}
+
+fn summarize_tagging(outcome: &TagOutcome) -> String {
+    let mut parts = Vec::new();
+    if !outcome.written.is_empty() {
+        parts.push(format!("wrote {} fields", outcome.written.len()));
+    }
+    if !outcome.unchanged.is_empty() {
+        parts.push(format!("kept {}", outcome.unchanged.len()));
+    }
+    if outcome.cover_art {
+        parts.push("cover art".to_string());
+    }
+    let mut summary = if parts.is_empty() {
+        " — nothing to change".to_string()
+    } else {
+        format!(" — {}", parts.join(", "))
+    };
+    for conflict in &outcome.conflicts {
+        summary.push_str(&format!(
+            "\n    conflict: {} is {:?}, MusicBrainz says {:?}",
+            conflict.field, conflict.existing, conflict.proposed
+        ));
+    }
+    summary
 }
 
 // -- formatting ------------------------------------------------------------

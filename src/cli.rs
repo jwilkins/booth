@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::audio::encode::Codec;
 use crate::normalize::PeakPolicy;
 use crate::stems::{Backend, Stem};
+use crate::tag::OnExisting;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -32,6 +33,62 @@ pub enum Command {
     Normalize(NormalizeArgs),
     /// Split files into vocals, melody and drums.
     Stems(StemsArgs),
+    /// Identify files by sound and write metadata tags from MusicBrainz.
+    Tag(TagArgs),
+}
+
+/// What to do with a file whose best match is below the confidence threshold.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OnAmbiguous {
+    /// Leave the file alone and report it as unmatched.
+    Skip,
+    /// Tag it with the best match anyway.
+    Best,
+}
+
+#[derive(Args, Debug)]
+pub struct TagArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
+    /// AcoustID API key. Free from https://acoustid.org/new-application.
+    /// MusicBrainz itself needs no key.
+    #[arg(long, value_name = "KEY", env = "ACOUSTID_API_KEY", hide_env_values = true)]
+    pub acoustid_key: Option<String>,
+
+    /// What to do with tags the file already has.
+    #[arg(long, value_enum, default_value_t = OnExisting::Keep)]
+    pub on_existing: OnExisting,
+
+    /// Minimum AcoustID confidence, from 0 to 1, for a match to be trusted.
+    #[arg(long, value_name = "SCORE", default_value_t = 0.8)]
+    pub min_score: f64,
+
+    /// What to do when no match reaches --min-score.
+    #[arg(long, value_enum, default_value_t = OnAmbiguous::Skip)]
+    pub on_ambiguous: OnAmbiguous,
+
+    /// Also fetch front cover art from the Cover Art Archive and embed it.
+    #[arg(long)]
+    pub cover_art: bool,
+
+    /// Largest cover image to accept, in bytes.
+    #[arg(long, value_name = "BYTES", default_value_t = crate::tag::coverart::DEFAULT_MAX_BYTES)]
+    pub max_cover_bytes: usize,
+
+    /// Print each file's fingerprint and duration, then stop. Needs no API key
+    /// and makes no network requests.
+    #[arg(long)]
+    pub print_fingerprint: bool,
+
+    /// Look everything up and report what would change, but write nothing.
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
+
+    /// Milliseconds between MusicBrainz requests. Their terms ask for at least
+    /// 1000; going below that will get you rate limited and then blocked.
+    #[arg(long, value_name = "MS", default_value_t = 1_100)]
+    pub musicbrainz_interval: u64,
 }
 
 #[derive(Args, Debug)]

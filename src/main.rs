@@ -25,5 +25,6 @@ fn run() -> Result<()> {
         Command::Analyze(args) => commands::analyze(args),
         Command::Normalize(args) => commands::normalize(args),
         Command::Stems(args) => commands::stems(args),
+        Command::Tag(args) => commands::tag(args),
     }
 }

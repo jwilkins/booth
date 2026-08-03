@@ -1,14 +1,21 @@
 # musicai
 
-A local command-line audio tool in Rust. It does two things:
+A command-line audio tool in Rust. It does three things:
 
 - **Normalize** mp3, flac and wav files to a consistent loudness (EBU R128 / LUFS), either by
   re-encoding or by writing ReplayGain tags and leaving the audio untouched.
 - **Separate** a mix into three stems — vocals, melody and drums.
+- **Tag** files by identifying them from their sound, via acoustic fingerprinting and
+  MusicBrainz.
 
-Everything runs on your machine. Nothing is uploaded, and nothing is downloaded at run time.
-There is no ffmpeg dependency: decoding is [Symphonia](https://github.com/pdeljanov/Symphonia),
-and the encoders (LAME for mp3, `flacenc` for flac, `hound` for wav) are built into the binary.
+`analyze`, `normalize` and `stems` run entirely on your machine — nothing is uploaded and
+nothing is downloaded at run time. `tag` is the exception: fingerprinting is local, but turning
+a fingerprint into metadata means asking AcoustID and MusicBrainz, so that one command needs the
+network. See [Tag](#tag) for what it sends.
+
+There is no ffmpeg dependency: decoding is
+[Symphonia](https://github.com/pdeljanov/Symphonia), and the encoders (LAME for mp3, `flacenc`
+for flac, `hound` for wav) are built into the binary.
 
 ## Install
 
@@ -147,6 +154,85 @@ Nothing is installed or downloaded on your behalf; if the binary is not there, y
 use `--backend dsp`. Demucs produces four stems, so its `bass` and `other` are summed to make our
 `melody`. `--demucs-bin`, `--demucs-model` and `--demucs-device` are there when you need them.
 
+## Tag
+
+Identify files by what they sound like, and write the resulting metadata into their tags:
+
+```sh
+export ACOUSTID_API_KEY=...        # free from https://acoustid.org/new-application
+musicai tag ~/Music/unsorted -r
+```
+
+```
+album/01.flac: Radiohead - Creep (Pablo Honey) (score 0.98) — wrote 14 fields
+album/02.flac: no confident match
+```
+
+The pipeline is: compute a Chromaprint fingerprint locally, ask **AcoustID** which MusicBrainz
+recording it is, ask **MusicBrainz** for the details, write them into the file. Filenames and
+any existing tags are ignored — identification is from the audio alone, so a file called
+`track03.flac` with no tags identifies just as well as a correctly named one.
+
+### This command uses the network
+
+Unlike everything else here, `tag` cannot work offline. It sends the fingerprint (not the audio)
+and the track duration to AcoustID, then recording IDs to MusicBrainz, and with `--cover-art` it
+fetches images from the Cover Art Archive. No audio ever leaves your machine, but the fingerprint
+and the fact that you are looking a track up do.
+
+**AcoustID needs a free API key**, from <https://acoustid.org/new-application>. Pass it with
+`--acoustid-key` or set `ACOUSTID_API_KEY`. **MusicBrainz needs no key** — it is open for
+non-commercial use — but it does require a descriptive User-Agent and no more than one request
+per second, both of which this handles. That rate limit is why tagging a large library takes a
+while: roughly one second per distinct track.
+
+Fingerprinting alone needs no key and no network:
+
+```sh
+musicai tag ~/Music --print-fingerprint    # prints "<duration> <fingerprint>" per file
+```
+
+### Existing tags
+
+`--on-existing` decides what happens to fields a file already has. Empty fields are always
+filled, whatever the setting.
+
+- `keep` (default) — never touch a field that already has a value. Safe for a library you have
+  curated by hand.
+- `overwrite` — MusicBrainz wins. Good for a library you know is a mess.
+- `report` — leave existing values alone, but print every case where MusicBrainz disagrees, so
+  you can look before deciding.
+
+### Confidence
+
+AcoustID returns candidates with a confidence score from 0 to 1. `--min-score` (default `0.8`)
+sets the bar, and `--on-ambiguous` decides what happens to files that fall short:
+
+```sh
+musicai tag ~/Music --min-score 0.9 --on-ambiguous skip   # cautious (skip is the default)
+musicai tag ~/Music --min-score 0.5 --on-ambiguous best   # tag everything, best guess wins
+```
+
+`--dry-run` looks everything up and reports what it would write without touching a file.
+
+### What gets written
+
+Tag names follow the MusicBrainz Picard convention, so other software recognises them: Vorbis
+comments for flac (`TITLE`, `ALBUMARTIST`, `MUSICBRAINZ_TRACKID`, …) and ID3v2.4 for mp3 (`TIT2`,
+`TPE2`, `TXXX:MusicBrainz Album Id`, …). Wav has no standard metadata tag and is rejected.
+
+Alongside the obvious fields — title, artist, album, album artist, date, track and disc numbers —
+it writes the MusicBrainz recording, release, release-group and artist IDs, plus the AcoustID.
+Those identifiers are what let you re-look-up or correct the metadata later without
+re-fingerprinting.
+
+`--cover-art` additionally fetches the front cover from the Cover Art Archive and embeds it
+(a FLAC `PICTURE` block or an ID3 `APIC` frame). It is off by default because it means more
+requests and materially bigger files. Re-tagging replaces the existing front cover rather than
+adding a second one.
+
+Only the tag blocks are rewritten; the audio is left byte-for-byte alone.
+
 ## Notes
 
 - Supported formats in and out: mp3, flac, wav. Files named explicitly on the command line are
@@ -165,9 +251,22 @@ use `--backend dsp`. Demucs produces four stems, so its `bass` and `other` are s
 cargo test --release
 ```
 
-Unit tests cover the STFT round trip, the median filters, the limiter's ceiling guarantee and
-the loudness maths. `tests/end_to_end.rs` drives the real binary over real encoded files, and
-`tests/separation_quality.rs` pins how well the default separator routes known sources.
+Unit tests cover the STFT round trip, the median filters, the limiter's ceiling guarantee, the
+loudness maths and the parsing of AcoustID and MusicBrainz responses. `tests/end_to_end.rs`
+drives the real binary over real encoded files, `tests/separation_quality.rs` pins how well the
+default separator routes known sources, and `tests/tagging.rs` round-trips tags through real
+flac and mp3 files.
+
+That suite is entirely offline. Tests that talk to the real services are marked `#[ignore]` and
+run separately:
+
+```sh
+cargo test --release --test live_services -- --ignored --test-threads=1
+```
+
+`--test-threads=1` is required — the rate limiter is shared per host, but running these in
+parallel would still queue them all up behind each other for no benefit. The AcoustID test needs
+`ACOUSTID_API_KEY` and skips itself without one.
 
 ## License
 

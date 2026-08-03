@@ -12,3 +12,4 @@ pub mod dsp;
 pub mod loudness;
 pub mod normalize;
 pub mod stems;
+pub mod tag;
