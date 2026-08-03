@@ -1,0 +1,5 @@
+# Keep short struct literals, calls and match arms on one line rather than
+# exploding them across five. This is the style the code is written in, so
+# `cargo fmt` is a no-op rather than a large reformat.
+max_width = 100
+use_small_heuristics = "Max"
