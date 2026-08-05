@@ -181,7 +181,14 @@ fetches images from the Cover Art Archive. No audio ever leaves your machine, bu
 and the fact that you are looking a track up do.
 
 **AcoustID needs a free API key**, from <https://acoustid.org/new-application>. Pass it with
-`--acoustid-key` or set `ACOUSTID_API_KEY`. **MusicBrainz needs no key** — it is open for
+`--acoustid-key` or set `ACOUSTID_API_KEY`.
+
+> AcoustID issues **two** keys and only one of them works here. Lookups need the *application*
+> API key, listed at <https://acoustid.org/my-applications>. The *user* API key in your account
+> preferences is a different thing, used only for submitting fingerprints back to AcoustID.
+> Both are short alphanumeric strings and the service rejects the wrong one with nothing more
+> than "invalid API key", so it is an easy mix-up; `musicai` spells out the difference if it
+> happens. **MusicBrainz needs no key** — it is open for
 non-commercial use — but it does require a descriptive User-Agent and no more than one request
 per second, both of which this handles. That rate limit is why tagging a large library takes a
 while: roughly one second per distinct track.
