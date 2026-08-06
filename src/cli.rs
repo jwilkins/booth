@@ -202,7 +202,7 @@ pub struct StemsArgs {
     pub input: InputArgs,
 
     /// Which separator to use.
-    #[arg(long, value_enum, default_value_t = Backend::Dsp)]
+    #[arg(long, value_enum, default_value_t = Backend::Demucs)]
     pub backend: Backend,
 
     /// Directory to write stems into, as <dir>/<track>/<stem>.<ext>.

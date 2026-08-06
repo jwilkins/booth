@@ -402,8 +402,17 @@ fn cli_stems_writes_three_files() {
     let input = write_song(&dir, "song", Codec::Flac, 0.4);
     let out_dir = dir.path("out");
 
-    let output =
-        musicai().arg("stems").arg(&input).arg("--out-dir").arg(&out_dir).output().unwrap();
+    // Pinned to the built-in backend on purpose: this is about the CLI's file
+    // layout, not about separation quality, and it must run without demucs
+    // installed.
+    let output = musicai()
+        .arg("stems")
+        .arg(&input)
+        .args(["--backend", "dsp"])
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
     for stem in Stem::ALL {
@@ -422,9 +431,11 @@ fn cli_stems_honours_a_subset_and_format() {
     let input = write_song(&dir, "song", Codec::Wav, 0.4);
     let out_dir = dir.path("out");
 
+    // Backend pinned for the same reason as above.
     let output = musicai()
         .arg("stems")
         .arg(&input)
+        .args(["--backend", "dsp"])
         .arg("--out-dir")
         .arg(&out_dir)
         .arg("--only")
@@ -461,6 +472,29 @@ fn cli_rejects_a_missing_path() {
     let output = musicai().arg("analyze").arg("/no/such/file.mp3").output().unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8(output.stderr).unwrap().contains("does not exist"));
+}
+
+/// The default backend is demucs, so a machine without it must say so rather
+/// than quietly falling back to the weaker separator.
+#[test]
+fn cli_stems_defaults_to_demucs() {
+    let dir = Scratch::new("cli-stems-default");
+    let input = write_song(&dir, "song", Codec::Wav, 0.3);
+
+    let output = musicai()
+        .arg("stems")
+        .arg(&input)
+        .arg("--demucs-bin")
+        .arg("definitely-not-installed-demucs")
+        .arg("--out-dir")
+        .arg(dir.path("out"))
+        .output()
+        .unwrap();
+
+    // No --backend given, yet it tried to run demucs.
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("demucs"), "the default backend was not demucs: {stderr}");
 }
 
 #[test]

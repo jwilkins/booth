@@ -85,11 +85,13 @@ impl StemSet {
 /// Which separator to run.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Backend {
-    /// The built-in signal-processing separator. No external dependencies.
-    Dsp,
-    /// Shell out to a locally installed `demucs`. Much better quality, but you
-    /// have to install it yourself.
+    /// Shell out to a locally installed `demucs`. The default: it is the only
+    /// one of the two that genuinely isolates a voice.
     Demucs,
+    /// The built-in signal-processing separator. Needs nothing installed and
+    /// runs offline, but leaks vocals into every stem — see the module docs
+    /// for what it can and cannot do.
+    Dsp,
 }
 
 #[cfg(test)]
