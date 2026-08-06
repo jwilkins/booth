@@ -175,9 +175,6 @@ fn words(text: &str) -> BTreeSet<String> {
 }
 
 /// Fraction of the reference's words that also appear in `candidate`.
-///
-/// Recall against the mix, rather than similarity between two transcripts, is
-/// the question being asked: how much of what was sung ended up here?
 fn recall(reference: &BTreeSet<String>, candidate: &BTreeSet<String>) -> f64 {
     if reference.is_empty() {
         return 0.0;
@@ -222,54 +219,63 @@ fn lyrics_appear_only_in_the_vocal_stem() {
     let transcripts = dir.path("transcripts");
     std::fs::create_dir_all(&transcripts).unwrap();
 
-    let reference = words(&transcribe(&mix_path, &whisper_bin, &transcripts));
-    assert!(
-        reference.len() >= 10,
-        "the mix only produced {} distinct words, so it cannot tell us anything about the \
-         stems — point MUSICAI_TEST_TRACK at a track with clearly audible singing",
-        reference.len()
-    );
+    let heard = |path: &Path| words(&transcribe(path, &whisper_bin, &transcripts));
+    let mix_words = heard(&mix_path);
+    let stem_words: Vec<(Stem, BTreeSet<String>)> =
+        stem_paths.iter().map(|(stem, path)| (*stem, heard(path))).collect();
 
-    let mut scores = Vec::new();
-    for (stem, path) in &stem_paths {
-        let heard = words(&transcribe(path, &whisper_bin, &transcripts));
-        let score = recall(&reference, &heard);
-        // Counts and ratios only. The transcripts themselves are song lyrics
-        // and have no business in test output or in this repository.
-        eprintln!(
-            "  {stem:<7} recovered {:>5.1}% of the mix's {} words ({} distinct words heard)",
-            score * 100.0,
-            reference.len(),
-            heard.len()
-        );
-        scores.push((*stem, score));
+    let of = |want: Stem| &stem_words.iter().find(|(s, _)| *s == want).unwrap().1;
+    let vocals = of(Stem::Vocals);
+    let melody = of(Stem::Melody);
+    let drums = of(Stem::Drums);
+
+    // Counts only. The transcripts are song lyrics and have no business in
+    // test output or in this repository.
+    eprintln!("  mix    {:>3} distinct words", mix_words.len());
+    for (stem, words) in &stem_words {
+        eprintln!("  {stem:<7}{:>3} distinct words", words.len());
     }
 
-    let score_for = |want: Stem| scores.iter().find(|(s, _)| *s == want).unwrap().1;
-    let vocals = score_for(Stem::Vocals);
-    let melody = score_for(Stem::Melody);
-    let drums = score_for(Stem::Drums);
-
+    // The vocal stem is the reference, not the mix. Separation makes singing
+    // *more* intelligible than it was in the mix — on a dense, loud master
+    // Whisper can return nothing at all for the original and a full transcript
+    // for the isolated voice — so the mix is the least reliable thing to
+    // measure against.
     assert!(
-        vocals >= 0.5,
-        "the vocal stem recovered only {:.1}% of what was sung in the mix",
-        vocals * 100.0
+        vocals.len() >= 10,
+        "the vocal stem yielded only {} distinct words, so there is nothing to test; point          MUSICAI_TEST_TRACK at a track with clearly audible singing",
+        vocals.len()
     );
-    // The real claim: the words are in one stem and not the others. A margin
-    // rather than an absolute ceiling, because a little bleed is normal and
-    // Whisper invents words when given instrumental audio.
+
+    // The claim under test: those words are in the vocal stem and not the
+    // others. A small margin rather than zero, because a little bleed is
+    // normal and Whisper invents words when handed instrumental audio.
     for (name, other) in [("melody", melody), ("drums", drums)] {
+        let leaked = recall(vocals, other);
         assert!(
-            vocals >= other * 2.0,
-            "the {name} stem recovered {:.1}% of the sung words against the vocal stem's \
-             {:.1}%, which is not the separation we claim",
-            other * 100.0,
-            vocals * 100.0
+            leaked <= 0.25,
+            "the {name} stem reproduced {:.1}% of the words sung in the vocal stem; the voice \
+             is bleeding into it",
+            leaked * 100.0
         );
+    }
+
+    // Whatever the mix did yield should be accounted for by the vocal stem.
+    // Skipped when the mix transcribes to almost nothing, which is a normal
+    // outcome for a loud mix rather than a failure.
+    if mix_words.len() >= 10 {
+        let captured = recall(&mix_words, vocals);
+        eprintln!("  vocal stem accounts for {:.1}% of the mix's words", captured * 100.0);
         assert!(
-            other <= 0.35,
-            "the {name} stem recovered {:.1}% of the sung words; the voice is bleeding into it",
-            other * 100.0
+            captured >= 0.5,
+            "the vocal stem accounts for only {:.1}% of the words heard in the mix",
+            captured * 100.0
+        );
+    } else {
+        eprintln!(
+            "  mix yielded too few words ({}) to compare against; the loud master is hard for \
+             speech recognition, which is itself the point of separating it",
+            mix_words.len()
         );
     }
 }
