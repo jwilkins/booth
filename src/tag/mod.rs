@@ -307,11 +307,25 @@ impl TagTarget for VorbisTarget<'_> {
     }
 
     fn set_cover_art(&mut self, art: &coverart::CoverArt) -> Result<()> {
-        use metaflac::block::PictureType;
+        use metaflac::block::{Block, Picture, PictureType};
+
         // Replace rather than accumulate: re-tagging a file should not leave
         // it carrying three front covers.
         self.0.remove_picture_type(PictureType::CoverFront);
-        self.0.add_picture(art.mime_type, PictureType::CoverFront, art.data.clone());
+
+        // Built by hand rather than through `add_picture`, which leaves the
+        // dimension fields at zero. A FLAC PICTURE block carries width, height
+        // and depth of its own, and writing zeros produces a block that is
+        // valid but incomplete.
+        let mut picture = Picture::new();
+        picture.picture_type = PictureType::CoverFront;
+        picture.mime_type = art.mime_type.to_string();
+        picture.width = art.width;
+        picture.height = art.height;
+        picture.depth = art.depth;
+        picture.data = art.data.clone();
+
+        self.0.push_block(Block::Picture(picture));
         Ok(())
     }
 }

@@ -55,18 +55,39 @@ impl Client {
         let duration = fingerprint.duration_secs.to_string();
         // Fingerprints run to several kilobytes, past what many servers accept
         // in a query string, so this goes in a POST body.
-        let response = self.http.post_form_json(
-            LOOKUP_URL,
-            &[
-                ("client", self.api_key.as_str()),
-                ("meta", "recordings"),
-                ("duration", duration.as_str()),
-                ("fingerprint", fingerprint.compressed.as_str()),
-            ],
-        )?;
+        let response = self
+            .http
+            .post_form_json(
+                LOOKUP_URL,
+                &[
+                    ("client", self.api_key.as_str()),
+                    ("meta", "recordings"),
+                    ("duration", duration.as_str()),
+                    ("fingerprint", fingerprint.compressed.as_str()),
+                ],
+            )
+            .map_err(explain_key_rejection)?;
 
-        parse_candidates(&response)
+        parse_candidates(&response).map_err(explain_key_rejection)
     }
+}
+
+/// Add the explanation that AcoustID's own message leaves out.
+///
+/// AcoustID issues two unrelated keys and says only "invalid API key" when it
+/// gets the wrong one. The *application* key identifies the program and is
+/// what lookups need; the *user* key identifies the account and is only for
+/// submitting fingerprints. Both are short alphanumeric strings, so there is
+/// nothing about a user key that looks wrong until the server rejects it.
+fn explain_key_rejection(error: anyhow::Error) -> anyhow::Error {
+    if !error.to_string().contains("invalid API key") {
+        return error;
+    }
+    error.context(
+        "AcoustID rejected the API key. Lookups need an *application* API key from \
+         https://acoustid.org/my-applications — not the *user* API key from your account \
+         preferences, which is only used for submitting fingerprints",
+    )
 }
 
 /// Pull candidates out of an AcoustID lookup response, best score first.
@@ -195,6 +216,27 @@ mod tests {
         });
         let err = parse_candidates(&response).unwrap_err();
         assert!(err.to_string().contains("invalid API key"), "{err}");
+    }
+
+    #[test]
+    fn a_rejected_key_explains_which_of_the_two_keys_is_needed() {
+        // "invalid API key" on its own sends people to check for a typo in a
+        // key that is perfectly valid — just the wrong one of AcoustID's two.
+        let rejected = anyhow::anyhow!("returned HTTP 400: invalid API key");
+        let explained = explain_key_rejection(rejected);
+        let message = format!("{explained:#}");
+
+        assert!(message.contains("application"), "{message}");
+        assert!(message.contains("my-applications"), "{message}");
+        // The original cause is still there, not replaced.
+        assert!(message.contains("invalid API key"), "{message}");
+    }
+
+    #[test]
+    fn unrelated_errors_are_passed_through_untouched() {
+        let other = anyhow::anyhow!("could not reach https://api.acoustid.org: timed out");
+        let passed = explain_key_rejection(other);
+        assert!(!format!("{passed:#}").contains("my-applications"));
     }
 
     #[test]

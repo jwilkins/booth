@@ -64,11 +64,18 @@ fn metadata() -> Metadata {
     }
 }
 
-/// A tiny but structurally valid PNG.
+/// A small but structurally valid PNG, built through `identify` so the
+/// dimensions are filled in the same way a fetched cover's would be.
 fn cover() -> CoverArt {
     let mut data = b"\x89PNG\r\n\x1a\n".to_vec();
-    data.extend_from_slice(&[0u8; 512]);
-    CoverArt { data, mime_type: "image/png" }
+    data.extend_from_slice(&[0, 0, 0, 13]); // IHDR length
+    data.extend_from_slice(b"IHDR");
+    data.extend_from_slice(&600u32.to_be_bytes());
+    data.extend_from_slice(&600u32.to_be_bytes());
+    data.push(8); // bit depth
+    data.push(2); // colour type: truecolour
+    data.extend_from_slice(&[0; 512]);
+    musicai::tag::coverart::identify(data).expect("not recognised as an image")
 }
 
 fn vorbis(path: &PathBuf, key: &str) -> Option<String> {
@@ -216,6 +223,10 @@ fn embeds_cover_art_in_flac_without_duplicating_it() {
     let picture = tag.pictures().next().unwrap();
     assert_eq!(picture.mime_type, "image/png");
     assert_eq!(picture.data.len(), art.data.len());
+    // A FLAC PICTURE block carries its own dimensions; leaving them zero
+    // writes a block that is valid but incomplete.
+    assert_eq!((picture.width, picture.height), (600, 600));
+    assert_eq!(picture.depth, 24);
 }
 
 #[test]

@@ -90,9 +90,15 @@ fn acoustid_accepts_a_fingerprint_we_generated() {
         return;
     };
 
-    // A fingerprint of synthetic audio will match nothing in the index, but a
-    // successful empty result still proves the whole request is well formed:
-    // the key, the duration, and above all the fingerprint encoding.
+    // Synthetic audio matches nothing in the index, so this proves the request
+    // is well formed — key, duration and above all the fingerprint encoding —
+    // rather than that identification works.
+    //
+    // Identification itself was verified by hand against Nine Inch Nails' "The
+    // Slip" (Creative Commons, from archive.org), which came back as
+    // "1,000,000" at score 0.99 and "Letting You" at 0.98 with correct MBIDs
+    // and track numbers. That cannot live here: it needs both an API key and a
+    // real recording, and neither belongs in the repository.
     let audio = synthetic_audio(30);
     let fingerprint = musicai::tag::fingerprint::fingerprint(&audio).unwrap();
 

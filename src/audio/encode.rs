@@ -68,8 +68,30 @@ impl Default for EncodeOptions {
     }
 }
 
+/// What writing a file had to do to the samples to fit the format.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WriteReport {
+    /// Samples that exceeded full scale and were clamped.
+    ///
+    /// Worth surfacing rather than swallowing: separated stems routinely peak
+    /// above the mix they came from, so a stem can clip on the way into an
+    /// integer format even though the original never did.
+    pub clipped: usize,
+}
+
+impl WriteReport {
+    pub fn clipped_anything(&self) -> bool {
+        self.clipped > 0
+    }
+}
+
 /// Encode `audio` to `path`, choosing the encoder from `codec`.
-pub fn write_file(path: &Path, audio: &Audio, codec: Codec, opts: &EncodeOptions) -> Result<()> {
+pub fn write_file(
+    path: &Path,
+    audio: &Audio,
+    codec: Codec,
+    opts: &EncodeOptions,
+) -> Result<WriteReport> {
     if audio.is_empty() {
         bail!("refusing to write an empty audio file to {}", path.display());
     }
@@ -95,7 +117,7 @@ fn check_bit_depth(bit_depth: u16) -> Result<()> {
     Ok(())
 }
 
-fn write_wav(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<()> {
+fn write_wav(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<WriteReport> {
     check_bit_depth(opts.bit_depth)?;
     let spec = hound::WavSpec {
         channels: u16::try_from(audio.channels()).context("too many channels for wav")?,
@@ -105,17 +127,17 @@ fn write_wav(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<()> {
     };
 
     let mut writer = hound::WavWriter::create(path, spec)?;
-    let samples = quantize(&audio.to_interleaved(), opts.bit_depth, opts.dither);
+    let (samples, report) = quantize(&audio.to_interleaved(), opts.bit_depth, opts.dither);
     for sample in samples {
         writer.write_sample(sample)?;
     }
     writer.finalize()?;
-    Ok(())
+    Ok(report)
 }
 
-fn write_flac(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<()> {
+fn write_flac(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<WriteReport> {
     check_bit_depth(opts.bit_depth)?;
-    let samples = quantize(&audio.to_interleaved(), opts.bit_depth, opts.dither);
+    let (samples, report) = quantize(&audio.to_interleaved(), opts.bit_depth, opts.dither);
 
     let config = flacenc::config::Encoder::default()
         .into_verified()
@@ -135,7 +157,7 @@ fn write_flac(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<()> {
     let mut bytes = sink.as_slice().to_vec();
     mark_fixed_block_size(&mut bytes)?;
     std::fs::write(path, &bytes)?;
-    Ok(())
+    Ok(report)
 }
 
 /// Make STREAMINFO's minimum block size equal its maximum.
@@ -169,7 +191,7 @@ fn mark_fixed_block_size(bytes: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-fn write_mp3(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<()> {
+fn write_mp3(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<WriteReport> {
     use mp3lame_encoder::{Builder, FlushNoGap, InterleavedPcm};
 
     let channels = audio.channels();
@@ -194,8 +216,8 @@ fn write_mp3(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<()> {
 
     // LAME wants 16-bit PCM; dither on the way down as with any other
     // truncation to 16 bits.
-    let pcm: Vec<i16> =
-        quantize(&audio.to_interleaved(), 16, opts.dither).into_iter().map(|s| s as i16).collect();
+    let (quantized, report) = quantize(&audio.to_interleaved(), 16, opts.dither);
+    let pcm: Vec<i16> = quantized.into_iter().map(|s| s as i16).collect();
 
     let mut out: Vec<u8> = Vec::with_capacity(mp3lame_encoder::max_required_buffer_size(pcm.len()));
     encoder
@@ -206,7 +228,7 @@ fn write_mp3(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<()> {
         .map_err(|e| anyhow!("flushing mp3 encoder: {e}"))?;
 
     std::fs::write(path, &out)?;
-    Ok(())
+    Ok(report)
 }
 
 fn mp3_bitrate(kbps: u32) -> Result<mp3lame_encoder::Bitrate> {
@@ -241,15 +263,21 @@ fn mp3_bitrate(kbps: u32) -> Result<mp3lame_encoder::Bitrate> {
 /// should have kept us inside it, but a caller that skipped limiting must not
 /// get wraparound distortion. TPDF dither is added at 16 bits, where the
 /// quantization floor is audible.
-fn quantize(samples: &[f32], bit_depth: u16, dither: bool) -> Vec<i32> {
+fn quantize(samples: &[f32], bit_depth: u16, dither: bool) -> (Vec<i32>, WriteReport) {
     let max = ((1i64 << (bit_depth - 1)) - 1) as f32;
     let min = -(1i64 << (bit_depth - 1)) as f32;
     let mut rng = Rng::new(0x9E37_79B9_7F4A_7C15);
     let apply_dither = dither && bit_depth == 16;
+    let mut clipped = 0usize;
 
-    samples
+    let out = samples
         .iter()
         .map(|&s| {
+            // Count against the input, so dither noise nudging a sample over
+            // the last code is not reported as clipping.
+            if s.abs() > 1.0 {
+                clipped += 1;
+            }
             let mut scaled = s * (max + 1.0);
             if apply_dither {
                 // Triangular PDF spanning +/-1 LSB, from two uniform draws.
@@ -257,7 +285,9 @@ fn quantize(samples: &[f32], bit_depth: u16, dither: bool) -> Vec<i32> {
             }
             scaled.round().clamp(min, max) as i32
         })
-        .collect()
+        .collect();
+
+    (out, WriteReport { clipped })
 }
 
 /// xorshift64*, enough for dither noise and keeps the dependency list short.
@@ -290,22 +320,35 @@ mod tests {
 
     #[test]
     fn quantize_clips_instead_of_wrapping() {
-        let out = quantize(&[2.0, -2.0], 16, false);
+        let (out, report) = quantize(&[2.0, -2.0], 16, false);
         assert_eq!(out, vec![32767, -32768]);
+        assert_eq!(report.clipped, 2);
+        assert!(report.clipped_anything());
     }
 
     #[test]
     fn quantize_scales_full_range() {
-        let out = quantize(&[1.0, 0.0, -1.0], 16, false);
+        let (out, report) = quantize(&[1.0, 0.0, -1.0], 16, false);
         assert_eq!(out, vec![32767, 0, -32768]);
+        // Exactly full scale is representable, so nothing was lost.
+        assert_eq!(report.clipped, 0);
     }
 
     #[test]
     fn dither_stays_within_one_lsb() {
         let flat = vec![0.0f32; 4096];
-        for s in quantize(&flat, 16, true) {
+        let (out, report) = quantize(&flat, 16, true);
+        for s in out {
             assert!(s.abs() <= 1, "dither pushed a silent sample to {s}");
         }
+        // Dither must not be mistaken for clipping.
+        assert_eq!(report.clipped, 0);
+    }
+
+    #[test]
+    fn counts_only_the_samples_that_were_over() {
+        let (_, report) = quantize(&[0.5, 1.5, -0.2, -3.0, 0.99], 16, false);
+        assert_eq!(report.clipped, 2);
     }
 
     #[test]

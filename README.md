@@ -4,14 +4,14 @@ A command-line audio tool in Rust. It does three things:
 
 - **Normalize** mp3, flac and wav files to a consistent loudness (EBU R128 / LUFS), either by
   re-encoding or by writing ReplayGain tags and leaving the audio untouched.
-- **Separate** a mix into three stems — vocals, melody and drums.
+- **Separate** a mix into three stems — vocals, melody and drums, using demucs.
 - **Tag** files by identifying them from their sound, via acoustic fingerprinting and
   MusicBrainz.
 
-`analyze`, `normalize` and `stems` run entirely on your machine — nothing is uploaded and
-nothing is downloaded at run time. `tag` is the exception: fingerprinting is local, but turning
-a fingerprint into metadata means asking AcoustID and MusicBrainz, so that one command needs the
-network. See [Tag](#tag) for what it sends.
+Everything runs on your machine, but two commands need something beyond the binary. `stems` drives
+a locally installed [demucs](https://github.com/adefossez/demucs); `tag` fingerprints locally but
+must ask AcoustID and MusicBrainz to turn that fingerprint into metadata, so it needs the network.
+`analyze` and `normalize` need neither.
 
 There is no ffmpeg dependency: decoding is
 [Symphonia](https://github.com/pdeljanov/Symphonia), and the encoders (LAME for mp3, `flacenc`
@@ -100,59 +100,74 @@ musicai stems ~/Music/track.flac
 Options worth knowing: `--only vocals,drums` to write a subset, `--format flac` to change the
 output codec, `-o DIR` to change where they land.
 
-### The built-in separator (`--backend dsp`, default)
+### Demucs (default)
 
-Pure signal processing: no model files, no network, no Python. A five-minute stereo track
-separates in about 23 seconds on a multi-core machine.
-
-It is Driedger & Müller's cascade of two harmonic/percussive separations at different
-resolutions. The first pass, at the shorter window, splits vertical spectrogram streaks (drum
-hits) from horizontal ones (anything pitched) — that gives the **drums**. The second pass runs
-on the leftovers at a longer window, where a steadily-pitched instrument is still a clean
-horizontal line but a sung note smears vertically because its pitch is never quite still. The
-smeared half is the **vocals**, the steady half is the **melody**. On stereo input the vocal
-mask is additionally weighted by how centred each frequency bin is, since lead vocals are almost
-always panned to the middle.
-
-Two consequences worth setting expectations around:
-
-- **The three stems always add back up to the original mix**, exactly. Every split uses a pair of
-  masks that sum to one, and the STFT reconstructs to within floating-point error. This is
-  checked by tests.
-- **It is not a neural separator.** Drums come out cleanly; vocals and melody are usable for
-  practice, remixing and analysis, but there is audible bleed both ways, and anything with a
-  steady pitch and no vibrato — a held organ note, a synth pad — will read as melody even if a
-  person sang it. Use the demucs backend when you need it clean.
-
-`musicai stems --help` lists the tuning knobs under "Built-in separator tuning". The defaults
-were chosen by measuring how cleanly a set of synthetic mixes was routed, and they are not the
-obvious values — see `tests/separation_quality.rs`. Two in particular:
-
-- `--drum-fft` cannot be very small. At 1024 points the bins are 43 Hz wide, chord tones in the
-  low-mid range fall inside a single bin, and the whole chord reads as a transient and ends up
-  in the drum stem.
-- `--voice-bandwidth` has to be narrow (tens of hertz). Anything much wider than a
-  vibrato-smeared partial swallows the lead along with the steady notes, and the vocal stem
-  stops tracking the voice.
-
-Memory scales with track length: the whole track and several spectrograms of it are held at
-once. A five-minute stereo track peaks around 1.1 GB. Passing `--overlap 2` brings that to about
-0.8 GB and roughly halves the runtime, at a small cost in masking smoothness — the audio buffers
-that dominate the total do not shrink with overlap, so it is not a 2x saving.
-
-### The demucs backend (`--backend demucs`)
-
-If you have [demucs](https://github.com/adefossez/demucs) installed, `--backend demucs` shells
-out to it for much better quality:
+Separation runs through [demucs](https://github.com/adefossez/demucs), which you install
+yourself:
 
 ```sh
 pipx install demucs
-musicai stems track.flac --backend demucs
+musicai stems track.flac
 ```
 
-Nothing is installed or downloaded on your behalf; if the binary is not there, you are told to
-use `--backend dsp`. Demucs produces four stems, so its `bass` and `other` are summed to make our
-`melody`. `--demucs-bin`, `--demucs-model` and `--demucs-device` are there when you need them.
+Nothing is installed or downloaded on your behalf; if the binary is not there you are told so and
+pointed at your options. `--demucs-bin`, `--demucs-model` and `--demucs-device` are there when you
+need them.
+
+Demucs produces four stems, so its `bass` and `other` are summed to make our `melody`. It is slow
+on a CPU — roughly four minutes per track — and much faster on a GPU via `--demucs-device cuda`.
+
+Isolation is verified rather than asserted. `tests/stem_isolation.rs` transcribes the mix and each
+stem with Whisper and checks that the sung words come back from the vocal stem and not from the
+others; see [Tests](#tests) for how to run it.
+
+### The built-in separator (`--backend dsp`)
+
+Pure signal processing: no model files, no network, no Python, and about 25x faster than demucs on
+a CPU. **Its quality is well short of demucs** — the voice bleeds into all three stems, audibly.
+It is here for when demucs is not an option, not as a serious alternative to it.
+
+It is Driedger &amp; Müller's cascade of two harmonic/percussive separations at different
+resolutions. The first pass, at the shorter window, splits vertical spectrogram streaks (drum
+hits) from horizontal ones (anything pitched) — that gives the **drums**. The second pass runs on
+the leftovers at a longer window, where a steadily-pitched instrument is still a clean horizontal
+line but a sung note smears vertically because its pitch is never quite still. The smeared half is
+the **vocals**, the steady half is the **melody**. On stereo input the vocal mask is additionally
+weighted by how centred each frequency bin is.
+
+What it does well: drums come out cleanly, and the three stems always add back up to the original
+mix exactly, since every split uses a pair of masks that sum to one over an invertible STFT.
+
+What it does badly: anything sustained and pitched reads as melody whether or not a person sang
+it, and the residue of the voice is spread across every stem. On a real track its vocal stem
+measures 7 dB quieter than demucs' with half the loudness range — the signature of a residue
+rather than an isolated voice.
+
+`musicai stems --help` lists its tuning knobs under "Built-in separator tuning". The defaults were
+chosen by measuring how cleanly synthetic mixes were routed — see `tests/separation_quality.rs` —
+and are not the obvious values. Two in particular:
+
+- `--drum-fft` cannot be very small. At 1024 points the bins are 43 Hz wide, chord tones in the
+  low-mid range fall inside a single bin, and the whole chord reads as a transient and ends up in
+  the drum stem.
+- `--voice-bandwidth` has to be narrow (tens of hertz). Anything much wider than a vibrato-smeared
+  partial swallows the lead along with the steady notes.
+
+Memory scales with track length: a five-minute stereo track peaks around 1.1 GB, or 0.8 GB with
+`--overlap 2`, which also roughly halves the runtime.
+
+### Stems can clip
+
+Separated stems peak **above** the mix they came from — the split redistributes energy, so a stem
+may exceed full scale even when the original never did. On a loud master that means clipping on
+the way into an integer format, and `musicai` says so per file:
+
+```
+wrote stems/track/melody.flac — warning: 52 samples clipped; the stem peaks above full scale
+```
+
+Raising `--bit-depth` does not help, since the limit is range rather than precision. Normalize the
+stems afterwards, or separate a quieter copy of the track.
 
 ## Tag
 
@@ -181,7 +196,14 @@ fetches images from the Cover Art Archive. No audio ever leaves your machine, bu
 and the fact that you are looking a track up do.
 
 **AcoustID needs a free API key**, from <https://acoustid.org/new-application>. Pass it with
-`--acoustid-key` or set `ACOUSTID_API_KEY`. **MusicBrainz needs no key** — it is open for
+`--acoustid-key` or set `ACOUSTID_API_KEY`.
+
+> AcoustID issues **two** keys and only one of them works here. Lookups need the *application*
+> API key, listed at <https://acoustid.org/my-applications>. The *user* API key in your account
+> preferences is a different thing, used only for submitting fingerprints back to AcoustID.
+> Both are short alphanumeric strings and the service rejects the wrong one with nothing more
+> than "invalid API key", so it is an easy mix-up; `musicai` spells out the difference if it
+> happens. **MusicBrainz needs no key** — it is open for
 non-commercial use — but it does require a descriptive User-Agent and no more than one request
 per second, both of which this handles. That rate limit is why tagging a large library takes a
 while: roughly one second per distinct track.
@@ -267,6 +289,20 @@ cargo test --release --test live_services -- --ignored --test-threads=1
 `--test-threads=1` is required — the rate limiter is shared per host, but running these in
 parallel would still queue them all up behind each other for no benefit. The AcoustID test needs
 `ACOUSTID_API_KEY` and skips itself without one.
+
+`tests/stem_isolation.rs` is the one that decides whether separation actually works. It
+transcribes the mix and each stem with Whisper and checks the sung words come back from the vocal
+stem and not from the others:
+
+```sh
+pipx install demucs openai-whisper
+export MUSICAI_TEST_TRACK=/path/to/a-song-with-vocals.flac
+cargo test --release --test stem_isolation -- --ignored --nocapture
+```
+
+It holds no expected text of its own. The reference is whatever Whisper makes of the original mix
+at run time, so it works on any track with a voice in it, and it reports word counts and
+percentages rather than transcripts.
 
 ## License
 
