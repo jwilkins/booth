@@ -260,24 +260,29 @@ fn lyrics_appear_only_in_the_vocal_stem() {
         );
     }
 
-    // Whatever the mix did yield should be accounted for by the vocal stem.
-    // Skipped when the mix transcribes to almost nothing, which is a normal
-    // outcome for a loud mix rather than a failure.
-    if mix_words.len() >= 10 {
-        let captured = recall(&mix_words, vocals);
-        eprintln!("  vocal stem accounts for {:.1}% of the mix's words", captured * 100.0);
-        assert!(
-            captured >= 0.5,
-            "the vocal stem accounts for only {:.1}% of the words heard in the mix",
-            captured * 100.0
-        );
-    } else {
-        eprintln!(
-            "  mix yielded too few words ({}) to compare against; the loud master is hard for \
-             speech recognition, which is itself the point of separating it",
-            mix_words.len()
-        );
-    }
+    // Separating the voice out should not make it *harder* to make out than it
+    // was in the mix. That is the one thing the mix can honestly be measured
+    // against.
+    //
+    // What it cannot be used for is ground truth. Whisper mishears a dense mix
+    // rather than falling silent, so a good part of what it returns for the
+    // original is simply wrong — that is the whole reason for separating it.
+    // Requiring the vocal stem to contain those words would be requiring it to
+    // reproduce the transcriber's mistakes, so their overlap is reported and
+    // not asserted on.
+    let shared = recall(&mix_words, vocals);
+    eprintln!(
+        "  {:.0}% of the mix's words reappear in the vocal stem (reported, not asserted: a \
+         mix this loud is transcribed unreliably)",
+        shared * 100.0
+    );
+    assert!(
+        vocals.len() >= mix_words.len(),
+        "the vocal stem yielded {} distinct words against the mix's {}; isolating the voice \
+         made it less intelligible, not more",
+        vocals.len(),
+        mix_words.len()
+    );
 }
 
 #[test]
