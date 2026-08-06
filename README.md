@@ -135,6 +135,17 @@ obvious values — see `tests/separation_quality.rs`. Two in particular:
   vibrato-smeared partial swallows the lead along with the steady notes, and the vocal stem
   stops tracking the voice.
 
+Separated stems can peak **above** the mix they came from — the split redistributes energy, so a
+stem may exceed full scale even when the original never did. On a loud master that means the
+stem clips on the way into an integer format, and `musicai` says so per file:
+
+```
+wrote stems/track/melody.flac — warning: 52 samples clipped; the stem peaks above full scale
+```
+
+Raising `--bit-depth` does not help, since the clipping is about range rather than precision.
+If it matters, normalize the stems afterwards or separate a quieter copy of the track.
+
 Memory scales with track length: the whole track and several spectrograms of it are held at
 once. A five-minute stereo track peaks around 1.1 GB. Passing `--overlap 2` brings that to about
 0.8 GB and roughly halves the runtime, at a small cost in masking smoothness — the audio buffers

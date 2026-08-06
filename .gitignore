@@ -1,1 +1,4 @@
 /target
+
+# Scratch audio for manual listening tests; far too large to commit.
+/testdata

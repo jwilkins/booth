@@ -164,8 +164,11 @@ fn normalize_reencode(args: &NormalizeArgs, files: &[PathBuf]) -> Result<()> {
             if args.dry_run {
                 line.push_str(" [dry run]");
             } else {
-                write_file(&plan.output, &audio, plan.codec, &encode)?;
+                let report = write_file(&plan.output, &audio, plan.codec, &encode)?;
                 line.push_str(&format!(" -> {}", plan.output.display()));
+                if report.clipped_anything() {
+                    line.push_str(&format!(" (warning: {} samples clipped)", report.clipped));
+                }
             }
             Ok(vec![line])
         })
@@ -395,8 +398,18 @@ fn write_stems(
     let mut written = Vec::new();
     for stem in &args.only {
         let out = dir.join(format!("{}.{}", stem.name(), args.format.extension()));
-        write_file(&out, separated.get(*stem), args.format, encode)?;
-        written.push(format!("wrote {}", out.display()));
+        let report = write_file(&out, separated.get(*stem), args.format, encode)?;
+
+        let mut line = format!("wrote {}", out.display());
+        if report.clipped_anything() {
+            // A stem can peak higher than the mix it came from, so this
+            // happens on loud masters even though the input never clipped.
+            line.push_str(&format!(
+                " — warning: {} samples clipped; the stem peaks above full scale",
+                report.clipped
+            ));
+        }
+        written.push(line);
     }
     Ok(written)
 }
