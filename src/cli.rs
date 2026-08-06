@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::audio::encode::Codec;
 use crate::normalize::PeakPolicy;
+use crate::stems::install::InstallPolicy;
 use crate::stems::{Backend, Stem};
 use crate::tag::OnExisting;
 
@@ -310,4 +311,9 @@ pub struct DemucsArgs {
     /// Torch device for demucs, e.g. cpu or cuda.
     #[arg(long, value_name = "DEVICE")]
     pub demucs_device: Option<String>,
+
+    /// What to do when demucs is not installed. `ask` offers to install it,
+    /// but only on macOS and only when there is a terminal to answer on.
+    #[arg(long, value_enum, default_value_t = InstallPolicy::Ask)]
+    pub install_demucs: InstallPolicy,
 }

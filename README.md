@@ -110,9 +110,39 @@ pipx install demucs
 musicai stems track.flac
 ```
 
-Nothing is installed or downloaded on your behalf; if the binary is not there you are told so and
-pointed at your options. `--demucs-bin`, `--demucs-model` and `--demucs-device` are there when you
-need them.
+`--demucs-bin`, `--demucs-model` and `--demucs-device` are there when you need them.
+
+#### Installing it for you (macOS)
+
+On macOS, if demucs is missing, `musicai` offers to install it rather than just complaining:
+
+```
+demucs is not installed. Install it now?
+
+    pipx install demucs    # installs demucs into its own isolated environment
+
+This installs software on your machine, and demucs downloads about 300 MB of model weights the
+first time it runs.
+
+Proceed? [y/N]
+```
+
+Nothing runs until you answer `y` — pressing return declines, and so does anything other than
+`y`/`yes`. The prompt always lists the exact commands first. If pipx is missing but Homebrew is
+present, `brew install pipx` is added to the list and shown alongside.
+
+The offer only appears when there is a terminal to answer on, so scripts and CI get an error with
+instructions instead of hanging on a prompt nobody can see. `--install-demucs` controls it:
+
+| Value | Behaviour |
+|---|---|
+| `ask` (default) | Offer, on macOS, when attached to a terminal |
+| `never` | Never offer; print instructions and stop |
+| `yes` | Install without prompting — for scripts that have already decided |
+
+Elsewhere, and when neither installer is available, you get the instructions and nothing is run.
+A freshly pipx-installed demucs is not on the `PATH` this process inherited, so `musicai` looks in
+pipx's own bin directory rather than telling you to open a new shell.
 
 Demucs produces four stems, so its `bass` and `other` are summed to make our `melody`. It is slow
 on a CPU — roughly four minutes per track — and much faster on a GPU via `--demucs-device cuda`.

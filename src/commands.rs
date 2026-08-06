@@ -13,7 +13,7 @@ use crate::discover;
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
-use crate::stems::{demucs, dsp, Backend, StemSet};
+use crate::stems::{demucs, dsp, install, Backend, StemSet};
 use crate::tag::{acoustid, coverart, fingerprint, musicbrainz, Metadata, TagOutcome};
 
 /// Outcome of a batch: how many files worked, and the failures.
@@ -323,6 +323,18 @@ fn plan_outputs(args: &NormalizeArgs, files: &[PathBuf]) -> Result<Vec<Plan>> {
 pub fn stems(args: &StemsArgs) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
     let config = dsp::Config::from(&args.dsp);
+
+    // Resolve demucs once, before any work starts. Doing it per file would ask
+    // the same question repeatedly, and finding out that it is missing after
+    // separating half a library would be worse still.
+    let demucs_bin = match args.backend {
+        Backend::Demucs => Some(install::ensure_available(
+            args.demucs.demucs_bin.as_os_str(),
+            args.demucs.install_demucs,
+        )?),
+        Backend::Dsp => None,
+    };
+
     let encode =
         EncodeOptions { bit_depth: args.bit_depth, mp3_bitrate: args.bitrate, dither: true };
 
@@ -332,7 +344,7 @@ pub fn stems(args: &StemsArgs) -> Result<()> {
     // files go one at a time. Each one prints as it finishes rather than at the
     // end, because a long batch would otherwise look like it had hung.
     for path in &files {
-        match separate_one(path, args, &config, &encode) {
+        match separate_one(path, args, &config, &encode, demucs_bin.as_deref()) {
             Ok(written) => {
                 for line in written {
                     println!("{line}");
@@ -350,6 +362,7 @@ fn separate_one(
     args: &StemsArgs,
     config: &dsp::Config,
     encode: &EncodeOptions,
+    demucs_bin: Option<&std::ffi::OsStr>,
 ) -> Result<Vec<String>> {
     let track = path
         .file_stem()
@@ -374,7 +387,10 @@ fn separate_one(
         Backend::Demucs => {
             let work_dir = args.out_dir.join(".demucs-work");
             let mut demucs_config = demucs::Config::new(work_dir.clone());
-            demucs_config.program = args.demucs.demucs_bin.clone().into_os_string();
+            // Already resolved, and possibly to somewhere not on PATH.
+            demucs_config.program = demucs_bin
+                .map(|p| p.to_os_string())
+                .unwrap_or_else(|| args.demucs.demucs_bin.clone().into_os_string());
             demucs_config.model = args.demucs.demucs_model.clone();
             demucs_config.device = args.demucs.demucs_device.clone();
 
