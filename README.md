@@ -106,9 +106,14 @@ Separation runs through [demucs](https://github.com/adefossez/demucs), which you
 yourself:
 
 ```sh
-pipx install demucs
+uv tool install demucs --with numpy     # or: pipx install demucs && pipx inject demucs numpy
 musicai stems track.flac
 ```
+
+The `numpy` is not optional. Demucs 4.1.0 imports numpy but does not list it among its
+dependencies, and torch no longer pulls it in, so a plain `install demucs` produces something
+that dies on first run with `ModuleNotFoundError: No module named 'numpy'`. `musicai` recognises
+that failure and tells you how to fix it, and its own installer adds numpy on every route.
 
 `--demucs-bin`, `--demucs-model` and `--demucs-device` are there when you need them.
 

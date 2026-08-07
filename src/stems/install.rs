@@ -55,6 +55,7 @@ impl Os {
 #[derive(Clone, Debug)]
 pub struct Environment {
     pub os: Os,
+    pub has_uv: bool,
     pub has_pipx: bool,
     pub has_brew: bool,
     pub interactive: bool,
@@ -65,6 +66,7 @@ impl Environment {
     pub fn detect(policy: InstallPolicy) -> Self {
         Self {
             os: Os::current(),
+            has_uv: find_executable("uv").is_some(),
             has_pipx: find_executable("pipx").is_some(),
             has_brew: find_executable("brew").is_some(),
             interactive: std::io::stdin().is_terminal(),
@@ -131,12 +133,29 @@ pub fn plan(env: &Environment) -> Plan {
         );
     }
 
-    let steps = if env.has_pipx {
+    // Every path installs numpy alongside demucs. Demucs imports it but does
+    // not declare it as a dependency, and torch stopped pulling it in
+    // transitively, so a plain `install demucs` produces something that fails
+    // on first run with `No module named 'numpy'`.
+    let steps = if env.has_uv {
         vec![Step::new(
-            "pipx",
-            &["install", "demucs"],
-            "installs demucs into its own isolated environment",
+            "uv",
+            &["tool", "install", "--force", "demucs", "--with", "numpy"],
+            "installs demucs, with the numpy it forgets to depend on",
         )]
+    } else if env.has_pipx {
+        vec![
+            Step::new(
+                "pipx",
+                &["install", "demucs"],
+                "installs demucs into its own isolated environment",
+            ),
+            Step::new(
+                "pipx",
+                &["inject", "demucs", "numpy"],
+                "adds the numpy demucs imports but does not depend on",
+            ),
+        ]
     } else if env.has_brew {
         vec![
             Step::new(
@@ -149,11 +168,16 @@ pub fn plan(env: &Environment) -> Plan {
                 &["install", "demucs"],
                 "installs demucs into its own isolated environment",
             ),
+            Step::new(
+                "pipx",
+                &["inject", "demucs", "numpy"],
+                "adds the numpy demucs imports but does not depend on",
+            ),
         ]
     } else {
         return manual_instructions(
-            "demucs is not installed, and neither pipx nor Homebrew is available to install it \
-             with",
+            "demucs is not installed, and none of uv, pipx or Homebrew is available to install \
+             it with",
         );
     };
 
@@ -300,31 +324,69 @@ mod tests {
     use super::*;
 
     fn env(os: Os, has_pipx: bool, has_brew: bool, interactive: bool) -> Environment {
-        Environment { os, has_pipx, has_brew, interactive, policy: InstallPolicy::Ask }
+        Environment {
+            os,
+            has_uv: false,
+            has_pipx,
+            has_brew,
+            interactive,
+            policy: InstallPolicy::Ask,
+        }
+    }
+
+    /// Every install route must bring numpy with it. Demucs imports numpy but
+    /// does not declare it, so installing demucs alone yields a build that
+    /// dies on first run — which is exactly what happened to a real user.
+    fn assert_installs_numpy(steps: &[Step]) {
+        let all: String = steps.iter().map(|s| s.command_line()).collect::<Vec<_>>().join(" ; ");
+        assert!(all.contains("numpy"), "no step installs numpy: {all}");
+    }
+
+    #[test]
+    fn prefers_uv_when_it_is_available() {
+        let mut e = env(Os::MacOs, true, true, true);
+        e.has_uv = true;
+        let Plan::Offer(steps) = plan(&e) else { panic!("expected an offer") };
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].command_line(), "uv tool install --force demucs --with numpy");
+        assert_installs_numpy(&steps);
     }
 
     #[test]
     fn uses_pipx_when_it_is_available() {
         let plan = plan(&env(Os::MacOs, true, true, true));
         let Plan::Offer(steps) = plan else { panic!("expected an offer, got {plan:?}") };
-        assert_eq!(steps.len(), 1);
+        assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].command_line(), "pipx install demucs");
+        assert_eq!(steps[1].command_line(), "pipx inject demucs numpy");
+        assert_installs_numpy(&steps);
     }
 
     #[test]
     fn installs_pipx_first_when_only_homebrew_is_present() {
         let plan = plan(&env(Os::MacOs, false, true, true));
         let Plan::Offer(steps) = plan else { panic!("expected an offer, got {plan:?}") };
-        assert_eq!(steps.len(), 2);
+        assert_eq!(steps.len(), 3);
         assert_eq!(steps[0].command_line(), "brew install pipx");
         assert_eq!(steps[1].command_line(), "pipx install demucs");
+        assert_installs_numpy(&steps);
+    }
+
+    #[test]
+    fn every_install_route_brings_numpy() {
+        for (uv, pipx, brew) in [(true, true, true), (false, true, true), (false, false, true)] {
+            let mut e = env(Os::MacOs, pipx, brew, true);
+            e.has_uv = uv;
+            let Plan::Offer(steps) = plan(&e) else { panic!("expected an offer for {e:?}") };
+            assert_installs_numpy(&steps);
+        }
     }
 
     #[test]
     fn gives_up_gracefully_with_neither_installer() {
         let plan = plan(&env(Os::MacOs, false, false, true));
         let Plan::Manual(message) = plan else { panic!("expected manual advice, got {plan:?}") };
-        assert!(message.contains("neither pipx nor Homebrew"), "{message}");
+        assert!(message.contains("none of uv, pipx or Homebrew"), "{message}");
         // And still points at the option that always works.
         assert!(message.contains("--backend dsp"), "{message}");
     }
