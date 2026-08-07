@@ -417,7 +417,7 @@ fn cli_stems_writes_three_files() {
 
     for stem in Stem::ALL {
         // Stems inherit the source's format, so a flac input yields flac.
-        let path = out_dir.join("song").join(format!("{stem}.flac"));
+        let path = out_dir.join(format!("song-{stem}.flac"));
         assert!(path.exists(), "missing {}", path.display());
         let audio = decode_file(&path).unwrap();
         assert_eq!(audio.channels(), 2);
@@ -445,7 +445,7 @@ fn cli_stems_match_the_source_format() {
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
         let track = input.file_stem().unwrap().to_string_lossy().into_owned();
-        let expected = out_dir.join(&track).join(format!("vocals.{}", codec.extension()));
+        let expected = out_dir.join(format!("{track}-vocals.{}", codec.extension()));
         assert!(expected.exists(), "expected {}", expected.display());
     }
 
@@ -461,7 +461,7 @@ fn cli_stems_match_the_source_format() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(out_dir.join("override").join("vocals.mp3").exists());
+    assert!(out_dir.join("override-vocals.mp3").exists());
 }
 
 #[test]
@@ -485,10 +485,9 @@ fn cli_stems_honours_a_subset_and_format() {
         .unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
-    let stem_dir = out_dir.join("song");
-    assert!(stem_dir.join("vocals.flac").exists());
-    assert!(stem_dir.join("drums.flac").exists());
-    assert!(!stem_dir.join("melody.flac").exists(), "wrote a stem that was not asked for");
+    assert!(out_dir.join("song-vocals.flac").exists());
+    assert!(out_dir.join("song-drums.flac").exists());
+    assert!(!out_dir.join("song-melody.flac").exists(), "wrote a stem that was not asked for");
 }
 
 #[test]

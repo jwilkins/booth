@@ -13,7 +13,7 @@ use crate::discover;
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
-use crate::stems::{demucs, dsp, install, Backend, StemSet};
+use crate::stems::{demucs, dsp, install, Backend, Stem, StemSet};
 use crate::tag::{acoustid, coverart, fingerprint, musicbrainz, Metadata, TagOutcome};
 
 /// Outcome of a batch: how many files worked, and the failures.
@@ -369,7 +369,6 @@ fn separate_one(
         .with_context(|| format!("{} has no file name", path.display()))?
         .to_string_lossy()
         .into_owned();
-    let dir = args.out_dir.join(&track);
 
     // Stems inherit the source's format unless told otherwise, so an mp3
     // yields mp3 stems and a flac yields flac.
@@ -385,7 +384,7 @@ fn separate_one(
 
     // Check the destinations before doing the expensive part.
     for stem in &args.only {
-        let out = dir.join(format!("{}.{}", stem.name(), codec.extension()));
+        let out = stem_path(&args.out_dir, &track, *stem, codec);
         if out.exists() && !args.force {
             bail!("{} already exists; pass --force to overwrite", out.display());
         }
@@ -414,11 +413,17 @@ fn separate_one(
         }
     };
 
-    write_stems(&dir, &separated, args, encode, codec, path)
+    write_stems(&track, &separated, args, encode, codec, path)
+}
+
+/// Where a stem goes: beside its siblings, named after the track it came from,
+/// so `track.mp3` yields `track-vocals.mp3` next to `track-drums.mp3`.
+fn stem_path(out_dir: &Path, track: &str, stem: Stem, codec: Codec) -> PathBuf {
+    out_dir.join(format!("{}-{}.{}", track, stem.name(), codec.extension()))
 }
 
 fn write_stems(
-    dir: &Path,
+    track: &str,
     separated: &StemSet,
     args: &StemsArgs,
     encode: &EncodeOptions,
@@ -427,7 +432,7 @@ fn write_stems(
 ) -> Result<Vec<String>> {
     let mut written = Vec::new();
     for stem in &args.only {
-        let out = dir.join(format!("{}.{}", stem.name(), codec.extension()));
+        let out = stem_path(&args.out_dir, track, *stem, codec);
         let report = write_file(&out, separated.get(*stem), codec, encode)?;
 
         // Tags go on after the audio, so the stem is identifiable in a library

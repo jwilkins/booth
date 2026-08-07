@@ -92,10 +92,13 @@ ReplayGain tag, so this mode rejects wav files and tells you to use `--mode reen
 
 ```sh
 musicai stems ~/Music/track.flac
-# -> stems/track/vocals.flac
-#    stems/track/melody.flac
-#    stems/track/drums.flac
+# -> stems/track-vocals.flac
+#    stems/track-melody.flac
+#    stems/track-drums.flac
 ```
+
+Stems are named after the track they came from, so they stay identifiable once they leave the
+directory they were written into.
 
 Options worth knowing: `--only vocals,drums` to write a subset, `--format wav` to override the
 output codec, `-o DIR` to change where they land.
@@ -220,7 +223,7 @@ may exceed full scale even when the original never did. On a loud master that me
 the way into an integer format, and `musicai` says so per file:
 
 ```
-wrote stems/track/melody.flac — warning: 52 samples clipped; the stem peaks above full scale
+wrote stems/track-melody.flac — warning: 52 samples clipped; the stem peaks above full scale
 ```
 
 Raising `--bit-depth` does not help, since the limit is range rather than precision. Normalize the
