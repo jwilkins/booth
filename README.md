@@ -1,6 +1,6 @@
 # musicai
 
-A command-line audio tool in Rust. It does three things:
+An audio tool in Rust, as a command-line program and as a macOS app. It does three things:
 
 - **Normalize** mp3, flac and wav files to a consistent loudness (EBU R128 / LUFS), either by
   re-encoding or by writing ReplayGain tags and leaving the audio untouched.
@@ -23,6 +23,9 @@ for flac, `hound` for wav) are built into the binary.
 cargo build --release
 # binary at ./target/release/musicai
 ```
+
+The window is a separate crate in the same workspace, so this builds only the command-line tool
+and none of a window toolkit. For the app, see [The macOS app](#the-macos-app).
 
 ## Analyze
 
@@ -315,6 +318,68 @@ adding a second one.
 
 Only the tag blocks are rewritten; the audio is left byte-for-byte alone.
 
+## The macOS app
+
+Everything above, in a window. Pick a task along the top, drop files on the left, set the options
+in the middle, press the button. Results appear in the log at the bottom as they arrive, and a
+long job can be stopped without leaving a half-written file behind.
+
+![The app, having normalized two files](docs/screenshot.png)
+
+### Building it
+
+```sh
+scripts/package-macos.sh
+# dist/musicai.app and dist/musicai-0.1.0.dmg
+```
+
+That builds for Apple silicon and Intel and `lipo`s them together, so the result runs natively on
+either. It needs both targets installed:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+```
+
+The bundle carries **both** binaries — the app you launch and the `musicai` command-line tool, at
+`musicai.app/Contents/MacOS/musicai`. One download gives you both, and they can never be different
+versions of each other. Symlink it onto your `PATH` if you want it there:
+
+```sh
+ln -s /Applications/musicai.app/Contents/MacOS/musicai /usr/local/bin/musicai
+```
+
+To run the window without packaging anything:
+
+```sh
+cargo run -p musicai-gui --release
+```
+
+Files named on the command line start out selected, which is also how Finder's *Open With* hands
+over a selection.
+
+### Signing
+
+Without a Developer ID the app is ad-hoc signed: it runs on the machine that built it, and
+Gatekeeper stops it anywhere else until you right-click and choose *Open*. With one, set the
+environment and the script does the rest:
+
+```sh
+MUSICAI_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+MUSICAI_NOTARY_PROFILE=my-notary-profile \
+    scripts/package-macos.sh
+```
+
+`.github/workflows/macos-app.yml` builds the same thing on a macOS runner, on a tag or on demand.
+
+### What the window is, and is not
+
+It is a front end, not a second implementation. Every option is the command-line tool's own
+argument struct, filled in with the defaults clap would apply, and pressing the button calls the
+same function the CLI calls. A default cannot drift between the two, and an option added to the
+CLI without a control in the window is a compile error rather than a silent difference. The
+command line that matches what you have set up is printed in the log when a job starts, so you can
+run it once in the window and then copy the line into a script.
+
 ## Notes
 
 - Supported formats in and out: mp3, flac, wav. Files named explicitly on the command line are
@@ -336,8 +401,19 @@ cargo test --release
 Unit tests cover the STFT round trip, the median filters, the limiter's ceiling guarantee, the
 loudness maths and the parsing of AcoustID and MusicBrainz responses. `tests/end_to_end.rs`
 drives the real binary over real encoded files, `tests/separation_quality.rs` pins how well the
-default separator routes known sources, and `tests/tagging.rs` round-trips tags through real
-flac and mp3 files.
+default separator routes known sources, `tests/tagging.rs` round-trips tags through real
+flac and mp3 files, and `tests/packaging.rs` assembles the macOS bundle and checks its layout,
+its plist and the icon container.
+
+The window has its own tests, which are not in the default workspace member and so need asking
+for:
+
+```sh
+cargo test -p musicai-gui --release
+```
+
+They run real jobs through the worker thread and assert on what comes back — progress, per-file
+failures, cancellation, and that the window is told to redraw. Nothing there needs a display.
 
 That suite is entirely offline. Tests that talk to the real services are marked `#[ignore]` and
 run separately:

@@ -13,6 +13,7 @@ use crate::discover;
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
+use crate::report::{self, Event, Progress, Reporter};
 use crate::stems::{demucs, dsp, install, Backend, Stem, StemSet};
 use crate::tag::{acoustid, coverart, fingerprint, musicbrainz, Metadata, TagOutcome};
 
@@ -20,13 +21,23 @@ use crate::tag::{acoustid, coverart, fingerprint, musicbrainz, Metadata, TagOutc
 pub struct Outcome {
     pub processed: usize,
     pub failures: Vec<(PathBuf, anyhow::Error)>,
+    pub cancelled: bool,
 }
 
 impl Outcome {
-    fn report(self) -> Result<()> {
+    fn new(processed: usize, failures: Vec<(PathBuf, anyhow::Error)>) -> Self {
+        Self { processed, failures, cancelled: false }
+    }
+
+    fn report(self, reporter: &dyn Reporter) -> Result<()> {
         for (path, error) in &self.failures {
-            eprintln!("error: {}: {error:#}", path.display());
+            report::failed(reporter, path, error);
         }
+        reporter.event(Event::Finished {
+            processed: self.processed,
+            failed: self.failures.len(),
+            cancelled: self.cancelled,
+        });
         if self.failures.is_empty() {
             Ok(())
         } else {
@@ -45,41 +56,49 @@ fn partition(paths: &[PathBuf], results: Vec<Result<Vec<String>>>) -> (Vec<Strin
             Err(e) => failures.push((path.clone(), e)),
         }
     }
-    (lines, Outcome { processed: paths.len(), failures })
+    (lines, Outcome::new(paths.len(), failures))
 }
 
 // -- analyze ---------------------------------------------------------------
 
-pub fn analyze(args: &AnalyzeArgs) -> Result<()> {
+pub fn analyze(args: &AnalyzeArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    let progress = Progress::new(reporter, files.len());
 
     let results: Vec<Result<Vec<String>>> = files
         .par_iter()
         .map(|path| {
-            let audio = decode_file(path)?;
-            let measured = loudness::measure(&audio)?;
-            let line = if args.json {
-                json_line(path, &measured, audio.duration_secs(), audio.channels())
-            } else {
-                table_row(path, &measured, audio.duration_secs())
-            };
-            Ok(vec![line])
+            if progress.cancelled() {
+                return Ok(Vec::new());
+            }
+            let outcome = (|| {
+                let audio = decode_file(path)?;
+                let measured = loudness::measure(&audio)?;
+                Ok(vec![if args.json {
+                    json_line(path, &measured, audio.duration_secs(), audio.channels())
+                } else {
+                    table_row(path, &measured, audio.duration_secs())
+                }])
+            })();
+            progress.tick();
+            outcome
         })
         .collect();
 
-    let (lines, outcome) = partition(&files, results);
+    let (lines, mut outcome) = partition(&files, results);
+    outcome.cancelled = reporter.cancelled();
 
     if !args.json && !lines.is_empty() {
-        println!(
+        reporter.event(Event::Heading(format!(
             "{:<40} {:>8} {:>10} {:>8} {:>11}",
             "file", "length", "loudness", "range", "true peak"
-        );
+        )));
     }
     for line in lines {
-        println!("{line}");
+        reporter.event(Event::Line(line));
     }
 
-    outcome.report()
+    outcome.report(reporter)
 }
 
 fn table_row(path: &Path, measured: &Loudness, duration: f64) -> String {
@@ -108,15 +127,19 @@ fn json_line(path: &Path, measured: &Loudness, duration: f64, channels: usize) -
 
 // -- normalize -------------------------------------------------------------
 
-pub fn normalize(args: &NormalizeArgs) -> Result<()> {
+pub fn normalize(args: &NormalizeArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
     match args.mode {
-        NormalizeMode::Reencode => normalize_reencode(args, &files),
-        NormalizeMode::Replaygain => normalize_replaygain(args, &files),
+        NormalizeMode::Reencode => normalize_reencode(args, &files, reporter),
+        NormalizeMode::Replaygain => normalize_replaygain(args, &files, reporter),
     }
 }
 
-fn normalize_reencode(args: &NormalizeArgs, files: &[PathBuf]) -> Result<()> {
+fn normalize_reencode(
+    args: &NormalizeArgs,
+    files: &[PathBuf],
+    reporter: &dyn Reporter,
+) -> Result<()> {
     let plans = plan_outputs(args, files)?;
 
     let settings = Settings {
@@ -131,58 +154,75 @@ fn normalize_reencode(args: &NormalizeArgs, files: &[PathBuf]) -> Result<()> {
         dither: !args.no_dither,
     };
 
+    let progress = Progress::new(reporter, plans.len());
     let results: Vec<Result<Vec<String>>> = plans
         .par_iter()
         .map(|plan| {
-            let mut audio = decode_file(&plan.input)?;
-            let report = normalize::apply(&mut audio, &settings)?;
-
-            if report.silent {
-                return Ok(vec![format!("{}: silent, skipped", plan.input.display())]);
+            if progress.cancelled() {
+                return Ok(Vec::new());
             }
-
-            let mut line = format!(
-                "{}: {} LUFS -> {} LUFS ({:+.2} dB)",
-                plan.input.display(),
-                format_db(report.before.integrated_lufs),
-                format_db(report.after.integrated_lufs),
-                report.gain_db,
-            );
-            if report.withheld_db > 0.01 {
-                line.push_str(&format!(
-                    ", held back {:.2} dB to stay under {:.1} dBTP",
-                    report.withheld_db, args.ceiling
-                ));
-            }
-            if report.limiter_reduction_db < -0.01 {
-                line.push_str(&format!(
-                    ", limiter took off up to {:.2} dB",
-                    -report.limiter_reduction_db
-                ));
-            }
-
-            if args.dry_run {
-                line.push_str(" [dry run]");
-            } else {
-                let report = write_file(&plan.output, &audio, plan.codec, &encode)?;
-                line.push_str(&format!(" -> {}", plan.output.display()));
-                if report.clipped_anything() {
-                    line.push_str(&format!(" (warning: {} samples clipped)", report.clipped));
-                }
-            }
-            Ok(vec![line])
+            let outcome = normalize_one(plan, args, &settings, &encode);
+            progress.tick();
+            outcome
         })
         .collect();
 
     let inputs: Vec<PathBuf> = plans.iter().map(|p| p.input.clone()).collect();
-    let (lines, outcome) = partition(&inputs, results);
+    let (lines, mut outcome) = partition(&inputs, results);
+    outcome.cancelled = reporter.cancelled();
     for line in lines {
-        println!("{line}");
+        reporter.event(Event::Line(line));
     }
-    outcome.report()
+    outcome.report(reporter)
 }
 
-fn normalize_replaygain(args: &NormalizeArgs, files: &[PathBuf]) -> Result<()> {
+fn normalize_one(
+    plan: &Plan,
+    args: &NormalizeArgs,
+    settings: &Settings,
+    encode: &EncodeOptions,
+) -> Result<Vec<String>> {
+    let mut audio = decode_file(&plan.input)?;
+    let report = normalize::apply(&mut audio, settings)?;
+
+    if report.silent {
+        return Ok(vec![format!("{}: silent, skipped", plan.input.display())]);
+    }
+
+    let mut line = format!(
+        "{}: {} LUFS -> {} LUFS ({:+.2} dB)",
+        plan.input.display(),
+        format_db(report.before.integrated_lufs),
+        format_db(report.after.integrated_lufs),
+        report.gain_db,
+    );
+    if report.withheld_db > 0.01 {
+        line.push_str(&format!(
+            ", held back {:.2} dB to stay under {:.1} dBTP",
+            report.withheld_db, args.ceiling
+        ));
+    }
+    if report.limiter_reduction_db < -0.01 {
+        line.push_str(&format!(", limiter took off up to {:.2} dB", -report.limiter_reduction_db));
+    }
+
+    if args.dry_run {
+        line.push_str(" [dry run]");
+    } else {
+        let report = write_file(&plan.output, &audio, plan.codec, encode)?;
+        line.push_str(&format!(" -> {}", plan.output.display()));
+        if report.clipped_anything() {
+            line.push_str(&format!(" (warning: {} samples clipped)", report.clipped));
+        }
+    }
+    Ok(vec![line])
+}
+
+fn normalize_replaygain(
+    args: &NormalizeArgs,
+    files: &[PathBuf],
+    reporter: &dyn Reporter,
+) -> Result<()> {
     let reference = args.target_lufs();
 
     // Album gain is defined over a whole album, so group by directory. Without
@@ -198,10 +238,16 @@ fn normalize_replaygain(args: &NormalizeArgs, files: &[PathBuf]) -> Result<()> {
     }
 
     let group_keys: Vec<PathBuf> = groups.keys().cloned().collect();
+    // Progress counts files rather than groups, so an --album run over one
+    // directory still advances instead of sitting at zero until it finishes.
+    let progress = Progress::new(reporter, files.len());
     let results: Vec<Result<Vec<String>>> = group_keys
         .par_iter()
         .map(|key| {
             let members = &groups[key];
+            if progress.cancelled() {
+                return Ok(Vec::new());
+            }
 
             // Meter every track, keeping the meters so their gating histories
             // can be pooled for the album figure. The decoded audio itself is
@@ -247,17 +293,19 @@ fn normalize_replaygain(args: &NormalizeArgs, files: &[PathBuf]) -> Result<()> {
                     line.push_str(", tagged");
                 }
                 lines.push(line);
+                progress.tick();
             }
             Ok(lines)
         })
         .collect();
 
-    let (mut lines, outcome) = partition(&group_keys, results);
+    let (mut lines, mut outcome) = partition(&group_keys, results);
+    outcome.cancelled = reporter.cancelled();
     lines.sort();
     for line in lines {
-        println!("{line}");
+        reporter.event(Event::Line(line));
     }
-    outcome.report()
+    outcome.report(reporter)
 }
 
 /// An input paired with where its normalized copy goes.
@@ -320,7 +368,7 @@ fn plan_outputs(args: &NormalizeArgs, files: &[PathBuf]) -> Result<Vec<Plan>> {
 
 // -- stems -----------------------------------------------------------------
 
-pub fn stems(args: &StemsArgs) -> Result<()> {
+pub fn stems(args: &StemsArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
     let config = dsp::Config::from(&args.dsp);
 
@@ -339,22 +387,29 @@ pub fn stems(args: &StemsArgs) -> Result<()> {
         EncodeOptions { bit_depth: args.bit_depth, mp3_bitrate: args.bitrate, dither: true };
 
     let mut failures = Vec::new();
+    let progress = Progress::new(reporter, files.len());
 
     // Separation is memory-hungry and already uses every core internally, so
-    // files go one at a time. Each one prints as it finishes rather than at the
+    // files go one at a time. Each one reports as it finishes rather than at the
     // end, because a long batch would otherwise look like it had hung.
     for path in &files {
+        if progress.cancelled() {
+            break;
+        }
         match separate_one(path, args, &config, &encode, demucs_bin.as_deref()) {
             Ok(written) => {
                 for line in written {
-                    println!("{line}");
+                    reporter.event(Event::Line(line));
                 }
             }
             Err(e) => failures.push((path.clone(), e)),
         }
+        progress.tick();
     }
 
-    Outcome { processed: files.len(), failures }.report()
+    let mut outcome = Outcome::new(files.len(), failures);
+    outcome.cancelled = reporter.cancelled();
+    outcome.report(reporter)
 }
 
 fn separate_one(
@@ -457,8 +512,9 @@ fn write_stems(
 
 // -- tag -------------------------------------------------------------------
 
-pub fn tag(args: &TagArgs) -> Result<()> {
+pub fn tag(args: &TagArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    let progress = Progress::new(reporter, files.len());
 
     // Fingerprinting is local and CPU-bound, so it runs across every core
     // before any network work starts.
@@ -477,9 +533,9 @@ pub fn tag(args: &TagArgs) -> Result<()> {
             .collect();
         let (lines, outcome) = partition(&files, results);
         for (path, line) in files.iter().zip(lines) {
-            println!("{}\t{line}", path.display());
+            reporter.event(Event::Line(format!("{}\t{line}", path.display())));
         }
-        return outcome.report();
+        return outcome.report(reporter);
     }
 
     let key = args.acoustid_key.clone().unwrap_or_default();
@@ -493,22 +549,31 @@ pub fn tag(args: &TagArgs) -> Result<()> {
     // per second, so there is nothing to gain from parallelism and a real risk
     // of being blocked for ignoring the limit.
     for (path, fingerprint) in files.iter().zip(fingerprints) {
+        if progress.cancelled() {
+            break;
+        }
         let result = fingerprint.and_then(|fp| tag_one(path, &fp, args, &mut lookup));
         match result {
             Ok(Some(line)) => {
                 matched += 1;
-                println!("{line}");
+                reporter.event(Event::Line(line));
             }
             Ok(None) => {
                 unmatched += 1;
-                println!("{}: no confident match", path.display());
+                reporter.event(Event::Line(format!("{}: no confident match", path.display())));
             }
             Err(e) => failures.push((path.clone(), e)),
         }
+        progress.tick();
     }
 
-    eprintln!("{matched} tagged, {unmatched} unmatched, {} failed", failures.len());
-    Outcome { processed: files.len(), failures }.report()
+    reporter.event(Event::Summary(format!(
+        "{matched} tagged, {unmatched} unmatched, {} failed",
+        failures.len()
+    )));
+    let mut outcome = Outcome::new(files.len(), failures);
+    outcome.cancelled = reporter.cancelled();
+    outcome.report(reporter)
 }
 
 /// The three services, plus the caches that keep repeated lookups off the

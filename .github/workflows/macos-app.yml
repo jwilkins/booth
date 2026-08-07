@@ -1,0 +1,47 @@
+name: macOS app
+
+# Builds musicai.app and its disk image. Runs on demand, and on tags, because a
+# universal build is two compiles of everything and is not worth doing on every
+# push.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Apple targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the app and the disk image
+        run: scripts/package-macos.sh
+
+      # Unsigned by design: signing needs a Developer ID certificate, which
+      # belongs in this repository's secrets rather than in the workflow. Set
+      # MUSICAI_SIGN_IDENTITY and MUSICAI_NOTARY_PROFILE here once there is one.
+      - name: Check the app is put together properly
+        run: |
+          set -euo pipefail
+          app=dist/musicai.app
+          test -x "$app/Contents/MacOS/musicai-gui"
+          test -x "$app/Contents/MacOS/musicai"
+          test -f "$app/Contents/Resources/icon.icns"
+          # Both architectures really are in there.
+          lipo -info "$app/Contents/MacOS/musicai-gui" | grep -q arm64
+          lipo -info "$app/Contents/MacOS/musicai-gui" | grep -q x86_64
+          # The command-line tool in the bundle actually runs.
+          "$app/Contents/MacOS/musicai" --version
+          codesign --verify --deep --strict "$app"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: musicai-macos
+          path: dist/*.dmg
+          if-no-files-found: error

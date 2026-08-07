@@ -21,10 +21,11 @@ fn run() -> Result<()> {
             .context("configuring the thread pool")?;
     }
 
+    let reporter = musicai::report::Stdio;
     match &cli.command {
-        Command::Analyze(args) => commands::analyze(args),
-        Command::Normalize(args) => commands::normalize(args),
-        Command::Stems(args) => commands::stems(args),
-        Command::Tag(args) => commands::tag(args),
+        Command::Analyze(args) => commands::analyze(args, &reporter),
+        Command::Normalize(args) => commands::normalize(args, &reporter),
+        Command::Stems(args) => commands::stems(args, &reporter),
+        Command::Tag(args) => commands::tag(args, &reporter),
     }
 }

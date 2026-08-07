@@ -1,3 +1,11 @@
+[workspace]
+members = ["gui"]
+
+# The window lives in its own crate so that eframe and its several hundred
+# dependencies stay out of the command-line tool entirely: `cargo build` still
+# builds just the CLI, and the CLI keeps its own (much lower) minimum Rust
+# version.
+
 [package]
 name = "musicai"
 version = "0.1.0"

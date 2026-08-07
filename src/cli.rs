@@ -47,7 +47,7 @@ pub enum OnAmbiguous {
     Best,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct TagArgs {
     #[command(flatten)]
     pub input: InputArgs,
@@ -92,7 +92,7 @@ pub struct TagArgs {
     pub musicbrainz_interval: u64,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct InputArgs {
     /// Files or directories to process.
     #[arg(value_name = "PATH", required = true)]
@@ -103,7 +103,7 @@ pub struct InputArgs {
     pub recursive: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct AnalyzeArgs {
     #[command(flatten)]
     pub input: InputArgs,
@@ -123,7 +123,7 @@ pub enum NormalizeMode {
     Replaygain,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct NormalizeArgs {
     #[command(flatten)]
     pub input: InputArgs,
@@ -197,7 +197,7 @@ impl NormalizeArgs {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct StemsArgs {
     #[command(flatten)]
     pub input: InputArgs,
@@ -244,7 +244,7 @@ pub struct StemsArgs {
 
 /// Tuning for the built-in separator. All of it has sensible defaults; these
 /// exist for when a particular track fights them.
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 #[command(next_help_heading = "Built-in separator tuning")]
 pub struct DspArgs {
     /// FFT size for the drum pass. Smaller sharpens transients, but too small
@@ -302,7 +302,7 @@ impl From<&DspArgs> for crate::stems::dsp::Config {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 #[command(next_help_heading = "Demucs backend")]
 pub struct DemucsArgs {
     /// The demucs executable to run.
