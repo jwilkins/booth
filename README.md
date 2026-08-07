@@ -1,12 +1,18 @@
 # musicai
 
-A command-line audio tool in Rust. It does three things:
+An audio tool in Rust, as a command-line program and as a macOS app. It does three things:
 
 - **Normalize** mp3, flac and wav files to a consistent loudness (EBU R128 / LUFS), either by
   re-encoding or by writing ReplayGain tags and leaving the audio untouched.
 - **Separate** a mix into three stems — vocals, melody and drums, using demucs.
 - **Tag** files by identifying them from their sound, via acoustic fingerprinting and
   MusicBrainz.
+
+By default it does all three, over everything you point it at:
+
+```sh
+musicai ~/Music/album
+```
 
 Everything runs on your machine, but two commands need something beyond the binary. `stems` drives
 a locally installed [demucs](https://github.com/adefossez/demucs); `tag` fingerprints locally but
@@ -23,6 +29,54 @@ for flac, `hound` for wav) are built into the binary.
 cargo build --release
 # binary at ./target/release/musicai
 ```
+
+The window is a separate crate in the same workspace, so this builds only the command-line tool
+and none of a window toolkit. For the app, see [The macOS app](#the-macos-app).
+
+## The default: all of it, over everything
+
+With no subcommand, `musicai` runs the whole pipeline over the files and folders you name. It is
+the same as `musicai run`, which is where the options live.
+
+```sh
+musicai ~/Music/album -r
+```
+
+```
+12 files through normalize -> tag -> stems
+== 1/3 normalize ==
+album/01 - opener.flac: -9.8 LUFS, track gain -8.20 dB, tagged
+...
+== 2/3 tag ==
+album/01 - opener.flac -> Opener — Some Band (0.98)
+...
+== 3/3 stems ==
+wrote stems/01 - opener-vocals.flac
+```
+
+The whole file list is gathered before any work starts, so the run can say how much there is to do
+and a folder is walked once rather than once per step. Each step then runs over every file before
+the next begins, and announces itself as it starts.
+
+**The order is deliberate.** Tagging happens before separation, so the stems inherit the tags that
+were just written rather than whatever was there before. Normalizing happens first, so everything
+downstream sees the finished audio. `--steps normalize,stems` runs a subset; they always run in
+that order regardless of how they are listed.
+
+Three things about the defaults are worth knowing:
+
+- **Loudness is tagged, not re-encoded.** `--mode replaygain` is the default here, unlike the
+  `normalize` subcommand, because a pipeline that re-encodes leaves a second copy of your whole
+  library behind. The audio is untouched and there is no generation loss. Pass `--mode reencode`
+  to write new files instead — the later steps then follow the new files, not the originals, so
+  the stems come from the audio you actually normalized.
+- **Wav files skip the loudness step.** Wav has nowhere to put a ReplayGain tag. Rather than
+  failing once per file, the run says so once and carries them on to tagging and separation.
+- **Tagging is skipped without an AcoustID key**, with a note saying so, because every lookup
+  would otherwise fail. Set `ACOUSTID_API_KEY` or pass `--acoustid-key`.
+
+`--dry-run` reports what every step would do and writes nothing. Separation is the slow part; if
+you only want the other two, `--steps normalize,tag`.
 
 ## Analyze
 
@@ -315,6 +369,75 @@ adding a second one.
 
 Only the tag blocks are rewritten; the audio is left byte-for-byte alone.
 
+## The macOS app
+
+Everything above, in a window. Pick a task along the top, drop files on the left, set the options
+in the middle, press the button. Results appear in the log at the bottom as they arrive, and a
+long job can be stopped without leaving a half-written file behind.
+
+It opens on **Batch**, which is the pipeline: tick the steps you want and press Run all. Each step
+uses the settings on its own tab, so there is one place to configure anything and no second copy of
+every control. The step being run is shown next to the progress bar as the run moves through them.
+
+Stems default to `~/Music/musicai-stems` rather than the command line's relative `stems`, because
+an app launched from the Finder has no useful working directory.
+
+![The app, on the Batch tab](docs/screenshot.png)
+
+### Building it
+
+```sh
+scripts/package-macos.sh
+# dist/musicai.app and dist/musicai-0.1.0.dmg
+```
+
+That builds for Apple silicon and Intel and `lipo`s them together, so the result runs natively on
+either. It needs both targets installed:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+```
+
+The bundle carries **both** binaries — the app you launch and the `musicai` command-line tool, at
+`musicai.app/Contents/MacOS/musicai`. One download gives you both, and they can never be different
+versions of each other. Symlink it onto your `PATH` if you want it there:
+
+```sh
+ln -s /Applications/musicai.app/Contents/MacOS/musicai /usr/local/bin/musicai
+```
+
+To run the window without packaging anything:
+
+```sh
+cargo run -p musicai-gui --release
+```
+
+Files named on the command line start out selected, which is also how Finder's *Open With* hands
+over a selection.
+
+### Signing
+
+Without a Developer ID the app is ad-hoc signed: it runs on the machine that built it, and
+Gatekeeper stops it anywhere else until you right-click and choose *Open*. With one, set the
+environment and the script does the rest:
+
+```sh
+MUSICAI_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+MUSICAI_NOTARY_PROFILE=my-notary-profile \
+    scripts/package-macos.sh
+```
+
+`.github/workflows/macos-app.yml` builds the same thing on a macOS runner, on a tag or on demand.
+
+### What the window is, and is not
+
+It is a front end, not a second implementation. Every option is the command-line tool's own
+argument struct, filled in with the defaults clap would apply, and pressing the button calls the
+same function the CLI calls. A default cannot drift between the two, and an option added to the
+CLI without a control in the window is a compile error rather than a silent difference. The
+command line that matches what you have set up is printed in the log when a job starts, so you can
+run it once in the window and then copy the line into a script.
+
 ## Notes
 
 - Supported formats in and out: mp3, flac, wav. Files named explicitly on the command line are
@@ -336,8 +459,22 @@ cargo test --release
 Unit tests cover the STFT round trip, the median filters, the limiter's ceiling guarantee, the
 loudness maths and the parsing of AcoustID and MusicBrainz responses. `tests/end_to_end.rs`
 drives the real binary over real encoded files, `tests/separation_quality.rs` pins how well the
-default separator routes known sources, and `tests/tagging.rs` round-trips tags through real
-flac and mp3 files.
+default separator routes known sources, `tests/tagging.rs` round-trips tags through real
+flac and mp3 files, and `tests/packaging.rs` assembles the macOS bundle and checks its layout,
+its plist and the icon container. The pipeline has its own end-to-end tests: that the steps run in
+order and announce themselves, that re-encoding hands the new files to the next step rather than
+the originals, that a wav survives a ReplayGain run, and that a missing key skips tagging instead
+of failing every file.
+
+The window has its own tests, which are not in the default workspace member and so need asking
+for:
+
+```sh
+cargo test -p musicai-gui --release
+```
+
+They run real jobs through the worker thread and assert on what comes back — progress, per-file
+failures, cancellation, and that the window is told to redraw. Nothing there needs a display.
 
 That suite is entirely offline. Tests that talk to the real services are marked `#[ignore]` and
 run separately:

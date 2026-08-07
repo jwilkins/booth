@@ -2,3 +2,6 @@
 
 # Scratch audio for manual listening tests; far too large to commit.
 /testdata
+
+# Built macOS app and disk image.
+/dist

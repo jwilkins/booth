@@ -11,5 +11,6 @@ pub mod discover;
 pub mod dsp;
 pub mod loudness;
 pub mod normalize;
+pub mod report;
 pub mod stems;
 pub mod tag;

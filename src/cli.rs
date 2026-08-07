@@ -14,12 +14,25 @@ use crate::tag::OnExisting;
 #[command(
     name = "musicai",
     version,
-    about = "Loudness-normalize and stem-separate mp3, flac and wav files, locally",
+    about = "Loudness-normalize, tag and stem-separate mp3, flac and wav files, locally",
+    // With no subcommand the arguments below are the `run` pipeline's, so
+    // `musicai ~/Music` does the lot. With one, they belong to it instead.
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
     max_term_width = 100
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
+
+    /// The pipeline's arguments, used when no subcommand is given.
+    ///
+    /// Not an `Option`: a required argument inside an optional group is a
+    /// contradiction clap resolves by never filling the group in, which is
+    /// exactly the bug it looks like. `subcommand_negates_reqs` is what makes
+    /// the paths optional when a subcommand supplies its own.
+    #[command(flatten)]
+    pub run: RunArgs,
 
     /// Worker threads. Defaults to one per core.
     #[arg(long, short = 'j', global = true, value_name = "N")]
@@ -32,11 +45,163 @@ pub enum Command {
     Analyze(AnalyzeArgs),
     /// Bring files to a consistent loudness.
     Normalize(NormalizeArgs),
+    /// Normalize, tag and separate, in one pass. This is what running
+    /// `musicai` with no subcommand does.
+    Run(RunArgs),
     /// Split files into vocals, melody and drums.
     Stems(StemsArgs),
     /// Identify files by sound and write metadata tags from MusicBrainz.
     Tag(TagArgs),
 }
+
+/// One step of the pipeline.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Step {
+    Normalize,
+    Tag,
+    Stems,
+}
+
+impl Step {
+    /// In the order they run. Tagging comes before separation, so the stems
+    /// inherit the tags that were just written rather than whatever was there
+    /// before; normalizing comes first so that everything downstream sees the
+    /// finished audio.
+    pub const ALL: [Step; 3] = [Step::Normalize, Step::Tag, Step::Stems];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Step::Normalize => "normalize",
+            Step::Tag => "tag",
+            Step::Stems => "stems",
+        }
+    }
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct RunArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
+    /// Which steps to run. They always run in the order normalize, tag, stems,
+    /// whatever order they are listed in.
+    #[arg(long, value_enum, value_delimiter = ',', default_values_t = Step::ALL)]
+    pub steps: Vec<Step>,
+
+    /// How to normalize. The default writes ReplayGain tags rather than new
+    /// files, so the pipeline keeps working on one set of files instead of
+    /// leaving a second copy of the library behind. With `reencode`, the later
+    /// steps follow the newly written files.
+    #[arg(long, value_enum, default_value_t = NormalizeMode::Replaygain)]
+    pub mode: NormalizeMode,
+
+    /// Target loudness in LUFS. Defaults to -14 when re-encoding and -18 for
+    /// ReplayGain.
+    #[arg(long, value_name = "LUFS", allow_negative_numbers = true)]
+    pub target: Option<f64>,
+
+    /// Also compute album gain, grouping files by the directory they sit in.
+    #[arg(long)]
+    pub album: bool,
+
+    /// AcoustID API key. Without one the tag step is skipped, because every
+    /// lookup would fail.
+    #[arg(long, value_name = "KEY", env = "ACOUSTID_API_KEY", hide_env_values = true)]
+    pub acoustid_key: Option<String>,
+
+    /// Minimum AcoustID confidence, from 0 to 1, for a match to be trusted.
+    #[arg(long, value_name = "SCORE", default_value_t = 0.8)]
+    pub min_score: f64,
+
+    /// Also fetch front cover art and embed it.
+    #[arg(long)]
+    pub cover_art: bool,
+
+    /// Which separator to use.
+    #[arg(long, value_enum, default_value_t = Backend::Demucs)]
+    pub backend: Backend,
+
+    /// Directory to write stems into.
+    #[arg(long, value_name = "DIR", default_value = "stems")]
+    pub stems_dir: PathBuf,
+
+    /// What to do when demucs is not installed.
+    #[arg(long, value_enum, default_value_t = InstallPolicy::Ask)]
+    pub install_demucs: InstallPolicy,
+
+    /// Overwrite files that already exist.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Report what every step would do, and write nothing.
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
+}
+
+impl RunArgs {
+    /// The `normalize` arguments this run implies, starting from the defaults
+    /// the command-line tool would apply.
+    pub fn normalize_args(&self) -> NormalizeArgs {
+        NormalizeArgs {
+            input: self.input.clone(),
+            mode: self.mode,
+            target: self.target,
+            album: self.album,
+            force: self.force,
+            dry_run: self.dry_run,
+            ..NormalizeArgs::defaults()
+        }
+    }
+
+    pub fn tag_args(&self) -> TagArgs {
+        TagArgs {
+            input: self.input.clone(),
+            acoustid_key: self.acoustid_key.clone(),
+            min_score: self.min_score,
+            cover_art: self.cover_art,
+            dry_run: self.dry_run,
+            ..TagArgs::defaults()
+        }
+    }
+
+    pub fn stems_args(&self) -> StemsArgs {
+        let mut args = StemsArgs {
+            input: self.input.clone(),
+            backend: self.backend,
+            out_dir: self.stems_dir.clone(),
+            force: self.force,
+            ..StemsArgs::defaults()
+        };
+        args.demucs.install_demucs = self.install_demucs;
+        args
+    }
+}
+
+/// Give an arguments struct a `defaults()` constructor, filled in by clap.
+///
+/// Defaults are then stated once, in the `#[arg]` attributes, and everything
+/// else — the pipeline, the window — asks for them rather than restating them
+/// and slowly drifting out of step.
+macro_rules! defaults_from_clap {
+    ($type:ident, $subcommand:literal, $variant:ident) => {
+        impl $type {
+            pub fn defaults() -> Self {
+                // Every subcommand needs at least one input path; callers
+                // replace this placeholder before anything runs.
+                match Cli::parse_from(["musicai", $subcommand, "<none>"]).command {
+                    Some(Command::$variant(args)) => args,
+                    other => unreachable!("clap parsed {other:?} for {}", $subcommand),
+                }
+            }
+        }
+    };
+}
+
+defaults_from_clap!(AnalyzeArgs, "analyze", Analyze);
+defaults_from_clap!(NormalizeArgs, "normalize", Normalize);
+defaults_from_clap!(RunArgs, "run", Run);
+defaults_from_clap!(StemsArgs, "stems", Stems);
+defaults_from_clap!(TagArgs, "tag", Tag);
 
 /// What to do with a file whose best match is below the confidence threshold.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -47,7 +212,7 @@ pub enum OnAmbiguous {
     Best,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct TagArgs {
     #[command(flatten)]
     pub input: InputArgs,
@@ -92,7 +257,7 @@ pub struct TagArgs {
     pub musicbrainz_interval: u64,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct InputArgs {
     /// Files or directories to process.
     #[arg(value_name = "PATH", required = true)]
@@ -103,7 +268,7 @@ pub struct InputArgs {
     pub recursive: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct AnalyzeArgs {
     #[command(flatten)]
     pub input: InputArgs,
@@ -123,7 +288,7 @@ pub enum NormalizeMode {
     Replaygain,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct NormalizeArgs {
     #[command(flatten)]
     pub input: InputArgs,
@@ -197,7 +362,7 @@ impl NormalizeArgs {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct StemsArgs {
     #[command(flatten)]
     pub input: InputArgs,
@@ -244,7 +409,7 @@ pub struct StemsArgs {
 
 /// Tuning for the built-in separator. All of it has sensible defaults; these
 /// exist for when a particular track fights them.
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 #[command(next_help_heading = "Built-in separator tuning")]
 pub struct DspArgs {
     /// FFT size for the drum pass. Smaller sharpens transients, but too small
@@ -302,7 +467,7 @@ impl From<&DspArgs> for crate::stems::dsp::Config {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 #[command(next_help_heading = "Demucs backend")]
 pub struct DemucsArgs {
     /// The demucs executable to run.

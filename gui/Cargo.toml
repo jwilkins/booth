@@ -1,0 +1,37 @@
+[package]
+name = "musicai-gui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Window for musicai: loudness normalization, stem separation and tagging"
+license = "MIT"
+
+[[bin]]
+name = "musicai-gui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+async-std = "1"
+clap = { version = "4", features = ["derive", "env"] }
+eframe = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+musicai = { path = ".." }
+rayon = "1"
+# Native file pickers. The xdg-portal backend is chosen so that a Linux build
+# needs no GTK development packages; macOS uses AppKit either way. It is
+# async-only, so the whole app uses the async API and blocks on it off the UI
+# thread.
+rfd = { version = "0.15", default-features = false, features = [
+    "xdg-portal",
+    "async-std",
+] }
+
+[features]
+# eframe can write a screenshot and exit, which is how the layout is checked
+# under a headless X server in the tests.
+screenshot = ["eframe/__screenshot"]

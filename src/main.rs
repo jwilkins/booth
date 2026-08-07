@@ -21,10 +21,14 @@ fn run() -> Result<()> {
             .context("configuring the thread pool")?;
     }
 
+    let reporter = musicai::report::Stdio;
     match &cli.command {
-        Command::Analyze(args) => commands::analyze(args),
-        Command::Normalize(args) => commands::normalize(args),
-        Command::Stems(args) => commands::stems(args),
-        Command::Tag(args) => commands::tag(args),
+        Some(Command::Analyze(args)) => commands::analyze(args, &reporter),
+        Some(Command::Normalize(args)) => commands::normalize(args, &reporter),
+        Some(Command::Run(args)) => commands::run(args, &reporter),
+        Some(Command::Stems(args)) => commands::stems(args, &reporter),
+        Some(Command::Tag(args)) => commands::tag(args, &reporter),
+        // No subcommand: the paths given are a pipeline run.
+        None => commands::run(&cli.run, &reporter),
     }
 }
