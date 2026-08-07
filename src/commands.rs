@@ -371,9 +371,21 @@ fn separate_one(
         .into_owned();
     let dir = args.out_dir.join(&track);
 
+    // Stems inherit the source's format unless told otherwise, so an mp3
+    // yields mp3 stems and a flac yields flac.
+    let codec = match args.format {
+        Some(codec) => codec,
+        None => Codec::from_path(path).with_context(|| {
+            format!(
+                "cannot tell what format {} is, so cannot match it for the stems; pass --format",
+                path.display()
+            )
+        })?,
+    };
+
     // Check the destinations before doing the expensive part.
     for stem in &args.only {
-        let out = dir.join(format!("{}.{}", stem.name(), args.format.extension()));
+        let out = dir.join(format!("{}.{}", stem.name(), codec.extension()));
         if out.exists() && !args.force {
             bail!("{} already exists; pass --force to overwrite", out.display());
         }
@@ -402,7 +414,7 @@ fn separate_one(
         }
     };
 
-    write_stems(&dir, &separated, args, encode)
+    write_stems(&dir, &separated, args, encode, codec, path)
 }
 
 fn write_stems(
@@ -410,11 +422,19 @@ fn write_stems(
     separated: &StemSet,
     args: &StemsArgs,
     encode: &EncodeOptions,
+    codec: Codec,
+    source: &Path,
 ) -> Result<Vec<String>> {
     let mut written = Vec::new();
     for stem in &args.only {
-        let out = dir.join(format!("{}.{}", stem.name(), args.format.extension()));
-        let report = write_file(&out, separated.get(*stem), args.format, encode)?;
+        let out = dir.join(format!("{}.{}", stem.name(), codec.extension()));
+        let report = write_file(&out, separated.get(*stem), codec, encode)?;
+
+        // Tags go on after the audio, so the stem is identifiable in a library
+        // rather than landing there as an untitled file by an unknown artist.
+        if !args.no_tags {
+            crate::tag::copy::copy_for_stem(source, &out, *stem)?;
+        }
 
         let mut line = format!("wrote {}", out.display());
         if report.clipped_anything() {

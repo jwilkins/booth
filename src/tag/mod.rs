@@ -10,6 +10,7 @@
 //! require a descriptive User-Agent and no more than one request per second.
 
 pub mod acoustid;
+pub mod copy;
 pub mod coverart;
 pub mod fingerprint;
 pub mod http;
@@ -269,6 +270,56 @@ fn plan<T: TagTarget>(
 
     outcome.written = writes.iter().map(|(field, _)| *field).collect();
     (writes, outcome)
+}
+
+/// Read whatever of our known fields a file already carries.
+///
+/// The inverse of [`write_tags`], sharing the same field mapping so the two
+/// cannot drift apart.
+pub fn read_metadata(path: &Path) -> Result<Metadata> {
+    let mut metadata = Metadata::default();
+
+    match Codec::from_path(path) {
+        Some(Codec::Flac) => {
+            let mut tag = metaflac::Tag::read_from_path(path)?;
+            let target = VorbisTarget(&mut tag);
+            for field in Field::ALL {
+                set_field(&mut metadata, field, target.get(field));
+            }
+        }
+        Some(Codec::Mp3) => {
+            let mut tag = id3::Tag::read_from_path(path).unwrap_or_default();
+            let target = Id3Target(&mut tag);
+            for field in Field::ALL {
+                set_field(&mut metadata, field, target.get(field));
+            }
+        }
+        Some(Codec::Wav) => {}
+        None => bail!("cannot tell what kind of file {} is", path.display()),
+    }
+
+    Ok(metadata)
+}
+
+fn set_field(metadata: &mut Metadata, field: Field, value: Option<String>) {
+    let Some(value) = value else { return };
+    let number = || value.parse().ok();
+    match field {
+        Field::Title => metadata.title = Some(value),
+        Field::Artist => metadata.artist = Some(value),
+        Field::Album => metadata.album = Some(value),
+        Field::AlbumArtist => metadata.album_artist = Some(value),
+        Field::Date => metadata.date = Some(value),
+        Field::TrackNumber => metadata.track_number = number(),
+        Field::TotalTracks => metadata.total_tracks = number(),
+        Field::DiscNumber => metadata.disc_number = number(),
+        Field::TotalDiscs => metadata.total_discs = number(),
+        Field::RecordingMbid => metadata.recording_mbid = Some(value),
+        Field::ReleaseMbid => metadata.release_mbid = Some(value),
+        Field::ReleaseGroupMbid => metadata.release_group_mbid = Some(value),
+        Field::ArtistMbid => metadata.artist_mbid = Some(value),
+        Field::AcoustId => metadata.acoustid = Some(value),
+    }
 }
 
 /// Write `metadata` into the tags of an existing file.

@@ -416,13 +416,52 @@ fn cli_stems_writes_three_files() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
     for stem in Stem::ALL {
-        let path = out_dir.join("song").join(format!("{stem}.wav"));
+        // Stems inherit the source's format, so a flac input yields flac.
+        let path = out_dir.join("song").join(format!("{stem}.flac"));
         assert!(path.exists(), "missing {}", path.display());
         let audio = decode_file(&path).unwrap();
         assert_eq!(audio.channels(), 2);
         assert_eq!(audio.sample_rate, SAMPLE_RATE);
         assert!(audio.sample_peak() > 1e-3, "{stem} came out silent");
     }
+}
+
+#[test]
+fn cli_stems_match_the_source_format() {
+    let dir = Scratch::new("cli-stems-format");
+
+    for codec in [Codec::Flac, Codec::Mp3, Codec::Wav] {
+        let input = write_song(&dir, &format!("song-{}", codec.extension()), codec, 0.4);
+        let out_dir = dir.path(&format!("out-{}", codec.extension()));
+
+        let output = musicai()
+            .arg("stems")
+            .arg(&input)
+            .args(["--backend", "dsp", "--only", "vocals"])
+            .arg("--out-dir")
+            .arg(&out_dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+        let track = input.file_stem().unwrap().to_string_lossy().into_owned();
+        let expected = out_dir.join(&track).join(format!("vocals.{}", codec.extension()));
+        assert!(expected.exists(), "expected {}", expected.display());
+    }
+
+    // And an explicit --format still overrides the source.
+    let input = write_song(&dir, "override", Codec::Flac, 0.4);
+    let out_dir = dir.path("out-override");
+    let output = musicai()
+        .arg("stems")
+        .arg(&input)
+        .args(["--backend", "dsp", "--only", "vocals", "--format", "mp3"])
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(out_dir.join("override").join("vocals.mp3").exists());
 }
 
 #[test]

@@ -210,9 +210,14 @@ pub struct StemsArgs {
     #[arg(long, short = 'o', value_name = "DIR", default_value = "stems")]
     pub out_dir: PathBuf,
 
-    /// Output format for the stems.
-    #[arg(long, value_enum, default_value_t = Codec::Wav)]
-    pub format: Codec,
+    /// Output format for the stems. Defaults to matching each input, so an
+    /// mp3 yields mp3 stems and a flac yields flac.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub format: Option<Codec>,
+
+    /// Do not copy the source file's tags onto its stems.
+    #[arg(long)]
+    pub no_tags: bool,
 
     /// Only write these stems.
     #[arg(long, value_enum, value_delimiter = ',', default_values_t = Stem::ALL)]
