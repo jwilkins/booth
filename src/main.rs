@@ -23,9 +23,12 @@ fn run() -> Result<()> {
 
     let reporter = musicai::report::Stdio;
     match &cli.command {
-        Command::Analyze(args) => commands::analyze(args, &reporter),
-        Command::Normalize(args) => commands::normalize(args, &reporter),
-        Command::Stems(args) => commands::stems(args, &reporter),
-        Command::Tag(args) => commands::tag(args, &reporter),
+        Some(Command::Analyze(args)) => commands::analyze(args, &reporter),
+        Some(Command::Normalize(args)) => commands::normalize(args, &reporter),
+        Some(Command::Run(args)) => commands::run(args, &reporter),
+        Some(Command::Stems(args)) => commands::stems(args, &reporter),
+        Some(Command::Tag(args)) => commands::tag(args, &reporter),
+        // No subcommand: the paths given are a pipeline run.
+        None => commands::run(&cli.run, &reporter),
     }
 }

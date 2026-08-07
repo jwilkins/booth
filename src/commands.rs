@@ -1,4 +1,5 @@
-//! Implementations of the three subcommands.
+//! Implementations of the subcommands, and the pipeline that runs several of
+//! them over one set of files.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,9 @@ use rayon::prelude::*;
 
 use crate::audio::decode::decode_file;
 use crate::audio::encode::{write_file, Codec, EncodeOptions};
-use crate::cli::{AnalyzeArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, StemsArgs, TagArgs};
+use crate::cli::{
+    AnalyzeArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, RunArgs, StemsArgs, Step, TagArgs,
+};
 use crate::discover;
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
@@ -63,6 +66,10 @@ fn partition(paths: &[PathBuf], results: Vec<Result<Vec<String>>>) -> (Vec<Strin
 
 pub fn analyze(args: &AnalyzeArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    analyze_files(args, &files, reporter)
+}
+
+pub fn analyze_files(args: &AnalyzeArgs, files: &[PathBuf], reporter: &dyn Reporter) -> Result<()> {
     let progress = Progress::new(reporter, files.len());
 
     let results: Vec<Result<Vec<String>>> = files
@@ -85,7 +92,7 @@ pub fn analyze(args: &AnalyzeArgs, reporter: &dyn Reporter) -> Result<()> {
         })
         .collect();
 
-    let (lines, mut outcome) = partition(&files, results);
+    let (lines, mut outcome) = partition(files, results);
     outcome.cancelled = reporter.cancelled();
 
     if !args.json && !lines.is_empty() {
@@ -129,9 +136,26 @@ fn json_line(path: &Path, measured: &Loudness, duration: f64, channels: usize) -
 
 pub fn normalize(args: &NormalizeArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    normalize_files(args, &files, reporter).map(|_| ())
+}
+
+/// Normalize an explicit list, and report which files anything downstream
+/// should carry on with.
+///
+/// In ReplayGain mode that is the inputs, since the audio was left alone. When
+/// re-encoding it is the files that were just written — a pipeline that went on
+/// to tag the originals instead would tag the wrong copy. A file that was
+/// skipped, or a dry run, produces nothing new, so the input stands in.
+pub fn normalize_files(
+    args: &NormalizeArgs,
+    files: &[PathBuf],
+    reporter: &dyn Reporter,
+) -> Result<Vec<PathBuf>> {
     match args.mode {
-        NormalizeMode::Reencode => normalize_reencode(args, &files, reporter),
-        NormalizeMode::Replaygain => normalize_replaygain(args, &files, reporter),
+        NormalizeMode::Reencode => normalize_reencode(args, files, reporter),
+        NormalizeMode::Replaygain => {
+            normalize_replaygain(args, files, reporter).map(|()| files.to_vec())
+        }
     }
 }
 
@@ -139,7 +163,7 @@ fn normalize_reencode(
     args: &NormalizeArgs,
     files: &[PathBuf],
     reporter: &dyn Reporter,
-) -> Result<()> {
+) -> Result<Vec<PathBuf>> {
     let plans = plan_outputs(args, files)?;
 
     let settings = Settings {
@@ -155,11 +179,11 @@ fn normalize_reencode(
     };
 
     let progress = Progress::new(reporter, plans.len());
-    let results: Vec<Result<Vec<String>>> = plans
+    let results: Vec<Result<Normalized>> = plans
         .par_iter()
         .map(|plan| {
             if progress.cancelled() {
-                return Ok(Vec::new());
+                return Ok(Normalized::skipped(&plan.input));
             }
             let outcome = normalize_one(plan, args, &settings, &encode);
             progress.tick();
@@ -167,13 +191,38 @@ fn normalize_reencode(
         })
         .collect();
 
-    let inputs: Vec<PathBuf> = plans.iter().map(|p| p.input.clone()).collect();
-    let (lines, mut outcome) = partition(&inputs, results);
-    outcome.cancelled = reporter.cancelled();
-    for line in lines {
-        reporter.event(Event::Line(line));
+    let mut failures = Vec::new();
+    let mut next = Vec::with_capacity(plans.len());
+    for (plan, result) in plans.iter().zip(results) {
+        match result {
+            Ok(done) => {
+                if let Some(line) = done.line {
+                    reporter.event(Event::Line(line));
+                }
+                next.push(done.produced);
+            }
+            Err(e) => failures.push((plan.input.clone(), e)),
+        }
     }
-    outcome.report(reporter)
+
+    let mut outcome = Outcome::new(plans.len(), failures);
+    outcome.cancelled = reporter.cancelled();
+    outcome.report(reporter)?;
+    Ok(next)
+}
+
+/// What normalizing one file produced: something to report, and the file that
+/// carries on to the next step.
+struct Normalized {
+    line: Option<String>,
+    produced: PathBuf,
+}
+
+impl Normalized {
+    /// Nothing was written, so the input is what carries on.
+    fn skipped(input: &Path) -> Self {
+        Self { line: None, produced: input.to_path_buf() }
+    }
 }
 
 fn normalize_one(
@@ -181,12 +230,16 @@ fn normalize_one(
     args: &NormalizeArgs,
     settings: &Settings,
     encode: &EncodeOptions,
-) -> Result<Vec<String>> {
+) -> Result<Normalized> {
     let mut audio = decode_file(&plan.input)?;
     let report = normalize::apply(&mut audio, settings)?;
 
     if report.silent {
-        return Ok(vec![format!("{}: silent, skipped", plan.input.display())]);
+        return Ok(Normalized {
+            line: Some(format!("{}: silent, skipped", plan.input.display())),
+            // Nothing was written, so anything downstream uses the original.
+            produced: plan.input.clone(),
+        });
     }
 
     let mut line = format!(
@@ -206,16 +259,18 @@ fn normalize_one(
         line.push_str(&format!(", limiter took off up to {:.2} dB", -report.limiter_reduction_db));
     }
 
-    if args.dry_run {
+    let produced = if args.dry_run {
         line.push_str(" [dry run]");
+        plan.input.clone()
     } else {
         let report = write_file(&plan.output, &audio, plan.codec, encode)?;
         line.push_str(&format!(" -> {}", plan.output.display()));
         if report.clipped_anything() {
             line.push_str(&format!(" (warning: {} samples clipped)", report.clipped));
         }
-    }
-    Ok(vec![line])
+        plan.output.clone()
+    };
+    Ok(Normalized { line: Some(line), produced })
 }
 
 fn normalize_replaygain(
@@ -370,6 +425,10 @@ fn plan_outputs(args: &NormalizeArgs, files: &[PathBuf]) -> Result<Vec<Plan>> {
 
 pub fn stems(args: &StemsArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    stems_files(args, &files, reporter)
+}
+
+pub fn stems_files(args: &StemsArgs, files: &[PathBuf], reporter: &dyn Reporter) -> Result<()> {
     let config = dsp::Config::from(&args.dsp);
 
     // Resolve demucs once, before any work starts. Doing it per file would ask
@@ -392,7 +451,7 @@ pub fn stems(args: &StemsArgs, reporter: &dyn Reporter) -> Result<()> {
     // Separation is memory-hungry and already uses every core internally, so
     // files go one at a time. Each one reports as it finishes rather than at the
     // end, because a long batch would otherwise look like it had hung.
-    for path in &files {
+    for path in files {
         if progress.cancelled() {
             break;
         }
@@ -514,6 +573,10 @@ fn write_stems(
 
 pub fn tag(args: &TagArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    tag_files(args, &files, reporter)
+}
+
+pub fn tag_files(args: &TagArgs, files: &[PathBuf], reporter: &dyn Reporter) -> Result<()> {
     let progress = Progress::new(reporter, files.len());
 
     // Fingerprinting is local and CPU-bound, so it runs across every core
@@ -531,7 +594,7 @@ pub fn tag(args: &TagArgs, reporter: &dyn Reporter) -> Result<()> {
             .into_iter()
             .map(|r| r.map(|fp| vec![format!("{} {}", fp.duration_secs, fp.compressed)]))
             .collect();
-        let (lines, outcome) = partition(&files, results);
+        let (lines, outcome) = partition(files, results);
         for (path, line) in files.iter().zip(lines) {
             reporter.event(Event::Line(format!("{}\t{line}", path.display())));
         }
@@ -574,6 +637,158 @@ pub fn tag(args: &TagArgs, reporter: &dyn Reporter) -> Result<()> {
     let mut outcome = Outcome::new(files.len(), failures);
     outcome.cancelled = reporter.cancelled();
     outcome.report(reporter)
+}
+
+// -- run: the whole pipeline -----------------------------------------------
+
+/// Everything the pipeline needs, in whatever detail the caller has.
+///
+/// The command line offers a curated subset of each step's options and builds
+/// these from it; the window already holds all three argument structs and
+/// passes them straight through. Both end up here, so there is one pipeline
+/// rather than two that drift.
+pub struct Pipeline<'a> {
+    pub steps: &'a [Step],
+    pub normalize: &'a NormalizeArgs,
+    pub tag: &'a TagArgs,
+    pub stems: &'a StemsArgs,
+}
+
+pub fn run(args: &RunArgs, reporter: &dyn Reporter) -> Result<()> {
+    // The whole list is gathered before any work starts, so the run knows how
+    // much there is to do and can say so, and so a directory is walked once
+    // rather than once per step.
+    let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+
+    let normalize = args.normalize_args();
+    let tag = args.tag_args();
+    let stems = args.stems_args();
+
+    run_pipeline(
+        &files,
+        &Pipeline { steps: &args.steps, normalize: &normalize, tag: &tag, stems: &stems },
+        reporter,
+    )
+}
+
+/// Normalize, tag and separate one list of files, in that order.
+///
+/// Each step runs over every file before the next one starts. That is what
+/// makes the ordering meaningful — the tags are on disk before anything is
+/// separated — and it means a step that needs the network is not interleaved
+/// with one that saturates the CPU.
+pub fn run_pipeline(
+    files: &[PathBuf],
+    pipeline: &Pipeline<'_>,
+    reporter: &dyn Reporter,
+) -> Result<()> {
+    // Requested order is ignored in favour of the order that makes sense; see
+    // Step::ALL.
+    let steps: Vec<Step> =
+        Step::ALL.iter().copied().filter(|s| pipeline.steps.contains(s)).collect();
+
+    if files.is_empty() {
+        reporter.event(Event::Summary("nothing to do: no audio files found".into()));
+        return Ok(());
+    }
+    if steps.is_empty() {
+        reporter.event(Event::Summary("nothing to do: no steps selected".into()));
+        return Ok(());
+    }
+
+    reporter.event(Event::Summary(format!(
+        "{} file{} through {}",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        steps.iter().map(|s| s.name()).collect::<Vec<_>>().join(" -> "),
+    )));
+
+    // Each step works on what the one before it produced. Only normalizing
+    // changes the set, and only when it re-encodes into new files.
+    let mut working: Vec<PathBuf> = files.to_vec();
+    let mut failed_steps = Vec::new();
+
+    for (index, step) in steps.iter().enumerate() {
+        if reporter.cancelled() {
+            reporter.event(Event::Summary(format!("stopped before {}", step.name())));
+            break;
+        }
+
+        reporter.event(Event::Stage {
+            name: step.name().to_string(),
+            index: index + 1,
+            of: steps.len(),
+        });
+
+        let result = match step {
+            Step::Normalize => normalize_step(pipeline.normalize, &mut working, reporter),
+            Step::Tag => {
+                // Every lookup needs the key, so without one this is a long
+                // list of identical failures rather than a tagging run.
+                if pipeline.tag.acoustid_key.as_deref().unwrap_or_default().trim().is_empty() {
+                    reporter.event(Event::Summary(
+                        "skipping tag: no AcoustID key (set ACOUSTID_API_KEY, or pass \
+                         --acoustid-key; free from https://acoustid.org/new-application)"
+                            .into(),
+                    ));
+                    continue;
+                }
+                tag_files(pipeline.tag, &working, reporter)
+            }
+            Step::Stems => stems_files(pipeline.stems, &working, reporter),
+        };
+
+        // One step failing does not cancel the rest: tagging that cannot reach
+        // MusicBrainz is no reason to skip separating, and the files that did
+        // work are still worth carrying forward.
+        if let Err(e) = result {
+            report::failed(reporter, Path::new(step.name()), &e);
+            failed_steps.push(step.name());
+        }
+    }
+
+    if failed_steps.is_empty() {
+        Ok(())
+    } else {
+        bail!("{} did not finish cleanly", failed_steps.join(" and "))
+    }
+}
+
+/// The normalize step of a pipeline, which is not quite the `normalize`
+/// command.
+///
+/// Wav has nowhere to put a ReplayGain tag. On its own that is an error worth
+/// stopping for, because tagging wavs is all you asked for. In a pipeline it is
+/// not: the file still wants tagging and separating, so the wavs are set aside
+/// with one message rather than one error each, and carry on to the next step
+/// unchanged.
+fn normalize_step(
+    args: &NormalizeArgs,
+    working: &mut Vec<PathBuf>,
+    reporter: &dyn Reporter,
+) -> Result<()> {
+    if args.mode != NormalizeMode::Replaygain {
+        *working = normalize_files(args, working, reporter)?;
+        return Ok(());
+    }
+
+    let (taggable, wavs): (Vec<PathBuf>, Vec<PathBuf>) =
+        working.iter().cloned().partition(|p| Codec::from_path(p) != Some(Codec::Wav));
+
+    if !wavs.is_empty() {
+        reporter.event(Event::Summary(format!(
+            "{} wav file{} cannot carry ReplayGain tags, so their loudness is unchanged \
+             (use --mode reencode to write new files instead)",
+            wavs.len(),
+            if wavs.len() == 1 { "" } else { "s" },
+        )));
+    }
+    if taggable.is_empty() {
+        return Ok(());
+    }
+
+    normalize_files(args, &taggable, reporter)?;
+    Ok(())
 }
 
 /// The three services, plus the caches that keep repeated lookups off the

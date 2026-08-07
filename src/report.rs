@@ -14,6 +14,8 @@ use std::sync::Mutex;
 /// Something a command has to say while it works.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
+    /// One step of a multi-step run is beginning. `index` counts from one.
+    Stage { name: String, index: usize, of: usize },
     /// A batch is starting, with this many files to get through.
     Started { total: usize },
     /// A column heading for the lines that follow.
@@ -81,6 +83,9 @@ impl Reporter for Stdio {
         match event {
             Event::Heading(text) | Event::Line(text) => println!("{text}"),
             Event::Summary(text) => eprintln!("{text}"),
+            // A stage header is commentary about the run, not a result, so it
+            // goes to stderr with the rest of the commentary.
+            Event::Stage { name, index, of } => eprintln!("== {index}/{of} {name} =="),
             Event::Failed { path, message } => {
                 eprintln!("error: {}: {message}", path.display())
             }

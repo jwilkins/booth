@@ -8,6 +8,12 @@ An audio tool in Rust, as a command-line program and as a macOS app. It does thr
 - **Tag** files by identifying them from their sound, via acoustic fingerprinting and
   MusicBrainz.
 
+By default it does all three, over everything you point it at:
+
+```sh
+musicai ~/Music/album
+```
+
 Everything runs on your machine, but two commands need something beyond the binary. `stems` drives
 a locally installed [demucs](https://github.com/adefossez/demucs); `tag` fingerprints locally but
 must ask AcoustID and MusicBrainz to turn that fingerprint into metadata, so it needs the network.
@@ -26,6 +32,51 @@ cargo build --release
 
 The window is a separate crate in the same workspace, so this builds only the command-line tool
 and none of a window toolkit. For the app, see [The macOS app](#the-macos-app).
+
+## The default: all of it, over everything
+
+With no subcommand, `musicai` runs the whole pipeline over the files and folders you name. It is
+the same as `musicai run`, which is where the options live.
+
+```sh
+musicai ~/Music/album -r
+```
+
+```
+12 files through normalize -> tag -> stems
+== 1/3 normalize ==
+album/01 - opener.flac: -9.8 LUFS, track gain -8.20 dB, tagged
+...
+== 2/3 tag ==
+album/01 - opener.flac -> Opener — Some Band (0.98)
+...
+== 3/3 stems ==
+wrote stems/01 - opener-vocals.flac
+```
+
+The whole file list is gathered before any work starts, so the run can say how much there is to do
+and a folder is walked once rather than once per step. Each step then runs over every file before
+the next begins, and announces itself as it starts.
+
+**The order is deliberate.** Tagging happens before separation, so the stems inherit the tags that
+were just written rather than whatever was there before. Normalizing happens first, so everything
+downstream sees the finished audio. `--steps normalize,stems` runs a subset; they always run in
+that order regardless of how they are listed.
+
+Three things about the defaults are worth knowing:
+
+- **Loudness is tagged, not re-encoded.** `--mode replaygain` is the default here, unlike the
+  `normalize` subcommand, because a pipeline that re-encodes leaves a second copy of your whole
+  library behind. The audio is untouched and there is no generation loss. Pass `--mode reencode`
+  to write new files instead — the later steps then follow the new files, not the originals, so
+  the stems come from the audio you actually normalized.
+- **Wav files skip the loudness step.** Wav has nowhere to put a ReplayGain tag. Rather than
+  failing once per file, the run says so once and carries them on to tagging and separation.
+- **Tagging is skipped without an AcoustID key**, with a note saying so, because every lookup
+  would otherwise fail. Set `ACOUSTID_API_KEY` or pass `--acoustid-key`.
+
+`--dry-run` reports what every step would do and writes nothing. Separation is the slow part; if
+you only want the other two, `--steps normalize,tag`.
 
 ## Analyze
 
@@ -324,7 +375,14 @@ Everything above, in a window. Pick a task along the top, drop files on the left
 in the middle, press the button. Results appear in the log at the bottom as they arrive, and a
 long job can be stopped without leaving a half-written file behind.
 
-![The app, having normalized two files](docs/screenshot.png)
+It opens on **Batch**, which is the pipeline: tick the steps you want and press Run all. Each step
+uses the settings on its own tab, so there is one place to configure anything and no second copy of
+every control. The step being run is shown next to the progress bar as the run moves through them.
+
+Stems default to `~/Music/musicai-stems` rather than the command line's relative `stems`, because
+an app launched from the Finder has no useful working directory.
+
+![The app, on the Batch tab](docs/screenshot.png)
 
 ### Building it
 
@@ -403,7 +461,10 @@ loudness maths and the parsing of AcoustID and MusicBrainz responses. `tests/end
 drives the real binary over real encoded files, `tests/separation_quality.rs` pins how well the
 default separator routes known sources, `tests/tagging.rs` round-trips tags through real
 flac and mp3 files, and `tests/packaging.rs` assembles the macOS bundle and checks its layout,
-its plist and the icon container.
+its plist and the icon container. The pipeline has its own end-to-end tests: that the steps run in
+order and announce themselves, that re-encoding hands the new files to the next step rather than
+the originals, that a wav survives a ReplayGain run, and that a missing key skips tagging instead
+of failing every file.
 
 The window has its own tests, which are not in the default workspace member and so need asking
 for:

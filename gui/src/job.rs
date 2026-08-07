@@ -5,18 +5,20 @@
 //! is the same library call the command-line tool makes, so the two front ends
 //! cannot drift apart.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use musicai::cli::{AnalyzeArgs, Cli, Command, NormalizeArgs, StemsArgs, TagArgs};
+use musicai::cli::{AnalyzeArgs, NormalizeArgs, RunArgs, StemsArgs, Step, TagArgs};
+use musicai::commands::Pipeline;
 use musicai::report::{Event, Reporter};
 
-/// The four things this tool does.
+/// The things this tool does: the whole pipeline, or any one part of it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Task {
+    Batch,
     Analyze,
     Normalize,
     Stems,
@@ -24,10 +26,12 @@ pub enum Task {
 }
 
 impl Task {
-    pub const ALL: [Task; 4] = [Task::Analyze, Task::Normalize, Task::Stems, Task::Tag];
+    pub const ALL: [Task; 5] =
+        [Task::Batch, Task::Analyze, Task::Normalize, Task::Stems, Task::Tag];
 
     pub fn title(self) -> &'static str {
         match self {
+            Task::Batch => "Batch",
             Task::Analyze => "Analyze",
             Task::Normalize => "Normalize",
             Task::Stems => "Stems",
@@ -38,6 +42,7 @@ impl Task {
     /// One line under the title, saying what the task is for.
     pub fn blurb(self) -> &'static str {
         match self {
+            Task::Batch => "Normalize, tag and separate, in one pass over every file.",
             Task::Analyze => "Measure loudness and peaks. Changes nothing.",
             Task::Normalize => "Bring files to a consistent loudness.",
             Task::Stems => "Split each file into vocals, melody and drums.",
@@ -48,6 +53,7 @@ impl Task {
     /// The verb on the button that starts it.
     pub fn verb(self) -> &'static str {
         match self {
+            Task::Batch => "Run all",
             Task::Analyze => "Analyze",
             Task::Normalize => "Normalize",
             Task::Stems => "Separate",
@@ -57,6 +63,7 @@ impl Task {
 
     fn subcommand(self) -> &'static str {
         match self {
+            Task::Batch => "run",
             Task::Analyze => "analyze",
             Task::Normalize => "normalize",
             Task::Stems => "stems",
@@ -68,14 +75,21 @@ impl Task {
 /// Everything the window is currently editing.
 ///
 /// The per-task options are the command-line tool's own argument structs,
-/// filled in with the defaults clap would apply. That means a default in the
-/// window is by construction the same default as on the command line, and
-/// adding an option to the CLI without considering the window is a compile
-/// error rather than a silent difference.
+/// seeded from the defaults the `run` pipeline would apply — which are in turn
+/// each command's own clap defaults, with the handful the pipeline curates
+/// (loudness mode, stems directory, separator) overriding them. So a default in
+/// the window is by construction a default of the tool, the window and the
+/// pipeline agree, and adding an option to the CLI without considering the
+/// window is a compile error rather than a silent difference.
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub task: Task,
     pub files: Vec<PathBuf>,
+    /// Whether a chosen folder is searched all the way down. One flag rather
+    /// than one per task: it describes the file list, which every task shares.
+    pub recursive: bool,
+    /// Which steps the batch runs.
+    pub steps: Vec<Step>,
     pub analyze: AnalyzeArgs,
     pub normalize: NormalizeArgs,
     pub stems: StemsArgs,
@@ -84,37 +98,38 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        let run = RunArgs::defaults();
+        let mut stems = run.stems_args();
+        stems.out_dir = default_stems_dir(&stems.out_dir);
+
         Self {
-            task: Task::Normalize,
+            task: Task::Batch,
             files: Vec::new(),
-            analyze: match defaults(Task::Analyze) {
-                Command::Analyze(args) => args,
-                _ => unreachable!("clap parsed the wrong subcommand"),
-            },
-            normalize: match defaults(Task::Normalize) {
-                Command::Normalize(args) => args,
-                _ => unreachable!("clap parsed the wrong subcommand"),
-            },
-            stems: match defaults(Task::Stems) {
-                Command::Stems(args) => args,
-                _ => unreachable!("clap parsed the wrong subcommand"),
-            },
-            tag: match defaults(Task::Tag) {
-                Command::Tag(args) => args,
-                _ => unreachable!("clap parsed the wrong subcommand"),
-            },
+            recursive: false,
+            steps: run.steps.clone(),
+            analyze: AnalyzeArgs::defaults(),
+            normalize: run.normalize_args(),
+            stems,
+            tag: run.tag_args(),
         }
     }
 }
 
-/// A placeholder input, because every subcommand requires at least one path.
-/// It is replaced with the real selection before anything runs.
-const PLACEHOLDER: &str = "<none>";
-
-/// Ask clap for a subcommand's defaults rather than restating them here.
-fn defaults(task: Task) -> Command {
-    use clap::Parser;
-    Cli::parse_from(["musicai", task.subcommand(), PLACEHOLDER]).command
+/// Where stems go when nobody has said otherwise.
+///
+/// The command line's default is the relative `stems`, which means "under
+/// wherever you are" — exactly right in a terminal. An app launched from the
+/// Finder has no meaningful working directory (it is `/`, which is not
+/// writable), so the same default would fail on every run. Anchoring it under
+/// the home directory gives one predictable, writable, visible place instead.
+fn default_stems_dir(relative: &Path) -> PathBuf {
+    if relative.is_absolute() {
+        return relative.to_path_buf();
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => Path::new(&home).join("Music").join("musicai-stems"),
+        None => relative.to_path_buf(),
+    }
 }
 
 impl Settings {
@@ -149,13 +164,28 @@ impl Settings {
     fn arguments(&self) -> Vec<String> {
         let mut out = Vec::new();
         match self.task {
+            Task::Batch => {
+                flag(&mut out, "recursive", self.recursive);
+                if self.steps.len() != Step::ALL.len() {
+                    let names: Vec<&str> = self.steps.iter().map(|s| s.name()).collect();
+                    out.push(format!("--steps {}", names.join(",")));
+                }
+                out.push(format!("--mode {}", value_name(self.normalize.mode)));
+                out.push(format!("--backend {}", value_name(self.stems.backend)));
+                out.push(format!(
+                    "--stems-dir {}",
+                    quote(&self.stems.out_dir.display().to_string())
+                ));
+                flag(&mut out, "cover-art", self.tag.cover_art);
+                flag(&mut out, "dry-run", self.normalize.dry_run);
+            }
             Task::Analyze => {
-                flag(&mut out, "recursive", self.analyze.input.recursive);
+                flag(&mut out, "recursive", self.recursive);
                 flag(&mut out, "json", self.analyze.json);
             }
             Task::Normalize => {
                 let a = &self.normalize;
-                flag(&mut out, "recursive", a.input.recursive);
+                flag(&mut out, "recursive", self.recursive);
                 out.push(format!("--mode {}", value_name(a.mode)));
                 out.push(format!("--target {}", a.target_lufs()));
                 if a.mode == musicai::cli::NormalizeMode::Reencode {
@@ -174,7 +204,7 @@ impl Settings {
             }
             Task::Stems => {
                 let a = &self.stems;
-                flag(&mut out, "recursive", a.input.recursive);
+                flag(&mut out, "recursive", self.recursive);
                 out.push(format!("--backend {}", value_name(a.backend)));
                 out.push(format!("-o {}", quote(&a.out_dir.display().to_string())));
                 if let Some(codec) = a.format {
@@ -189,7 +219,7 @@ impl Settings {
             }
             Task::Tag => {
                 let a = &self.tag;
-                flag(&mut out, "recursive", a.input.recursive);
+                flag(&mut out, "recursive", self.recursive);
                 out.push(format!("--min-score {}", a.min_score));
                 out.push(format!("--on-existing {}", value_name(a.on_existing)));
                 out.push(format!("--on-ambiguous {}", value_name(a.on_ambiguous)));
@@ -200,33 +230,66 @@ impl Settings {
         out
     }
 
-    /// A copy of the chosen task's arguments with the selected files in place.
-    fn command(&self) -> Command {
-        let files = self.files.clone();
+    /// The arguments for one task, with the selected files and the shared
+    /// recursion flag in place.
+    fn with_inputs<T: WithInput + Clone>(&self, args: &T) -> T {
+        let mut args = args.clone();
+        *args.input_mut() =
+            musicai::cli::InputArgs { inputs: self.files.clone(), recursive: self.recursive };
+        args
+    }
+
+    /// Do what the window is set up to do. Runs on the worker thread.
+    fn execute(&self, reporter: &dyn Reporter) -> anyhow::Result<()> {
+        use musicai::commands;
         match self.task {
-            Task::Analyze => {
-                let mut args = self.analyze.clone();
-                args.input.inputs = files;
-                Command::Analyze(args)
+            Task::Batch => {
+                // The pipeline is handed the full list up front, so it can say
+                // how much there is to do and walk a folder once rather than
+                // once per step.
+                let files = musicai::discover::collect(&self.files, self.recursive)?;
+                let normalize = self.with_inputs(&self.normalize);
+                let tag = self.with_inputs(&self.tag);
+                let stems = self.with_inputs(&self.stems);
+                commands::run_pipeline(
+                    &files,
+                    &Pipeline {
+                        steps: &self.steps,
+                        normalize: &normalize,
+                        tag: &tag,
+                        stems: &stems,
+                    },
+                    reporter,
+                )
             }
-            Task::Normalize => {
-                let mut args = self.normalize.clone();
-                args.input.inputs = files;
-                Command::Normalize(args)
-            }
-            Task::Stems => {
-                let mut args = self.stems.clone();
-                args.input.inputs = files;
-                Command::Stems(args)
-            }
-            Task::Tag => {
-                let mut args = self.tag.clone();
-                args.input.inputs = files;
-                Command::Tag(args)
-            }
+            Task::Analyze => commands::analyze(&self.with_inputs(&self.analyze), reporter),
+            Task::Normalize => commands::normalize(&self.with_inputs(&self.normalize), reporter),
+            Task::Stems => commands::stems(&self.with_inputs(&self.stems), reporter),
+            Task::Tag => commands::tag(&self.with_inputs(&self.tag), reporter),
         }
     }
 }
+
+/// Lets the window put its file selection into any task's arguments without a
+/// copy of the same lines per task.
+trait WithInput {
+    fn input_mut(&mut self) -> &mut musicai::cli::InputArgs;
+}
+
+macro_rules! with_input {
+    ($type:ty) => {
+        impl WithInput for $type {
+            fn input_mut(&mut self) -> &mut musicai::cli::InputArgs {
+                &mut self.input
+            }
+        }
+    };
+}
+
+with_input!(AnalyzeArgs);
+with_input!(NormalizeArgs);
+with_input!(StemsArgs);
+with_input!(TagArgs);
 
 /// Add a bare `--flag`, but only when it is switched on.
 fn flag(out: &mut Vec<String>, name: &str, on: bool) {
@@ -293,16 +356,13 @@ impl Runner {
     pub fn start(settings: &Settings, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let command = settings.command();
+        // A snapshot: editing the options while a job runs must not change what
+        // that job is doing halfway through.
+        let settings = settings.clone();
         let reporter = Channel { tx: tx.clone(), cancel: Arc::clone(&cancel), wake };
 
         let handle = std::thread::spawn(move || {
-            let result = match &command {
-                Command::Analyze(args) => musicai::commands::analyze(args, &reporter),
-                Command::Normalize(args) => musicai::commands::normalize(args, &reporter),
-                Command::Stems(args) => musicai::commands::stems(args, &reporter),
-                Command::Tag(args) => musicai::commands::tag(args, &reporter),
-            };
+            let result = settings.execute(&reporter);
             let _ = tx.send(Update::Done(result.map_err(|e| format!("{e:#}"))));
             (reporter.wake)();
         });
@@ -397,10 +457,125 @@ mod tests {
         assert_eq!(settings.normalize.ceiling, -1.0);
         assert_eq!(settings.normalize.bitrate, 192);
         assert_eq!(settings.tag.min_score, 0.8);
-        assert_eq!(settings.stems.out_dir, PathBuf::from("stems"));
         assert_eq!(settings.stems.only, musicai::stems::Stem::ALL.to_vec());
         // The placeholder input never survives into the settings the user edits.
         assert!(settings.files.is_empty());
+    }
+
+    #[test]
+    fn the_window_opens_on_the_batch_with_the_pipelines_defaults() {
+        let settings = Settings::default();
+        let run = RunArgs::defaults();
+
+        assert_eq!(settings.task, Task::Batch);
+        assert_eq!(settings.steps, Step::ALL.to_vec());
+        // The pipeline curates a few defaults away from the single commands' —
+        // notably it tags loudness rather than re-encoding. The window has to
+        // start from the pipeline's, because the pipeline is what it opens on.
+        assert_eq!(settings.normalize.mode, run.mode);
+        assert_eq!(settings.stems.backend, run.backend);
+    }
+
+    #[test]
+    fn the_stems_directory_does_not_depend_on_the_working_directory() {
+        // Launched from the Finder, the working directory is `/`, so the command
+        // line's relative default would try to write to an unwritable root.
+        let settings = Settings::default();
+        assert!(
+            settings.stems.out_dir.is_absolute(),
+            "a window has no useful working directory: {}",
+            settings.stems.out_dir.display()
+        );
+        assert!(settings.stems.out_dir.ends_with("musicai-stems"));
+    }
+
+    #[test]
+    fn an_absolute_stems_directory_is_left_alone() {
+        let chosen = PathBuf::from("/somewhere/else");
+        assert_eq!(default_stems_dir(&chosen), chosen);
+    }
+
+    #[test]
+    fn the_batch_command_line_names_the_steps_only_when_some_are_off() {
+        let mut settings = Settings { task: Task::Batch, ..Default::default() };
+        settings.add_files([PathBuf::from("/music/track.flac")]);
+
+        let line = settings.command_line();
+        assert!(line.starts_with("musicai run "), "{line}");
+        assert!(!line.contains("--steps"), "all steps is the default: {line}");
+
+        settings.steps.retain(|s| *s != Step::Stems);
+        let line = settings.command_line();
+        assert!(line.contains("--steps normalize,tag"), "{line}");
+    }
+
+    #[test]
+    fn the_batch_runs_every_step_over_every_file() {
+        let dir = Scratch::new("batch");
+        let track = dir.0.join("track.wav");
+        write_tone(&track);
+
+        let mut settings = Settings { task: Task::Batch, ..Default::default() };
+        settings.add_files([dir.0.clone()]);
+        // Keep it offline and off demucs: tagging is skipped without a key, and
+        // the built-in separator needs nothing installed.
+        settings.stems.backend = musicai::stems::Backend::Dsp;
+        settings.stems.out_dir = dir.0.join("stems");
+
+        let mut runner = Runner::start(&settings, noop_wake());
+        runner.join();
+
+        let updates = runner.drain();
+        let stages: Vec<(String, usize, usize)> = updates
+            .iter()
+            .filter_map(|u| match u {
+                Update::Event(Event::Stage { name, index, of }) => {
+                    Some((name.clone(), *index, *of))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            stages,
+            vec![
+                ("normalize".to_string(), 1, 3),
+                ("tag".to_string(), 2, 3),
+                ("stems".to_string(), 3, 3),
+            ],
+            "every step should announce itself, in order"
+        );
+        assert!(matches!(updates.last(), Some(Update::Done(Ok(())))), "{updates:?}");
+
+        // The separation really ran: the stems are on disk.
+        for stem in musicai::stems::Stem::ALL {
+            let path = dir.0.join("stems").join(format!("track-{}.wav", stem.name()));
+            assert!(path.exists(), "missing {}", path.display());
+        }
+    }
+
+    #[test]
+    fn turning_a_step_off_leaves_it_out_of_the_run() {
+        let dir = Scratch::new("batch-subset");
+        write_tone(&dir.0.join("track.wav"));
+
+        let mut settings = Settings { task: Task::Batch, ..Default::default() };
+        settings.add_files([dir.0.clone()]);
+        settings.steps = vec![Step::Normalize];
+
+        let mut runner = Runner::start(&settings, noop_wake());
+        runner.join();
+
+        let names: Vec<String> = runner
+            .drain()
+            .iter()
+            .filter_map(|u| match u {
+                Update::Event(Event::Stage { name, .. }) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["normalize".to_string()]);
+        assert!(!dir.0.join("stems").exists(), "stems ran when it was switched off");
     }
 
     #[test]
@@ -509,6 +684,10 @@ mod tests {
         let out = dir.0.join("out");
 
         let mut settings = Settings { task: Task::Normalize, ..Default::default() };
+        // Re-encode explicitly: the batch default is ReplayGain, which a wav
+        // cannot carry, and that would fail or not depending on whether the
+        // worker beat the cancel flag to the file.
+        settings.normalize.mode = musicai::cli::NormalizeMode::Reencode;
         settings.normalize.out_dir = Some(out.clone());
         settings.add_files([track]);
 

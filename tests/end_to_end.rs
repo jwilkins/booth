@@ -594,3 +594,148 @@ fn both_overlap_settings_reconstruct_exactly() {
         }
     }
 }
+
+// -- the default pipeline --------------------------------------------------
+
+/// Read both streams, because the pipeline deliberately splits results
+/// (stdout) from commentary about the run (stderr).
+fn run_pipeline(args: &[&str]) -> (bool, String, String) {
+    let output = musicai().args(args).output().unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn no_subcommand_runs_the_whole_pipeline() {
+    let dir = Scratch::new("cli-default");
+    write_song(&dir, "song", Codec::Flac, 0.4);
+
+    let stems = dir.path("stems");
+
+    // Backend pinned so this needs nothing installed; no key, so tagging is
+    // skipped rather than failing against a service the tests must not call.
+    let (ok, _out, err) = run_pipeline(&[
+        &dir.0.display().to_string(),
+        "--backend",
+        "dsp",
+        "--stems-dir",
+        &stems.display().to_string(),
+    ]);
+    assert!(ok, "{err}");
+
+    // Every step announced itself, in the order the pipeline promises.
+    let stages: Vec<&str> = err.lines().filter(|l| l.starts_with("== ")).collect();
+    assert_eq!(stages, vec!["== 1/3 normalize ==", "== 2/3 tag ==", "== 3/3 stems =="], "{err}");
+    assert!(err.contains("1 file through normalize -> tag -> stems"), "{err}");
+
+    for stem in Stem::ALL {
+        let path = stems.join(format!("song-{stem}.flac"));
+        assert!(path.exists(), "missing {}", path.display());
+    }
+}
+
+#[test]
+fn the_pipeline_and_the_run_subcommand_are_the_same_thing() {
+    let dir = Scratch::new("cli-run-alias");
+    write_song(&dir, "song", Codec::Flac, 0.4);
+    let stems = dir.path("stems");
+
+    let (ok, _, err) = run_pipeline(&[
+        "run",
+        &dir.0.display().to_string(),
+        "--backend",
+        "dsp",
+        "--stems-dir",
+        &stems.display().to_string(),
+    ]);
+    assert!(ok, "{err}");
+    assert!(err.contains("== 1/3 normalize =="), "{err}");
+}
+
+#[test]
+fn the_pipeline_skips_tagging_without_a_key_rather_than_failing_every_file() {
+    let dir = Scratch::new("cli-nokey");
+    write_song(&dir, "song", Codec::Flac, 0.4);
+
+    let (ok, _, err) = run_pipeline(&[
+        &dir.0.display().to_string(),
+        "--steps",
+        "tag",
+        // An empty key is the same as none: the environment must not decide
+        // whether this test talks to a network service.
+        "--acoustid-key",
+        "",
+    ]);
+
+    assert!(ok, "a missing key should skip the step, not fail the run: {err}");
+    assert!(err.contains("skipping tag"), "{err}");
+    assert!(err.contains("acoustid.org"), "the message should say how to get one: {err}");
+}
+
+#[test]
+fn wav_files_survive_a_replaygain_pipeline() {
+    let dir = Scratch::new("cli-wav-rg");
+    write_song(&dir, "song", Codec::Wav, 0.4);
+    let stems = dir.path("stems");
+
+    // Wav cannot carry a ReplayGain tag. On its own that is an error; in a
+    // pipeline the file should still get separated.
+    let (ok, _, err) = run_pipeline(&[
+        &dir.0.display().to_string(),
+        "--steps",
+        "normalize,stems",
+        "--backend",
+        "dsp",
+        "--stems-dir",
+        &stems.display().to_string(),
+    ]);
+
+    assert!(ok, "{err}");
+    assert!(err.contains("cannot carry ReplayGain"), "{err}");
+    assert!(stems.join("song-vocals.wav").exists(), "the wav was dropped instead of separated");
+}
+
+#[test]
+fn re_encoding_hands_the_new_files_to_the_next_step() {
+    let dir = Scratch::new("cli-chain");
+    write_song(&dir, "song", Codec::Wav, 0.05);
+    let stems = dir.path("stems");
+
+    let (ok, _, err) = run_pipeline(&[
+        &dir.0.display().to_string(),
+        "--mode",
+        "reencode",
+        "--steps",
+        "normalize,stems",
+        "--backend",
+        "dsp",
+        "--stems-dir",
+        &stems.display().to_string(),
+    ]);
+    assert!(ok, "{err}");
+
+    // Separating the originals instead of the normalized copies would be a
+    // silent and very confusing bug, so the stems must be named for the copy.
+    assert!(dir.path("song-normalized.wav").exists());
+    assert!(
+        stems.join("song-normalized-vocals.wav").exists(),
+        "stems were taken from the original, not the normalized file"
+    );
+    assert!(!stems.join("song-vocals.wav").exists());
+}
+
+#[test]
+fn a_pipeline_with_no_steps_does_nothing_quietly() {
+    let dir = Scratch::new("cli-nosteps");
+    write_song(&dir, "song", Codec::Flac, 0.4);
+
+    let (ok, _, err) =
+        run_pipeline(&[&dir.0.display().to_string(), "--steps", "normalize", "--dry-run"]);
+    assert!(ok, "{err}");
+    assert!(err.contains("== 1/1 normalize =="), "{err}");
+    // Nothing was written, and the file is untouched.
+    assert!(!dir.path("stems").exists());
+}

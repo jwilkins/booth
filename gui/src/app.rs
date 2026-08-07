@@ -23,6 +23,8 @@ pub struct App {
     log: Vec<LogLine>,
     /// Files done and files expected, while a job runs.
     progress: Option<(usize, usize)>,
+    /// Which step of a batch is running, as (name, index, total).
+    stage: Option<(String, usize, usize)>,
     status: Status,
     /// Set when a file dialog is open, so a second click does not open another.
     picking: bool,
@@ -58,6 +60,7 @@ impl Default for App {
             runner: None,
             log: Vec::new(),
             progress: None,
+            stage: None,
             status: Status::Idle,
             picking: false,
             pick_rx: None,
@@ -109,6 +112,13 @@ impl App {
 
         for update in updates {
             match update {
+                Update::Event(Event::Stage { name, index, of }) => {
+                    // Each step restarts the file count, so the stage is what
+                    // says how far through the whole run this is.
+                    self.stage = Some((name.clone(), index, of));
+                    self.progress = None;
+                    self.push(format!("{index}/{of} {name}"), Kind::Heading);
+                }
                 Update::Event(Event::Started { total }) => self.progress = Some((0, total)),
                 Update::Event(Event::Progress { done, total }) => {
                     self.progress = Some((done, total))
@@ -131,6 +141,7 @@ impl App {
                 }
                 Update::Done(Ok(())) => {
                     self.progress = None;
+                    self.stage = None;
                     if self.running() {
                         // A command that reported nothing still ended.
                         self.status = Status::Done(if cancelled {
@@ -143,6 +154,7 @@ impl App {
                 }
                 Update::Done(Err(message)) => {
                     self.progress = None;
+                    self.stage = None;
                     // The per-file errors are already in the log; this is the
                     // summary the command returned.
                     if self.running() {
@@ -164,6 +176,7 @@ impl App {
 
     fn start(&mut self) {
         self.log.clear();
+        self.stage = None;
         self.progress = Some((0, self.settings.files.len()));
         self.status = Status::Running;
         self.push(self.settings.command_line(), Kind::Note);
@@ -290,8 +303,10 @@ impl App {
 
         // Folders are expanded when the job runs, so the checkbox belongs with
         // the file list rather than with any one task's options.
-        let recursive = self.recursive_mut();
-        ui.add_enabled(!running && count > 0, egui::Checkbox::new(recursive, "Search subfolders"));
+        ui.add_enabled(
+            !running && count > 0,
+            egui::Checkbox::new(&mut self.settings.recursive, "Search subfolders"),
+        );
 
         ui.separator();
         let mut remove = None;
@@ -316,20 +331,11 @@ impl App {
         }
     }
 
-    /// The recursive flag lives on each task's own arguments.
-    fn recursive_mut(&mut self) -> &mut bool {
-        match self.settings.task {
-            Task::Analyze => &mut self.settings.analyze.input.recursive,
-            Task::Normalize => &mut self.settings.normalize.input.recursive,
-            Task::Stems => &mut self.settings.stems.input.recursive,
-            Task::Tag => &mut self.settings.tag.input.recursive,
-        }
-    }
-
     fn options(&mut self, ui: &mut egui::Ui) {
         let running = self.running();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.add_enabled_ui(!running, |ui| match self.settings.task {
+                Task::Batch => batch_options(ui, &mut self.settings),
                 Task::Analyze => analyze_options(ui, &mut self.settings),
                 Task::Normalize => normalize_options(ui, &mut self.settings),
                 Task::Stems => stems_options(ui, &mut self.settings),
@@ -365,6 +371,9 @@ impl App {
                     }
                 }
                 Status::Running => {
+                    if let Some((name, index, of)) = &self.stage {
+                        ui.label(RichText::new(format!("{index}/{of} {name}")).strong());
+                    }
                     if let Some((done, total)) = self.progress {
                         let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
                         ui.add(
@@ -406,6 +415,83 @@ impl App {
 }
 
 // -- per-task options ------------------------------------------------------
+
+fn batch_options(ui: &mut egui::Ui, settings: &mut Settings) {
+    use musicai::cli::{NormalizeMode, Step};
+
+    ui.heading("Batch");
+    ui.label(
+        RichText::new(
+            "Every file goes through each step in turn. Tagging happens before separation, so \
+             the stems inherit the tags that were just written.",
+        )
+        .weak(),
+    );
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Steps");
+        for step in Step::ALL {
+            let mut on = settings.steps.contains(&step);
+            if ui.checkbox(&mut on, step.name()).changed() {
+                if on {
+                    settings.steps.push(step);
+                } else {
+                    settings.steps.retain(|s| *s != step);
+                }
+            }
+        }
+    });
+
+    // The settings each step uses are the ones on its own tab, so rather than a
+    // second copy of every control, the batch shows the few that decide what
+    // the run costs and links the rest.
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Loudness");
+        ui.selectable_value(&mut settings.normalize.mode, NormalizeMode::Replaygain, "Tag only");
+        ui.selectable_value(&mut settings.normalize.mode, NormalizeMode::Reencode, "Re-encode");
+    });
+    ui.label(
+        RichText::new(match settings.normalize.mode {
+            NormalizeMode::Replaygain => {
+                "Writes ReplayGain tags. The audio is untouched, and one copy of \
+                 the library stays one copy. Wav files cannot carry these tags and are \
+                 left alone."
+            }
+            NormalizeMode::Reencode => {
+                "Writes a new file per track, and the later steps follow those \
+                 rather than the originals."
+            }
+        })
+        .weak(),
+    );
+
+    ui.horizontal(|ui| {
+        ui.label("Separator");
+        ui.selectable_value(&mut settings.stems.backend, musicai::stems::Backend::Demucs, "Demucs");
+        ui.selectable_value(&mut settings.stems.backend, musicai::stems::Backend::Dsp, "Built-in");
+    });
+
+    if settings.tag.acoustid_key.as_deref().unwrap_or_default().trim().is_empty()
+        && settings.steps.contains(&Step::Tag)
+    {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "No AcoustID key, so the tag step will be skipped. Set one on the Tag tab.",
+            )
+            .color(Color32::from_rgb(0xb2, 0x6a, 0x00)),
+        );
+    }
+
+    ui.add_space(8.0);
+    ui.label(RichText::new("Everything else comes from each step's own tab.").weak());
+    ui.checkbox(
+        &mut settings.normalize.dry_run,
+        "Dry run — report what would happen, write nothing",
+    );
+}
 
 fn analyze_options(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.heading("Analyze");
