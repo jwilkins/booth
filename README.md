@@ -92,13 +92,38 @@ ReplayGain tag, so this mode rejects wav files and tells you to use `--mode reen
 
 ```sh
 musicai stems ~/Music/track.flac
-# -> stems/track/vocals.wav
-#    stems/track/melody.wav
-#    stems/track/drums.wav
+# -> stems/track-vocals.flac
+#    stems/track-melody.flac
+#    stems/track-drums.flac
 ```
 
-Options worth knowing: `--only vocals,drums` to write a subset, `--format flac` to change the
+Stems are named after the track they came from, so they stay identifiable once they leave the
+directory they were written into.
+
+Options worth knowing: `--only vocals,drums` to write a subset, `--format wav` to override the
 output codec, `-o DIR` to change where they land.
+
+### Stems look like the file they came from
+
+Stems are written in the same format as their parent by default: an mp3 yields mp3 stems, a flac
+yields flac. Pass `--format` to override that for every input.
+
+They also inherit the parent's tags, so a stem lands in a library as a recognisable track rather
+than as an untitled file by an unknown artist. Three details are not a straight copy:
+
+- **The stem name is appended to the title**, giving `Some Song (vocals)`. Three files all called
+  the same thing are worse than useless in a library.
+- **ReplayGain tags are dropped.** They measure the loudness of the mix, and a stem is quieter
+  than the mix it came from, so keeping them would have a player apply a figure taken from
+  different audio. Run `musicai normalize --mode replaygain` on the stems if you want correct
+  ones.
+- **A `STEM` tag** (a Vorbis comment, or an ID3 `TXXX` frame) records which stem the file is.
+
+When parent and stem share a format the whole tag comes across, including fields this tool has no
+model for — genre, composer, comments, cover art. When they differ (a flac parent with `--format
+mp3`, say) only the fields with an agreed meaning in both dialects survive. Wav stems carry no
+tags at all, because wav has no standard place to put them; that is not treated as an error. Pass
+`--no-tags` to skip the copy entirely.
 
 ### Demucs (default)
 
@@ -106,13 +131,48 @@ Separation runs through [demucs](https://github.com/adefossez/demucs), which you
 yourself:
 
 ```sh
-pipx install demucs
+uv tool install demucs --with numpy     # or: pipx install demucs && pipx inject demucs numpy
 musicai stems track.flac
 ```
 
-Nothing is installed or downloaded on your behalf; if the binary is not there you are told so and
-pointed at your options. `--demucs-bin`, `--demucs-model` and `--demucs-device` are there when you
-need them.
+The `numpy` is not optional. Demucs 4.1.0 imports numpy but does not list it among its
+dependencies, and torch no longer pulls it in, so a plain `install demucs` produces something
+that dies on first run with `ModuleNotFoundError: No module named 'numpy'`. `musicai` recognises
+that failure and tells you how to fix it, and its own installer adds numpy on every route.
+
+`--demucs-bin`, `--demucs-model` and `--demucs-device` are there when you need them.
+
+#### Installing it for you (macOS)
+
+On macOS, if demucs is missing, `musicai` offers to install it rather than just complaining:
+
+```
+demucs is not installed. Install it now?
+
+    pipx install demucs    # installs demucs into its own isolated environment
+
+This installs software on your machine, and demucs downloads about 300 MB of model weights the
+first time it runs.
+
+Proceed? [y/N]
+```
+
+Nothing runs until you answer `y` — pressing return declines, and so does anything other than
+`y`/`yes`. The prompt always lists the exact commands first. If pipx is missing but Homebrew is
+present, `brew install pipx` is added to the list and shown alongside.
+
+The offer only appears when there is a terminal to answer on, so scripts and CI get an error with
+instructions instead of hanging on a prompt nobody can see. `--install-demucs` controls it:
+
+| Value | Behaviour |
+|---|---|
+| `ask` (default) | Offer, on macOS, when attached to a terminal |
+| `never` | Never offer; print instructions and stop |
+| `yes` | Install without prompting — for scripts that have already decided |
+
+Elsewhere, and when neither installer is available, you get the instructions and nothing is run.
+A freshly pipx-installed demucs is not on the `PATH` this process inherited, so `musicai` looks in
+pipx's own bin directory rather than telling you to open a new shell.
 
 Demucs produces four stems, so its `bass` and `other` are summed to make our `melody`. It is slow
 on a CPU — roughly four minutes per track — and much faster on a GPU via `--demucs-device cuda`.
@@ -163,7 +223,7 @@ may exceed full scale even when the original never did. On a loud master that me
 the way into an integer format, and `musicai` says so per file:
 
 ```
-wrote stems/track/melody.flac — warning: 52 samples clipped; the stem peaks above full scale
+wrote stems/track-melody.flac — warning: 52 samples clipped; the stem peaks above full scale
 ```
 
 Raising `--bit-depth` does not help, since the limit is range rather than precision. Normalize the

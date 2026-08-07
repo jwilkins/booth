@@ -2,6 +2,7 @@
 
 pub mod demucs;
 pub mod dsp;
+pub mod install;
 
 use std::fmt;
 use std::str::FromStr;

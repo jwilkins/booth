@@ -73,15 +73,41 @@ pub fn separate(input: &Path, config: &Config) -> Result<StemSet> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "demucs exited with {}: {}",
-            output.status,
-            stderr.trim().lines().last().unwrap_or("no output")
-        );
+        let last = stderr.trim().lines().last().unwrap_or("no output");
+        match diagnose(&stderr) {
+            Some(hint) => bail!("demucs exited with {}: {last}\n\n{hint}", output.status),
+            None => bail!("demucs exited with {}: {last}", output.status),
+        }
     }
 
     let stem_dir = locate_output(&config.work_dir, &config.model, &input)?;
     load_stems(&stem_dir)
+}
+
+/// Recognise demucs failures whose cause is not obvious from the traceback,
+/// and say what to do about them.
+///
+/// The traceback demucs prints for a missing numpy ends in a bare
+/// `ModuleNotFoundError`, which reads like a broken Python install rather than
+/// what it is: demucs imports numpy but does not list it as a dependency, and
+/// torch no longer pulls it in, so *every* clean install of demucs 4.1.0 is
+/// born broken until numpy is added alongside it.
+fn diagnose(stderr: &str) -> Option<String> {
+    let missing_numpy =
+        stderr.contains("No module named 'numpy'") || stderr.contains("Failed to initialize NumPy");
+    if !missing_numpy {
+        return None;
+    }
+
+    Some(
+        "demucs imports numpy but does not declare it as a dependency, so a clean install of \
+         it cannot run. Add numpy to wherever demucs lives:\n\
+         \n    uv tool install --force demucs --with numpy    # if you installed it with uv\n\
+         \n    pipx inject demucs numpy                       # if you installed it with pipx\n\
+         \n    pip install numpy                              # if it is in a plain virtualenv\n\
+         \nThis is an upstream packaging bug, not a problem with your machine."
+            .to_string(),
+    )
 }
 
 /// Demucs writes to `<out>/<model>/<track name>/`, but the model directory is
@@ -142,6 +168,39 @@ fn read_stem(dir: &Path, name: &str) -> Result<Audio> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explains_the_undeclared_numpy_dependency() {
+        // The traceback a real user hit. On its own it reads like a broken
+        // Python install rather than an upstream packaging bug.
+        let stderr = "\
+            File \"/x/site-packages/demucs/transformer.py\", line 14, in <module>\n\
+            import numpy as np\n\
+            ModuleNotFoundError: No module named 'numpy'\n";
+
+        let hint = diagnose(stderr).expect("missing numpy was not recognised");
+        assert!(hint.contains("does not declare it as a dependency"), "{hint}");
+        // One command for each way demucs is commonly installed.
+        assert!(hint.contains("uv tool install --force demucs --with numpy"), "{hint}");
+        assert!(hint.contains("pipx inject demucs numpy"), "{hint}");
+        assert!(hint.contains("pip install numpy"), "{hint}");
+        // And says plainly whose fault it is.
+        assert!(hint.contains("not a problem with your machine"), "{hint}");
+    }
+
+    #[test]
+    fn also_recognises_the_torch_warning_form() {
+        // torch reports the same underlying problem in its own words, and it
+        // can appear without the traceback.
+        let stderr = "UserWarning: Failed to initialize NumPy: No module named 'numpy'";
+        assert!(diagnose(stderr).is_some());
+    }
+
+    #[test]
+    fn unrelated_failures_get_no_spurious_hint() {
+        assert!(diagnose("RuntimeError: CUDA out of memory").is_none());
+        assert!(diagnose("").is_none());
+    }
 
     #[test]
     fn reports_a_missing_binary_helpfully() {

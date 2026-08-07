@@ -282,3 +282,157 @@ fn refuses_to_tag_a_wav() {
     let err = write_tags(&path, &metadata(), OnExisting::Keep, None).unwrap_err();
     assert!(err.to_string().contains("no standard metadata tag"), "unhelpful error: {err}");
 }
+
+// -- copying a parent's tags onto its stems --------------------------------
+
+/// Give a file the kind of tags a real library file carries, including some
+/// this tool knows nothing about and some that must not be copied.
+fn tag_like_a_library_file(path: &PathBuf) {
+    match Codec::from_path(path).unwrap() {
+        Codec::Flac => {
+            let mut tag = metaflac::Tag::read_from_path(path).unwrap();
+            {
+                let c = tag.vorbis_comments_mut();
+                c.set("TITLE", vec!["Some Song"]);
+                c.set("ARTIST", vec!["Some Artist"]);
+                c.set("ALBUM", vec!["Some Album"]);
+                // Fields this tool has no model for, but a user curated.
+                c.set("GENRE", vec!["Shoegaze"]);
+                c.set("COMPOSER", vec!["Someone Else"]);
+                // Measured on the mix, so meaningless for a stem.
+                c.set("REPLAYGAIN_TRACK_GAIN", vec!["-7.32 dB"]);
+                c.set("REPLAYGAIN_TRACK_PEAK", vec!["0.988"]);
+            }
+            tag.save().unwrap();
+        }
+        Codec::Mp3 => {
+            use id3::frame::ExtendedText;
+            use id3::TagLike;
+            let mut tag = id3::Tag::new();
+            tag.set_title("Some Song");
+            tag.set_artist("Some Artist");
+            tag.set_album("Some Album");
+            tag.set_genre("Shoegaze");
+            tag.add_frame(ExtendedText {
+                description: "REPLAYGAIN_TRACK_GAIN".into(),
+                value: "-7.32 dB".into(),
+            });
+            tag.write_to_path(path, id3::Version::Id3v24).unwrap();
+        }
+        Codec::Wav => {}
+    }
+}
+
+#[test]
+fn stems_inherit_the_parents_tags_in_flac() {
+    use musicai::stems::Stem;
+    use musicai::tag::copy::copy_for_stem;
+
+    let dir = Scratch::new("copy-flac");
+    let source = dir.track(Codec::Flac);
+    tag_like_a_library_file(&source);
+
+    let stem_path = dir.0.join("vocals.flac");
+    std::fs::copy(&source, &stem_path).unwrap();
+    // Start from a stem carrying nothing, as a freshly written one would.
+    let mut bare = metaflac::Tag::read_from_path(&stem_path).unwrap();
+    bare.remove_blocks(metaflac::BlockType::VorbisComment);
+    bare.save().unwrap();
+
+    copy_for_stem(&source, &stem_path, Stem::Vocals).unwrap();
+
+    assert_eq!(vorbis(&stem_path, "ARTIST").as_deref(), Some("Some Artist"));
+    assert_eq!(vorbis(&stem_path, "ALBUM").as_deref(), Some("Some Album"));
+    // Same-format copies bring across fields this tool has no model for.
+    assert_eq!(vorbis(&stem_path, "GENRE").as_deref(), Some("Shoegaze"));
+    assert_eq!(vorbis(&stem_path, "COMPOSER").as_deref(), Some("Someone Else"));
+    // The stem is identifiable rather than a duplicate of its siblings.
+    assert_eq!(vorbis(&stem_path, "TITLE").as_deref(), Some("Some Song (vocals)"));
+    assert_eq!(vorbis(&stem_path, "STEM").as_deref(), Some("vocals"));
+}
+
+#[test]
+fn replaygain_is_not_carried_over_to_a_stem() {
+    use musicai::stems::Stem;
+    use musicai::tag::copy::copy_for_stem;
+
+    let dir = Scratch::new("copy-no-rg");
+    let source = dir.track(Codec::Flac);
+    tag_like_a_library_file(&source);
+
+    let stem_path = dir.0.join("drums.flac");
+    std::fs::copy(&source, &stem_path).unwrap();
+    copy_for_stem(&source, &stem_path, Stem::Drums).unwrap();
+
+    // The parent's loudness was measured on the mix. A stem is quieter, so
+    // copying these would have a player apply a figure from other audio.
+    assert_eq!(vorbis(&stem_path, "REPLAYGAIN_TRACK_GAIN"), None);
+    assert_eq!(vorbis(&stem_path, "REPLAYGAIN_TRACK_PEAK"), None);
+    // Everything else still made it.
+    assert_eq!(vorbis(&stem_path, "ARTIST").as_deref(), Some("Some Artist"));
+}
+
+#[test]
+fn stems_inherit_the_parents_tags_in_mp3() {
+    use id3::TagLike;
+    use musicai::stems::Stem;
+    use musicai::tag::copy::copy_for_stem;
+
+    let dir = Scratch::new("copy-mp3");
+    let source = dir.track(Codec::Mp3);
+    tag_like_a_library_file(&source);
+
+    let stem_path = dir.0.join("melody.mp3");
+    std::fs::copy(&source, &stem_path).unwrap();
+    copy_for_stem(&source, &stem_path, Stem::Melody).unwrap();
+
+    let tag = id3::Tag::read_from_path(&stem_path).unwrap();
+    assert_eq!(tag.artist(), Some("Some Artist"));
+    assert_eq!(tag.album(), Some("Some Album"));
+    assert_eq!(tag.genre(), Some("Shoegaze"));
+    assert_eq!(tag.title(), Some("Some Song (melody)"));
+
+    let txxx: Vec<_> = tag.extended_texts().collect();
+    assert!(txxx.iter().any(|t| t.description == "STEM" && t.value == "melody"));
+    assert!(
+        !txxx.iter().any(|t| t.description.starts_with("REPLAYGAIN_")),
+        "replaygain was copied onto the stem"
+    );
+}
+
+#[test]
+fn crossing_formats_carries_the_fields_both_dialects_share() {
+    use musicai::stems::Stem;
+    use musicai::tag::copy::copy_for_stem;
+
+    let dir = Scratch::new("copy-cross");
+    let source = dir.track(Codec::Flac);
+    tag_like_a_library_file(&source);
+
+    // A flac parent with mp3 stems, as `--format mp3` would produce.
+    let stem_path = dir.0.join("vocals.mp3");
+    write_file(&stem_path, &decode_file(&source).unwrap(), Codec::Mp3, &EncodeOptions::default())
+        .unwrap();
+    copy_for_stem(&source, &stem_path, Stem::Vocals).unwrap();
+
+    use id3::TagLike;
+    let tag = id3::Tag::read_from_path(&stem_path).unwrap();
+    assert_eq!(tag.artist(), Some("Some Artist"));
+    assert_eq!(tag.title(), Some("Some Song (vocals)"));
+    assert!(tag.extended_texts().any(|t| t.description == "STEM"));
+}
+
+#[test]
+fn a_wav_stem_is_left_alone_rather_than_failing() {
+    use musicai::stems::Stem;
+    use musicai::tag::copy::copy_for_stem;
+
+    let dir = Scratch::new("copy-wav");
+    let source = dir.track(Codec::Flac);
+    tag_like_a_library_file(&source);
+    let stem_path = dir.track(Codec::Wav);
+
+    // Wav has no standard tag; that must not abort the separation.
+    copy_for_stem(&source, &stem_path, Stem::Drums).unwrap();
+    assert!(decode_file(&stem_path).is_ok());
+}
