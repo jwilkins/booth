@@ -12,6 +12,9 @@ on:
 jobs:
   package:
     runs-on: macos-14
+    permissions:
+      # Only needed to attach the disk image to a release, on a tag.
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -45,3 +48,12 @@ jobs:
           name: musicai-macos
           path: dist/*.dmg
           if-no-files-found: error
+
+      # An artifact expires and needs a GitHub login to fetch. A release is a
+      # plain download link that keeps working, which is what you want when the
+      # answer to "where do I get the app" has to be a URL.
+      - name: Attach the disk image to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.dmg --generate-notes --verify-tag

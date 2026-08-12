@@ -428,6 +428,10 @@ MUSICAI_NOTARY_PROFILE=my-notary-profile \
 ```
 
 `.github/workflows/macos-app.yml` builds the same thing on a macOS runner, on a tag or on demand.
+It uploads the disk image as a run artifact, and on a tag it also attaches it to a GitHub release,
+which is a download link that keeps working and needs no login. It is not run on every push
+because a universal build is two full compiles, and macOS runner minutes are billed at ten times
+the rate of Linux ones.
 
 ### What the window is, and is not
 

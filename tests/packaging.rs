@@ -159,3 +159,65 @@ fn the_icon_is_a_real_icns_with_the_sizes_macos_wants() {
         assert!(kinds.iter().any(|k| k == wanted), "missing {wanted}; have {kinds:?}");
     }
 }
+
+/// The `cargo build` invocations `package-macos.sh` uses, as (package, binary).
+fn build_invocations() -> Vec<(String, String)> {
+    let script = std::fs::read_to_string(repo().join("scripts/package-macos.sh")).unwrap();
+    script
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("cargo build"))
+        .map(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let after = |flag: &str| {
+                words.iter().position(|w| *w == flag).map(|i| words[i + 1].to_string())
+            };
+            (
+                after("-p").unwrap_or_else(|| panic!("no -p in: {line}")),
+                after("--bin").unwrap_or_else(|| panic!("no --bin in: {line}")),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_packaging_script_builds_binaries_that_exist() {
+    // This is the bug this test is here for: the workspace's default member is
+    // the command-line tool alone, so `cargo build --bin musicai-gui` fails with
+    // "no bin target named `musicai-gui` in default-run packages". Naming the
+    // package is what makes it work, and nothing else in the suite compiles the
+    // window, so without this the script can be broken and everything is green.
+    let metadata = Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(repo())
+        .output()
+        .expect("running cargo metadata");
+    assert!(metadata.status.success());
+    let text = String::from_utf8_lossy(&metadata.stdout);
+
+    let invocations = build_invocations();
+    assert_eq!(invocations.len(), 2, "expected one build per binary: {invocations:?}");
+
+    for (package, binary) in invocations {
+        // Crude but dependency-free: the manifest lists every package name and
+        // every target name, and both have to be there.
+        assert!(
+            text.contains(&format!("\"name\":\"{package}\"")),
+            "the script builds package {package}, which is not in the workspace"
+        );
+        assert!(
+            text.contains(&format!("\"name\":\"{binary}\"")),
+            "the script builds binary {binary}, which no package produces"
+        );
+    }
+}
+
+#[test]
+fn every_build_in_the_packaging_script_names_its_package() {
+    // Covered by the test above too, but stated on its own because it is the
+    // single rule that keeps the script working: a bare --bin is resolved
+    // against the default members, which is not where the window lives.
+    for (package, binary) in build_invocations() {
+        assert!(!package.is_empty(), "{binary} is built without -p");
+    }
+}

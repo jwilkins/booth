@@ -40,8 +40,11 @@ for target in "${TARGETS[@]}"; do
 		echo "missing target $target; run: rustup target add $target" >&2
 		exit 1
 	fi
-	cargo build --release --target "$target" --bin musicai
-	cargo build --release --target "$target" --bin musicai-gui
+	# Both packages are named explicitly. The workspace's default member is
+	# the command-line tool alone — that is what keeps `cargo build` free of a
+	# window toolkit — so a bare `--bin musicai-gui` is not found.
+	cargo build --release --target "$target" -p musicai --bin musicai
+	cargo build --release --target "$target" -p musicai-gui --bin musicai-gui
 done
 
 # One binary that runs natively on both Apple silicon and Intel. Users should
