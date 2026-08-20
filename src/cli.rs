@@ -45,6 +45,8 @@ pub enum Command {
     Analyze(AnalyzeArgs),
     /// Write the per-track analysis files a Pioneer/AlphaTheta player reads.
     Anlz(AnlzArgs),
+    /// Build a whole USB drive a Pioneer/AlphaTheta player can browse.
+    Export(ExportArgs),
     /// Bring files to a consistent loudness.
     Normalize(NormalizeArgs),
     /// Normalize, tag and separate, in one pass. This is what running
@@ -309,6 +311,35 @@ pub struct AnlzArgs {
     /// be `/Contents/<filename>`.
     #[arg(long, value_name = "PATH")]
     pub on_drive_path: Option<String>,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct ExportArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
+    /// The drive to write, e.g. `/Volumes/USB`. Created if it does not exist.
+    #[arg(long, short = 'o', value_name = "DIR")]
+    pub drive: PathBuf,
+
+    /// Tempo, in BPM, applied to every file named.
+    ///
+    /// There is no beat detector yet, so the grid has to be given rather than
+    /// found. This is the next thing to change.
+    #[arg(long, value_name = "BPM")]
+    pub bpm: f64,
+
+    /// Where the first beat falls, in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = 0)]
+    pub first_beat: u32,
+
+    /// Name of the playlist the exported tracks go into.
+    #[arg(long, value_name = "NAME", default_value = "musicai")]
+    pub playlist: String,
+
+    /// Report what would be written without touching the drive.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Whether normalization rewrites the audio or only tags it.

@@ -14,6 +14,7 @@
 //! [DJ Link Ecosystem Analysis]: https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html
 
 pub mod anlz;
+pub mod pdb;
 pub mod waveform;
 
 /// One beat of a beat grid.

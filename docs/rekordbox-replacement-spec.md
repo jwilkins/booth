@@ -694,49 +694,59 @@ export format).
 
 ## 14. Development status
 
-Phase 0 has started. What exists, in `src/export/`:
+Phase 0 is most of the way there: a drive can be written. What exists, in `src/export/`:
 
-- **`anlz.rs`** — a writer for the analysis files: `PPTH` paths, `PQTZ` beat grids,
-  `PCOB` and `PCO2` cue lists with colours, comments and loops, all seven waveform
-  sections, and the masked `PSSI` phrase analysis. It assembles the three files a
-  drive carries: `.DAT`, `.EXT` and `.2EX`.
+- **`anlz.rs`** — the per-track analysis files: `PPTH` paths, `PQTZ` beat grids, `PCOB`
+  and `PCO2` cue lists with colours, comments and loops, all seven waveform sections, and
+  the masked `PSSI` phrase analysis, assembled into `.DAT`, `.EXT` and `.2EX`.
 - **`waveform.rs`** — generating those waveforms from decoded audio in one pass: a
   three-band split, per-column peaks at 150 columns a second, and the five different
   packings the sections use, down to the CDJ-3000's three bytes of mid, high and low.
-- **`inspect()`** — a reader written from the format documentation rather than from the
-  writer, which is the seed of the drive verifier SAFE-1 calls for.
-- **`musicai anlz`** — a command that writes the three files for a track and reads each
-  one back off disk before reporting success.
-- **`tests/rekordbox_export.rs`** — every file parsed back by `rekordcrate`, an
-  independent implementation, because our own reader agreeing with our own writer proves
-  nothing.
+- **`pdb.rs`** — `export.pdb`, the DeviceSQL database that indexes everything: the page
+  and heap layout, the row index that builds backwards from the end of each page, the
+  string encodings, and rows for tracks, artists, albums, genres, labels, keys, colours,
+  the browse menu, and the playlist tree and its entries.
+- **`inspect()` in both** — readers written from the format documentation rather than
+  from the writers, sharing no code with them. Together they are the drive verifier
+  SAFE-1 calls for.
+- **`musicai export`** — builds the whole drive: audio into `/Contents`, analysis into
+  `/PIONEER/USBANLZ`, database into `/PIONEER/rekordbox`, then reads the database back
+  off the drive and walks it before reporting success.
+- **`musicai anlz`** — the analysis files alone, for looking at one track.
+- **Cross-checks** against `rekordcrate`, an independent implementation of both formats,
+  because our own reader agreeing with our own writer proves nothing.
 
 ### What the first pass turned up
 
-Four things worth recording, all found by comparing the documentation against a real
-rekordbox export and against a second parser:
+Comparing the documentation against a real rekordbox export and against a second parser
+corrected several things, and left one open:
 
 - **`PCP2` cue entries are longer than the documentation requires.** The format spec
   allows an entry to end after its colour; real rekordbox writes twenty more bytes, and a
-  parser built from real files expects them. We write them.
+  parser built from real files expects them.
 - **`memory_count` is not a count.** A real export writes `0xffffffff` there even for an
-  empty cue list, which rules out the obvious reading.
+  empty cue list.
+- **Row heaps are four-byte aligned**, and `free_size` is what is left after the heap
+  *and* the row index — which is how a written page can be checked against a real one
+  arithmetically rather than by eye.
 - **Two sections nobody has documented.** A real `.EXT` contains `PQT2` — an extended
-  beat grid that appears where `PQTZ` sits in the `.DAT` — and a real `.2EX` ends with a
-  short `PWVC` section. Neither is in the public analysis. Whether a CDJ-3000 needs
-  either is open question 2, and is answered on hardware.
-- **Two parsers disagree about what a cue point is.** The format documentation says a
-  cue entry's type is 1 for a point and 2 for a loop, and says it twice; `rekordcrate`
-  defines the point as 0 and cannot read a 1 at all. We follow the documentation, and the
-  test suite records the disagreement rather than hiding it. The rekordbox export
-  available to check against has no cues in it, so this too is settled on hardware.
+  beat grid where `PQTZ` sits in the `.DAT` — and a real `.2EX` ends with a short `PWVC`.
+  Whether a CDJ-3000 needs either is open question 2.
+- **Two parsers disagree about what a cue point is.** The format documentation says a cue
+  entry's type is 1 for a point and 2 for a loop, and says it twice; `rekordcrate` defines
+  the point as 0 and cannot read a 1 at all. We follow the documentation. This one has
+  teeth now that whole drives are being written: if the documentation is wrong, cues will
+  not appear on the player. The rekordbox export available to check against has no cues
+  in it, so it can only be settled on hardware.
 
 ### Next
 
-1. `PVBR`, so variable-bitrate mp3s seek correctly.
-2. The tempo and beatgrid analyser, so `--bpm` stops being a required argument.
-3. `export.pdb` — the database that indexes all of this. Until it exists, the analysis
-   files are correct and nothing on a player can find them.
+1. Hardware. Everything above is checked against a parser, which is not the same as
+   checked against a CDJ, and the gap between those two is exactly what phase 0 exists to
+   close.
+2. Cue points and phrases through `export`, which the writers underneath already handle.
+3. The tempo and beatgrid analyser, so `--bpm` stops being a required argument.
+4. `PVBR`, so variable-bitrate mp3s seek correctly.
 
 ## 15. Sources
 

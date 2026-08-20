@@ -8,9 +8,10 @@ An audio tool in Rust, as a command-line program and as a macOS app. It does thr
 - **Tag** files by identifying them from their sound, via acoustic fingerprinting and
   MusicBrainz.
 
-A fourth command, `anlz`, is the start of something larger: writing the files a Pioneer /
-AlphaTheta DJ player reads off a USB drive. See [Anlz](#anlz) for what works and what
-does not yet.
+Two more commands are the start of something larger: writing a USB drive a Pioneer /
+AlphaTheta DJ player can browse and play. `export` builds a whole drive; `anlz` writes
+just the per-track analysis files. See [Export](#export) for what works and what does
+not yet.
 
 By default it does the first three, over everything you point it at:
 
@@ -373,6 +374,45 @@ adding a second one.
 
 Only the tag blocks are rewritten; the audio is left byte-for-byte alone.
 
+## Export
+
+Build a drive: the audio, the analysis, and the database that indexes them.
+
+```sh
+musicai export ~/Music/set -r --bpm 128 --playlist "Sat 14/9" -o /Volumes/USB
+```
+
+```
+set/01 - opener.flac -> /Contents/Peverelist/01 - opener.flac (1536 beats, 55350 waveform columns)
+set/02 - marius.flac -> /Contents/Batu/02 - marius.flac (1478 beats, 53250 waveform columns)
+wrote /Volumes/USB/PIONEER/rekordbox/export.pdb: 20 tables, 41 rows, verified
+```
+
+The drive comes out shaped the way a player expects:
+
+```
+/Contents/<artist>/<file>              the audio, copied, not re-encoded
+/PIONEER/USBANLZ/P001/00000001/…       ANLZ0000.DAT, .EXT and .2EX per track
+/PIONEER/rekordbox/export.pdb          the database that points at both
+```
+
+Title, artist, album, year and track number come from the file's own tags where it has
+them. Everything named goes into one playlist, `--playlist` names it, and `--dry-run`
+reports what would be written without touching the drive.
+
+Files a player cannot open are refused rather than copied — a file that fails at the gig
+is worse on the drive than off it — which today means checking the container and the
+sample rate. `--bpm` is required because there is still no beat detector.
+
+Once the database is written it is read back off the drive and walked the way a player
+walks it, and the command fails rather than reporting success if that does not work.
+
+**What is missing before this plays in a club:** cue points and phrase analysis are not
+yet plumbed through from `export` (the writer underneath handles both — see
+[Anlz](#anlz)), there is no beat detection, and none of it has been tried on real
+hardware. It has been checked against an independent parser, which is not the same
+thing.
+
 ## Anlz
 
 Write the per-track analysis files a Pioneer / AlphaTheta player reads: the beat grid,
@@ -397,10 +437,8 @@ the three-band low/mid/high pair the CDJ-3000 shows. Each file is read back off 
 after it is written, by a parser that shares no code with the writer, and the command
 fails rather than reporting success if that read-back does not work.
 
-**This does not yet produce a playable drive.** A player finds these files through a
-database (`PIONEER/rekordbox/export.pdb`) that this does not write, so the analysis is
-correct but nothing indexes it. There is also no beat detector yet, which is why `--bpm`
-has to be given rather than found.
+This writes the analysis files and nothing else, which is useful for looking at one
+track. For a drive a player can browse, use [`export`](#export).
 
 The file format is not published by its vendor. It has been reverse-engineered in public
 and in detail by [Deep Symmetry's DJ Link Ecosystem
@@ -408,7 +446,7 @@ Analysis](https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.h
 which is what this is written against, and the tests check the output by parsing it back
 with [rekordcrate](https://github.com/Holzhaus/rekordcrate) — a separate implementation
 by different people, so that a misunderstanding of the format cannot be symmetrical and
-invisible.
+invisible. The database format is documented in the same place and checked the same way.
 
 [`docs/rekordbox-replacement-spec.md`](docs/rekordbox-replacement-spec.md) is the wider
 plan this belongs to.

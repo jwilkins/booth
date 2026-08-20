@@ -10,11 +10,11 @@ use rayon::prelude::*;
 use crate::audio::decode::decode_file;
 use crate::audio::encode::{write_file, Codec, EncodeOptions};
 use crate::cli::{
-    AnalyzeArgs, AnlzArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, RunArgs, StemsArgs, Step,
-    TagArgs,
+    AnalyzeArgs, AnlzArgs, ExportArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, RunArgs,
+    StemsArgs, Step, TagArgs,
 };
 use crate::discover;
-use crate::export::{anlz, waveform, BeatGrid, Cue};
+use crate::export::{anlz, pdb, waveform, BeatGrid, Cue};
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
@@ -159,6 +159,213 @@ fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
         waveforms.detail_len(),
         written.join("\n  ")
     )])
+}
+
+// -- export ----------------------------------------------------------------
+
+/// The file formats a CDJ-3000 will play. Anything else is copied nowhere: a
+/// file the player cannot open is worse on the drive than off it, because it
+/// looks fine until the moment it is loaded.
+const PLAYABLE: [&str; 7] = ["mp3", "flac", "wav", "aiff", "aif", "m4a", "aac"];
+/// The longest path a player will follow, counting every folder name.
+const MAX_DRIVE_PATH: usize = 255;
+
+/// Build a drive: the audio, the analysis files, and the database that indexes
+/// them.
+pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
+    let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    let progress = Progress::new(reporter, files.len());
+
+    let prepared: Vec<Result<Prepared>> = files
+        .par_iter()
+        .enumerate()
+        .map(|(i, path)| {
+            if progress.cancelled() {
+                return Ok(Prepared::skipped());
+            }
+            let outcome = prepare(args, path, i as u32 + 1);
+            progress.tick();
+            outcome
+        })
+        .collect();
+
+    let mut tracks = Vec::new();
+    let mut failures = Vec::new();
+    let mut lines = Vec::new();
+    for (path, result) in files.iter().zip(prepared) {
+        match result {
+            Ok(prepared) => {
+                if let Some(track) = prepared.track {
+                    lines.push(format!(
+                        "{} -> {} ({} beats, {} waveform columns)",
+                        path.display(),
+                        track.file_path,
+                        prepared.beats,
+                        prepared.columns
+                    ));
+                    tracks.push(track);
+                }
+            }
+            Err(e) => failures.push((path.clone(), e)),
+        }
+    }
+
+    if !tracks.is_empty() {
+        let playlist = pdb::Playlist::new(1, &args.playlist, tracks.iter().map(|t| t.id).collect());
+        let database = pdb::Database { tracks: tracks.clone(), playlists: vec![playlist] };
+        let bytes = database.to_bytes()?;
+
+        if args.dry_run {
+            lines.push(format!(
+                "would write PIONEER/rekordbox/export.pdb: {} tracks, {} bytes",
+                tracks.len(),
+                bytes.len()
+            ));
+        } else {
+            let out = args.drive.join("PIONEER/rekordbox/export.pdb");
+            std::fs::create_dir_all(out.parent().unwrap())?;
+            std::fs::write(&out, &bytes)?;
+            // Read the database back off the drive and walk it the way a player
+            // would. The export is not finished until that works.
+            let tables = pdb::inspect(&std::fs::read(&out)?)
+                .with_context(|| format!("{} did not read back as a database", out.display()))?;
+            let rows: usize = tables.iter().map(|t| t.rows).sum();
+            lines.push(format!(
+                "wrote {}: {} tables, {} rows, verified",
+                out.display(),
+                tables.len(),
+                rows
+            ));
+        }
+    }
+
+    for line in lines {
+        reporter.event(Event::Line(line));
+    }
+    let mut outcome = Outcome::new(files.len(), failures);
+    outcome.cancelled = reporter.cancelled();
+    outcome.report(reporter)
+}
+
+/// One track's worth of drive: the audio copied across, the analysis written,
+/// and the row that will point at both.
+struct Prepared {
+    track: Option<pdb::Track>,
+    beats: usize,
+    columns: usize,
+}
+
+impl Prepared {
+    fn skipped() -> Self {
+        Self { track: None, beats: 0, columns: 0 }
+    }
+}
+
+fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
+    let extension =
+        path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    if !PLAYABLE.contains(&extension.as_str()) {
+        bail!("a player cannot open a .{extension} file");
+    }
+
+    let audio = decode_file(path)?;
+    if audio.sample_rate > 96_000 {
+        bail!("{} Hz is above the 96 kHz a player will accept", audio.sample_rate);
+    }
+    let metadata = crate::tag::read_metadata(path).unwrap_or_default();
+
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("{} has no usable file name", path.display()))?;
+    let artist = metadata.artist.clone().unwrap_or_else(|| "Unknown Artist".to_string());
+    let on_drive = format!("/Contents/{}/{}", safe_component(&artist), filename);
+    if on_drive.len() > MAX_DRIVE_PATH {
+        bail!("{} characters is longer than a player will follow", on_drive.len());
+    }
+
+    // rekordbox's own scheme for these two directory names is not understood;
+    // ours is derived from the track id, which keeps them unique and lets the
+    // path be reconstructed from the database that points at it.
+    let analyze_dir = format!("/PIONEER/USBANLZ/P{:03}/{id:08X}", id % 1000);
+    let analyze_path = format!("{analyze_dir}/ANLZ0000.DAT");
+
+    let duration_ms = (audio.duration_secs() * 1000.0).round() as u32;
+    let grid = BeatGrid::constant(args.bpm, args.first_beat, duration_ms);
+    if grid.is_empty() {
+        bail!("a tempo of {} BPM produces no beats", args.bpm);
+    }
+    let waveforms = waveform::analyze(&audio);
+    let cues = [Cue::memory(args.first_beat)];
+    let analysis = anlz::Analysis {
+        on_drive_path: &on_drive,
+        grid: &grid,
+        cues: &cues,
+        waveforms: &waveforms,
+        structure: None,
+    };
+
+    let file_size = std::fs::metadata(path).map(|m| m.len() as u32).unwrap_or(0);
+    let track = pdb::Track {
+        id,
+        title: metadata.title.clone().unwrap_or_else(|| stem_of(filename)),
+        artist,
+        album: metadata.album.clone().unwrap_or_default(),
+        file_path: on_drive.clone(),
+        analyze_path,
+        tempo_x100: (args.bpm * 100.0).round() as u32,
+        duration_secs: audio.duration_secs().round() as u16,
+        sample_rate: audio.sample_rate,
+        sample_depth: 16,
+        file_size,
+        track_number: metadata.track_number.unwrap_or(0),
+        disc_number: metadata.disc_number.unwrap_or(0) as u16,
+        year: metadata
+            .date
+            .as_deref()
+            .and_then(|d| d.get(..4))
+            .and_then(|y| y.parse().ok())
+            .unwrap_or(0),
+        ..pdb::Track::default()
+    };
+
+    if !args.dry_run {
+        let audio_out = args.drive.join(on_drive.trim_start_matches('/'));
+        std::fs::create_dir_all(audio_out.parent().unwrap())?;
+        std::fs::copy(path, &audio_out)
+            .with_context(|| format!("copying {} to the drive", path.display()))?;
+
+        let anlz_out = args.drive.join(analyze_dir.trim_start_matches('/'));
+        std::fs::create_dir_all(&anlz_out)?;
+        for (extension, bytes) in
+            [("DAT", analysis.dat()), ("EXT", analysis.ext()), ("2EX", analysis.two_ex())]
+        {
+            let out = anlz_out.join(format!("ANLZ0000.{extension}"));
+            std::fs::write(&out, &bytes)?;
+            anlz::inspect(&std::fs::read(&out)?)
+                .with_context(|| format!("{} did not read back", out.display()))?;
+        }
+    }
+
+    Ok(Prepared { track: Some(track), beats: grid.beats.len(), columns: waveforms.detail_len() })
+}
+
+/// A folder name a FAT filesystem and a player will both accept.
+fn safe_component(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    let trimmed = cleaned.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        "Unknown".to_string()
+    } else {
+        trimmed.chars().take(60).collect()
+    }
+}
+
+fn stem_of(filename: &str) -> String {
+    filename.rsplit_once('.').map_or(filename, |(stem, _)| stem).to_string()
 }
 
 // -- analyze ---------------------------------------------------------------
