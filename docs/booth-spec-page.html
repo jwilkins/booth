@@ -1,0 +1,827 @@
+<title>Booth</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=JetBrains+Mono:wght@400;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+:root{
+  --paper:#E8E9E5;
+  --surface:#FDFDFC;
+  --panel:#DEE0DB;
+  --ink:#14171A;
+  --ink-2:#4A5158;
+  --ink-3:#767E86;
+  --rule:#C9CCC5;
+  --low:#2F6FD0;
+  --mid:#B87614;
+  --mid-bright:#E2A03F;
+  --high:#5C6670;
+  --go:#2F7D52;
+  --alert:#C03A22;
+  --booth:#12161A;
+  --booth-2:#1B2127;
+  --booth-rule:#2C343C;
+  --booth-text:#D7DDE3;
+  --booth-dim:#7C8894;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0F1316;
+    --surface:#161B1F;
+    --panel:#1B2127;
+    --ink:#E6EAEE;
+    --ink-2:#A6B0B9;
+    --ink-3:#78838D;
+    --rule:#2A3238;
+    --low:#5E9BEF;
+    --mid:#E2A03F;
+    --mid-bright:#F0B95F;
+    --high:#98A4AE;
+    --go:#57B37F;
+    --alert:#E8654A;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0F1316;
+  --surface:#161B1F;
+  --panel:#1B2127;
+  --ink:#E6EAEE;
+  --ink-2:#A6B0B9;
+  --ink-3:#78838D;
+  --rule:#2A3238;
+  --low:#5E9BEF;
+  --mid:#E2A03F;
+  --mid-bright:#F0B95F;
+  --high:#98A4AE;
+  --go:#57B37F;
+  --alert:#E8654A;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:"Source Serif 4",Georgia,serif;
+  font-size:17px;
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4,.mono,.eyebrow,th,.chip,.btn{font-family:Archivo,"Helvetica Neue",Arial,sans-serif}
+.mono,code,pre,.data{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace}
+
+.wrap{max-width:1120px;margin:0 auto;padding:0 28px}
+.col{max-width:68ch}
+
+/* ---- top bar ---- */
+.bar{
+  position:sticky;top:0;z-index:50;
+  background:color-mix(in srgb,var(--paper) 88%,transparent);
+  backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--rule);
+}
+.bar-in{display:flex;align-items:center;gap:22px;height:52px}
+.brand{font-weight:800;letter-spacing:.14em;text-transform:uppercase;font-size:13px}
+.brand span{color:var(--mid)}
+.bar nav{display:flex;gap:18px;margin-left:auto;flex-wrap:wrap}
+.bar nav a{
+  font-family:"JetBrains Mono",monospace;font-size:11.5px;letter-spacing:.04em;
+  color:var(--ink-3);text-decoration:none;padding:4px 0;border-bottom:1px solid transparent;
+}
+.bar nav a:hover,.bar nav a:focus-visible{color:var(--ink);border-bottom-color:var(--mid)}
+
+/* ---- hero ---- */
+header.hero{padding:76px 0 44px;border-bottom:1px solid var(--rule)}
+.eyebrow{
+  font-size:11.5px;font-weight:600;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--mid);margin:0 0 20px;
+}
+h1{
+  font-size:clamp(40px,6.4vw,74px);line-height:.98;font-weight:800;
+  letter-spacing:-.025em;margin:0 0 26px;text-wrap:balance;
+}
+h1 em{font-style:normal;color:var(--ink-3)}
+.standfirst{font-size:21px;line-height:1.5;color:var(--ink-2);margin:0 0 34px;max-width:60ch}
+.facts{display:flex;flex-wrap:wrap;gap:0;border-top:1px solid var(--rule)}
+.fact{padding:16px 26px 16px 0;margin-right:26px;border-right:1px solid var(--rule);flex:0 0 auto}
+.fact:last-child{border-right:0}
+.fact b{display:block;font-family:Archivo,sans-serif;font-size:26px;font-weight:800;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.fact span{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--ink-3);letter-spacing:.03em}
+
+/* ---- sections ---- */
+section{padding:64px 0;border-bottom:1px solid var(--rule)}
+.snum{
+  font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--mid);
+  letter-spacing:.1em;display:block;margin-bottom:10px;
+}
+h2{font-size:clamp(27px,3.4vw,38px);line-height:1.08;font-weight:800;letter-spacing:-.02em;margin:0 0 18px;text-wrap:balance}
+h3{font-size:20px;font-weight:600;letter-spacing:-.01em;margin:38px 0 10px}
+p{margin:0 0 18px}
+a{color:var(--ink);text-decoration-color:var(--mid);text-underline-offset:3px}
+a:focus-visible,button:focus-visible{outline:2px solid var(--mid);outline-offset:3px}
+.lede{font-size:19px;color:var(--ink-2)}
+
+/* ---- the mockup ---- */
+.booth{
+  background:var(--booth);color:var(--booth-text);
+  border:1px solid var(--booth-rule);border-radius:4px;
+  font-family:Archivo,sans-serif;font-size:12.5px;line-height:1.35;
+  overflow:hidden;
+}
+.figure{margin:0 0 12px}
+.figcap{
+  font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--ink-3);
+  margin:0 0 44px;line-height:1.6;
+}
+.cmdbar{
+  display:flex;align-items:center;gap:12px;padding:9px 12px;
+  border-bottom:1px solid var(--booth-rule);background:var(--booth-2);
+}
+.q{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--booth-text)}
+.q .k{color:var(--mid-bright)}
+.q .n{color:var(--alert)}
+.caret{display:inline-block;width:7px;height:14px;background:var(--mid-bright);vertical-align:-2px;animation:blink 1.1s steps(1,end) infinite}
+@keyframes blink{50%{opacity:0}}
+.kbd{
+  font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--booth-dim);
+  border:1px solid var(--booth-rule);border-radius:3px;padding:1px 5px;
+}
+.queue{margin-left:auto;color:var(--mid-bright);font-family:"JetBrains Mono",monospace;font-size:11.5px}
+
+.grid3{display:grid;grid-template-columns:168px minmax(0,1fr) 196px}
+.pane{padding:12px;border-right:1px solid var(--booth-rule);min-width:0}
+.pane:last-child{border-right:0}
+.plabel{
+  font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--booth-dim);
+  margin:0 0 8px;font-weight:600;
+}
+.plabel+.plabel{margin-top:20px}
+.pane ul{list-style:none;margin:0;padding:0}
+.pane li{padding:2.5px 0;color:var(--booth-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pane li.sub{padding-left:12px;color:var(--booth-dim)}
+.pane li.on{color:var(--mid-bright)}
+
+table.rows{width:100%;border-collapse:collapse;font-size:12.5px}
+table.rows th{
+  text-align:left;font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--booth-dim);font-weight:600;padding:0 8px 7px 0;border-bottom:1px solid var(--booth-rule);
+}
+table.rows td{padding:5px 8px 5px 0;border-bottom:1px solid color-mix(in srgb,var(--booth-rule) 55%,transparent);white-space:nowrap}
+table.rows tr.sel td{background:color-mix(in srgb,var(--mid-bright) 14%,transparent)}
+table.rows tr.stem td{color:var(--booth-dim)}
+table.rows tr.stem td:first-child{padding-left:14px}
+.num{font-family:"JetBrains Mono",monospace;font-variant-numeric:tabular-nums}
+.meter{display:inline-flex;gap:2px;vertical-align:-1px}
+.meter i{width:5px;height:9px;background:var(--booth-rule);display:block}
+.meter i.f{background:var(--mid-bright)}
+.tagpill{
+  font-family:"JetBrains Mono",monospace;font-size:10px;border:1px solid var(--booth-rule);
+  border-radius:2px;padding:0 4px;color:var(--booth-dim);
+}
+
+.wavewrap{border-top:1px solid var(--booth-rule);padding:12px}
+canvas{display:block;width:100%;height:auto}
+.cues{display:flex;gap:0;margin:6px 0 0;font-family:"JetBrains Mono",monospace;font-size:10px}
+.phrases{display:flex;gap:2px;margin-top:6px;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase}
+.phrases div{padding:2px 6px;color:#0F1316;font-weight:600;white-space:nowrap;overflow:hidden}
+.status{
+  display:flex;gap:18px;margin-top:10px;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--booth-dim);
+  flex-wrap:wrap;
+}
+.status b{color:var(--go);font-weight:400}
+.status b.warn{color:var(--mid-bright)}
+
+.nowcover{
+  aspect-ratio:1;border:1px solid var(--booth-rule);margin-bottom:10px;
+  background:
+    radial-gradient(120% 120% at 22% 18%, color-mix(in srgb,var(--low) 70%,transparent) 0%, transparent 58%),
+    radial-gradient(90% 90% at 80% 84%, color-mix(in srgb,var(--mid-bright) 60%,transparent) 0%, transparent 60%),
+    #0A0D10;
+}
+.stemrow{display:flex;align-items:center;gap:7px;padding:2.5px 0;color:var(--booth-text)}
+.stemrow .ok{color:var(--go)}
+.stemrow .run{color:var(--mid-bright)}
+.dock{
+  display:flex;align-items:center;gap:14px;padding:10px 12px;
+  border-top:1px solid var(--booth-rule);background:var(--booth-2);
+}
+.dock .delta{color:var(--mid-bright);font-family:"JetBrains Mono",monospace;font-size:11.5px;margin-left:auto}
+.btn{
+  border:1px solid var(--mid-bright);color:#0F1316;background:var(--mid-bright);
+  font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;
+  padding:5px 14px;border-radius:2px;
+}
+
+/* sync sheet */
+.sheet{display:grid;grid-template-columns:1fr;gap:0}
+.sheet .line{
+  display:grid;grid-template-columns:88px 1fr 96px;gap:12px;padding:8px 12px;
+  border-bottom:1px solid color-mix(in srgb,var(--booth-rule) 60%,transparent);align-items:baseline;
+}
+.sheet .line .op{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--booth-dim);font-weight:600}
+.sheet .line .sz{text-align:right;font-family:"JetBrains Mono",monospace;font-variant-numeric:tabular-nums;color:var(--booth-dim);font-size:11.5px}
+.pf{padding:12px;border-top:1px solid var(--booth-rule)}
+.pf div{display:flex;gap:9px;padding:3px 0;font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--booth-text)}
+.pf .g{color:var(--go)}
+.pf .w{color:var(--mid-bright)}
+
+/* ---- prose tables ---- */
+.tablewrap{overflow-x:auto;margin:0 0 12px}
+table.doc{width:100%;border-collapse:collapse;font-size:15px;min-width:560px}
+table.doc th{
+  text-align:left;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);
+  font-weight:600;padding:0 14px 9px 0;border-bottom:1px solid var(--ink-3);
+}
+table.doc td{padding:11px 14px 11px 0;border-bottom:1px solid var(--rule);vertical-align:top}
+table.doc td:first-child{white-space:nowrap}
+.yes{color:var(--go);font-weight:600}
+.no{color:var(--ink-3)}
+.maybe{color:var(--mid)}
+strong.win{color:var(--mid);font-family:Archivo,sans-serif;font-weight:600}
+
+/* ---- complaint list ---- */
+.gripes{display:grid;gap:0;border-top:1px solid var(--rule)}
+.gripe{
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:28px;
+  padding:22px 0;border-bottom:1px solid var(--rule);
+}
+.gripe q{
+  display:block;font-size:18px;line-height:1.45;quotes:none;
+}
+.gripe q::before{content:"“";color:var(--mid);margin-left:-.42em}
+.gripe q::after{content:"”";color:var(--mid)}
+.gripe .src{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--ink-3);margin-top:8px;display:block}
+.gripe .ans{font-size:15.5px;color:var(--ink-2);margin:0}
+.gripe .ans .rid{
+  font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--ink);
+  border:1px solid var(--rule);border-radius:2px;padding:1px 5px;margin-right:7px;white-space:nowrap;
+}
+
+/* ---- phases ---- */
+.phases{display:grid;gap:0;counter-reset:none}
+.phase{display:grid;grid-template-columns:120px 1fr;gap:24px;padding:22px 0;border-bottom:1px solid var(--rule)}
+.phase .p{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--mid);letter-spacing:.06em}
+.phase .p small{display:block;color:var(--ink-3);letter-spacing:0;margin-top:4px}
+.phase h4{margin:0 0 6px;font-size:19px;font-weight:600;letter-spacing:-.01em}
+.phase p{margin:0;color:var(--ink-2);font-size:15.5px}
+.phase .exit{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--ink-3);margin-top:8px;display:block}
+
+.callout{
+  border-left:3px solid var(--mid);padding:2px 0 2px 20px;margin:26px 0;
+  font-size:18px;line-height:1.5;
+}
+footer{padding:52px 0 70px;color:var(--ink-3);font-size:14px}
+footer a{color:var(--ink-2)}
+.srclist{columns:2;column-gap:36px;font-size:13.5px;line-height:1.7}
+.srclist a{display:block;break-inside:avoid;margin-bottom:5px;color:var(--ink-2)}
+
+@media (max-width:860px){
+  .grid3{grid-template-columns:1fr}
+  .pane{border-right:0;border-bottom:1px solid var(--booth-rule)}
+  .gripe,.phase{grid-template-columns:1fr;gap:12px}
+  .srclist{columns:1}
+  body{font-size:16px}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+
+<div class="bar"><div class="wrap bar-in">
+  <div class="brand">Booth<span>.</span></div>
+  <nav>
+    <a href="#wedge">The wedge</a>
+    <a href="#ui">The UI</a>
+    <a href="#gripes">Evidence</a>
+    <a href="#format">The constraint</a>
+    <a href="#parity">Parity</a>
+    <a href="#plan">Plan</a>
+  </nav>
+</div></div>
+
+<header class="hero"><div class="wrap">
+  <p class="eyebrow">Functional specification · draft 1 · August 2026</p>
+  <h1>Rekordbox isn't loved.<br><em>It's load-bearing.</em></h1>
+  <p class="standfirst">The lock-in isn't the software — it's the format on the USB stick. That format is
+  public, documented and writable. So build the library DJs want, write the drive yourself, and put
+  something on a CDJ-3000 that AlphaTheta's own software can't: stems, standalone, no laptop in the booth.</p>
+  <div class="facts">
+    <div class="fact"><b>2009</b><span>oldest player the legacy format still feeds</span></div>
+    <div class="fact"><b>$10–36</b><span>rekordbox, per month, forever</span></div>
+    <div class="fact"><b>0</b><span>stems on a standalone CDJ-3000 today</span></div>
+    <div class="fact"><b>3.30</b><span>the firmware that emptied DJs' playlists</span></div>
+  </div>
+</div></header>
+
+<section id="wedge"><div class="wrap">
+  <span class="snum">01 — The wedge</span>
+  <h2>Pre-rendered stems, inherited grids</h2>
+  <div class="col">
+    <p class="lede">Serato, VirtualDJ and djay all separate stems in real time — on a laptop. Rekordbox does too,
+    in Performance mode, which means the CDJ-3000 gets stems only while a computer is running. Engine DJ took the
+    other route: render the stems at home, play them standalone. It works, and it's the only route that works on
+    club hardware.</p>
+    <p>Demucs is a masking separator: every stem comes back with the same sample rate, channel count and length as
+    the mix it came from. That one property is the whole trick. The beatgrid, the phrase boundaries and all eight
+    hot cues of the parent track are <em>valid verbatim</em> on the acapella and the instrumental. Rendering a stem
+    becomes a file operation; the musical preparation is inherited, and the two decks can never disagree about
+    where bar one is.</p>
+    <div class="callout">Two CDJs, no laptop. The acapella is the next line down in the playlist, on the same hot cue
+    letter, phase-locked because both decks read the same grid.</div>
+    <p>The rendering pipeline already exists in this repository — demucs, format-matched output, tags copied from the
+    parent with the stem name appended. What the spec adds around it is the part that makes a stem play well in a
+    booth: gain applied to the samples rather than written as a ReplayGain tag players ignore, clipping prevented
+    rather than reported, isolation quality scored per track, and companions sorted directly beneath their parent
+    in the exported playlist.</p>
+  </div>
+</div></section>
+
+<section id="ui"><div class="wrap">
+  <span class="snum">02 — The interface</span>
+  <h2>One window. No modes.</h2>
+  <div class="col">
+    <p class="lede">Rekordbox splits into Export mode and Performance mode — two mental models over one library,
+    a seam that exists for licensing reasons rather than for anything a DJ wants. Here there is one view. The
+    prep editor sits under the browser rather than replacing it, so arrow-keying down a crate moves the waveform,
+    and every prep action is one keystroke from the list you're digging in.</p>
+  </div>
+
+  <figure class="figure">
+    <div class="booth">
+      <div class="cmdbar">
+        <span class="q"><span class="k">bpm:</span>124-128 <span class="k">key:</span>~8A <span class="n">-played:30d</span> <span class="k">tag:</span>peak<span class="caret"></span></span>
+        <span class="kbd">⌘K</span>
+        <span class="queue">◐ 12 queued · stems 62%</span>
+      </div>
+
+      <div class="grid3">
+        <div class="pane">
+          <p class="plabel">Collection</p>
+          <ul>
+            <li>All tracks <span class="num" style="color:var(--booth-dim)">31,402</span></li>
+            <li>Unprepared <span class="num" style="color:var(--booth-dim)">218</span></li>
+            <li>Needs attention <span class="num" style="color:var(--alert)">4</span></li>
+          </ul>
+          <p class="plabel">Playlists</p>
+          <ul>
+            <li>▾ Sat 14/9</li>
+            <li class="sub">warm</li>
+            <li class="sub on">peak</li>
+            <li class="sub">close</li>
+            <li>▾ Digging</li>
+            <li class="sub">promos</li>
+            <li class="sub">to grid</li>
+          </ul>
+          <p class="plabel">Saved queries</p>
+          <ul>
+            <li>Peak 128±3</li>
+            <li>missing:grid</li>
+            <li>missing:stems</li>
+          </ul>
+        </div>
+
+        <div class="pane">
+          <table class="rows">
+            <thead><tr><th>Artist</th><th>Title</th><th>BPM</th><th>Key</th><th>Energy</th><th>Stems</th></tr></thead>
+            <tbody>
+              <tr class="sel"><td>Peverelist</td><td>Roll With The Punches</td><td class="num">128.02</td><td class="num">8A</td>
+                <td><span class="meter"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i></i></span></td>
+                <td><span class="tagpill">kit</span></td></tr>
+              <tr class="stem"><td>↳ Peverelist</td><td>Roll With The Punches (acapella)</td><td class="num">128.02</td><td class="num">8A</td><td></td><td><span class="tagpill">vocals</span></td></tr>
+              <tr class="stem"><td>↳ Peverelist</td><td>Roll With The Punches (instrumental)</td><td class="num">128.02</td><td class="num">8A</td><td></td><td><span class="tagpill">melody+drums</span></td></tr>
+              <tr><td>Batu</td><td>Marius</td><td class="num">130.00</td><td class="num">4A</td>
+                <td><span class="meter"><i class="f"></i><i class="f"></i><i class="f"></i><i></i><i></i></span></td><td></td></tr>
+              <tr><td>Bruce</td><td>Just Getting Started</td><td class="num">128.00</td><td class="num">8A</td>
+                <td><span class="meter"><i class="f"></i><i class="f"></i><i class="f"></i><i></i><i></i></span></td><td><span class="tagpill">kit</span></td></tr>
+              <tr><td>Pessimist</td><td>Hunter</td><td class="num">172.00</td><td class="num">11B</td>
+                <td><span class="meter"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i></span></td><td></td></tr>
+              <tr><td>Ploy</td><td>Ramos</td><td class="num">126.50</td><td class="num">8A</td>
+                <td><span class="meter"><i class="f"></i><i class="f"></i><i></i><i></i><i></i></span></td><td></td></tr>
+            </tbody>
+          </table>
+
+          <div class="wavewrap" style="border-top:1px solid var(--booth-rule);margin:12px -12px -12px;">
+            <canvas id="wave" width="1600" height="150" aria-label="Three-band waveform of the selected track, with hot cue markers and phrase segments"></canvas>
+            <div class="phrases" id="phrases"></div>
+            <div class="status">
+              <span>grid <b>✓ 128.02</b> · 1 region</span>
+              <span>key <b>✓ 8A</b> 0.94</span>
+              <span>phrase <b>✓ 6</b></span>
+              <span>loudness <b>−8.4 LUFS</b> · 0.2 dBTP</span>
+              <span>stems <b class="warn">rendering 62%</b></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="pane">
+          <p class="plabel">Now inspecting</p>
+          <div class="nowcover"></div>
+          <div style="font-weight:600">Roll With The Punches</div>
+          <div style="color:var(--booth-dim);margin-bottom:10px">Peverelist · Livity Sound · 2019</div>
+          <p class="plabel">Stem kit</p>
+          <div class="stemrow"><span class="ok">✓</span> vocals <span class="num" style="margin-left:auto;color:var(--booth-dim)">0.91</span></div>
+          <div class="stemrow"><span class="ok">✓</span> drums <span class="num" style="margin-left:auto;color:var(--booth-dim)">0.96</span></div>
+          <div class="stemrow"><span class="ok">✓</span> bass <span class="num" style="margin-left:auto;color:var(--booth-dim)">0.88</span></div>
+          <div class="stemrow"><span class="run">◐</span> other <span class="num" style="margin-left:auto;color:var(--booth-dim)">62%</span></div>
+          <p class="plabel">Tags</p>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <span class="tagpill">peak</span><span class="tagpill">rolling</span><span class="tagpill">dub</span><span class="tagpill">+</span>
+          </div>
+          <p class="plabel">Related</p>
+          <ul>
+            <li>Batu — Marius</li>
+            <li>Bruce — Just Getting…</li>
+            <li>Ploy — Ramos</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="dock">
+        <span style="font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--booth-dim);font-weight:600">Drives</span>
+        <span>▣ SANDISK-64 — Sat 14/9 · 412 tracks · 51.2 GB</span>
+        <span class="delta">8 to add · 2 changed · 24 stems</span>
+        <button class="btn">Sync</button>
+      </div>
+    </div>
+    <p class="figcap">The main window. Query bar instead of dropdown filters; prep under the browser instead of
+    replacing it; the drive delta permanently visible in the dock, because it is the number that decides whether
+    tonight goes well.</p>
+  </figure>
+
+  <div class="col">
+    <h3>The query bar is the browser</h3>
+    <p>Everything the list can be filtered by is expressible as text, which means it is also scriptable, shareable
+    and diffable. A saved query <em>is</em> a smart playlist — there is no second concept, no separate rule editor,
+    and no 1,000-track ceiling of the kind rekordbox's Intelligent Playlists impose.</p>
+  </div>
+
+  <div class="tablewrap"><table class="doc">
+    <thead><tr><th>Query</th><th>Finds</th><th>Query</th><th>Finds</th></tr></thead>
+    <tbody>
+      <tr><td class="data">key:~8A</td><td>harmonically compatible keys</td><td class="data">missing:stems</td><td>no stem kit rendered yet</td></tr>
+      <tr><td class="data">played:never</td><td>bought and never touched</td><td class="data">missing:grid</td><td>unanalysed or grid rejected</td></tr>
+      <tr><td class="data">added:&lt;14d -tag:vocal</td><td>new instrumentals</td><td class="data">dupes:title+artist</td><td>duplicate groups to merge</td></tr>
+      <tr><td class="data">in:drive:SANDISK-64</td><td>what's actually on the stick</td><td class="data">format:flac bitrate:&lt;256</td><td>files that won't survive the booth</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <h3>The one screen that must never be wrong</h3>
+    <p>The preflight runs before a byte is copied; the verification runs after, using a parser that shares no code
+    with the writer. The sheet does not report success until the second one passes — because a writer that
+    validates its own output is a writer that validates its own bugs.</p>
+  </div>
+
+  <figure class="figure">
+    <div class="booth">
+      <div class="cmdbar">
+        <span class="q">SYNC → <span class="k">SANDISK-64</span></span>
+        <span class="kbd">Target: CDJ-3000 · fw 3.20+</span>
+        <span class="kbd">writes: Device Library + ANLZ</span>
+        <span class="queue" style="color:var(--alert)">⚠ CDJ-3000X also needs OneLibrary</span>
+      </div>
+      <div class="sheet">
+        <div class="line"><span class="op">Add</span><span>8 tracks — Ploy, Bruce, Peverelist +5</span><span class="sz">2.1 GB</span></div>
+        <div class="line"><span class="op">Update</span><span>2 tracks — Batu “Marius”: hot cue C moved 1 bar</span><span class="sz">18 KB</span></div>
+        <div class="line"><span class="op">Remove</span><span>none</span><span class="sz">—</span></div>
+        <div class="line"><span class="op">Stems</span><span>24 files — acapella + instrumental for playlist “peak”</span><span class="sz">5.8 GB</span></div>
+      </div>
+      <div class="pf">
+        <div><span class="g">✓</span> 412 files decode · headers read, none 32-bit float</div>
+        <div><span class="g">✓</span> all paths under 256 characters · 6 folder levels deep</div>
+        <div><span class="g">✓</span> FAT32 · 41.3 GB free after write</div>
+        <div><span class="w">⚠</span> 1 file is 32-bit float WAV → converted to 24-bit on the drive copy, original untouched</div>
+        <div><span class="w">⚠</span> 1 file has no beatgrid → <u>fix first</u> / export anyway</div>
+        <div><span class="g">✓</span> read back after write: 412 tracks, 6 playlists, 412 analysis files, 0 broken paths</div>
+      </div>
+    </div>
+    <p class="figcap">The sync sheet. Every failure mode listed here is one that currently looks fine on the laptop
+    and fails silently in the booth: float WAVs, AIFF-C, DRM'd AAC, over-length paths, NTFS, sample rates above 96 kHz.</p>
+  </figure>
+</div></section>
+
+<section id="gripes"><div class="wrap">
+  <span class="snum">03 — Evidence</span>
+  <h2>What DJs actually complain about</h2>
+  <div class="col">
+    <p class="lede">Gathered from AlphaTheta's own community forums, the DJ trade press and the Mixxx issue tracker.
+    Each complaint on the left generates the requirement on the right. Forum reports are cited as evidence that a
+    complaint is common, not that any particular number is exact.</p>
+  </div>
+
+  <div class="gripes">
+    <div class="gripe">
+      <div><q>They show up to a gig, plug in their drive, and boom… playlists are gone.</q>
+        <span class="src">CDJ-3000 firmware 3.30, Oct 2025 — read the new database, refused to fall back to the old one. AlphaTheta pulled the update and told venues to roll back.</span></div>
+      <p class="ans"><span class="rid">SAFE-1</span>The drive is read back after every write by an independent parser, and the sync isn't done until every playlist, path and analysis file is confirmed.</p>
+    </div>
+    <div class="gripe">
+      <div><q>Random time skips that ruin the beat grid.</q>
+        <span class="src">rekordbox 7.1.1 bug report — an already-correct grid shifted by the length of the skip.</span></div>
+      <p class="ans"><span class="rid">ANA-9</span>Every result records the analyser version that produced it, and a hand-edited grid region is pinned against re-analysis forever.</p>
+    </div>
+    <div class="gripe">
+      <div><q>Clunky, no customization and lack of support for 3rd party plug-ins.</q>
+        <span class="src">The most-quoted user review of rekordbox on AlternativeTo, in full.</span></div>
+      <p class="ans"><span class="rid">INTEROP-3/4</span>Everything the window does, the CLI does, with <span class="data">--json</span> on every command — plus a documented plug-in interface for third-party beatgrid and key analysers.</p>
+    </div>
+    <div class="gripe">
+      <div><q>Too many bugs… takes forever to go from performance to export.</q>
+        <span class="src">Recurring across 7.0.7, 7.1.4 and 7.2.10 threads. The standard forum advice is to reinstall 6.8.</span></div>
+      <p class="ans"><span class="rid">UI-1/3</span>One mode, no seam to cross. A 100,000-track library opens in under two seconds and filters as you type — a hard requirement, not an aspiration.</p>
+    </div>
+    <div class="gripe">
+      <div><q>It's too easy to break things.</q>
+        <span class="src">Digital DJ Tips on Cloud Library Sync: a Dropbox account AlphaTheta administers, move-vs-copy that deletes everywhere at once, greyed-out unplayable libraries.</span></div>
+      <p class="ans"><span class="rid">LIB-8</span>Sync is a file operation the user can inspect. Any storage they already have works, because we move files and a documented SQLite database — not a service.</p>
+    </div>
+    <div class="gripe">
+      <div><q>Max of 1000 tracks per playlist.</q>
+        <span class="src">Forum thread on Intelligent Playlists. Also: no third-party plug-ins, no scripting surface, no API.</span></div>
+      <p class="ans"><span class="rid">LIB-5</span>Saved queries have no ceiling and return in under 200 ms over 100,000 tracks.</p>
+    </div>
+    <div class="gripe">
+      <div><q>$10 to $36 a month, and version 7 moved things behind paywalls version 6 didn't have.</q>
+        <span class="src">rekordbox Free / Core / Creative / Professional, plus Cloud as an add-on. Reviewers' verdict: not worth upgrading unless you're paying anyway.</span></div>
+      <p class="ans"><span class="rid">SAFE-6</span>No feature is gated at runtime. The app runs, exports and reads the library with no network and no account — a lapsed licence never costs anyone their prep work.</p>
+    </div>
+  </div>
+</div></section>
+
+<section id="format"><div class="wrap">
+  <span class="snum">04 — The constraint</span>
+  <h2>How a CDJ actually reads a drive</h2>
+  <div class="col">
+    <p class="lede">Everything else in this spec is ordinary software. This is the part that decides whether the
+    project is possible at all, so it comes first. A prepared drive holds a database of tracks and playlists plus
+    one analysis file per track — and there are three generations of that database.</p>
+  </div>
+
+  <div class="tablewrap"><table class="doc">
+    <thead><tr><th>Format</th><th>Storage</th><th>Documented</th><th>Read by</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Device Library</strong><br><span class="data" style="font-size:12px;color:var(--ink-3)">export.pdb + .DAT/.EXT/.2EX</span></td>
+        <td>DeviceSQL, page-based, unencrypted</td>
+        <td class="yes">Yes — reverse-engineered byte-for-byte, two independent parsers</td>
+        <td>Everything since 2009, <strong class="win">including the CDJ-3000 as it ships today</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Device Library Plus</strong><br><span class="data" style="font-size:12px;color:var(--ink-3)">exportLibrary.db</span></td>
+        <td>Encrypted SQLite</td>
+        <td class="no">No</td>
+        <td>OPUS-QUAD and later</td>
+      </tr>
+      <tr>
+        <td><strong>OneLibrary</strong><br><span class="data" style="font-size:12px;color:var(--ink-3)">Device Library Plus, rebranded</span></td>
+        <td>Encrypted SQLite</td>
+        <td class="no">No — spec unpublished</td>
+        <td>CDJ-3000X, XDJ-AZ, OPUS-QUAD, OMNIS-DUO</td>
+      </tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <p>The analysis files carry everything a CDJ-3000 needs and all of it is public: <span class="data">PQTZ</span>
+    beat grids with per-beat tempo, <span class="data">PCO2</span> cues and loops with RGB colours and UTF-16
+    comments, <span class="data">PWV5</span> colour waveforms, <span class="data">PWV6/7</span> the CDJ-3000's
+    three-band waveforms, and <span class="data">PSSI</span> song-structure phrases. A drive a CDJ-3000 will play
+    can be written today, from Rust, with nobody's permission.</p>
+    <p>The CDJ-3000X is the other half of the story, and it requires OneLibrary, which is closed. Lexicon already
+    ships both databases on one drive, so third-party implementation is evidently possible — by licence, by
+    reverse engineering, or both. The honest plan is to be valuable before that partnership exists: <strong>v1
+    writes the legacy database</strong> and hands off to rekordbox's free Export mode for OneLibrary hardware.
+    Clunky, and it works on day one.</p>
+  </div>
+</div></section>
+
+<section id="parity"><div class="wrap">
+  <span class="snum">05 — Parity</span>
+  <h2>Where this wins, and where it doesn't</h2>
+  <div class="tablewrap"><table class="doc">
+    <thead><tr><th>Capability</th><th>rekordbox</th><th>Serato</th><th>Engine DJ</th><th>Booth</th></tr></thead>
+    <tbody>
+      <tr><td>Writes CDJ-3000 drives</td><td class="yes">yes</td><td class="no">no</td><td class="no">no</td><td class="yes">yes — v1</td></tr>
+      <tr><td>Writes CDJ-3000X / OneLibrary drives</td><td class="yes">yes</td><td class="no">no</td><td class="no">no</td><td class="maybe">phase 3, licence-dependent</td></tr>
+      <tr><td>Stems on a standalone CDJ</td><td class="no">no</td><td class="no">no</td><td class="no">n/a</td><td><strong class="win">yes — pre-rendered</strong></td></tr>
+      <tr><td>Stem quality</td><td>3 stems, rated below peers</td><td>strong, real-time</td><td>pre-rendered</td><td><strong class="win">demucs, 4 stems, scored per track</strong></td></tr>
+      <tr><td>Variable-tempo gridding</td><td>weak</td><td>weak</td><td>weak</td><td><strong class="win">first-class</strong></td></tr>
+      <tr><td>Smart playlists</td><td>rule dropdowns, 1,000 cap</td><td>smart crates</td><td>limited</td><td><strong class="win">text query, no cap</strong></td></tr>
+      <tr><td>Drive verified before the gig</td><td class="no">no</td><td class="no">n/a</td><td class="no">no</td><td><strong class="win">independent read-back</strong></td></tr>
+      <tr><td>File-compatibility preflight</td><td class="no">no</td><td class="no">n/a</td><td class="no">no</td><td><strong class="win">yes</strong></td></tr>
+      <tr><td>Reads booth edits &amp; history back</td><td>partial</td><td class="no">n/a</td><td>partial</td><td><strong class="win">as a reviewable diff</strong></td></tr>
+      <tr><td>CLI, scripting, plug-ins</td><td class="no">no</td><td class="no">no</td><td class="no">no</td><td><strong class="win">yes</strong></td></tr>
+      <tr><td>Lighting, video, DVS, streaming</td><td class="yes">yes</td><td class="yes">yes</td><td>partial</td><td class="no">no — deliberately</td></tr>
+      <tr><td>Cost</td><td>$10–36 / month</td><td>subscription</td><td>free with hardware</td><td><strong class="win">perpetual / open</strong></td></tr>
+    </tbody>
+  </table></div>
+  <div class="col">
+    <p>The honest reading: rekordbox wins on ecosystem breadth and on OneLibrary hardware until phase 3 lands.
+    This wins on everything a DJ does between buying a track and playing it.</p>
+  </div>
+</div></section>
+
+<section id="plan"><div class="wrap">
+  <span class="snum">06 — Plan</span>
+  <h2>Four phases, each with a hardware exit</h2>
+  <div class="phases">
+    <div class="phase">
+      <div class="p">PHASE 0<small>6–8 weeks</small></div>
+      <div><h4>Prove the drive</h4>
+        <p>Write an <span class="data">export.pdb</span> and ANLZ set for ten hand-prepared tracks. Nothing else
+        matters until this plays.</p>
+        <span class="exit">Exit: a drive written by this project, played in a club, indistinguishable from a rekordbox one.</span></div>
+    </div>
+    <div class="phase">
+      <div class="p">PHASE 1<small>3–4 months</small></div>
+      <div><h4>The library and the loop</h4>
+        <p>Import, analyse, prep, export, verify. The complete cycle for CDJ-3000-class hardware, with the interface above.</p>
+        <span class="exit">Exit: a working DJ prepares a real gig in it and does not open rekordbox.</span></div>
+    </div>
+    <div class="phase">
+      <div class="p">PHASE 2<small>2–3 months</small></div>
+      <div><h4>Stems</h4>
+        <p>The render queue, the kits, export adjacency, loudness on the drive copy, isolation scoring. Most of the
+        DSP already exists; the work is the queue and the booth ergonomics.</p>
+        <span class="exit">Exit: a DJ plays an acapella off a USB stick on a CDJ-3000 with no computer in the booth.</span></div>
+    </div>
+    <div class="phase">
+      <div class="p">PHASE 3<small>open-ended</small></div>
+      <div><h4>The rest of the ecosystem</h4>
+        <p>OneLibrary if a licence allows it. Serato, Traktor and Engine DJ import. Full-fidelity history round-trip.
+        Pro DJ Link participation, documented by the same work that documents the export format.</p>
+        <span class="exit">Exit: the drive is no longer the only reason to open the app.</span></div>
+    </div>
+  </div>
+
+  <h3>The risks worth naming</h3>
+  <div class="tablewrap"><table class="doc">
+    <thead><tr><th>Risk</th><th>Response</th></tr></thead>
+    <tbody>
+      <tr><td><strong>OneLibrary stays closed</strong></td><td>v1 targets the CDJ-3000 installed base, which is enormous and isn't going anywhere. Approach AlphaTheta early; keep the rekordbox hand-off working.</td></tr>
+      <tr><td><strong>Firmware changes the format</strong></td><td>It already happened to AlphaTheta's own users. Explicit compatibility targets, a public tested-firmware matrix, and never being the only copy of anything.</td></tr>
+      <tr><td><strong>One bad drive destroys trust</strong></td><td>This is the entire justification for the verification requirements. The promise is reliability; one silent failure costs more than any feature gains.</td></tr>
+      <tr><td><strong>Beatgrids and keys are hard</strong></td><td>Ship measured accuracy against hand-labelled sets, make editing fast enough that imperfection survives, and let someone else's analyser plug in.</td></tr>
+      <tr><td><strong>Stems are slow and large</strong></td><td>Per-playlist opt-in, GPU rendering, and honest time and byte estimates quoted before the queue starts.</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <h3>Still open</h3>
+    <p>Can a third-party export populate <strong>Related Tracks</strong> and <strong>My Tag</strong> on a CDJ-3000,
+    or are those tables written but ignored? Which <span class="data">.2EX</span> fields does the three-band
+    waveform actually require, and what happens when they're malformed? Which models and firmwares really accept
+    exFAT? How many bytes does a rendered stem cost across genres? Every one of these is answered by writing a
+    drive and plugging it into a player — which is why phase 0 exists.</p>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <p>Full specification — requirements, acceptance criteria, architecture and sources — is
+  <a href="https://github.com/jwilkins/musicai/blob/claude/rekordbox-replacement-spec-54boh1/docs/rekordbox-replacement-spec.md">in the repository</a>.
+  “Booth” is a working title.</p>
+  <p style="margin-top:26px" class="eyebrow">Sources</p>
+  <div class="srclist">
+    <a href="https://djmag.com/tech/alphatheta-suspends-cdj-3000-firmware-update-distribution-following-playlist-issues">DJ Mag — AlphaTheta suspends CDJ-3000 firmware</a>
+    <a href="https://www.pioneerdj.com/en/news/2026/cdj-3000-firmware-ver330-important-notice/">Pioneer DJ — firmware 3.30 notice</a>
+    <a href="https://djlifemag.com/2025/11/cdj-3000-firmware-3-30-issue-what-really-happened-how-to-save-your-library/">DJ LIFE — what really happened</a>
+    <a href="https://community.pioneerdj.com/hc/en-us/community/posts/46261597128217-Rekordbox-7-1-1-Bug-random-time-skips-that-ruin-Beat-Grid">Pioneer DJ Community — 7.1.1 grid bug</a>
+    <a href="https://community.pioneerdj.com/hc/en-us/community/posts/55336663722137-New-update-of-Rekordbox-7-2-10-has-too-many-bugs">Pioneer DJ Community — 7.2.10 bugs</a>
+    <a href="https://community.pioneerdj.com/hc/en-us/community/posts/22978972729369-Max-of-1000-tracks-per-playlist-Intelligent-Playlists">Pioneer DJ Community — 1,000-track limit</a>
+    <a href="https://www.digitaldjtips.com/rekordbox-cloud-library-sync-advice/">Digital DJ Tips — Cloud Library Sync advice</a>
+    <a href="https://rekordbox.com/en/plan/">rekordbox — plans and pricing</a>
+    <a href="https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html">Deep Symmetry — analysis file format</a>
+    <a href="https://github.com/Holzhaus/rekordcrate">rekordcrate — Rust PDB parser</a>
+    <a href="https://github.com/Deep-Symmetry/crate-digger">crate-digger — Kaitai PDB structures</a>
+    <a href="https://github.com/mixxxdj/mixxx/issues/15556">Mixxx — OneLibrary support issue</a>
+    <a href="https://www.lexicondj.com/blog/everything-you-need-to-know-about-device-library-plus-and-more">Lexicon — Device Library Plus explained</a>
+    <a href="https://cdm.link/onelibrary-dj-interoperability/">CDM — can OneLibrary unite DJ tools?</a>
+    <a href="https://www.digitaldjtips.com/best-sounding-stems-2025/">Digital DJ Tips — best sounding stems</a>
+    <a href="https://boothready.app/players/cdj-3000">CDJ-3000 supported formats and USB specs</a>
+  </div>
+</div></footer>
+
+<script>
+(function(){
+  var c = document.getElementById('wave');
+  if(!c) return;
+  var ctx = c.getContext('2d');
+
+  // Deterministic pseudo-noise so the waveform is stable across reloads.
+  function noise(i){ var x = Math.sin(i * 12.9898) * 43758.5453; return x - Math.floor(x); }
+
+  // Song structure, in fractions of the track. Order carries the arrangement.
+  var phrases = [
+    {name:'intro',  end:0.11, level:0.34, band:'low'},
+    {name:'build',  end:0.24, level:0.62, band:'mid'},
+    {name:'drop',   end:0.46, level:1.00, band:'full'},
+    {name:'break',  end:0.58, level:0.42, band:'mid'},
+    {name:'drop',   end:0.86, level:1.00, band:'full'},
+    {name:'outro',  end:1.00, level:0.40, band:'low'}
+  ];
+  var cues = [
+    {at:0.005, label:'A', color:'#E2A03F'},
+    {at:0.24,  label:'B', color:'#2F6FD0'},
+    {at:0.46,  label:'C', color:'#57B37F'},
+    {at:0.58,  label:'D', color:'#C03A22'},
+    {at:0.86,  label:'E', color:'#9A6BD4'}
+  ];
+
+  function levelAt(t){
+    for(var i=0;i<phrases.length;i++){
+      if(t <= phrases[i].end){
+        var start = i ? phrases[i-1].end : 0;
+        var into = (t - start) / Math.max(phrases[i].end - start, 1e-6);
+        var p = phrases[i];
+        if(p.name === 'build') return p.level * (0.55 + 0.45*into);
+        if(p.name === 'outro') return p.level * (1 - 0.75*into);
+        return p.level;
+      }
+    }
+    return 0.4;
+  }
+  function bandMix(t){
+    for(var i=0;i<phrases.length;i++){
+      if(t <= phrases[i].end){
+        var b = phrases[i].band;
+        if(b === 'low')  return [1.00, 0.42, 0.16];
+        if(b === 'mid')  return [0.78, 0.86, 0.38];
+        return [1.00, 0.80, 0.60];
+      }
+    }
+    return [1,0.6,0.3];
+  }
+
+  function draw(){
+    var css = getComputedStyle(document.documentElement);
+    var dpr = window.devicePixelRatio || 1;
+    var w = c.clientWidth, h = 150;
+    c.width = Math.round(w*dpr); c.height = Math.round(h*dpr);
+    c.style.height = h + 'px';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,w,h);
+
+    var mid = h*0.52, maxA = h*0.40;
+    var colLow  = css.getPropertyValue('--low').trim()  || '#2F6FD0';
+    var colMid  = '#E2A03F';
+    var colHigh = '#D7DDE3';
+    var cols = Math.floor(w/2);
+
+    for(var x=0; x<cols; x++){
+      var t = x/cols;
+      var base = levelAt(t);
+      var mixv = bandMix(t);
+      var kick = (x % 8 < 2) ? 1 : 0.72;                 // four-to-the-floor emphasis
+      var jitter = 0.72 + 0.28*noise(x*1.7);
+      var a = base * kick * jitter;
+
+      var lows  = maxA * a * mixv[0];
+      var mids  = maxA * a * mixv[1] * (0.62 + 0.38*noise(x*3.1));
+      var highs = maxA * a * mixv[2] * (0.45 + 0.55*noise(x*5.3));
+
+      ctx.fillStyle = colLow;  ctx.fillRect(x*2, mid-lows,  1.4, lows*2);
+      ctx.fillStyle = colMid;  ctx.fillRect(x*2, mid-mids,  1.4, mids*2);
+      ctx.fillStyle = colHigh; ctx.fillRect(x*2, mid-highs, 1.4, highs*2);
+    }
+
+    // beat/bar ticks along the bottom
+    ctx.fillStyle = 'rgba(215,221,227,0.28)';
+    for(var b=0; b<=64; b++){
+      var bx = (b/64)*w;
+      ctx.fillRect(bx, h-9, 1, (b%4===0) ? 9 : 4);
+    }
+
+    // hot cue markers
+    cues.forEach(function(q){
+      var qx = q.at * w;
+      ctx.fillStyle = q.color;
+      ctx.fillRect(qx, 0, 1.5, h-10);
+      ctx.beginPath();
+      ctx.moveTo(qx-4.5, 0); ctx.lineTo(qx+6, 0); ctx.lineTo(qx+0.75, 9); ctx.closePath();
+      ctx.fill();
+      ctx.font = '700 9px "JetBrains Mono", monospace';
+      ctx.fillText(q.label, qx+4, 8);
+    });
+  }
+
+  // phrase strip under the canvas, widths from the same structure
+  var strip = document.getElementById('phrases');
+  if(strip){
+    var tone = {intro:'#5C6670', build:'#B87614', drop:'#E2A03F', break:'#2F6FD0', outro:'#5C6670'};
+    var prev = 0;
+    phrases.forEach(function(p){
+      var d = document.createElement('div');
+      d.textContent = p.name;
+      d.style.flex = (p.end - prev) + ' 0 0';
+      d.style.background = tone[p.name] || '#5C6670';
+      if(p.name === 'intro' || p.name === 'outro' || p.name === 'break') d.style.color = '#E8E9E5';
+      strip.appendChild(d);
+      prev = p.end;
+    });
+  }
+
+  draw();
+  var t;
+  window.addEventListener('resize', function(){ clearTimeout(t); t = setTimeout(draw, 120); });
+})();
+</script>
