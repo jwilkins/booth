@@ -1,0 +1,674 @@
+//! The tagged-section analysis files: `.DAT`, `.EXT` and `.2EX`.
+//!
+//! Every file is the four-character code `PMAI`, a header, and then a run of
+//! sections. Each section is its own four-character code, the length of its
+//! header, the length of the whole section, and a payload whose shape depends
+//! on the code. Nothing is compressed and only one section is obfuscated (see
+//! [`song_structure`]).
+//!
+//! Which sections go in which file is a compatibility decision rather than a
+//! technical one: `.DAT` holds what a 2009 player can read, `.EXT` adds what
+//! the nexus 2 line understands, and `.2EX` carries the CDJ-3000's three-band
+//! waveforms. A player reads the richest file it knows about and ignores the
+//! rest, which is why writing all three is the safe thing to do.
+
+use anyhow::{bail, Result};
+
+use super::waveform::WaveformData;
+use super::{BeatGrid, Cue, CueKind, SongStructure};
+
+/// The header length rekordbox writes at the top of every analysis file. The
+/// sixteen bytes after `len_file` have no known purpose and are written as
+/// zeroes.
+const FILE_HEADER_LEN: u32 = 0x1c;
+
+/// The three bytes that follow a cue's type in both cue formats. They are not
+/// padding: every file seen in the wild holds a big-endian 1000 there, and
+/// nobody knows why.
+const THOUSAND: [u8; 3] = [0x00, 0x03, 0xE8];
+
+fn put_u16(out: &mut Vec<u8>, v: u16) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+fn put_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+fn put_pad(out: &mut Vec<u8>, n: usize) {
+    out.extend(std::iter::repeat(0u8).take(n));
+}
+
+/// Start a section: its code, the length of its header, and a placeholder for
+/// the total length, which [`finish`] fills in once the body is known.
+fn start(fourcc: &[u8; 4], len_header: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64);
+    out.extend_from_slice(fourcc);
+    put_u32(&mut out, len_header);
+    put_u32(&mut out, 0); // len_tag, patched by finish()
+    out
+}
+
+fn finish(mut section: Vec<u8>) -> Vec<u8> {
+    let len = section.len() as u32;
+    section[8..12].copy_from_slice(&len.to_be_bytes());
+    section
+}
+
+/// UTF-16 big-endian with a trailing NUL, which is how every string in this
+/// format is stored.
+fn utf16_nul(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len() * 2 + 2);
+    for unit in s.encode_utf16() {
+        put_u16(&mut out, unit);
+    }
+    put_u16(&mut out, 0);
+    out
+}
+
+/// `PPTH` — where the audio file sits, as a path on the drive.
+///
+/// This is the player's link back from the analysis to the audio, so it has to
+/// be the path as the *player* will see it (`/Contents/…`), not the path on the
+/// machine that wrote it.
+pub fn path(on_drive: &str) -> Vec<u8> {
+    let mut out = start(b"PPTH", 0x10);
+    let text = utf16_nul(on_drive);
+    put_u32(&mut out, text.len() as u32);
+    out.extend_from_slice(&text);
+    finish(out)
+}
+
+/// `PQTZ` — the beat grid.
+pub fn beat_grid(grid: &BeatGrid) -> Vec<u8> {
+    let mut out = start(b"PQTZ", 0x18);
+    put_u32(&mut out, 0);
+    put_u32(&mut out, 0x0008_0000); // constant, purpose unknown
+    put_u32(&mut out, grid.beats.len() as u32);
+    for beat in &grid.beats {
+        put_u16(&mut out, beat.number);
+        put_u16(&mut out, beat.tempo_x100);
+        put_u32(&mut out, beat.time_ms);
+    }
+    finish(out)
+}
+
+/// `PCOB` — the original cue list, as players before the nexus 2 read it.
+///
+/// It carries no colours and no comments; those arrived with [`cues_extended`].
+/// Both are written, because an older player reads this one and ignores the
+/// other.
+pub fn cues(list: &[Cue], hot: bool) -> Vec<u8> {
+    let chosen: Vec<&Cue> = list.iter().filter(|c| c.is_hot() == hot).collect();
+    let mut out = start(b"PCOB", 0x18);
+    put_u32(&mut out, if hot { 1 } else { 0 });
+    put_pad(&mut out, 2);
+    put_u16(&mut out, chosen.len() as u16);
+    // `memory_count`, whose meaning nobody has worked out. A real rekordbox
+    // export writes 0xffffffff here even for an empty list, which is what rules
+    // out the obvious reading of it as a count.
+    put_u32(&mut out, 0xffff_ffff);
+    let last = chosen.len().saturating_sub(1);
+    for (i, cue) in chosen.iter().enumerate() {
+        let mut entry = Vec::with_capacity(56);
+        entry.extend_from_slice(b"PCPT");
+        put_u32(&mut entry, 0x1c);
+        put_u32(&mut entry, 0x38);
+        put_u32(&mut entry, cue.hot_cue as u32);
+        // Status 1 is "enabled". The other documented value, 4, means a loop
+        // that is *currently running*, which is a playback state rather than
+        // something a saved loop should claim.
+        put_u32(&mut entry, 1);
+        put_u32(&mut entry, 0x0001_0000); // constant, purpose unknown
+                                          // The two order fields chain the cues together; the ends of the chain
+                                          // are marked with 0xffff.
+        put_u16(&mut entry, if i == 0 { 0xffff } else { i as u16 });
+        put_u16(&mut entry, if i == last { 0xffff } else { i as u16 + 1 });
+        entry.push(match cue.kind {
+            CueKind::Point => 1,
+            CueKind::Loop { .. } => 2,
+        });
+        entry.extend_from_slice(&THOUSAND);
+        put_u32(&mut entry, cue.time_ms);
+        put_u32(
+            &mut entry,
+            match cue.kind {
+                CueKind::Point => 0xffff_ffff,
+                CueKind::Loop { end_ms } => end_ms,
+            },
+        );
+        put_pad(&mut entry, 16);
+        debug_assert_eq!(entry.len(), 0x38);
+        out.extend_from_slice(&entry);
+    }
+    finish(out)
+}
+
+/// `PCO2` — the cue list as the nexus 2 line and everything after it reads it,
+/// with hot cues D through H, per-cue colour, and a comment.
+pub fn cues_extended(list: &[Cue], hot: bool) -> Vec<u8> {
+    let chosen: Vec<&Cue> = list.iter().filter(|c| c.is_hot() == hot).collect();
+    let mut out = start(b"PCO2", 0x14);
+    put_u32(&mut out, if hot { 1 } else { 0 });
+    put_u16(&mut out, chosen.len() as u16);
+    put_pad(&mut out, 2);
+    for cue in chosen {
+        // Written even when there is no comment, as a bare NUL. rekordbox does
+        // the same, and a reader that trusts the length rather than the content
+        // rejects an entry that leaves it out.
+        let comment = utf16_nul(cue.comment.as_deref().unwrap_or(""));
+        let len_comment = comment.len() as u32;
+
+        let mut entry = Vec::with_capacity(64);
+        entry.extend_from_slice(b"PCP2");
+        put_u32(&mut entry, 0x1c);
+        // Always 68 bytes plus the comment. The colour fields are written even
+        // when there is no colour, so every entry has the same shape, and the
+        // twenty bytes on the end are what rekordbox itself leaves there — the
+        // format documentation allows an entry to stop before them, but a
+        // parser written from real files expects to find them.
+        put_u32(&mut entry, 68 + len_comment);
+        put_u32(&mut entry, cue.hot_cue as u32);
+        entry.push(match cue.kind {
+            CueKind::Point => 1,
+            CueKind::Loop { .. } => 2,
+        });
+        entry.extend_from_slice(&THOUSAND);
+        put_u32(&mut entry, cue.time_ms);
+        put_u32(
+            &mut entry,
+            match cue.kind {
+                CueKind::Point => 0xffff_ffff,
+                CueKind::Loop { end_ms } => end_ms,
+            },
+        );
+        entry.push(0); // colour table row, for memory cues that use one
+        put_pad(&mut entry, 7);
+        let (num, den) = cue.loop_beats.unwrap_or((0, 0));
+        put_u16(&mut entry, num);
+        put_u16(&mut entry, den);
+        put_u32(&mut entry, len_comment);
+        entry.extend_from_slice(&comment);
+        let color = cue.color.unwrap_or(super::Rgb { r: 0, g: 0, b: 0 });
+        entry.push(0); // colour code, a lookup rekordbox uses for its own palette
+        entry.push(color.r);
+        entry.push(color.g);
+        entry.push(color.b);
+        put_pad(&mut entry, 20);
+        debug_assert_eq!(entry.len() as u32, 68 + len_comment);
+        out.extend_from_slice(&entry);
+    }
+    finish(out)
+}
+
+/// `PWAV` — the 400-column monochrome preview above the touch strip.
+pub fn wave_preview(data: &[u8]) -> Vec<u8> {
+    fixed_preview(b"PWAV", data)
+}
+
+/// `PWV2` — the 100-column preview a CDJ-900 shows.
+pub fn wave_tiny(data: &[u8]) -> Vec<u8> {
+    fixed_preview(b"PWV2", data)
+}
+
+fn fixed_preview(fourcc: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = start(fourcc, 0x14);
+    put_u32(&mut out, data.len() as u32);
+    put_u32(&mut out, 0x0010_0000); // constant, purpose unknown
+    out.extend_from_slice(data);
+    finish(out)
+}
+
+/// `PWV3` — the scrolling monochrome waveform, one byte per half-frame.
+pub fn wave_detail(data: &[u8]) -> Vec<u8> {
+    entry_section(b"PWV3", 1, data, Some(0x0096_0000))
+}
+
+/// `PWV4` — the 1,200-column colour preview, six bytes per column.
+pub fn wave_color_preview(data: &[u8]) -> Vec<u8> {
+    entry_section(b"PWV4", 6, data, Some(0x0096_0000))
+}
+
+/// `PWV5` — the scrolling colour waveform, two bytes per half-frame.
+pub fn wave_color_detail(data: &[u8]) -> Vec<u8> {
+    entry_section(b"PWV5", 2, data, Some(0x0096_0305))
+}
+
+/// `PWV6` — the CDJ-3000's 1,200-column three-band preview.
+///
+/// Alone among the waveform sections this one has no unknown word before its
+/// entries, so its header is four bytes shorter than the others.
+pub fn wave_3band_preview(data: &[u8]) -> Vec<u8> {
+    entry_section(b"PWV6", 3, data, None)
+}
+
+/// `PWV7` — the CDJ-3000's scrolling three-band waveform.
+pub fn wave_3band_detail(data: &[u8]) -> Vec<u8> {
+    entry_section(b"PWV7", 3, data, Some(0x0096_0000))
+}
+
+fn entry_section(fourcc: &[u8; 4], entry_bytes: u32, data: &[u8], unknown: Option<u32>) -> Vec<u8> {
+    let len_header = if unknown.is_some() { 0x18 } else { 0x14 };
+    let mut out = start(fourcc, len_header);
+    put_u32(&mut out, entry_bytes);
+    put_u32(&mut out, data.len() as u32 / entry_bytes);
+    if let Some(v) = unknown {
+        put_u32(&mut out, v);
+    }
+    out.extend_from_slice(data);
+    finish(out)
+}
+
+/// The nineteen-byte pattern rekordbox 6 and later use to obfuscate `PSSI`.
+/// Each byte has the phrase count added to it before it is applied.
+const PSSI_MASK: [u8; 19] = [
+    0xCB, 0xE1, 0xEE, 0xFA, 0xE5, 0xEE, 0xAD, 0xEE, 0xE9, 0xD2, 0xE9, 0xEB, 0xE1, 0xE9, 0xF3, 0xE8,
+    0xE9, 0xF4, 0xE1,
+];
+
+/// `PSSI` — the phrase analysis the CDJ-3000 draws under its waveform.
+///
+/// Everything from the mood onwards is XOR-masked. The mask is not encryption
+/// and is not treated as one here: it is a fixed nineteen-byte pattern offset
+/// by the phrase count, documented in public, and it is applied because the
+/// player expects to have to undo it.
+pub fn song_structure(structure: &SongStructure) -> Vec<u8> {
+    let count = structure.phrases.len() as u16;
+
+    let mut body = Vec::with_capacity(20 + structure.phrases.len() * 24);
+    put_u16(&mut body, structure.mood as u16);
+    put_pad(&mut body, 6);
+    put_u16(&mut body, structure.end_beat);
+    put_pad(&mut body, 2);
+    body.push(structure.bank);
+    put_pad(&mut body, 1);
+    for (i, phrase) in structure.phrases.iter().enumerate() {
+        put_u16(&mut body, i as u16 + 1);
+        put_u16(&mut body, phrase.beat);
+        put_u16(&mut body, phrase.kind);
+        put_pad(&mut body, 1);
+        body.push(0); // k1
+        put_pad(&mut body, 1);
+        body.push(0); // k2
+        put_pad(&mut body, 1);
+        body.push(0); // b: extra beat numbers, only used by "Up 3" phrases
+        put_u16(&mut body, 0); // beat2
+        put_u16(&mut body, 0); // beat3
+        put_u16(&mut body, 0); // beat4
+        put_pad(&mut body, 1);
+        body.push(0); // k3
+        put_pad(&mut body, 1);
+        body.push(0); // fill-in present
+        put_u16(&mut body, 0); // beat at which the fill-in starts
+    }
+
+    let key = count as u8;
+    for (i, byte) in body.iter_mut().enumerate() {
+        *byte ^= PSSI_MASK[i % PSSI_MASK.len()].wrapping_add(key);
+    }
+
+    let mut out = start(b"PSSI", 0x20);
+    put_u32(&mut out, 24); // bytes per phrase entry
+    put_u16(&mut out, count);
+    out.extend_from_slice(&body);
+    finish(out)
+}
+
+/// Assemble sections into a complete analysis file.
+pub fn file(sections: &[Vec<u8>]) -> Vec<u8> {
+    let body_len: usize = sections.iter().map(|s| s.len()).sum();
+    let mut out = Vec::with_capacity(FILE_HEADER_LEN as usize + body_len);
+    out.extend_from_slice(b"PMAI");
+    put_u32(&mut out, FILE_HEADER_LEN);
+    put_u32(&mut out, FILE_HEADER_LEN + body_len as u32);
+    let padding = FILE_HEADER_LEN as usize - out.len();
+    put_pad(&mut out, padding);
+    for section in sections {
+        out.extend_from_slice(section);
+    }
+    out
+}
+
+/// Everything known about one track, ready to be written out.
+pub struct Analysis<'a> {
+    /// The path the *player* will use, e.g. `/Contents/Peverelist/track.flac`.
+    pub on_drive_path: &'a str,
+    pub grid: &'a BeatGrid,
+    pub cues: &'a [Cue],
+    pub waveforms: &'a WaveformData,
+    pub structure: Option<&'a SongStructure>,
+}
+
+impl Analysis<'_> {
+    /// The `.DAT` file: what a player from 2009 onwards can read.
+    pub fn dat(&self) -> Vec<u8> {
+        file(&[
+            path(self.on_drive_path),
+            beat_grid(self.grid),
+            wave_preview(&self.waveforms.preview),
+            wave_tiny(&self.waveforms.tiny),
+            cues(self.cues, false),
+            cues(self.cues, true),
+        ])
+    }
+
+    /// The `.EXT` file: colour waveforms, named and coloured cues, phrases.
+    ///
+    /// The order and the duplication follow a real rekordbox export rather than
+    /// taste: the extended file repeats the old cue lists alongside the new
+    /// ones, so a player that reads `.EXT` but predates the nexus 2 cue format
+    /// still finds cues.
+    pub fn ext(&self) -> Vec<u8> {
+        let mut sections = vec![
+            path(self.on_drive_path),
+            wave_detail(&self.waveforms.detail),
+            cues(self.cues, false),
+            cues(self.cues, true),
+            cues_extended(self.cues, false),
+            cues_extended(self.cues, true),
+            beat_grid(self.grid),
+            wave_color_detail(&self.waveforms.color_detail),
+            wave_color_preview(&self.waveforms.color_preview),
+        ];
+        if let Some(structure) = self.structure {
+            sections.push(song_structure(structure));
+        }
+        file(&sections)
+    }
+
+    /// The `.2EX` file: the CDJ-3000's three-band waveforms, detail first, as
+    /// rekordbox writes them.
+    pub fn two_ex(&self) -> Vec<u8> {
+        file(&[
+            path(self.on_drive_path),
+            wave_3band_detail(&self.waveforms.band_detail),
+            wave_3band_preview(&self.waveforms.band_preview),
+        ])
+    }
+}
+
+/// What a reader found in one section of an analysis file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionInfo {
+    pub fourcc: String,
+    pub len_header: u32,
+    pub len_tag: u32,
+    /// What the section turned out to contain: a beat count, a cue count, a
+    /// number of waveform columns, a path.
+    pub summary: String,
+}
+
+/// Walk an analysis file and report what is in it.
+///
+/// This is deliberately written against the format documentation rather than
+/// against the writers above: it decodes the bytes from scratch and shares no
+/// code with them. That is the point. A drive is only verified if something
+/// other than the thing that wrote it can read it back, and this is the first
+/// piece of that verifier.
+pub fn inspect(bytes: &[u8]) -> Result<Vec<SectionInfo>> {
+    if bytes.len() < 12 || &bytes[0..4] != b"PMAI" {
+        bail!("not an analysis file: missing the PMAI signature");
+    }
+    let be32 = |at: usize| -> u32 {
+        u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    };
+    let len_header = be32(4) as usize;
+    let len_file = be32(8) as usize;
+    if len_file != bytes.len() {
+        bail!("file header claims {len_file} bytes but the file is {}", bytes.len());
+    }
+    if len_header > bytes.len() {
+        bail!("file header claims to be {len_header} bytes, longer than the file");
+    }
+
+    let mut found = Vec::new();
+    let mut at = len_header;
+    while at + 12 <= bytes.len() {
+        let fourcc = String::from_utf8_lossy(&bytes[at..at + 4]).into_owned();
+        let sec_header = be32(at + 4);
+        let sec_len = be32(at + 8);
+        if sec_len < 12 || at + sec_len as usize > bytes.len() {
+            bail!("section {fourcc} at offset {at} claims a length of {sec_len} bytes");
+        }
+        let body = &bytes[at + 12..at + sec_len as usize];
+        let summary = match fourcc.as_str() {
+            "PQTZ" => format!("{} beats", u32::from_be_bytes(body[8..12].try_into()?)),
+            "PPTH" => {
+                let len = u32::from_be_bytes(body[0..4].try_into()?) as usize;
+                let units: Vec<u16> = body[4..4 + len.saturating_sub(2)]
+                    .chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&units)
+            }
+            "PCOB" => format!(
+                "{} {} cues",
+                u16::from_be_bytes(body[6..8].try_into()?),
+                if body[3] == 1 { "hot" } else { "memory" }
+            ),
+            "PCO2" => format!(
+                "{} {} cues",
+                u16::from_be_bytes(body[4..6].try_into()?),
+                if body[3] == 1 { "hot" } else { "memory" }
+            ),
+            "PWAV" | "PWV2" => {
+                format!("{} columns", u32::from_be_bytes(body[0..4].try_into()?))
+            }
+            "PWV3" | "PWV4" | "PWV5" | "PWV6" | "PWV7" => format!(
+                "{} entries of {} bytes",
+                u32::from_be_bytes(body[4..8].try_into()?),
+                u32::from_be_bytes(body[0..4].try_into()?)
+            ),
+            "PSSI" => format!("{} phrases", u16::from_be_bytes(body[4..6].try_into()?)),
+            _ => format!("{} bytes", body.len()),
+        };
+        found.push(SectionInfo { fourcc, len_header: sec_header, len_tag: sec_len, summary });
+        at += sec_len as usize;
+    }
+    if at != bytes.len() {
+        bail!("{} trailing bytes after the last section", bytes.len() - at);
+    }
+    Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::{Mood, Phrase};
+
+    fn codes(sections: &[SectionInfo]) -> Vec<&str> {
+        sections.iter().map(|s| s.fourcc.as_str()).collect()
+    }
+
+    #[test]
+    fn a_section_declares_its_own_length() {
+        let grid = BeatGrid::constant(120.0, 0, 4_000);
+        let section = beat_grid(&grid);
+        assert_eq!(&section[0..4], b"PQTZ");
+        assert_eq!(u32::from_be_bytes(section[8..12].try_into().unwrap()), section.len() as u32);
+        // Twelve bytes of section header, twelve of grid header, eight per beat.
+        assert_eq!(section.len(), 24 + grid.beats.len() * 8);
+    }
+
+    #[test]
+    fn beats_carry_bar_position_tempo_and_time() {
+        let grid = BeatGrid::constant(120.0, 0, 1_000);
+        let s = beat_grid(&grid);
+        assert_eq!(u16::from_be_bytes(s[24..26].try_into().unwrap()), 1); // first beat of the bar
+        assert_eq!(u16::from_be_bytes(s[26..28].try_into().unwrap()), 12_000); // 120.00 BPM
+        assert_eq!(u32::from_be_bytes(s[28..32].try_into().unwrap()), 0);
+        assert_eq!(u32::from_be_bytes(s[36..40].try_into().unwrap()), 500); // second beat
+    }
+
+    #[test]
+    fn paths_are_utf16_with_a_trailing_nul() {
+        let s = path("/Contents/a.flac");
+        let len = u32::from_be_bytes(s[12..16].try_into().unwrap()) as usize;
+        assert_eq!(len, ("/Contents/a.flac".len() + 1) * 2);
+        assert_eq!(&s[s.len() - 2..], &[0, 0]);
+    }
+
+    #[test]
+    fn a_non_ascii_path_survives_the_round_trip() {
+        let name = "/Contents/Björk/Jóga.flac";
+        let bytes = file(&[path(name)]);
+        let sections = inspect(&bytes).unwrap();
+        assert_eq!(sections[0].summary, name);
+    }
+
+    #[test]
+    fn cues_are_split_into_hot_and_memory_lists() {
+        let list = [Cue::memory(1_000), Cue::hot(1, 2_000), Cue::hot(2, 3_000)];
+        let memory = inspect(&file(&[cues(&list, false)])).unwrap();
+        let hot = inspect(&file(&[cues(&list, true)])).unwrap();
+        assert_eq!(memory[0].summary, "1 memory cues");
+        assert_eq!(hot[0].summary, "2 hot cues");
+    }
+
+    #[test]
+    fn every_extended_cue_entry_is_68_bytes_plus_its_comment() {
+        let list = [Cue::hot(1, 1_000).with_comment("first drop").with_color(226, 160, 63)];
+        let s = cues_extended(&list, true);
+        // 20 bytes of section header, then the entry.
+        let len_entry = u32::from_be_bytes(s[28..32].try_into().unwrap());
+        assert_eq!(len_entry as usize, 68 + ("first drop".len() + 1) * 2);
+        assert_eq!(cues_extended(&[Cue::hot(1, 0)], true).len(), 20 + 68 + 2);
+        assert_eq!(s.len(), 20 + len_entry as usize);
+        // The colour sits just before the twenty trailing bytes.
+        assert_eq!(&s[s.len() - 23..s.len() - 20], &[226, 160, 63]);
+    }
+
+    #[test]
+    fn a_loop_records_where_it_returns_to() {
+        let list = [Cue::hot(1, 1_000).looping(3_000)];
+        let s = cues_extended(&list, true);
+        assert_eq!(u32::from_be_bytes(s[40..44].try_into().unwrap()), 1_000);
+        assert_eq!(u32::from_be_bytes(s[44..48].try_into().unwrap()), 3_000);
+    }
+
+    #[test]
+    fn a_point_cue_has_no_loop_end() {
+        let s = cues_extended(&[Cue::hot(1, 1_000)], true);
+        assert_eq!(u32::from_be_bytes(s[44..48].try_into().unwrap()), 0xffff_ffff);
+    }
+
+    #[test]
+    fn song_structure_is_masked_and_unmasks_to_what_went_in() {
+        let structure = SongStructure {
+            mood: Mood::Mid,
+            end_beat: 512,
+            bank: 0,
+            phrases: vec![Phrase { beat: 1, kind: 1 }, Phrase { beat: 65, kind: 9 }],
+        };
+        let s = song_structure(&structure);
+        assert_eq!(u16::from_be_bytes(s[16..18].try_into().unwrap()), 2);
+
+        // The mood is not readable until the mask comes off.
+        let masked_mood = u16::from_be_bytes(s[18..20].try_into().unwrap());
+        assert_ne!(masked_mood, Mood::Mid as u16);
+        assert!(masked_mood > 20, "an unmasked file is recognised by a mood under 20");
+
+        let key = 2u8;
+        let unmasked: Vec<u8> = s[18..]
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ PSSI_MASK[i % PSSI_MASK.len()].wrapping_add(key))
+            .collect();
+        assert_eq!(u16::from_be_bytes(unmasked[0..2].try_into().unwrap()), Mood::Mid as u16);
+        assert_eq!(u16::from_be_bytes(unmasked[8..10].try_into().unwrap()), 512);
+        // The entries start fourteen bytes into the masked body, after the
+        // mood, the end beat and the lighting bank.
+        // First phrase: index 1, beat 1, kind 1 (Intro).
+        assert_eq!(u16::from_be_bytes(unmasked[14..16].try_into().unwrap()), 1);
+        assert_eq!(u16::from_be_bytes(unmasked[16..18].try_into().unwrap()), 1);
+        assert_eq!(u16::from_be_bytes(unmasked[18..20].try_into().unwrap()), 1);
+        // Second phrase, one 24-byte entry later, starts at beat 65 and is a
+        // chorus.
+        assert_eq!(u16::from_be_bytes(unmasked[38..40].try_into().unwrap()), 2);
+        assert_eq!(u16::from_be_bytes(unmasked[40..42].try_into().unwrap()), 65);
+        assert_eq!(u16::from_be_bytes(unmasked[42..44].try_into().unwrap()), 9);
+    }
+
+    #[test]
+    fn phrase_entries_are_24_bytes_each() {
+        let one = song_structure(&SongStructure {
+            mood: Mood::Mid,
+            end_beat: 4,
+            bank: 0,
+            phrases: vec![Phrase { beat: 1, kind: 1 }],
+        });
+        let two = song_structure(&SongStructure {
+            mood: Mood::Mid,
+            end_beat: 4,
+            bank: 0,
+            phrases: vec![Phrase { beat: 1, kind: 1 }, Phrase { beat: 5, kind: 2 }],
+        });
+        assert_eq!(two.len() - one.len(), 24);
+        assert_eq!(one.len(), 0x20 + 24);
+    }
+
+    #[test]
+    fn a_file_declares_its_own_length() {
+        let bytes =
+            file(&[path("/Contents/a.flac"), beat_grid(&BeatGrid::constant(128.0, 0, 2_000))]);
+        assert_eq!(&bytes[0..4], b"PMAI");
+        assert_eq!(u32::from_be_bytes(bytes[4..8].try_into().unwrap()), FILE_HEADER_LEN);
+        assert_eq!(u32::from_be_bytes(bytes[8..12].try_into().unwrap()), bytes.len() as u32);
+    }
+
+    #[test]
+    fn inspect_rejects_a_truncated_file() {
+        let bytes = file(&[path("/Contents/a.flac")]);
+        let err = inspect(&bytes[..bytes.len() - 4]).unwrap_err().to_string();
+        assert!(err.contains("bytes"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn inspect_rejects_something_that_is_not_an_analysis_file() {
+        assert!(inspect(b"this is an mp3, actually").is_err());
+    }
+
+    #[test]
+    fn the_three_files_carry_the_sections_their_players_expect() {
+        let grid = BeatGrid::constant(128.0, 0, 3_000);
+        let waveforms = WaveformData::silent(3.0);
+        let cue_list = [Cue::memory(0), Cue::hot(1, 1_000)];
+        let structure = SongStructure {
+            mood: Mood::Mid,
+            end_beat: 6,
+            bank: 0,
+            phrases: vec![Phrase { beat: 1, kind: 1 }],
+        };
+        let analysis = Analysis {
+            on_drive_path: "/Contents/a.flac",
+            grid: &grid,
+            cues: &cue_list,
+            waveforms: &waveforms,
+            structure: Some(&structure),
+        };
+
+        assert_eq!(
+            codes(&inspect(&analysis.dat()).unwrap()),
+            ["PPTH", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"]
+        );
+        assert_eq!(
+            codes(&inspect(&analysis.ext()).unwrap()),
+            ["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PQTZ", "PWV5", "PWV4", "PSSI"]
+        );
+        assert_eq!(codes(&inspect(&analysis.two_ex()).unwrap()), ["PPTH", "PWV7", "PWV6"]);
+    }
+
+    #[test]
+    fn a_track_with_no_phrase_analysis_simply_has_no_pssi() {
+        let grid = BeatGrid::constant(128.0, 0, 3_000);
+        let waveforms = WaveformData::silent(3.0);
+        let analysis = Analysis {
+            on_drive_path: "/Contents/a.flac",
+            grid: &grid,
+            cues: &[],
+            waveforms: &waveforms,
+            structure: None,
+        };
+        assert!(!codes(&inspect(&analysis.ext()).unwrap()).contains(&"PSSI"));
+    }
+}

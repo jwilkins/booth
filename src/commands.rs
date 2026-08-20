@@ -10,9 +10,11 @@ use rayon::prelude::*;
 use crate::audio::decode::decode_file;
 use crate::audio::encode::{write_file, Codec, EncodeOptions};
 use crate::cli::{
-    AnalyzeArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, RunArgs, StemsArgs, Step, TagArgs,
+    AnalyzeArgs, AnlzArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, RunArgs, StemsArgs, Step,
+    TagArgs,
 };
 use crate::discover;
+use crate::export::{anlz, waveform, BeatGrid, Cue};
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
@@ -60,6 +62,103 @@ fn partition(paths: &[PathBuf], results: Vec<Result<Vec<String>>>) -> (Vec<Strin
         }
     }
     (lines, Outcome::new(paths.len(), failures))
+}
+
+// -- anlz ------------------------------------------------------------------
+
+/// Write the `.DAT`, `.EXT` and `.2EX` analysis files for each input.
+///
+/// This is half of what a playable drive needs: the players find these through
+/// a database (`export.pdb`) that this does not write yet, so the files are
+/// correct but nothing indexes them. It exists now because the analysis files
+/// are the part that can be checked — against the format documentation, and
+/// against a player once the other half lands.
+pub fn anlz(args: &AnlzArgs, reporter: &dyn Reporter) -> Result<()> {
+    let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    if args.hot_cues.len() > 8 {
+        bail!("a player has eight hot cues, A to H; {} were given", args.hot_cues.len());
+    }
+    let progress = Progress::new(reporter, files.len());
+
+    let results: Vec<Result<Vec<String>>> = files
+        .par_iter()
+        .map(|path| {
+            if progress.cancelled() {
+                return Ok(Vec::new());
+            }
+            let outcome = write_analysis(args, path);
+            progress.tick();
+            outcome
+        })
+        .collect();
+
+    let (lines, mut outcome) = partition(&files, results);
+    outcome.cancelled = reporter.cancelled();
+    for line in lines {
+        reporter.event(Event::Line(line));
+    }
+    outcome.report(reporter)
+}
+
+fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
+    let audio = decode_file(path)?;
+    let duration_ms = (audio.duration_secs() * 1000.0).round() as u32;
+    let waveforms = waveform::analyze(&audio);
+    let grid = BeatGrid::constant(args.bpm, args.first_beat, duration_ms);
+    if grid.is_empty() {
+        bail!("a tempo of {} BPM produces no beats", args.bpm);
+    }
+
+    let mut cues = vec![Cue::memory(args.first_beat)];
+    for (i, &at) in args.hot_cues.iter().enumerate() {
+        cues.push(Cue::hot(i as u8 + 1, at));
+    }
+
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("{} has no usable file name", path.display()))?;
+    let on_drive = args.on_drive_path.clone().unwrap_or_else(|| format!("/Contents/{name}"));
+
+    let analysis = anlz::Analysis {
+        on_drive_path: &on_drive,
+        grid: &grid,
+        cues: &cues,
+        waveforms: &waveforms,
+        structure: None,
+    };
+
+    let dir = args
+        .output
+        .clone()
+        .unwrap_or_else(|| path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+
+    let mut written = Vec::new();
+    for (extension, bytes) in
+        [("DAT", analysis.dat()), ("EXT", analysis.ext()), ("2EX", analysis.two_ex())]
+    {
+        let out = dir.join(format!("{stem}.{extension}"));
+        std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
+        // Read it back from disk rather than trusting what we just built. This
+        // is the smallest version of the check every export will get: the file
+        // is only written if something else can parse it.
+        let read_back = std::fs::read(&out)?;
+        let sections = anlz::inspect(&read_back)
+            .with_context(|| format!("{} did not read back as an analysis file", out.display()))?;
+        written.push(format!("{}: {} sections", out.display(), sections.len()));
+    }
+
+    Ok(vec![format!(
+        "{}: {} beats at {:.2} BPM, {} hot cues, {} waveform columns\n  {}",
+        path.display(),
+        grid.beats.len(),
+        args.bpm,
+        args.hot_cues.len(),
+        waveforms.detail_len(),
+        written.join("\n  ")
+    )])
 }
 
 // -- analyze ---------------------------------------------------------------

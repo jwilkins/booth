@@ -9,6 +9,7 @@ pub mod cli;
 pub mod commands;
 pub mod discover;
 pub mod dsp;
+pub mod export;
 pub mod loudness;
 pub mod normalize;
 pub mod report;

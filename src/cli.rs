@@ -43,6 +43,8 @@ pub struct Cli {
 pub enum Command {
     /// Report loudness and peak levels without changing anything.
     Analyze(AnalyzeArgs),
+    /// Write the per-track analysis files a Pioneer/AlphaTheta player reads.
+    Anlz(AnlzArgs),
     /// Bring files to a consistent loudness.
     Normalize(NormalizeArgs),
     /// Normalize, tag and separate, in one pass. This is what running
@@ -276,6 +278,37 @@ pub struct AnalyzeArgs {
     /// Emit one JSON object per file instead of a table.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct AnlzArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
+    /// Where the files go. Defaults to alongside each input.
+    #[arg(long, short = 'o', value_name = "DIR")]
+    pub output: Option<PathBuf>,
+
+    /// Tempo, in BPM, applied to every file named.
+    ///
+    /// There is no beat detector yet, so the grid has to be given rather than
+    /// found. This is the first thing that changes.
+    #[arg(long, value_name = "BPM")]
+    pub bpm: f64,
+
+    /// Where the first beat falls, in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = 0)]
+    pub first_beat: u32,
+
+    /// A hot cue position, in milliseconds. Repeat for more; they are lettered
+    /// A onwards in the order given.
+    #[arg(long = "hot-cue", value_name = "MS")]
+    pub hot_cues: Vec<u32>,
+
+    /// The path at which the player will find the audio, if it is not going to
+    /// be `/Contents/<filename>`.
+    #[arg(long, value_name = "PATH")]
+    pub on_drive_path: Option<String>,
 }
 
 /// Whether normalization rewrites the audio or only tags it.

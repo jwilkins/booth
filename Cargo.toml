@@ -41,9 +41,11 @@ ureq = "3.2.1"
 walkdir = "2"
 
 [dev-dependencies]
+binrw = "0.14"
 # The integration tests read back the tags the ReplayGain mode writes.
 id3 = "1"
 metaflac = "0.2"
+rekordcrate = { version = "0.3.0", default-features = false }
 
 [profile.release]
 opt-level = 3

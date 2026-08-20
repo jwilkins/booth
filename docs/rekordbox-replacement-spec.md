@@ -166,7 +166,30 @@ waveforms. There are three generations of that database:
 |---|---|---|---|---|
 | **Device Library** (legacy) | `PIONEER/rekordbox/export.pdb` + `.DAT`/`.EXT`/`.2EX` analysis | DeviceSQL, page-based, unencrypted | **Yes** — reverse-engineered byte-for-byte, two independent parsers | Everything since CDJ-2000 (2009), **including the CDJ-3000 as it ships today** |
 | **Device Library Plus** | `exportLibrary.db` | **Encrypted** SQLite | No | OPUS-QUAD and later |
-| **OneLibrary** | Device Library Plus, rebranded and opened to partners | Encrypted SQLite | **No** — spec not public | CDJ-3000X, XDJ-AZ, OPUS-QUAD, OMNIS-DUO; djay Pro and rekordbox write it, Traktor announced |
+| **OneLibrary** | Device Library Plus, rebranded and opened to partners | Encrypted SQLite | **No** — spec not public | CDJ-3000X, CDJ-1500X, XDJ-AZ, XDJ-AN, OPUS-QUAD, OMNIS-DUO; djay Pro and rekordbox write it, Traktor announced |
+
+Two things about that table are worth stating flatly, because both are easy to
+assume the other way round.
+
+**The CDJ-3000X does not fall back to a legacy drive.** AlphaTheta's own
+compatibility notice lists Device Library as "–" for the CDJ-3000X, and the
+rekordbox FAQ says it directly: "The CDJ-3000X can browse tracks and playlists on
+a USB storage device only if OneLibrary (formerly Device Library Plus) has been
+exported to that device." What makes a modern rekordbox-written stick work on
+both old and new players is that rekordbox 6.8.2 and later write *both*
+databases to the same drive — not that the new player reads the old format.
+Anecdotes that a 3000X played someone's old stick are almost certainly this:
+the stick had been re-synced by a recent rekordbox and carries both.
+
+**OneLibrary is standardised, not open.** It is a shared format agreed between
+AlphaTheta, Algoriddim and Native Instruments, and AlphaTheta's own page says
+only that they are "working with other brands". There is no published
+specification, no SDK, and no developer programme on any AlphaTheta page found.
+The Mixxx developers looked at exactly this question and concluded the route is
+a direct conversation with AlphaTheta rather than a public document. The
+rekordbox OneLibrary FAQ does point at a "rekordbox for Developers" support
+section, which is the first thing to chase — but until something is published,
+plan as though it is closed.
 
 Three consequences follow, and they shape the whole roadmap.
 
@@ -198,7 +221,8 @@ against *that player's* rules, not against ours.
 
 - **v1 ships the legacy Device Library writer.** It targets CDJ-3000 (current firmware),
   CDJ-2000NXS2, XDJ-1000/RX, and every rented rig older than last year. That is most of
-  the world's booths.
+  the world's booths — but explicitly *not* the CDJ-3000X, which is the cost of starting
+  here and has to be said out loud to anyone who buys into the project.
 - **v1 offers an interoperability escape hatch for OneLibrary hardware**: write the
   legacy database, then hand off to rekordbox (which is free in Export mode) or djay to
   produce the OneLibrary database from it. Clunky, honest, and it works on day one.
@@ -617,6 +641,7 @@ track and playing it.
 **Phase 0 — prove the drive (6–8 weeks).** Write an `export.pdb` and ANLZ set for a
 hand-made playlist of ten tracks; play it on a real CDJ-3000; verify waveforms, phrases,
 cues and colours appear correctly. Nothing else matters until this works on hardware.
+The analysis half is written — see §14 — and the database half is what is left.
 *Exit criterion: a drive written by this project, played in a club, indistinguishable
 from a rekordbox one.*
 
@@ -667,7 +692,53 @@ export format).
 7. **Where does the 3-stem/4-stem recipe boundary sit** for DJ use? `melody = bass +
    other`, as the CLI does today, is right for an instrumental and wrong for a bass swap.
 
-## 14. Sources
+## 14. Development status
+
+Phase 0 has started. What exists, in `src/export/`:
+
+- **`anlz.rs`** — a writer for the analysis files: `PPTH` paths, `PQTZ` beat grids,
+  `PCOB` and `PCO2` cue lists with colours, comments and loops, all seven waveform
+  sections, and the masked `PSSI` phrase analysis. It assembles the three files a
+  drive carries: `.DAT`, `.EXT` and `.2EX`.
+- **`waveform.rs`** — generating those waveforms from decoded audio in one pass: a
+  three-band split, per-column peaks at 150 columns a second, and the five different
+  packings the sections use, down to the CDJ-3000's three bytes of mid, high and low.
+- **`inspect()`** — a reader written from the format documentation rather than from the
+  writer, which is the seed of the drive verifier SAFE-1 calls for.
+- **`musicai anlz`** — a command that writes the three files for a track and reads each
+  one back off disk before reporting success.
+- **`tests/rekordbox_export.rs`** — every file parsed back by `rekordcrate`, an
+  independent implementation, because our own reader agreeing with our own writer proves
+  nothing.
+
+### What the first pass turned up
+
+Four things worth recording, all found by comparing the documentation against a real
+rekordbox export and against a second parser:
+
+- **`PCP2` cue entries are longer than the documentation requires.** The format spec
+  allows an entry to end after its colour; real rekordbox writes twenty more bytes, and a
+  parser built from real files expects them. We write them.
+- **`memory_count` is not a count.** A real export writes `0xffffffff` there even for an
+  empty cue list, which rules out the obvious reading.
+- **Two sections nobody has documented.** A real `.EXT` contains `PQT2` — an extended
+  beat grid that appears where `PQTZ` sits in the `.DAT` — and a real `.2EX` ends with a
+  short `PWVC` section. Neither is in the public analysis. Whether a CDJ-3000 needs
+  either is open question 2, and is answered on hardware.
+- **Two parsers disagree about what a cue point is.** The format documentation says a
+  cue entry's type is 1 for a point and 2 for a loop, and says it twice; `rekordcrate`
+  defines the point as 0 and cannot read a 1 at all. We follow the documentation, and the
+  test suite records the disagreement rather than hiding it. The rekordbox export
+  available to check against has no cues in it, so this too is settled on hardware.
+
+### Next
+
+1. `PVBR`, so variable-bitrate mp3s seek correctly.
+2. The tempo and beatgrid analyser, so `--bpm` stops being a required argument.
+3. `export.pdb` — the database that indexes all of this. Until it exists, the analysis
+   files are correct and nothing on a player can find them.
+
+## 15. Sources
 
 Complaints, format details and hardware facts referenced above:
 

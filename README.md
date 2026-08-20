@@ -8,7 +8,11 @@ An audio tool in Rust, as a command-line program and as a macOS app. It does thr
 - **Tag** files by identifying them from their sound, via acoustic fingerprinting and
   MusicBrainz.
 
-By default it does all three, over everything you point it at:
+A fourth command, `anlz`, is the start of something larger: writing the files a Pioneer /
+AlphaTheta DJ player reads off a USB drive. See [Anlz](#anlz) for what works and what
+does not yet.
+
+By default it does the first three, over everything you point it at:
 
 ```sh
 musicai ~/Music/album
@@ -368,6 +372,46 @@ requests and materially bigger files. Re-tagging replaces the existing front cov
 adding a second one.
 
 Only the tag blocks are rewritten; the audio is left byte-for-byte alone.
+
+## Anlz
+
+Write the per-track analysis files a Pioneer / AlphaTheta player reads: the beat grid,
+the cues, and the waveforms it draws.
+
+```sh
+musicai anlz track.flac --bpm 128 --first-beat 412 --hot-cue 412 --hot-cue 60000
+# -> track.DAT   track.EXT   track.2EX
+```
+
+```
+track.flac: 1536 beats at 128.00 BPM, 2 hot cues, 55350 waveform columns
+  track.DAT: 6 sections
+  track.EXT: 10 sections
+  track.2EX: 3 sections
+```
+
+Between them the three files carry a beat grid with per-beat tempo, memory cues and hot
+cues with colours and comments, saved loops, phrase analysis, and seven waveforms — the
+monochrome preview a 2009 player draws, the colour ones the nexus 2 line introduced, and
+the three-band low/mid/high pair the CDJ-3000 shows. Each file is read back off disk
+after it is written, by a parser that shares no code with the writer, and the command
+fails rather than reporting success if that read-back does not work.
+
+**This does not yet produce a playable drive.** A player finds these files through a
+database (`PIONEER/rekordbox/export.pdb`) that this does not write, so the analysis is
+correct but nothing indexes it. There is also no beat detector yet, which is why `--bpm`
+has to be given rather than found.
+
+The file format is not published by its vendor. It has been reverse-engineered in public
+and in detail by [Deep Symmetry's DJ Link Ecosystem
+Analysis](https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html),
+which is what this is written against, and the tests check the output by parsing it back
+with [rekordcrate](https://github.com/Holzhaus/rekordcrate) — a separate implementation
+by different people, so that a misunderstanding of the format cannot be symmetrical and
+invisible.
+
+[`docs/rekordbox-replacement-spec.md`](docs/rekordbox-replacement-spec.md) is the wider
+plan this belongs to.
 
 ## The macOS app
 
