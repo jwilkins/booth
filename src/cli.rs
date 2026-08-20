@@ -311,8 +311,27 @@ pub struct ExportArgs {
     pub input: InputArgs,
 
     /// The drive to write, e.g. `/Volumes/USB`. Created if it does not exist.
-    #[arg(long, short = 'o', value_name = "DIR")]
-    pub drive: PathBuf,
+    #[arg(
+        long,
+        short = 'o',
+        value_name = "DIR",
+        conflicts_with = "image",
+        required_unless_present = "image"
+    )]
+    pub drive: Option<PathBuf>,
+
+    /// Write a disk image instead of a folder.
+    ///
+    /// A partitioned, FAT32-formatted `.img` — the thing a player actually
+    /// reads. It can go straight onto a stick with `dd`, or into the USB slot
+    /// of a CDJ-3000 emulator, which is the closest thing to a player that
+    /// does not involve a player.
+    #[arg(long, value_name = "FILE", conflicts_with = "drive", required_unless_present = "drive")]
+    pub image: Option<PathBuf>,
+
+    /// The volume label an image is formatted with.
+    #[arg(long, value_name = "NAME", default_value = "REKORDBOX")]
+    pub label: String,
 
     /// Override the detected tempo, in BPM, for every file named.
     ///

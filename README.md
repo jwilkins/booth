@@ -396,6 +396,11 @@ The drive comes out shaped the way a player expects:
 /PIONEER/rekordbox/export.pdb          the database that points at both
 ```
 
+`--image drive.img` writes a disk image instead of a folder: a raw file with a
+partition table and a FAT32 filesystem, which is what a player actually reads. It goes
+onto a stick with `dd if=drive.img of=/dev/disk4 bs=4m`, or into the USB slot of an
+emulator — see [Trying it on a player](#trying-it-on-a-player).
+
 Each track is listened to on the way past: the beats are found, the track is divided into
 phrases, and cue points are set at the phrase boundaries and where a voice comes in — see
 [What it hears](#what-it-hears). `--bpm` overrides the tempo when the detector gets it
@@ -415,6 +420,43 @@ walks it, and the command fails rather than reporting success if that does not w
 
 **What is missing before this plays in a club:** none of it has been tried on real
 hardware. It has been checked against an independent parser, which is not the same thing.
+
+## Trying it on a player
+
+The nearest thing to a CDJ that is not a CDJ is
+[cdj3k-emu](https://github.com/nsaintot/cdj3k-emu), which boots real CDJ-3000 firmware
+under QEMU and gives it a virtual USB slot. A drive written here can be handed straight
+to it:
+
+```sh
+musicai export ~/Music/set -r --image ~/rekordbox.img
+```
+
+then in the emulator, **USB → Attach virtual image** and pick `rekordbox.img`. The guest
+mounts it the same way the firmware mounts a real stick: partition 1, FAT32, at
+`/media/usb/sdb1`. What to look at, in the order that things break:
+
+1. **Does the drive appear at all?** That is the database being readable —
+   `export.pdb` parsed, the table list understood.
+2. **Do the playlists and tracks list?** The playlist tree, the playlist entries, and the
+   track rows, with their titles and artists off the interned tables.
+3. **Does a track load?** The `file_path` in the row resolving to real audio.
+4. **Is there a waveform, in three colours?** The `.EXT` and `.2EX` files being found
+   through `analyze_path`, and the three-band data being what the CDJ-3000 expects.
+5. **Are the cues on the beat, and named?** The beat grid, `PCO2`, and the analysis.
+6. **Are the phrases drawn under the waveform?** `PSSI`, including the mask.
+
+Two things are worth knowing before setting time aside for this. The emulator is **Apple
+Silicon macOS only** — it uses HVF, vmnet and CoreAudio, so there is no Linux or Windows
+build and it cannot run in CI. And it **ships no Pioneer firmware**: it needs a CDJ-3000
+firmware update file and its decryption key, which you have to supply yourself and which
+this project cannot help with either.
+
+Failing that, the checks that can be run anywhere are the ones in [Tests](#tests):
+everything written is parsed back by
+[rekordcrate](https://github.com/Holzhaus/rekordcrate), and a disk image is additionally
+read with [mtools](https://www.gnu.org/software/mtools/), so the filesystem is one that
+something other than us agrees is a filesystem.
 
 ## What it hears
 

@@ -15,6 +15,7 @@ use crate::cli::{
     StemsArgs, Step, TagArgs,
 };
 use crate::discover;
+use crate::export::image::{capacity_for, Destination, DriveImage};
 use crate::export::{anlz, pdb, waveform};
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
@@ -163,32 +164,44 @@ const PLAYABLE: [&str; 7] = ["mp3", "flac", "wav", "aiff", "aif", "m4a", "aac"];
 /// The longest path a player will follow, counting every folder name.
 const MAX_DRIVE_PATH: usize = 255;
 
+/// How many tracks are analysed before what they produced is written out.
+///
+/// Analysis is parallel and writing is not — a filesystem is one thing with one
+/// position in it — so the work goes through in batches. The batch size bounds
+/// how much prepared analysis is held in memory at once, which is a few
+/// megabytes here rather than the whole library's worth.
+const BATCH: usize = 16;
+
 /// Build a drive: the audio, the analysis files, and the database that indexes
 /// them.
 pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    let destination = if args.dry_run { None } else { Some(open_destination(args, &files)?) };
     let progress = Progress::new(reporter, files.len());
-
-    let prepared: Vec<Result<Prepared>> = files
-        .par_iter()
-        .enumerate()
-        .map(|(i, path)| {
-            if progress.cancelled() {
-                return Ok(Prepared::skipped());
-            }
-            let outcome = prepare(args, path, i as u32 + 1);
-            progress.tick();
-            outcome
-        })
-        .collect();
 
     let mut tracks = Vec::new();
     let mut failures = Vec::new();
     let mut lines = Vec::new();
-    for (path, result) in files.iter().zip(prepared) {
-        match result {
-            Ok(prepared) => {
-                if let Some(track) = prepared.track {
+
+    for (batch, chunk) in files.chunks(BATCH).enumerate() {
+        let first_id = (batch * BATCH) as u32 + 1;
+        let prepared: Vec<Result<Prepared>> = chunk
+            .par_iter()
+            .enumerate()
+            .map(|(i, path)| {
+                if progress.cancelled() {
+                    return Ok(Prepared::skipped());
+                }
+                let outcome = prepare(args, path, first_id + i as u32);
+                progress.tick();
+                outcome
+            })
+            .collect();
+
+        for (path, result) in chunk.iter().zip(prepared) {
+            match result {
+                Ok(prepared) => {
+                    let Some(track) = &prepared.track else { continue };
                     lines.push(format!(
                         "{} -> {} ({:.2} BPM, {} beats, {} phrases, {} cues)",
                         path.display(),
@@ -198,40 +211,54 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
                         prepared.phrases,
                         prepared.cues
                     ));
-                    tracks.push(track);
+                    if let Some(destination) = &destination {
+                        match prepared.commit(destination, path) {
+                            Ok(()) => tracks.push(prepared.track.unwrap()),
+                            Err(e) => {
+                                lines.pop();
+                                failures.push((path.clone(), e));
+                            }
+                        }
+                    } else {
+                        tracks.push(prepared.track.unwrap());
+                    }
                 }
+                Err(e) => failures.push((path.clone(), e)),
             }
-            Err(e) => failures.push((path.clone(), e)),
         }
     }
 
     if !tracks.is_empty() {
         let playlist = pdb::Playlist::new(1, &args.playlist, tracks.iter().map(|t| t.id).collect());
-        let database = pdb::Database { tracks: tracks.clone(), playlists: vec![playlist] };
+        let database = pdb::Database { tracks, playlists: vec![playlist] };
         let bytes = database.to_bytes()?;
 
-        if args.dry_run {
-            lines.push(format!(
+        match &destination {
+            None => lines.push(format!(
                 "would write PIONEER/rekordbox/export.pdb: {} tracks, {} bytes",
-                tracks.len(),
+                database.tracks.len(),
                 bytes.len()
-            ));
-        } else {
-            let out = args.drive.join("PIONEER/rekordbox/export.pdb");
-            std::fs::create_dir_all(out.parent().unwrap())?;
-            std::fs::write(&out, &bytes)?;
-            // Read the database back off the drive and walk it the way a player
-            // would. The export is not finished until that works.
-            let tables = pdb::inspect(&std::fs::read(&out)?)
-                .with_context(|| format!("{} did not read back as a database", out.display()))?;
-            let rows: usize = tables.iter().map(|t| t.rows).sum();
-            lines.push(format!(
-                "wrote {}: {} tables, {} rows, verified",
-                out.display(),
-                tables.len(),
-                rows
-            ));
+            )),
+            Some(destination) => {
+                const DATABASE: &str = "/PIONEER/rekordbox/export.pdb";
+                destination.write(DATABASE, &bytes)?;
+                // Read the database back off the drive and walk it the way a
+                // player would. The export is not finished until that works.
+                let tables = pdb::inspect(&destination.read(DATABASE)?)
+                    .context("the database did not read back off the drive")?;
+                let rows: usize = tables.iter().map(|t| t.rows).sum();
+                lines.push(format!(
+                    "wrote {DATABASE} to {}: {} tables, {} rows, verified",
+                    destination.describe(),
+                    tables.len(),
+                    rows
+                ));
+            }
         }
+    }
+
+    if let Some(destination) = destination {
+        destination.finish()?;
     }
 
     for line in lines {
@@ -242,10 +269,14 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
     outcome.report(reporter)
 }
 
-/// One track's worth of drive: the audio copied across, the analysis written,
-/// and the row that will point at both.
+/// One track's worth of drive: the row that describes it, and the files that
+/// have to land on the drive for that row to mean anything.
 struct Prepared {
     track: Option<pdb::Track>,
+    /// Where the audio goes, as the player will see it.
+    on_drive: String,
+    /// The analysis files, by their paths on the drive.
+    analysis: Vec<(String, Vec<u8>)>,
     beats: usize,
     bpm: f64,
     phrases: usize,
@@ -254,8 +285,45 @@ struct Prepared {
 
 impl Prepared {
     fn skipped() -> Self {
-        Self { track: None, beats: 0, bpm: 0.0, phrases: 0, cues: 0 }
+        Self {
+            track: None,
+            on_drive: String::new(),
+            analysis: Vec::new(),
+            beats: 0,
+            bpm: 0.0,
+            phrases: 0,
+            cues: 0,
+        }
     }
+
+    /// Put it on the drive, and read every analysis file back before calling it
+    /// written.
+    fn commit(&self, destination: &Destination, source: &Path) -> Result<()> {
+        destination.copy_in(&self.on_drive, source)?;
+        for (at, bytes) in &self.analysis {
+            destination.write(at, bytes)?;
+            anlz::inspect(&destination.read(at)?)
+                .with_context(|| format!("{at} did not read back off the drive"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Where this export is going, and — for an image — how big it needs to be.
+///
+/// The size has to be settled before a byte is written, so it is estimated from
+/// the audio plus a couple of megabytes a track for the analysis. That is
+/// generous for anything under about half an hour long.
+fn open_destination(args: &ExportArgs, files: &[PathBuf]) -> Result<Destination> {
+    if let Some(root) = &args.drive {
+        return Ok(Destination::Directory(root.clone()));
+    }
+    let image = args.image.as_ref().expect("clap requires one of --drive and --image");
+
+    let audio: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+    let analysis = files.len() as u64 * 2 * 1024 * 1024;
+    let capacity = capacity_for(audio + analysis);
+    Ok(Destination::Image(std::sync::Mutex::new(DriveImage::create(image, capacity, &args.label)?)))
 }
 
 fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
@@ -293,7 +361,7 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
     }
     let waveforms = waveform::analyze(&audio);
     let structure = listened.song_structure();
-    let analysis = anlz::Analysis {
+    let files = anlz::Analysis {
         on_drive_path: &on_drive,
         grid: &listened.grid,
         cues: &listened.cues,
@@ -325,26 +393,16 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
         ..pdb::Track::default()
     };
 
-    if !args.dry_run {
-        let audio_out = args.drive.join(on_drive.trim_start_matches('/'));
-        std::fs::create_dir_all(audio_out.parent().unwrap())?;
-        std::fs::copy(path, &audio_out)
-            .with_context(|| format!("copying {} to the drive", path.display()))?;
-
-        let anlz_out = args.drive.join(analyze_dir.trim_start_matches('/'));
-        std::fs::create_dir_all(&anlz_out)?;
-        for (extension, bytes) in
-            [("DAT", analysis.dat()), ("EXT", analysis.ext()), ("2EX", analysis.two_ex())]
-        {
-            let out = anlz_out.join(format!("ANLZ0000.{extension}"));
-            std::fs::write(&out, &bytes)?;
-            anlz::inspect(&std::fs::read(&out)?)
-                .with_context(|| format!("{} did not read back", out.display()))?;
-        }
-    }
+    let analysis = vec![
+        (format!("{analyze_dir}/ANLZ0000.DAT"), files.dat()),
+        (format!("{analyze_dir}/ANLZ0000.EXT"), files.ext()),
+        (format!("{analyze_dir}/ANLZ0000.2EX"), files.two_ex()),
+    ];
 
     Ok(Prepared {
         track: Some(track),
+        on_drive,
+        analysis,
         beats: listened.grid.beats.len(),
         bpm: listened.bpm,
         phrases: listened.structure.sections.len(),

@@ -19,6 +19,7 @@ anyhow = "1"
 base64 = "0.23.0"
 clap = { version = "4", features = ["derive", "env"] }
 ebur128 = "0.1"
+fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
 flacenc = "0.5"
 hound = "3.5"
 id3 = "1"

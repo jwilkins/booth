@@ -13,6 +13,7 @@ use musicai::audio::encode::{write_file, Codec, EncodeOptions};
 use musicai::audio::Audio;
 use musicai::cli::{ExportArgs, InputArgs};
 use musicai::commands;
+use musicai::export::image::DriveImage;
 use musicai::report::Collected;
 use rekordcrate::pdb::{Header, PageType, Row};
 
@@ -84,22 +85,38 @@ fn write_song_of(scratch: &Scratch, name: &str, seconds: f32) -> PathBuf {
     path
 }
 
-fn export(inputs: Vec<PathBuf>, drive: &Path) -> Vec<String> {
-    let args = ExportArgs {
+fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
+    ExportArgs {
         input: InputArgs { inputs, recursive: false },
-        drive: drive.to_path_buf(),
+        drive: None,
+        image: None,
+        label: "REKORDBOX".to_string(),
         bpm: None,
         playlist: "Sat 14/9".to_string(),
         dry_run: false,
-    };
+    }
+}
+
+fn export(inputs: Vec<PathBuf>, drive: &Path) -> Vec<String> {
+    let args = ExportArgs { drive: Some(drive.to_path_buf()), ..args_for(inputs) };
     let reporter = Collected::new();
     commands::export(&args, &reporter).expect("export failed");
     reporter.lines()
 }
 
+fn export_image(inputs: Vec<PathBuf>, image: &Path) -> Vec<String> {
+    let args = ExportArgs { image: Some(image.to_path_buf()), ..args_for(inputs) };
+    let reporter = Collected::new();
+    commands::export(&args, &reporter).expect("export to an image failed");
+    reporter.lines()
+}
+
 /// The tracks in the drive's database, as `(id, file path, analysis path)`.
 fn tracks_on(drive: &Path) -> Vec<(u32, String, String)> {
-    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    tracks_in(&std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap())
+}
+
+fn tracks_in(bytes: &[u8]) -> Vec<(u32, String, String)> {
     let mut cursor = Cursor::new(&bytes);
     let header = Header::read(&mut cursor).expect("rekordcrate could not read the database");
 
@@ -219,11 +236,9 @@ fn a_dry_run_writes_nothing() {
     let scratch = Scratch::new("dry");
     let drive = scratch.path("USB");
     let args = ExportArgs {
-        input: InputArgs { inputs: vec![write_song(&scratch, "one.flac")], recursive: false },
-        drive: drive.clone(),
-        bpm: None,
-        playlist: "test".to_string(),
+        drive: Some(drive.clone()),
         dry_run: true,
+        ..args_for(vec![write_song(&scratch, "one.flac")])
     };
     let reporter = Collected::new();
     commands::export(&args, &reporter).unwrap();
@@ -282,14 +297,144 @@ fn a_file_a_player_cannot_open_is_refused_rather_than_copied() {
     let path = scratch.path("fast.wav");
     write_file(&path, &fast, Codec::Wav, &EncodeOptions::default()).unwrap();
 
-    let args = ExportArgs {
-        input: InputArgs { inputs: vec![path], recursive: false },
-        drive: drive.clone(),
-        bpm: None,
-        playlist: "test".to_string(),
-        dry_run: false,
-    };
+    let args = ExportArgs { drive: Some(drive.clone()), ..args_for(vec![path]) };
     let error = commands::export(&args, &Collected::new()).unwrap_err().to_string();
     assert!(error.contains("1 of 1 files failed"), "{error}");
     assert!(!drive.join("Contents").exists(), "the unplayable file was copied anyway");
+}
+
+// -- disk images -----------------------------------------------------------
+
+/// Everything below is about the other shape a drive comes in: a raw `.img`
+/// with a partition table and a filesystem, which is what a player actually
+/// reads and what an emulator's USB slot takes.
+
+#[test]
+fn an_image_is_a_partitioned_fat32_volume() {
+    let scratch = Scratch::new("image-layout");
+    let image = scratch.path("REKORDBOX.img");
+    export_image(vec![write_song(&scratch, "one.flac")], &image);
+
+    let bytes = std::fs::read(&image).unwrap();
+    assert_eq!(bytes.len() % 512, 0, "an image is a whole number of sectors");
+    assert_eq!(&bytes[510..512], &[0x55, 0xaa], "no MBR signature");
+
+    // One partition, FAT32 with LBA addressing, starting at the usual megabyte.
+    let entry = 0x1be;
+    assert_eq!(bytes[entry + 4], 0x0c);
+    let start = u32::from_le_bytes(bytes[entry + 8..entry + 12].try_into().unwrap());
+    let count = u32::from_le_bytes(bytes[entry + 12..entry + 16].try_into().unwrap());
+    assert_eq!(start, 2048);
+    assert_eq!((start + count) as usize * 512, bytes.len(), "the partition should fill the disk");
+
+    // And the partition really is FAT32, which it says in its own boot sector.
+    let boot = start as usize * 512;
+    assert_eq!(&bytes[boot + 0x52..boot + 0x57], b"FAT32");
+    assert_eq!(&bytes[boot + 0x47..boot + 0x52], b"REKORDBOX  ");
+}
+
+#[test]
+fn an_image_holds_exactly_what_a_folder_would() {
+    let scratch = Scratch::new("image-same");
+    let source = write_song(&scratch, "one.flac");
+    let folder = scratch.path("USB");
+    let image = scratch.path("USB.img");
+
+    export(vec![source.clone()], &folder);
+    export_image(vec![source], &image);
+
+    let (_, file_path, analyze_path) = tracks_on(&folder).remove(0);
+    let opened = DriveImage::open(&image).unwrap();
+
+    // The database is byte-for-byte the same either way: nothing about where
+    // the drive is being written leaks into what is written.
+    let from_folder = std::fs::read(folder.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    assert_eq!(opened.read("/PIONEER/rekordbox/export.pdb").unwrap(), from_folder);
+
+    // So are the analysis files and the audio.
+    for extension in ["DAT", "EXT", "2EX"] {
+        let at = analyze_path.replace("ANLZ0000.DAT", &format!("ANLZ0000.{extension}"));
+        let on_disk = std::fs::read(folder.join(at.trim_start_matches('/'))).unwrap();
+        assert_eq!(opened.read(&at).unwrap(), on_disk, "{at} differs");
+    }
+    let audio = std::fs::read(folder.join(file_path.trim_start_matches('/'))).unwrap();
+    assert_eq!(opened.read(&file_path).unwrap(), audio);
+}
+
+#[test]
+fn the_database_in_an_image_is_the_one_a_player_would_walk() {
+    let scratch = Scratch::new("image-db");
+    let image = scratch.path("USB.img");
+    let inputs: Vec<PathBuf> =
+        (1..=3).map(|i| write_song(&scratch, &format!("track{i}.flac"))).collect();
+    export_image(inputs, &image);
+
+    let opened = DriveImage::open(&image).unwrap();
+    let tables =
+        musicai::export::pdb::inspect(&opened.read("/PIONEER/rekordbox/export.pdb").unwrap())
+            .unwrap();
+    let rows = |name: &str| tables.iter().find(|t| t.table == name).unwrap().rows;
+    assert_eq!(rows("Tracks"), 3);
+    assert_eq!(rows("PlaylistEntries"), 3);
+
+    // And the analysis each row points at is in the image, all three files.
+    let bytes = opened.read("/PIONEER/rekordbox/export.pdb").unwrap();
+    for (_, _, analyze_path) in tracks_in(&bytes) {
+        for extension in ["DAT", "EXT", "2EX"] {
+            let at = analyze_path.replace("ANLZ0000.DAT", &format!("ANLZ0000.{extension}"));
+            assert!(opened.read(&at).is_ok(), "{at} is missing from the image");
+        }
+    }
+}
+
+/// mtools is a FAT implementation with nothing to do with ours, so if it can
+/// read the image then the image is a FAT filesystem rather than merely
+/// something our own code agrees with itself about.
+///
+/// Skipped, loudly, where mtools is not installed.
+#[test]
+fn mtools_reads_the_image() {
+    let Ok(mdir) = which("mdir") else {
+        eprintln!("skipping: mtools is not installed (apt install mtools)");
+        return;
+    };
+
+    let scratch = Scratch::new("mtools");
+    let image = scratch.path("USB.img");
+    export_image(vec![write_song(&scratch, "one.flac")], &image);
+
+    let listing = std::process::Command::new(&mdir)
+        .env("MTOOLS_SKIP_CHECK", "1")
+        .arg("-i")
+        .arg(format!("{}@@1M", image.display()))
+        .arg("::/PIONEER/rekordbox")
+        .output()
+        .expect("running mdir");
+    let text = String::from_utf8_lossy(&listing.stdout);
+    assert!(listing.status.success(), "mdir failed: {}", String::from_utf8_lossy(&listing.stderr));
+    assert!(text.contains("REKORDBOX"), "the volume label is wrong: {text}");
+    assert!(text.contains("EXPORT"), "no export.pdb in {text}");
+
+    // Pull the database back out with mtools and check it is the same bytes.
+    let extracted = scratch.path("export.pdb");
+    let status = std::process::Command::new(which("mcopy").unwrap())
+        .env("MTOOLS_SKIP_CHECK", "1")
+        .arg("-i")
+        .arg(format!("{}@@1M", image.display()))
+        .arg("::/PIONEER/rekordbox/export.pdb")
+        .arg(&extracted)
+        .status()
+        .expect("running mcopy");
+    assert!(status.success(), "mcopy failed");
+
+    let ours = DriveImage::open(&image).unwrap().read("/PIONEER/rekordbox/export.pdb").unwrap();
+    assert_eq!(std::fs::read(&extracted).unwrap(), ours);
+}
+
+fn which(program: &str) -> Result<PathBuf, ()> {
+    let path = std::env::var_os("PATH").ok_or(())?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+        .ok_or(())
 }

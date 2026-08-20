@@ -707,6 +707,9 @@ than described by hand. What exists:
 - **`pdb.rs`** — `export.pdb`, the DeviceSQL database: pages, heaps, the row index that
   builds backwards from the end of each page, the string encodings, and rows for tracks,
   artists, albums, genres, labels, keys, colours, the browse menu, and the playlist tree.
+- **`image.rs`** — the drive as a disk image rather than a folder: a master boot record
+  with one FAT32 partition, which is the shape a player reads and the shape an emulator's
+  USB slot takes.
 - **`inspect()` in both** — readers written from the format documentation rather than
   from the writers, sharing no code with them: the beginnings of SAFE-1's verifier.
 
@@ -774,10 +777,32 @@ synthetic track and a favourable one; the honest limits are:
 - **No accuracy figures against a labelled set yet.** ANA-2 and ANA-4 ask for measured
   numbers on real music, and there is no key detection at all.
 
+### Getting to a player without a player
+
+[cdj3k-emu](https://github.com/nsaintot/cdj3k-emu) boots real CDJ-3000 firmware under
+QEMU and exposes a virtual USB slot that takes a raw `.img`. That is phase 0's exit
+criterion reachable from a desk rather than a booth, and it is why `--image` exists: the
+guest mounts partition 1 as FAT32 at `/media/usb/sdb1`, which is exactly what we now
+write.
+
+It is not a substitute for the real thing and it does not remove the hardware
+requirement, for three reasons worth writing down:
+
+- **Apple Silicon macOS only.** HVF, vmnet and CoreAudio. There is no Linux build, so it
+  cannot run in CI, and the checks that gate a merge stay the parser-based ones.
+- **It ships no firmware.** A CDJ-3000 `.UPD` and its decryption key have to come from
+  the user. Neither this project nor that one can supply them.
+- **It is an emulator.** Faithful enough to run EP122, explicitly not a forensic
+  recreation. A drive it accepts is strong evidence; a drive a CDJ accepts is proof.
+
+What it can settle that nothing else here can: whether the database is browsable, whether
+the three-band waveform draws, whether phrases appear under it, and — the one genuinely
+open question in the format — whether a cue point written as type 1 shows up at all.
+
 ### Next
 
-1. Hardware. Everything here is checked against a parser, which is not the same as
-   checked against a CDJ, and closing that gap is what is left of phase 0.
+1. A player, emulated or real. Everything here is checked against a parser, which is not
+   the same as checked against a CDJ, and closing that gap is what is left of phase 0.
 2. Key detection, the one analysis requirement with nothing behind it.
 3. Accuracy measured against hand-labelled real music, rather than against synthesis.
 4. `PVBR`, so variable-bitrate mp3s seek correctly.
