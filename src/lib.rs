@@ -4,6 +4,7 @@
 //! Everything runs on the machine it is invoked on. Nothing is uploaded, and
 //! nothing is downloaded at run time.
 
+pub mod analysis;
 pub mod audio;
 pub mod cli;
 pub mod commands;

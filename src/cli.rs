@@ -291,21 +291,13 @@ pub struct AnlzArgs {
     #[arg(long, short = 'o', value_name = "DIR")]
     pub output: Option<PathBuf>,
 
-    /// Tempo, in BPM, applied to every file named.
+    /// Override the detected tempo, in BPM.
     ///
-    /// There is no beat detector yet, so the grid has to be given rather than
-    /// found. This is the first thing that changes.
+    /// The beats are still tracked against the audio; this only says how far
+    /// apart they are, which is what a detector gets wrong when it hears a
+    /// track at half or double speed.
     #[arg(long, value_name = "BPM")]
-    pub bpm: f64,
-
-    /// Where the first beat falls, in milliseconds.
-    #[arg(long, value_name = "MS", default_value_t = 0)]
-    pub first_beat: u32,
-
-    /// A hot cue position, in milliseconds. Repeat for more; they are lettered
-    /// A onwards in the order given.
-    #[arg(long = "hot-cue", value_name = "MS")]
-    pub hot_cues: Vec<u32>,
+    pub bpm: Option<f64>,
 
     /// The path at which the player will find the audio, if it is not going to
     /// be `/Contents/<filename>`.
@@ -322,16 +314,12 @@ pub struct ExportArgs {
     #[arg(long, short = 'o', value_name = "DIR")]
     pub drive: PathBuf,
 
-    /// Tempo, in BPM, applied to every file named.
+    /// Override the detected tempo, in BPM, for every file named.
     ///
-    /// There is no beat detector yet, so the grid has to be given rather than
-    /// found. This is the next thing to change.
+    /// The beats are still tracked against the audio; this only says how far
+    /// apart they are.
     #[arg(long, value_name = "BPM")]
-    pub bpm: f64,
-
-    /// Where the first beat falls, in milliseconds.
-    #[arg(long, value_name = "MS", default_value_t = 0)]
-    pub first_beat: u32,
+    pub bpm: Option<f64>,
 
     /// Name of the playlist the exported tracks go into.
     #[arg(long, value_name = "NAME", default_value = "musicai")]

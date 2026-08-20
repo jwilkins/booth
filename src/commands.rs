@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 
+use crate::analysis;
 use crate::audio::decode::decode_file;
 use crate::audio::encode::{write_file, Codec, EncodeOptions};
 use crate::cli::{
@@ -14,7 +15,7 @@ use crate::cli::{
     StemsArgs, Step, TagArgs,
 };
 use crate::discover;
-use crate::export::{anlz, pdb, waveform, BeatGrid, Cue};
+use crate::export::{anlz, pdb, waveform};
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
@@ -75,9 +76,6 @@ fn partition(paths: &[PathBuf], results: Vec<Result<Vec<String>>>) -> (Vec<Strin
 /// against a player once the other half lands.
 pub fn anlz(args: &AnlzArgs, reporter: &dyn Reporter) -> Result<()> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
-    if args.hot_cues.len() > 8 {
-        bail!("a player has eight hot cues, A to H; {} were given", args.hot_cues.len());
-    }
     let progress = Progress::new(reporter, files.len());
 
     let results: Vec<Result<Vec<String>>> = files
@@ -102,16 +100,10 @@ pub fn anlz(args: &AnlzArgs, reporter: &dyn Reporter) -> Result<()> {
 
 fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
     let audio = decode_file(path)?;
-    let duration_ms = (audio.duration_secs() * 1000.0).round() as u32;
     let waveforms = waveform::analyze(&audio);
-    let grid = BeatGrid::constant(args.bpm, args.first_beat, duration_ms);
-    if grid.is_empty() {
-        bail!("a tempo of {} BPM produces no beats", args.bpm);
-    }
-
-    let mut cues = vec![Cue::memory(args.first_beat)];
-    for (i, &at) in args.hot_cues.iter().enumerate() {
-        cues.push(Cue::hot(i as u8 + 1, at));
+    let listened = analysis::analyze_at(&audio, args.bpm);
+    if !listened.found_beats() {
+        bail!("no beat could be found; pass --bpm to say what the tempo is");
     }
 
     let name = path
@@ -120,12 +112,13 @@ fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
         .ok_or_else(|| anyhow::anyhow!("{} has no usable file name", path.display()))?;
     let on_drive = args.on_drive_path.clone().unwrap_or_else(|| format!("/Contents/{name}"));
 
+    let structure = listened.song_structure();
     let analysis = anlz::Analysis {
         on_drive_path: &on_drive,
-        grid: &grid,
-        cues: &cues,
+        grid: &listened.grid,
+        cues: &listened.cues,
         waveforms: &waveforms,
-        structure: None,
+        structure: structure.as_ref(),
     };
 
     let dir = args
@@ -151,12 +144,12 @@ fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
     }
 
     Ok(vec![format!(
-        "{}: {} beats at {:.2} BPM, {} hot cues, {} waveform columns\n  {}",
+        "{}: {:.2} BPM, {} beats, {} phrases, {} cues\n  {}",
         path.display(),
-        grid.beats.len(),
-        args.bpm,
-        args.hot_cues.len(),
-        waveforms.detail_len(),
+        listened.bpm,
+        listened.grid.beats.len(),
+        listened.structure.sections.len(),
+        listened.cues.iter().filter(|c| c.is_hot()).count(),
         written.join("\n  ")
     )])
 }
@@ -197,11 +190,13 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
             Ok(prepared) => {
                 if let Some(track) = prepared.track {
                     lines.push(format!(
-                        "{} -> {} ({} beats, {} waveform columns)",
+                        "{} -> {} ({:.2} BPM, {} beats, {} phrases, {} cues)",
                         path.display(),
                         track.file_path,
+                        prepared.bpm,
                         prepared.beats,
-                        prepared.columns
+                        prepared.phrases,
+                        prepared.cues
                     ));
                     tracks.push(track);
                 }
@@ -252,12 +247,14 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
 struct Prepared {
     track: Option<pdb::Track>,
     beats: usize,
-    columns: usize,
+    bpm: f64,
+    phrases: usize,
+    cues: usize,
 }
 
 impl Prepared {
     fn skipped() -> Self {
-        Self { track: None, beats: 0, columns: 0 }
+        Self { track: None, beats: 0, bpm: 0.0, phrases: 0, cues: 0 }
     }
 }
 
@@ -290,19 +287,18 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
     let analyze_dir = format!("/PIONEER/USBANLZ/P{:03}/{id:08X}", id % 1000);
     let analyze_path = format!("{analyze_dir}/ANLZ0000.DAT");
 
-    let duration_ms = (audio.duration_secs() * 1000.0).round() as u32;
-    let grid = BeatGrid::constant(args.bpm, args.first_beat, duration_ms);
-    if grid.is_empty() {
-        bail!("a tempo of {} BPM produces no beats", args.bpm);
+    let listened = analysis::analyze_at(&audio, args.bpm);
+    if !listened.found_beats() {
+        bail!("no beat could be found; pass --bpm to say what the tempo is");
     }
     let waveforms = waveform::analyze(&audio);
-    let cues = [Cue::memory(args.first_beat)];
+    let structure = listened.song_structure();
     let analysis = anlz::Analysis {
         on_drive_path: &on_drive,
-        grid: &grid,
-        cues: &cues,
+        grid: &listened.grid,
+        cues: &listened.cues,
         waveforms: &waveforms,
-        structure: None,
+        structure: structure.as_ref(),
     };
 
     let file_size = std::fs::metadata(path).map(|m| m.len() as u32).unwrap_or(0);
@@ -313,7 +309,7 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
         album: metadata.album.clone().unwrap_or_default(),
         file_path: on_drive.clone(),
         analyze_path,
-        tempo_x100: (args.bpm * 100.0).round() as u32,
+        tempo_x100: (listened.bpm * 100.0).round() as u32,
         duration_secs: audio.duration_secs().round() as u16,
         sample_rate: audio.sample_rate,
         sample_depth: 16,
@@ -347,7 +343,13 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
         }
     }
 
-    Ok(Prepared { track: Some(track), beats: grid.beats.len(), columns: waveforms.detail_len() })
+    Ok(Prepared {
+        track: Some(track),
+        beats: listened.grid.beats.len(),
+        bpm: listened.bpm,
+        phrases: listened.structure.sections.len(),
+        cues: listened.cues.iter().filter(|c| c.is_hot()).count(),
+    })
 }
 
 /// A folder name a FAT filesystem and a player will both accept.

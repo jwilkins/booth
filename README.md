@@ -379,12 +379,12 @@ Only the tag blocks are rewritten; the audio is left byte-for-byte alone.
 Build a drive: the audio, the analysis, and the database that indexes them.
 
 ```sh
-musicai export ~/Music/set -r --bpm 128 --playlist "Sat 14/9" -o /Volumes/USB
+musicai export ~/Music/set -r --playlist "Sat 14/9" -o /Volumes/USB
 ```
 
 ```
-set/01 - opener.flac -> /Contents/Peverelist/01 - opener.flac (1536 beats, 55350 waveform columns)
-set/02 - marius.flac -> /Contents/Batu/02 - marius.flac (1478 beats, 53250 waveform columns)
+set/01 - opener.flac -> /Contents/Peverelist/01 - opener.flac (128.02 BPM, 1536 beats, 6 phrases, 5 cues)
+set/02 - marius.flac -> /Contents/Batu/02 - marius.flac (130.00 BPM, 1478 beats, 4 phrases, 4 cues)
 wrote /Volumes/USB/PIONEER/rekordbox/export.pdb: 20 tables, 41 rows, verified
 ```
 
@@ -396,22 +396,63 @@ The drive comes out shaped the way a player expects:
 /PIONEER/rekordbox/export.pdb          the database that points at both
 ```
 
+Each track is listened to on the way past: the beats are found, the track is divided into
+phrases, and cue points are set at the phrase boundaries and where a voice comes in — see
+[What it hears](#what-it-hears). `--bpm` overrides the tempo when the detector gets it
+wrong; the beats are still tracked against the audio, so the grid stays where the music
+is.
+
 Title, artist, album, year and track number come from the file's own tags where it has
 them. Everything named goes into one playlist, `--playlist` names it, and `--dry-run`
 reports what would be written without touching the drive.
 
 Files a player cannot open are refused rather than copied — a file that fails at the gig
 is worse on the drive than off it — which today means checking the container and the
-sample rate. `--bpm` is required because there is still no beat detector.
+sample rate.
 
 Once the database is written it is read back off the drive and walked the way a player
 walks it, and the command fails rather than reporting success if that does not work.
 
-**What is missing before this plays in a club:** cue points and phrase analysis are not
-yet plumbed through from `export` (the writer underneath handles both — see
-[Anlz](#anlz)), there is no beat detection, and none of it has been tried on real
-hardware. It has been checked against an independent parser, which is not the same
-thing.
+**What is missing before this plays in a club:** none of it has been tried on real
+hardware. It has been checked against an independent parser, which is not the same thing.
+
+## What it hears
+
+Analysis is signal processing rather than a model: it runs offline in a couple of seconds
+a track, it explains itself, and everything it decides is visible and correctable.
+
+**The beats.** Spectral flux gives an onset envelope; its autocorrelation, weighted
+towards the tempo a listener would pick, gives the period; and a dynamic program then
+chooses the sequence of beat times that best balances landing on the onsets against
+keeping time. That last step is Ellis's, from 2007, and it is hard to beat without a
+neural network. The bar lines go where the kicks are.
+
+A tempo read off the autocorrelation can only be a whole number of frames, which is a
+step of more than a beat per minute — too coarse to hold a mix together. So the tempo is
+read back off the tracked beats instead, and if a straight line fits them, the grid
+becomes that line. A track made to a click comes out at one exact tempo; one that drifts
+keeps its drift, and each beat carries the tempo measured around it.
+
+**The phrases.** Each bar is described by where its energy sits, every bar is compared
+with every other, and the moments where the music stops resembling what came before are
+the boundaries — Foote's method. Boundaries snap to four bars, because arrangements are
+built in fours. Sections are then named from how much is happening in them: intro, build,
+drop, break, outro, which are the phrase types the format calls a "high mood" track and
+the words a DJ uses about a record. Those names are heuristic and the positions are not;
+a breakdown that leads into a drop can honestly be called either.
+
+**The cues.** A memory cue at the first downbeat, where a player parks when the track
+loads, and up to eight hot cues: one at each phrase boundary, and one where a voice comes
+in. When there are more than eight candidates the drops and the first vocal survive and
+the builds are dropped. Everything lands on a beat, and on a downbeat where there is one
+close by.
+
+Finding the voice without separating the stems means measuring energy that is both
+centred in the stereo image and in the range a voice occupies. That finds a sung line
+entering over a backing; it will also fire on a centred lead synth. Separating the stems
+properly would answer it better and costs minutes a track rather than milliseconds —
+which is the trade [the spec](docs/rekordbox-replacement-spec.md) proposes making later,
+in the background, for the tracks that are going to a gig.
 
 ## Anlz
 
@@ -419,12 +460,12 @@ Write the per-track analysis files a Pioneer / AlphaTheta player reads: the beat
 the cues, and the waveforms it draws.
 
 ```sh
-musicai anlz track.flac --bpm 128 --first-beat 412 --hot-cue 412 --hot-cue 60000
+musicai anlz track.flac
 # -> track.DAT   track.EXT   track.2EX
 ```
 
 ```
-track.flac: 1536 beats at 128.00 BPM, 2 hot cues, 55350 waveform columns
+track.flac: 128.02 BPM, 1536 beats, 6 phrases, 5 cues
   track.DAT: 6 sections
   track.EXT: 10 sections
   track.2EX: 3 sections

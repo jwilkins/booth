@@ -694,27 +694,47 @@ export format).
 
 ## 14. Development status
 
-Phase 0 is most of the way there: a drive can be written. What exists, in `src/export/`:
+Phase 0 is nearly done: a drive can be written, and the tracks on it are analysed rather
+than described by hand. What exists:
+
+**`src/export/`** — the drive.
 
 - **`anlz.rs`** — the per-track analysis files: `PPTH` paths, `PQTZ` beat grids, `PCOB`
   and `PCO2` cue lists with colours, comments and loops, all seven waveform sections, and
   the masked `PSSI` phrase analysis, assembled into `.DAT`, `.EXT` and `.2EX`.
-- **`waveform.rs`** — generating those waveforms from decoded audio in one pass: a
-  three-band split, per-column peaks at 150 columns a second, and the five different
-  packings the sections use, down to the CDJ-3000's three bytes of mid, high and low.
-- **`pdb.rs`** — `export.pdb`, the DeviceSQL database that indexes everything: the page
-  and heap layout, the row index that builds backwards from the end of each page, the
-  string encodings, and rows for tracks, artists, albums, genres, labels, keys, colours,
-  the browse menu, and the playlist tree and its entries.
+- **`waveform.rs`** — generating those waveforms from decoded audio in one pass, in the
+  five packings the sections use, down to the CDJ-3000's three bytes of mid, high and low.
+- **`pdb.rs`** — `export.pdb`, the DeviceSQL database: pages, heaps, the row index that
+  builds backwards from the end of each page, the string encodings, and rows for tracks,
+  artists, albums, genres, labels, keys, colours, the browse menu, and the playlist tree.
 - **`inspect()` in both** — readers written from the format documentation rather than
-  from the writers, sharing no code with them. Together they are the drive verifier
-  SAFE-1 calls for.
-- **`musicai export`** — builds the whole drive: audio into `/Contents`, analysis into
-  `/PIONEER/USBANLZ`, database into `/PIONEER/rekordbox`, then reads the database back
-  off the drive and walks it before reporting success.
-- **`musicai anlz`** — the analysis files alone, for looking at one track.
-- **Cross-checks** against `rekordcrate`, an independent implementation of both formats,
-  because our own reader agreeing with our own writer proves nothing.
+  from the writers, sharing no code with them: the beginnings of SAFE-1's verifier.
+
+**`src/analysis/`** — what goes on it. Signal processing, not a model: seconds a track,
+offline, and every decision visible.
+
+- **`features.rs`** — one pass over the audio producing spectral flux, band energies,
+  level and a vocal-presence estimate. A five-minute track measures out at about a
+  megabyte rather than a spectrogram's few hundred.
+- **`tempo.rs`** — ANA-1 and ANA-2. Autocorrelation with a perceptual tempo prior, then
+  Ellis's dynamic program for the beat times, then the downbeat from where the kicks are.
+  The tempo is read back off the tracked beats rather than off the autocorrelation lag,
+  which is only accurate to about a beat per minute; where a constant tempo fits the
+  beats, the grid becomes that constant tempo exactly.
+- **`structure.rs`** — ANA-5. Foote's self-similarity novelty over bar-synchronous band
+  features, snapped to four bars, labelled intro / build / drop / break / outro from how
+  much is happening in each section.
+- **`cues.rs`** — PREP-2, in its automatic form. A memory cue at the first downbeat and up
+  to eight hot cues at the phrase boundaries and where a voice enters, named, coloured by
+  kind, and quantised to the grid.
+
+**Commands.** `musicai export` builds the drive and `musicai anlz` writes one track's
+analysis; both listen to the audio, and both read back what they wrote before reporting
+success. `--bpm` is an override rather than a requirement — and it overrides the *tempo*,
+not the grid, so the beats stay tracked against the audio.
+
+**Cross-checks** against `rekordcrate`, an independent implementation of both formats,
+because our own reader agreeing with our own writer proves nothing.
 
 ### What the first pass turned up
 
@@ -722,30 +742,44 @@ Comparing the documentation against a real rekordbox export and against a second
 corrected several things, and left one open:
 
 - **`PCP2` cue entries are longer than the documentation requires.** The format spec
-  allows an entry to end after its colour; real rekordbox writes twenty more bytes, and a
-  parser built from real files expects them.
+  allows an entry to end after its colour; real rekordbox writes twenty more bytes.
 - **`memory_count` is not a count.** A real export writes `0xffffffff` there even for an
   empty cue list.
 - **Row heaps are four-byte aligned**, and `free_size` is what is left after the heap
-  *and* the row index — which is how a written page can be checked against a real one
-  arithmetically rather than by eye.
-- **Two sections nobody has documented.** A real `.EXT` contains `PQT2` — an extended
-  beat grid where `PQTZ` sits in the `.DAT` — and a real `.2EX` ends with a short `PWVC`.
-  Whether a CDJ-3000 needs either is open question 2.
-- **Two parsers disagree about what a cue point is.** The format documentation says a cue
-  entry's type is 1 for a point and 2 for a loop, and says it twice; `rekordcrate` defines
-  the point as 0 and cannot read a 1 at all. We follow the documentation. This one has
-  teeth now that whole drives are being written: if the documentation is wrong, cues will
-  not appear on the player. The rekordbox export available to check against has no cues
-  in it, so it can only be settled on hardware.
+  *and* the row index.
+- **Two sections nobody has documented.** A real `.EXT` contains `PQT2` — an extended beat
+  grid where `PQTZ` sits in the `.DAT` — and a real `.2EX` ends with a short `PWVC`.
+- **Two parsers disagree about what a cue point is.** The documentation says a cue entry's
+  type is 1 for a point and 2 for a loop, and says it twice; `rekordcrate` defines the
+  point as 0 and cannot read a 1 at all. We follow the documentation. This has teeth now
+  that every exported track carries cues: if the documentation is wrong, they will not
+  appear on the player.
+
+### What the analysis gets right, and where it does not
+
+On a synthetic hundred-second arrangement at 126 BPM, with the drums entering at bar 8,
+dropping out at 24 for a vocal breakdown, returning at 32, and a second vocal at 48, the
+detector reports 126.05 BPM and cues at 0.02 s (intro), 15.23 s (drop), 45.71 s (break),
+60.94 s (drop) and 91.43 s (vocal) — every boundary on the correct bar. That is a
+synthetic track and a favourable one; the honest limits are:
+
+- **Vocals are inferred, not separated.** Centred energy in the vocal band finds a sung
+  line over a wide backing and also fires on a centred lead. The stems would answer it
+  properly and cost minutes a track; §8's render queue is where that belongs.
+- **Phrase labels are heuristic.** A breakdown that leads into a drop can be called
+  either. The boundaries are the part to trust.
+- **Heavy rubato is not handled.** The tracker follows one tempo estimate, so a live
+  recording that drifts across a set is beyond it. Per-beat tempo is recorded, so a
+  gentle drift survives; a rallentando will not.
+- **No accuracy figures against a labelled set yet.** ANA-2 and ANA-4 ask for measured
+  numbers on real music, and there is no key detection at all.
 
 ### Next
 
-1. Hardware. Everything above is checked against a parser, which is not the same as
-   checked against a CDJ, and the gap between those two is exactly what phase 0 exists to
-   close.
-2. Cue points and phrases through `export`, which the writers underneath already handle.
-3. The tempo and beatgrid analyser, so `--bpm` stops being a required argument.
+1. Hardware. Everything here is checked against a parser, which is not the same as
+   checked against a CDJ, and closing that gap is what is left of phase 0.
+2. Key detection, the one analysis requirement with nothing behind it.
+3. Accuracy measured against hand-labelled real music, rather than against synthesis.
 4. `PVBR`, so variable-bitrate mp3s seek correctly.
 
 ## 15. Sources

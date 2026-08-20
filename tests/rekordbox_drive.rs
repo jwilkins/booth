@@ -39,24 +39,48 @@ impl Drop for Scratch {
     }
 }
 
-/// Four seconds with something in every frequency band.
-fn song() -> Audio {
-    let frames = SAMPLE_RATE as usize * 4;
-    let plane: Vec<f32> = (0..frames)
-        .map(|i| {
+const BPM: f64 = 128.0;
+
+/// A track with a beat in it, because the exporter now listens for one.
+///
+/// Kick, hat and a pad, four to the bar, with the drums dropping out for the
+/// middle third so there is an arrangement as well as a pulse.
+fn song(seconds: f32) -> Audio {
+    let beat = 60.0 / BPM as f32;
+    let beats = (seconds / beat) as usize;
+    let len = SAMPLE_RATE as usize / 2 + (SAMPLE_RATE as f32 * seconds) as usize;
+    let mut plane = vec![0.0f32; len];
+    let two_pi = 2.0 * std::f32::consts::PI;
+
+    for index in 0..beats {
+        let quiet = index > beats / 3 && index < beats * 2 / 3;
+        let (kick, hat) = if quiet { (0.3f32, 0.0f32) } else { (1.0, 0.25) };
+        let start = SAMPLE_RATE as usize / 2 + (SAMPLE_RATE as f32 * beat * index as f32) as usize;
+        for i in 0..(SAMPLE_RATE as usize / 4) {
+            let at = start + i;
+            if at >= len {
+                break;
+            }
             let t = i as f32 / SAMPLE_RATE as f32;
-            let two_pi = 2.0 * std::f32::consts::PI;
-            0.5 * (two_pi * 60.0 * t).sin()
-                + 0.25 * (two_pi * 700.0 * t).sin()
-                + 0.1 * (two_pi * 9_000.0 * t).sin()
-        })
-        .collect();
+            plane[at] += 0.5
+                * (kick * (-30.0 * t).exp() * (two_pi * 55.0 * t).sin()
+                    + hat * (-60.0 * t).exp() * (two_pi * 9_000.0 * t).sin());
+        }
+    }
+    for (i, sample) in plane.iter_mut().enumerate() {
+        let t = i as f32 / SAMPLE_RATE as f32;
+        *sample += 0.15 * (two_pi * 320.0 * t).sin();
+    }
     Audio::new(SAMPLE_RATE, vec![plane.clone(), plane]).unwrap()
 }
 
 fn write_song(scratch: &Scratch, name: &str) -> PathBuf {
+    write_song_of(scratch, name, 10.0)
+}
+
+fn write_song_of(scratch: &Scratch, name: &str, seconds: f32) -> PathBuf {
     let path = scratch.path(name);
-    write_file(&path, &song(), Codec::Flac, &EncodeOptions::default()).unwrap();
+    write_file(&path, &song(seconds), Codec::Flac, &EncodeOptions::default()).unwrap();
     path
 }
 
@@ -64,8 +88,7 @@ fn export(inputs: Vec<PathBuf>, drive: &Path) -> Vec<String> {
     let args = ExportArgs {
         input: InputArgs { inputs, recursive: false },
         drive: drive.to_path_buf(),
-        bpm: 128.0,
-        first_beat: 412,
+        bpm: None,
         playlist: "Sat 14/9".to_string(),
         dry_run: false,
     };
@@ -168,8 +191,10 @@ fn the_analysis_on_the_drive_agrees_with_the_database() {
     // The analysis file carries its own copy of where the audio is, and the two
     // must agree or the player draws one track's waveform over another's.
     assert_eq!(summary("PPTH"), file_path);
-    // Four seconds at 128 BPM from 412 ms in.
-    assert_eq!(summary("PQTZ"), "8 beats");
+    // Ten seconds at 128 BPM is a shade over twenty beats, and the tracker
+    // extends its grid a little past the music at both ends.
+    let beats: usize = summary("PQTZ").trim_end_matches(" beats").parse().unwrap();
+    assert!((18..=24).contains(&beats), "{beats} beats for a ten-second track at 128 BPM");
 }
 
 #[test]
@@ -196,8 +221,7 @@ fn a_dry_run_writes_nothing() {
     let args = ExportArgs {
         input: InputArgs { inputs: vec![write_song(&scratch, "one.flac")], recursive: false },
         drive: drive.clone(),
-        bpm: 128.0,
-        first_beat: 0,
+        bpm: None,
         playlist: "test".to_string(),
         dry_run: true,
     };
@@ -206,6 +230,47 @@ fn a_dry_run_writes_nothing() {
 
     assert!(!drive.exists(), "a dry run created {}", drive.display());
     assert!(reporter.lines().iter().any(|l| l.contains("would write")));
+}
+
+#[test]
+fn a_long_enough_track_gets_its_phrases_onto_the_drive() {
+    let scratch = Scratch::new("phrases");
+    let drive = scratch.path("USB");
+    // Forty seconds is enough bars for the phrase detector to have something to
+    // divide up; ten is not.
+    export(vec![write_song_of(&scratch, "long.flac", 40.0)], &drive);
+
+    let (_, _, analyze_path) = tracks_on(&drive).remove(0);
+    let ext = drive.join(analyze_path.trim_start_matches('/')).with_extension("EXT");
+    let sections = musicai::export::anlz::inspect(&std::fs::read(&ext).unwrap()).unwrap();
+
+    let phrases = sections
+        .iter()
+        .find(|s| s.fourcc == "PSSI")
+        .unwrap_or_else(|| panic!("no phrase analysis in {}", ext.display()));
+    assert!(phrases.summary.ends_with("phrases"), "{}", phrases.summary);
+    let count: usize = phrases.summary.trim_end_matches(" phrases").parse().unwrap();
+    assert!(count >= 2, "only {count} phrases in a track that changes twice");
+}
+
+#[test]
+fn the_cues_on_the_drive_are_named_and_coloured() {
+    let scratch = Scratch::new("cues");
+    let drive = scratch.path("USB");
+    export(vec![write_song_of(&scratch, "long.flac", 40.0)], &drive);
+
+    let (_, _, analyze_path) = tracks_on(&drive).remove(0);
+    let dat = drive.join(analyze_path.trim_start_matches('/'));
+    let sections = musicai::export::anlz::inspect(&std::fs::read(&dat).unwrap()).unwrap();
+
+    let hot = sections
+        .iter()
+        .filter(|s| s.fourcc == "PCOB" && s.summary.contains("hot"))
+        .map(|s| s.summary.clone())
+        .next()
+        .expect("no hot cue list");
+    let count: usize = hot.trim_end_matches(" hot cues").parse().unwrap();
+    assert!((1..=8).contains(&count), "{count} hot cues");
 }
 
 #[test]
@@ -220,8 +285,7 @@ fn a_file_a_player_cannot_open_is_refused_rather_than_copied() {
     let args = ExportArgs {
         input: InputArgs { inputs: vec![path], recursive: false },
         drive: drive.clone(),
-        bpm: 128.0,
-        first_beat: 0,
+        bpm: None,
         playlist: "test".to_string(),
         dry_run: false,
     };
