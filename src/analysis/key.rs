@@ -1,20 +1,25 @@
 //! Working out a track's musical key.
 //!
-//! Two steps, both standard. A chromagram folds the whole spectrum down to how
-//! much of each of the twelve pitch classes is present, summed across every
-//! octave and averaged over the track. Then the Krumhansl–Schmuckler method
-//! correlates that against a profile of what each of the twenty-four keys
-//! sounds like, and the best match wins.
+//! Two steps, both standard. A chromagram folds the spectrum down to how much
+//! of each of the twelve pitch classes is present, averaged over the track;
+//! then the Krumhansl–Schmuckler method correlates that against a profile of
+//! what each of the twenty-four keys sounds like, and the best match wins.
 //!
 //! The output is what a DJ reads on the player: the Camelot code they mix by,
 //! and the classical name underneath it. A confidence comes with it, because a
 //! modal or key-ambiguous track has no one right answer and it is more honest
 //! to say the answer was close than to pick a side and sound certain.
 //!
-//! This wants pitch resolution the structural features do not, so it runs its
-//! own transform at a longer window rather than sharing theirs — a semitone in
-//! the bass is only a few hertz wide, and the 21 Hz bins of the shared 2048-
-//! point window would smear three of them into one.
+//! Two choices are made for the sake of real music rather than tidiness. The
+//! chromagram is gathered by reading the spectrum *at* each note's frequency
+//! and interpolating, rather than by dropping each FFT bin into the nearest
+//! pitch class: in the bass, where dance music carries its key, a semitone is
+//! only a few hertz wide and a bin dropped into the nearest class lands in the
+//! wrong one as often as not. And the key profiles are Sha'ath's — the ones the
+//! KeyFinder tool uses — rather than the classical Krumhansl–Kessler ones,
+//! because they were tuned on popular and electronic music and they tell major
+//! from minor on a bass-heavy track far better, which is exactly where the
+//! classical profiles fail.
 
 use realfft::num_complex::Complex32;
 use realfft::{RealFftPlanner, RealToComplex};
@@ -22,31 +27,33 @@ use std::sync::Arc;
 
 use crate::audio::Audio;
 
-/// A long window: 8192 points is 5.4 Hz per bin at 44.1 kHz, enough to tell
-/// two low semitones apart. Pitch does not move fast enough for the time
-/// smearing to matter.
-const N_FFT: usize = 8_192;
-const HOP: usize = 4_096;
-/// The lowest note counted, roughly C2. Below this the bins are still too wide
-/// to place a semitone, and there is little musical key information down there
-/// anyway — mostly kick drums.
-const MIN_HZ: f32 = 65.0;
-/// The highest, roughly C7. Above it the harmonics are a wash.
-const MAX_HZ: f32 = 2_100.0;
+/// A long window: 16384 points is 2.7 Hz per bin at 44.1 kHz. That is what lets
+/// the bass resolve — a semitone at C2 is 3.9 Hz, so a coarser window would put
+/// two low notes in one bin. Pitch does not move fast enough for the time
+/// smearing a window this long brings to matter.
+const N_FFT: usize = 16_384;
+const HOP: usize = 8_192;
+/// The lowest and highest notes gathered, as MIDI numbers: C2 (36) to C7 (96).
+/// Below C2 even this window cannot separate semitones, and there is little key
+/// information down there anyway — mostly kick drums; above C7 it is harmonics.
+const MIN_MIDI: i32 = 36;
+const MAX_MIDI: i32 = 96;
 /// The twelve pitch classes.
 const PITCHES: usize = 12;
 
 /// The pitch-class names, sharp-spelled, indexed from C.
 const NAMES: [&str; PITCHES] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
-/// The Krumhansl–Kessler major profile: the relative weight a listener gives
-/// each scale degree, starting from the tonic. Rotated to each of twelve tonics
-/// it becomes the template for that major key.
-const MAJOR_PROFILE: [f32; PITCHES] =
-    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-/// And the minor profile.
-const MINOR_PROFILE: [f32; PITCHES] =
-    [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+/// Sha'ath's major profile: the relative weight each scale degree carries,
+/// starting from the tonic. Rotated to each of twelve tonics it becomes the
+/// template for that major key. These are the weights the KeyFinder tool uses,
+/// derived on popular and electronic music, from Ibrahim Sha'ath's 2011 thesis.
+const MAJOR_PROFILE: [f32; PITCHES] = [6.6, 2.0, 3.5, 2.3, 4.6, 4.0, 2.5, 5.2, 2.4, 3.7, 2.3, 3.4];
+/// And the minor profile. Its minor third (index 3, weight 5.4) sits just above
+/// its fifth, which is what tells a minor track from its parallel major on a
+/// record where the root and fifth dominate and the third is buried — the case
+/// the classical profiles get wrong.
+const MINOR_PROFILE: [f32; PITCHES] = [6.5, 2.7, 3.5, 5.4, 2.6, 3.5, 2.5, 5.2, 4.0, 2.7, 4.3, 3.2];
 
 /// Whether a key is major or minor. On the Camelot wheel these are the `B` and
 /// `A` suffixes.
@@ -142,7 +149,15 @@ fn chromagram(audio: &Audio) -> Option<[f32; PITCHES]> {
         .collect();
     let bins = N_FFT / 2 + 1;
     let bin_hz = sample_rate / N_FFT as f32;
-    let pitch_of = pitch_map(bin_hz, bins);
+    // The fractional bin each note sits at, worked out once. Reading the
+    // spectrum here rather than dropping bins into classes is what keeps the
+    // bass honest.
+    let note_bins: Vec<(usize, f32)> = (MIN_MIDI..=MAX_MIDI)
+        .map(|midi| {
+            let hz = 440.0 * 2.0f32.powf((midi - 69) as f32 / 12.0);
+            ((midi.rem_euclid(PITCHES as i32)) as usize, hz / bin_hz)
+        })
+        .collect();
 
     let mut chroma = [0.0f64; PITCHES];
     let mut frame = vec![0.0f32; N_FFT];
@@ -157,12 +172,13 @@ fn chromagram(audio: &Audio) -> Option<[f32; PITCHES]> {
             *sample = mono * window[i];
         }
         let _ = forward.process_with_scratch(&mut frame, &mut spectrum, &mut scratch);
-        for (bin, pitch) in pitch_of.iter().enumerate() {
-            if let Some(class) = pitch {
-                // Magnitude, not power: a chromagram tracks how present a note
-                // is, and power over-weights whatever happens to be loudest.
-                chroma[*class as usize] += spectrum[bin].norm() as f64;
-            }
+        for &(class, bin) in &note_bins {
+            // Magnitude, not power: a chromagram tracks how present a note is,
+            // and power over-weights whatever happens to be loudest. The value
+            // is read at the note's exact frequency, taking the strongest of
+            // the bin and its neighbours so a track tuned a little sharp or flat
+            // still lands on the right note.
+            chroma[class] += magnitude_at(&spectrum, bin) as f64;
         }
         start += HOP;
     }
@@ -178,21 +194,20 @@ fn chromagram(audio: &Audio) -> Option<[f32; PITCHES]> {
     Some(out)
 }
 
-/// Which pitch class each FFT bin belongs to, or `None` for the bins outside
-/// the range worth counting.
-fn pitch_map(bin_hz: f32, bins: usize) -> Vec<Option<u8>> {
-    (0..bins)
-        .map(|bin| {
-            let hz = bin as f32 * bin_hz;
-            if !(MIN_HZ..=MAX_HZ).contains(&hz) {
-                return None;
-            }
-            // MIDI note number, then reduced to a pitch class. 440 Hz is A4,
-            // MIDI 69; pitch class 9.
-            let midi = 69.0 + 12.0 * (hz / 440.0).log2();
-            Some((midi.round() as i32).rem_euclid(PITCHES as i32) as u8)
-        })
-        .collect()
+/// The spectrum magnitude at a fractional bin, interpolated, and taken as the
+/// strongest of that bin and the two either side. The neighbour search gives a
+/// little tolerance for a track that is not tuned to exactly 440 Hz, which many
+/// older and analogue-sourced records are not.
+fn magnitude_at(spectrum: &[Complex32], bin: f32) -> f32 {
+    let center = bin.round() as isize;
+    let mut best = 0.0f32;
+    for offset in -1..=1 {
+        let at = center + offset;
+        if at >= 0 && (at as usize) < spectrum.len() {
+            best = best.max(spectrum[at as usize].norm());
+        }
+    }
+    best
 }
 
 /// Match a chromagram against all twenty-four key profiles.

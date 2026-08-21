@@ -89,7 +89,7 @@ fn main() {
             title: track.title,
             ref_key: track.tonality.as_deref().and_then(Key::parse),
             got_key: listened.key.as_ref().map(|k| k.key),
-            ref_bpm: track.average_bpm,
+            ref_bpm: track.average_bpm.filter(|&b| b > 0.0),
             got_bpm: listened.bpm,
         });
         eprint!("\r  analysed {} tracks", rows.len());
@@ -125,30 +125,43 @@ fn report(rows: &[Row]) {
 
     let bpmed: Vec<&Row> = rows.iter().filter(|r| r.ref_bpm.is_some()).collect();
     let mut bpm_exact = 0usize;
-    let mut bpm_octave = 0usize;
+    let mut bpm_metrical = 0usize;
     let mut bpm_misses = Vec::new();
+    // The metrical relationships a beat tracker legitimately confuses: a track
+    // heard at half or double time, or at a triplet or dotted level (2/3, 3/2,
+    // 3/4, 4/3). A DJ would still call these related, even if beatmatching at
+    // the wrong one is a mistake.
+    let ratios = [0.5, 2.0, 2.0 / 3.0, 3.0 / 2.0, 3.0 / 4.0, 4.0 / 3.0];
     for row in &bpmed {
         let reference = row.ref_bpm.unwrap();
         if close(row.got_bpm, reference, 0.02) {
             bpm_exact += 1;
-        } else if close(row.got_bpm * 2.0, reference, 0.02)
-            || close(row.got_bpm / 2.0, reference, 0.02)
-        {
-            bpm_octave += 1;
+        } else if ratios.iter().any(|r| close(row.got_bpm * r, reference, 0.02)) {
+            bpm_metrical += 1;
         } else {
             bpm_misses.push((row, format!("{:.2} vs {:.2}", row.got_bpm, reference)));
         }
     }
 
+    // How many of the outright misses are a track called the wrong mode on the
+    // right root (A major for A minor). A cluster of these points at the key
+    // profiles rather than the chromagram.
+    let mode_flips = keyed
+        .iter()
+        .filter_map(|r| Some((r.ref_key?, r.got_key?)))
+        .filter(|(reference, got)| got.tonic == reference.tonic && got.mode != reference.mode)
+        .count();
+
     println!("\n== key ==  ({} tracks with a reference key)", keyed.len());
     if !keyed.is_empty() {
         percent("exact", exact, keyed.len());
         percent("exact or harmonically adjacent", exact + compatible, keyed.len());
+        percent("same root, wrong mode", mode_flips, keyed.len());
     }
     println!("\n== tempo ==  ({} tracks with a reference tempo)", bpmed.len());
     if !bpmed.is_empty() {
         percent("within 2%", bpm_exact, bpmed.len());
-        percent("within 2% at half or double", bpm_exact + bpm_octave, bpmed.len());
+        percent("within 2% at a metrical multiple", bpm_exact + bpm_metrical, bpmed.len());
     }
 
     print_misses("key disagreements", &key_misses);

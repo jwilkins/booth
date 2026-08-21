@@ -37,6 +37,13 @@ symphonia = { version = "0.6", default-features = false, features = [
     "pcm",
     "id3v1",
     "id3v2",
+    # Apple's containers and codecs: m4a is ISO-MP4 holding AAC or ALAC. A CDJ
+    # plays both, and a real library has a lot of them, so we decode them for
+    # analysis. Only decoding — the encoders stay LAME/flac/hound.
+    "isomp4",
+    "aac",
+    "alac",
+    "aiff",
 ] }
 ureq = "3.2.1"
 walkdir = "2"

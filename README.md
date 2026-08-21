@@ -2,7 +2,7 @@
 
 An audio tool in Rust, as a command-line program and as a macOS app. It does three things:
 
-- **Normalize** mp3, flac and wav files to a consistent loudness (EBU R128 / LUFS), either by
+- **Normalize** mp3, flac, wav, m4a and aiff files to a consistent loudness (EBU R128 / LUFS), either by
   re-encoding or by writing ReplayGain tags and leaving the audio untouched.
 - **Separate** a mix into three stems — vocals, melody and drums, using demucs.
 - **Tag** files by identifying them from their sound, via acoustic fingerprinting and
@@ -486,10 +486,16 @@ drop, break, outro, which are the phrase types the format calls a "high mood" tr
 the words a DJ uses about a record. Those names are heuristic and the positions are not;
 a breakdown that leads into a drop can honestly be called either.
 
-**The key.** A chromagram folds the whole spectrum down to how much of each of the twelve
-pitch classes is present, averaged over the track; the Krumhansl–Schmuckler method then
-correlates that against a profile of what each of the twenty-four keys sounds like, and
-the closest match wins. The output is the Camelot code a DJ mixes by (`8A`) and the
+**The key.** A chromagram folds the spectrum down to how much of each of the twelve pitch
+classes is present, averaged over the track; a profile-matching method then correlates
+that against a template of what each of the twenty-four keys sounds like, and the closest
+match wins. Two details are for real music rather than tidiness: the chromagram is read
+*at* each note's frequency and interpolated, not by dropping FFT bins into the nearest
+class — in the bass, where dance music carries its key, a semitone is a few hertz wide and
+the nearest-class approach lands wrong as often as right — and the key templates are
+[Sha'ath's](https://www.ibrahimshaath.co.uk/keyfinder/), the ones KeyFinder uses, which
+were tuned on popular and electronic music and tell major from minor on a bass-heavy track
+where the classical templates flip them. The output is the Camelot code a DJ mixes by (`8A`) and the
 classical name under it (`Am`), with a confidence, and a runner-up when the two best were
 a hair apart — usually the relative major/minor, which shares every note. A track with no
 tonal centre — a drum tool — is left without a key rather than assigned a wrong one.

@@ -732,10 +732,10 @@ offline, and every decision visible.
 - **`cues.rs`** — PREP-2, in its automatic form. A memory cue at the first downbeat and up
   to eight hot cues at the phrase boundaries and where a voice enters, named, coloured by
   kind, and quantised to the grid.
-- **`key.rs`** — ANA-4. A chromagram (its own longer transform, for the pitch resolution)
-  and Krumhansl–Schmuckler correlation against all twenty-four keys, reported as Camelot
-  and classical with a confidence. `Key::parse` reads the notations a library stores, both
-  for measuring against one and, later, for importing one.
+- **`key.rs`** — ANA-4. A chromagram read at each note's frequency (its own longer
+  transform, so the bass resolves) and Sha'ath-profile correlation against all twenty-four
+  keys, reported as Camelot and classical with a confidence. `Key::parse` reads the
+  notations a library stores, both for measuring against one and, later, for importing one.
 
 **Commands.** `musicai export` builds the drive and `musicai anlz` writes one track's
 analysis; both listen to the audio, and both read back what they wrote before reporting
