@@ -9,6 +9,7 @@
 
 pub mod cues;
 pub mod features;
+pub mod key;
 pub mod structure;
 pub mod tempo;
 
@@ -26,6 +27,9 @@ pub struct TrackAnalysis {
     pub structure: structure::Structure,
     /// A memory cue at the first downbeat, then up to eight hot cues.
     pub cues: Vec<Cue>,
+    /// The musical key, or `None` when the track has no tonal centre to find —
+    /// a drum tool, say. The confidence is carried on [`key::Detected`].
+    pub key: Option<key::Detected>,
 }
 
 impl TrackAnalysis {
@@ -37,6 +41,12 @@ impl TrackAnalysis {
 
     pub fn found_beats(&self) -> bool {
         !self.grid.is_empty()
+    }
+
+    /// The key as it should read on the player, e.g. `"8A"`, or empty when
+    /// none was found.
+    pub fn camelot(&self) -> String {
+        self.key.as_ref().map(|k| k.key.camelot()).unwrap_or_default()
     }
 }
 
@@ -59,6 +69,7 @@ pub fn analyze_at(audio: &Audio, bpm: Option<f64>) -> TrackAnalysis {
     let times: Vec<u32> = beats.grid.beats.iter().map(|b| b.time_ms).collect();
     let structure = structure::detect(&measured, &times);
     let cues = cues::suggest(&measured, &times, &structure);
+    let key = key::detect(audio);
 
     TrackAnalysis {
         grid: beats.grid,
@@ -66,6 +77,7 @@ pub fn analyze_at(audio: &Audio, bpm: Option<f64>) -> TrackAnalysis {
         confidence: beats.confidence,
         structure,
         cues,
+        key,
     }
 }
 

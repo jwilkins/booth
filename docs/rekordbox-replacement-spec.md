@@ -730,6 +730,10 @@ offline, and every decision visible.
 - **`cues.rs`** — PREP-2, in its automatic form. A memory cue at the first downbeat and up
   to eight hot cues at the phrase boundaries and where a voice enters, named, coloured by
   kind, and quantised to the grid.
+- **`key.rs`** — ANA-4. A chromagram (its own longer transform, for the pitch resolution)
+  and Krumhansl–Schmuckler correlation against all twenty-four keys, reported as Camelot
+  and classical with a confidence. `Key::parse` reads the notations a library stores, both
+  for measuring against one and, later, for importing one.
 
 **Commands.** `musicai export` builds the drive and `musicai anlz` writes one track's
 analysis; both listen to the audio, and both read back what they wrote before reporting
@@ -775,7 +779,11 @@ synthetic track and a favourable one; the honest limits are:
   recording that drifts across a set is beyond it. Per-beat tempo is recorded, so a
   gentle drift survives; a rallentando will not.
 - **No accuracy figures against a labelled set yet.** ANA-2 and ANA-4 ask for measured
-  numbers on real music, and there is no key detection at all.
+  numbers on real music. `examples/eval.rs` is the harness for producing them — it reads a
+  rekordbox collection export and scores the detected key and tempo against the library's
+  own labels — but it needs the audio, which lives on the DJ's machine, not in the repo.
+  What can be checked here already is that the harness reads a real 8,300-track v7.2.17
+  export cleanly and that all 8,209 of its stored key labels parse.
 
 ### Getting to a player without a player
 
@@ -803,9 +811,9 @@ open question in the format — whether a cue point written as type 1 shows up a
 
 1. A player, emulated or real. Everything here is checked against a parser, which is not
    the same as checked against a CDJ, and closing that gap is what is left of phase 0.
-2. Key detection, the one analysis requirement with nothing behind it.
-3. Accuracy measured against hand-labelled real music, rather than against synthesis.
-4. `PVBR`, so variable-bitrate mp3s seek correctly.
+2. Accuracy run over a real library — the harness exists (`examples/eval.rs`); it needs
+   the audio, which means running it on the machine the library lives on.
+3. `PVBR`, so variable-bitrate mp3s seek correctly.
 
 ## 15. Sources
 

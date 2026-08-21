@@ -153,6 +153,10 @@ fn names_are_interned_into_their_own_tables_and_shared() {
     find(rows_of(&all, PageType::Artists), "Batu");
     find(rows_of(&all, PageType::Keys), "8A");
     find(rows_of(&all, PageType::Labels), "Livity Sound");
+
+    // The track rows link to that one key by id.
+    let peverelist = find(rows_of(&all, PageType::Tracks), "Roll With The Punches");
+    assert!(peverelist.contains("key_id: KeyId(1)"), "{peverelist}");
 }
 
 #[test]

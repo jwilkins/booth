@@ -383,8 +383,8 @@ musicai export ~/Music/set -r --playlist "Sat 14/9" -o /Volumes/USB
 ```
 
 ```
-set/01 - opener.flac -> /Contents/Peverelist/01 - opener.flac (128.02 BPM, 1536 beats, 6 phrases, 5 cues)
-set/02 - marius.flac -> /Contents/Batu/02 - marius.flac (130.00 BPM, 1478 beats, 4 phrases, 4 cues)
+set/01 - opener.flac -> /Contents/Peverelist/01 - opener.flac (128.02 BPM 8A, 1536 beats, 6 phrases, 5 cues)
+set/02 - marius.flac -> /Contents/Batu/02 - marius.flac (130.00 BPM 4A, 1478 beats, 4 phrases, 4 cues)
 wrote /Volumes/USB/PIONEER/rekordbox/export.pdb: 20 tables, 41 rows, verified
 ```
 
@@ -483,6 +483,14 @@ drop, break, outro, which are the phrase types the format calls a "high mood" tr
 the words a DJ uses about a record. Those names are heuristic and the positions are not;
 a breakdown that leads into a drop can honestly be called either.
 
+**The key.** A chromagram folds the whole spectrum down to how much of each of the twelve
+pitch classes is present, averaged over the track; the Krumhansl–Schmuckler method then
+correlates that against a profile of what each of the twenty-four keys sounds like, and
+the closest match wins. The output is the Camelot code a DJ mixes by (`8A`) and the
+classical name under it (`Am`), with a confidence, and a runner-up when the two best were
+a hair apart — usually the relative major/minor, which shares every note. A track with no
+tonal centre — a drum tool — is left without a key rather than assigned a wrong one.
+
 **The cues.** A memory cue at the first downbeat, where a player parks when the track
 loads, and up to eight hot cues: one at each phrase boundary, and one where a voice comes
 in. When there are more than eight candidates the drops and the first vocal survive and
@@ -496,6 +504,15 @@ properly would answer it better and costs minutes a track rather than millisecon
 which is the trade [the spec](docs/rekordbox-replacement-spec.md) proposes making later,
 in the background, for the tracks that are going to a gig.
 
+**Measuring it.** The tests above use synthetic audio, which proves the code does what it
+was written to do but not that it agrees with a human. `cargo run --release --example eval
+-- rekordbox.xml` reads a rekordbox collection export, runs the analysis over the tracks
+it references, and reports how often the detected key and tempo match the ones already in
+the library — exact, and within a Camelot neighbour or a half/double. `--dry-run` first
+shows how much of the library is reachable before committing to the decode. Against a real
+8,300-track v7.2.17 export, every one of the 8,209 stored key labels parsed; the audio
+side runs on the machine the library lives on.
+
 ## Anlz
 
 Write the per-track analysis files a Pioneer / AlphaTheta player reads: the beat grid,
@@ -507,7 +524,7 @@ musicai anlz track.flac
 ```
 
 ```
-track.flac: 128.02 BPM, 1536 beats, 6 phrases, 5 cues
+track.flac: 128.02 BPM 8A, 1536 beats, 6 phrases, 5 cues
   track.DAT: 6 sections
   track.EXT: 10 sections
   track.2EX: 3 sections

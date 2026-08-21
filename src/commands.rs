@@ -144,10 +144,12 @@ fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
         written.push(format!("{}: {} sections", out.display(), sections.len()));
     }
 
+    let key = listened.camelot();
     Ok(vec![format!(
-        "{}: {:.2} BPM, {} beats, {} phrases, {} cues\n  {}",
+        "{}: {:.2} BPM{}, {} beats, {} phrases, {} cues\n  {}",
         path.display(),
         listened.bpm,
+        if key.is_empty() { String::new() } else { format!(" {key}") },
         listened.grid.beats.len(),
         listened.structure.sections.len(),
         listened.cues.iter().filter(|c| c.is_hot()).count(),
@@ -203,10 +205,15 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
                 Ok(prepared) => {
                     let Some(track) = &prepared.track else { continue };
                     lines.push(format!(
-                        "{} -> {} ({:.2} BPM, {} beats, {} phrases, {} cues)",
+                        "{} -> {} ({:.2} BPM{}, {} beats, {} phrases, {} cues)",
                         path.display(),
                         track.file_path,
                         prepared.bpm,
+                        if prepared.key.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", prepared.key)
+                        },
                         prepared.beats,
                         prepared.phrases,
                         prepared.cues
@@ -279,6 +286,8 @@ struct Prepared {
     analysis: Vec<(String, Vec<u8>)>,
     beats: usize,
     bpm: f64,
+    /// The key as it reads on the player, or empty when none was found.
+    key: String,
     phrases: usize,
     cues: usize,
 }
@@ -291,6 +300,7 @@ impl Prepared {
             analysis: Vec::new(),
             beats: 0,
             bpm: 0.0,
+            key: String::new(),
             phrases: 0,
             cues: 0,
         }
@@ -375,6 +385,7 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
         title: metadata.title.clone().unwrap_or_else(|| stem_of(filename)),
         artist,
         album: metadata.album.clone().unwrap_or_default(),
+        key: listened.camelot(),
         file_path: on_drive.clone(),
         analyze_path,
         tempo_x100: (listened.bpm * 100.0).round() as u32,
@@ -405,6 +416,7 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
         analysis,
         beats: listened.grid.beats.len(),
         bpm: listened.bpm,
+        key: listened.camelot(),
         phrases: listened.structure.sections.len(),
         cues: listened.cues.iter().filter(|c| c.is_hot()).count(),
     })

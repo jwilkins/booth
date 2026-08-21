@@ -269,6 +269,44 @@ fn a_long_enough_track_gets_its_phrases_onto_the_drive() {
 }
 
 #[test]
+fn a_tonal_track_gets_its_key_into_the_database() {
+    let scratch = Scratch::new("key");
+    let drive = scratch.path("USB");
+    // A pitched track: a bass line plus a triad, so there is a key to find.
+    let path = scratch.path("tonal.flac");
+    let seconds = 30.0f32;
+    let mut left = vec![0.0f32; (SAMPLE_RATE as f32 * seconds) as usize];
+    let two_pi = 2.0 * std::f32::consts::PI;
+    // A minor triad (A, C, E) held under a steady pulse.
+    for (i, sample) in left.iter_mut().enumerate() {
+        let t = i as f32 / SAMPLE_RATE as f32;
+        for hz in [220.0, 261.63, 329.63] {
+            *sample += 0.15 * (two_pi * hz * t).sin();
+        }
+        let beat = 60.0 / BPM as f32;
+        let into = (t % beat) / beat;
+        *sample += 0.5 * (-30.0 * into * beat).exp() * (two_pi * 55.0 * t).sin();
+    }
+    let right = left.clone();
+    write_file(
+        &path,
+        &Audio::new(SAMPLE_RATE, vec![left, right]).unwrap(),
+        Codec::Flac,
+        &EncodeOptions::default(),
+    )
+    .unwrap();
+
+    export(vec![path], &drive);
+
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let tables = musicai::export::pdb::inspect(&bytes).unwrap();
+    let keys = tables.iter().find(|t| t.table == "Keys").unwrap();
+    // A tonal track leaves exactly one key in the table, whatever it turned
+    // out to be; a keyless one would leave the table empty.
+    assert_eq!(keys.rows, 1, "a pitched track should have produced one key row");
+}
+
+#[test]
 fn the_cues_on_the_drive_are_named_and_coloured() {
     let scratch = Scratch::new("cues");
     let drive = scratch.path("USB");
