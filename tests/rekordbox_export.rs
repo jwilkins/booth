@@ -87,6 +87,7 @@ impl Fixture {
             cues: &self.cues,
             waveforms: &self.waveforms,
             structure: Some(&self.structure),
+            vbr: None,
         }
     }
 }
@@ -308,6 +309,36 @@ fn a_2ex_file_frames_the_three_band_waveforms() {
 }
 
 #[test]
+fn a_seek_index_round_trips_through_the_independent_parser() {
+    use rekordcrate::anlz::ContentKind;
+
+    let fixture = Fixture::new();
+    // A believable VBR table: monotonic offsets ending at a file length.
+    let mut offsets = [0u32; 401];
+    for (i, slot) in offsets.iter_mut().enumerate() {
+        *slot = (i as u32) * 5_000 + (i as u32 % 7) * 137;
+    }
+    offsets[400] = 2_048_000;
+
+    let analysis = anlz::Analysis {
+        on_drive_path: "/Contents/track.mp3",
+        grid: &fixture.grid,
+        cues: &fixture.cues,
+        waveforms: &fixture.waveforms,
+        structure: Some(&fixture.structure),
+        vbr: Some(&offsets),
+    };
+    let file = parse(&analysis.dat());
+
+    // rekordcrate reads PVBR as a VBR section; it sits right after the path.
+    assert_eq!(file.sections[0].header.kind, ContentKind::Path);
+    assert_eq!(file.sections[1].header.kind, ContentKind::VBR);
+    // The whole file parses, which is the point — a malformed section length
+    // would have stopped it at PVBR.
+    assert!(kinds(&file).contains(&ContentKind::BeatGrid));
+}
+
+#[test]
 fn a_track_with_no_cues_or_phrases_still_produces_readable_files() {
     let audio = track(2.0);
     let grid = BeatGrid::constant(174.0, 0, 2_000);
@@ -318,6 +349,7 @@ fn a_track_with_no_cues_or_phrases_still_produces_readable_files() {
         cues: &[],
         waveforms: &waveforms,
         structure: None,
+        vbr: None,
     };
 
     let dat = parse(&analysis.dat());

@@ -79,6 +79,23 @@ pub fn path(on_drive: &str) -> Vec<u8> {
     finish(out)
 }
 
+/// `PVBR` — the seek index for a variable-bitrate file.
+///
+/// A table of byte offsets, one per boundary of the 400 equal-time intervals a
+/// track is divided into, so a player can jump to a moment in a VBR file
+/// without decoding from the start. The four bytes after the section header,
+/// then 401 big-endian offsets. See [`crate::audio::mp3`] for how the offsets
+/// are found; a constant-bitrate file passes a stubbed table here, which is
+/// what rekordbox writes.
+pub fn vbr(offsets: &[u32; 401]) -> Vec<u8> {
+    let mut out = start(b"PVBR", 0x10);
+    put_u32(&mut out, 0); // unknown, always zero in a real export
+    for &offset in offsets.iter() {
+        put_u32(&mut out, offset);
+    }
+    finish(out)
+}
+
 /// `PQTZ` — the beat grid.
 pub fn beat_grid(grid: &BeatGrid) -> Vec<u8> {
     let mut out = start(b"PQTZ", 0x18);
@@ -337,19 +354,28 @@ pub struct Analysis<'a> {
     pub cues: &'a [Cue],
     pub waveforms: &'a WaveformData,
     pub structure: Option<&'a SongStructure>,
+    /// The 401-entry seek index, for an MP3. `None` for a format that seeks
+    /// without one, which is every format but MP3.
+    pub vbr: Option<&'a [u32; 401]>,
 }
 
 impl Analysis<'_> {
     /// The `.DAT` file: what a player from 2009 onwards can read.
     pub fn dat(&self) -> Vec<u8> {
-        file(&[
-            path(self.on_drive_path),
+        // PVBR sits right after the path, as it does in a real export, and only
+        // in the .DAT — the .EXT and .2EX do not carry it.
+        let mut sections = vec![path(self.on_drive_path)];
+        if let Some(offsets) = self.vbr {
+            sections.push(vbr(offsets));
+        }
+        sections.extend([
             beat_grid(self.grid),
             wave_preview(&self.waveforms.preview),
             wave_tiny(&self.waveforms.tiny),
             cues(self.cues, false),
             cues(self.cues, true),
-        ])
+        ]);
+        file(&sections)
     }
 
     /// The `.EXT` file: colour waveforms, named and coloured cues, phrases.
@@ -453,6 +479,15 @@ pub fn inspect(bytes: &[u8]) -> Result<Vec<SectionInfo>> {
             ),
             "PWAV" | "PWV2" => {
                 format!("{} columns", u32::from_be_bytes(body[0..4].try_into()?))
+            }
+            "PVBR" => {
+                // Four unknown bytes, then the offsets. Report the last, which
+                // is the file length and the one entry a CBR stub fills in.
+                let last = body.len().saturating_sub(4);
+                format!(
+                    "seek index, ends at {}",
+                    u32::from_be_bytes(body[last..last + 4].try_into()?)
+                )
             }
             "PWV3" | "PWV4" | "PWV5" | "PWV6" | "PWV7" => format!(
                 "{} entries of {} bytes",
@@ -645,6 +680,7 @@ mod tests {
             cues: &cue_list,
             waveforms: &waveforms,
             structure: Some(&structure),
+            vbr: None,
         };
 
         assert_eq!(
@@ -659,6 +695,29 @@ mod tests {
     }
 
     #[test]
+    fn a_seek_index_lands_right_after_the_path_in_the_dat() {
+        let grid = BeatGrid::constant(128.0, 0, 3_000);
+        let waveforms = WaveformData::silent(3.0);
+        let offsets = [0u32; 401];
+        let analysis = Analysis {
+            on_drive_path: "/Contents/a.mp3",
+            grid: &grid,
+            cues: &[],
+            waveforms: &waveforms,
+            structure: None,
+            vbr: Some(&offsets),
+        };
+        let dat = analysis.dat();
+        assert_eq!(
+            codes(&inspect(&dat).unwrap()),
+            ["PPTH", "PVBR", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"]
+        );
+        // And it is only in the .DAT, never the .EXT.
+        let ext = analysis.ext();
+        assert!(!codes(&inspect(&ext).unwrap()).contains(&"PVBR"));
+    }
+
+    #[test]
     fn a_track_with_no_phrase_analysis_simply_has_no_pssi() {
         let grid = BeatGrid::constant(128.0, 0, 3_000);
         let waveforms = WaveformData::silent(3.0);
@@ -668,6 +727,7 @@ mod tests {
             cues: &[],
             waveforms: &waveforms,
             structure: None,
+            vbr: None,
         };
         assert!(!codes(&inspect(&analysis.ext()).unwrap()).contains(&"PSSI"));
     }

@@ -707,6 +707,8 @@ than described by hand. What exists:
 - **`pdb.rs`** — `export.pdb`, the DeviceSQL database: pages, heaps, the row index that
   builds backwards from the end of each page, the string encodings, and rows for tracks,
   artists, albums, genres, labels, keys, colours, the browse menu, and the playlist tree.
+- **`mp3.rs`** — an MP3 frame walker that builds the `PVBR` variable-bitrate seek index,
+  so a hot cue on a VBR file lands where it should. No decoding: it reads the frame headers.
 - **`image.rs`** — the drive as a disk image rather than a folder: a master boot record
   with one FAT32 partition, which is the shape a player reads and the shape an emulator's
   USB slot takes.
@@ -813,7 +815,6 @@ open question in the format — whether a cue point written as type 1 shows up a
    the same as checked against a CDJ, and closing that gap is what is left of phase 0.
 2. Accuracy run over a real library — the harness exists (`examples/eval.rs`); it needs
    the audio, which means running it on the machine the library lives on.
-3. `PVBR`, so variable-bitrate mp3s seek correctly.
 
 ## 15. Sources
 

@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use crate::analysis;
 use crate::audio::decode::decode_file;
 use crate::audio::encode::{write_file, Codec, EncodeOptions};
+use crate::audio::mp3::SeekIndex;
 use crate::cli::{
     AnalyzeArgs, AnlzArgs, ExportArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, RunArgs,
     StemsArgs, Step, TagArgs,
@@ -114,12 +115,14 @@ fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
     let on_drive = args.on_drive_path.clone().unwrap_or_else(|| format!("/Contents/{name}"));
 
     let structure = listened.song_structure();
+    let seek = seek_index(path);
     let analysis = anlz::Analysis {
         on_drive_path: &on_drive,
         grid: &listened.grid,
         cues: &listened.cues,
         waveforms: &waveforms,
         structure: structure.as_ref(),
+        vbr: seek.as_ref(),
     };
 
     let dir = args
@@ -155,6 +158,21 @@ fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
         listened.cues.iter().filter(|c| c.is_hot()).count(),
         written.join("\n  ")
     )])
+}
+
+/// The variable-bitrate seek index for a file, when it needs one.
+///
+/// Only MP3 does: every other format the players read carries its own seek
+/// information. A read failure is not fatal — a drive without a seek index
+/// still plays, it just seeks a VBR file less precisely — so this reports the
+/// problem by returning `None` rather than by stopping the export.
+fn seek_index(path: &Path) -> Option<[u32; 401]> {
+    if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("mp3"))
+        != Some(true)
+    {
+        return None;
+    }
+    SeekIndex::of_mp3(path).ok().flatten().map(|index| index.pvbr_offsets())
 }
 
 // -- export ----------------------------------------------------------------
@@ -371,12 +389,14 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
     }
     let waveforms = waveform::analyze(&audio);
     let structure = listened.song_structure();
+    let seek = seek_index(path);
     let files = anlz::Analysis {
         on_drive_path: &on_drive,
         grid: &listened.grid,
         cues: &listened.cues,
         waveforms: &waveforms,
         structure: structure.as_ref(),
+        vbr: seek.as_ref(),
     };
 
     let file_size = std::fs::metadata(path).map(|m| m.len() as u32).unwrap_or(0);

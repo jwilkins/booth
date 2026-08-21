@@ -415,6 +415,9 @@ Files a player cannot open are refused rather than copied — a file that fails 
 is worse on the drive than off it — which today means checking the container and the
 sample rate.
 
+Variable-bitrate MP3s get a seek index (`PVBR`) so their hot cues land in the right place
+on the player — see [What it hears](#what-it-hears). Every other format seeks without one.
+
 Once the database is written it is read back off the drive and walked the way a player
 walks it, and the command fails rather than reporting success if that does not work.
 
@@ -503,6 +506,14 @@ entering over a backing; it will also fire on a centred lead synth. Separating t
 properly would answer it better and costs minutes a track rather than milliseconds —
 which is the trade [the spec](docs/rekordbox-replacement-spec.md) proposes making later,
 in the background, for the tracks that are going to a gig.
+
+**Seeking a VBR MP3.** A variable-bitrate MP3 has no fixed relationship between a moment in
+the music and a byte in the file — each frame holds the same audio but takes a different
+number of bytes — so a player cannot jump to a hot cue by arithmetic. rekordbox writes a
+table of byte offsets, and so does this: it walks the MP3's frame headers (without decoding
+anything) and builds the 401-entry seek index the CDJ reads. A constant-bitrate file, which
+seeks fine by arithmetic, gets the same empty stub rekordbox writes. This only concerns MP3;
+FLAC, WAV and AIFF carry their own seek information.
 
 **Measuring it.** The tests above use synthetic audio, which proves the code does what it
 was written to do but not that it agrees with a human. `cargo run --release --example eval
