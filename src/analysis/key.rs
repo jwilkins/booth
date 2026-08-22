@@ -175,8 +175,8 @@ fn chromagram(audio: &Audio) -> Option<[f32; PITCHES]> {
         for &(class, bin) in &note_bins {
             // Magnitude, not power: a chromagram tracks how present a note is,
             // and power over-weights whatever happens to be loudest. The value
-            // is read at the note's exact frequency, taking the strongest of
-            // the bin and its neighbours so a track tuned a little sharp or flat
+            // is read at the note's exact frequency, taking the strongest of the
+            // bin and its neighbours so a track tuned a little sharp or flat
             // still lands on the right note.
             chroma[class] += magnitude_at(&spectrum, bin) as f64;
         }

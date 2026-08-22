@@ -157,6 +157,7 @@ fn report(rows: &[Row]) {
         percent("exact", exact, keyed.len());
         percent("exact or harmonically adjacent", exact + compatible, keyed.len());
         percent("same root, wrong mode", mode_flips, keyed.len());
+        key_bias(&keyed);
     }
     println!("\n== tempo ==  ({} tracks with a reference tempo)", bpmed.len());
     if !bpmed.is_empty() {
@@ -184,6 +185,45 @@ fn print_misses(heading: &str, misses: &[(&&Row, String)]) {
 fn percent(label: &str, count: usize, total: usize) {
     let pct = 100.0 * count as f64 / total as f64;
     println!("  {label:32} {count:4}/{total:<4}  {pct:5.1}%");
+}
+
+/// Which keys the detector reaches for more (or less) often than the library
+/// says it should. A key detected far more than it is referenced is a bias —
+/// the C-minor lean a loud kick produces looks like a big positive next to 5A.
+/// This is the objective version of squinting at the disagreement list.
+fn key_bias(keyed: &[&Row]) {
+    let mut detected: BTreeMap<String, i32> = BTreeMap::new();
+    let mut referenced: BTreeMap<String, i32> = BTreeMap::new();
+    for row in keyed {
+        if let Some(got) = row.got_key {
+            *detected.entry(got.camelot()).or_default() += 1;
+        }
+        if let Some(reference) = row.ref_key {
+            *referenced.entry(reference.camelot()).or_default() += 1;
+        }
+    }
+    let mut bias: Vec<(String, i32)> = detected
+        .keys()
+        .chain(referenced.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|code| {
+            let net = detected.get(code).copied().unwrap_or(0)
+                - referenced.get(code).copied().unwrap_or(0);
+            (code.clone(), net)
+        })
+        .collect();
+    bias.sort_by_key(|(_, net)| -net.abs());
+    let notable: Vec<&(String, i32)> =
+        bias.iter().filter(|(_, net)| net.abs() >= 5).take(8).collect();
+    if notable.is_empty() {
+        return;
+    }
+    println!("  key bias (detected − referenced, worst first):");
+    for (code, net) in notable {
+        let sign = if *net > 0 { "+" } else { "" };
+        println!("    {code:<4} {sign}{net}");
+    }
 }
 
 /// Two keys a DJ would consider a safe mix: the same key, its relative
