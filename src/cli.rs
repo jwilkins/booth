@@ -207,6 +207,24 @@ defaults_from_clap!(RunArgs, "run", Run);
 defaults_from_clap!(StemsArgs, "stems", Stems);
 defaults_from_clap!(TagArgs, "tag", Tag);
 
+impl ExportArgs {
+    /// The same trick as the macro, with one extra step.
+    ///
+    /// An export has to be told where it is going, and clap enforces that by
+    /// requiring one of `--drive` and `--image`. So the defaults are parsed with
+    /// a placeholder drive, which is then cleared again: there is no default
+    /// destination, and a caller that has not chosen one has not chosen one.
+    pub fn defaults() -> Self {
+        match Cli::parse_from(["musicai", "export", "--drive", "<none>", "<none>"]).command {
+            Some(Command::Export(mut args)) => {
+                args.drive = None;
+                args
+            }
+            other => unreachable!("clap parsed {other:?} for export"),
+        }
+    }
+}
+
 /// What to do with a file whose best match is below the confidence threshold.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum OnAmbiguous {

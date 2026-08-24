@@ -1,0 +1,274 @@
+//! The waveform under the browser.
+//!
+//! It paints the same three-band picture the player will draw, from the same
+//! bytes the analysis file will carry — so what is on screen while prepping is
+//! what will be on the CDJ's screen, rather than a second rendering that agrees
+//! with it approximately.
+
+use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui, Vec2};
+
+use crate::library::{CueMark, Phrase};
+use crate::theme;
+
+/// How tall the waveform draws, in points.
+pub const HEIGHT: f32 = 132.0;
+/// The strip of phrase names under it.
+pub const STRIP_HEIGHT: f32 = 16.0;
+
+/// The bytes in one column of the three-band preview, as the format stores
+/// them: mid, high, low.
+const COLUMN: usize = 3;
+
+/// What the panel needs to draw one track.
+pub struct Waveform<'a> {
+    /// 1,200 columns of three bytes. Empty when the track has not been analysed.
+    pub bands: &'a [u8],
+    pub duration_secs: f64,
+    pub beat_ms: &'a [u32],
+    pub cues: &'a [CueMark],
+    /// Where the playhead sits, as a fraction of the track, if anywhere.
+    pub position: Option<f32>,
+}
+
+impl Waveform<'_> {
+    /// How many columns of picture there are.
+    pub fn columns(&self) -> usize {
+        self.bands.len() / COLUMN
+    }
+
+    /// The three band heights of one column, as fractions of full scale.
+    ///
+    /// Returns them in the order they are painted rather than the order they
+    /// are stored: lows first, so the mids and highs sit over the top of them.
+    fn column(&self, index: usize) -> [f32; 3] {
+        let at = index * COLUMN;
+        let byte = |offset: usize| self.bands.get(at + offset).copied().unwrap_or(0) as f32 / 255.0;
+        [byte(2), byte(0), byte(1)]
+    }
+}
+
+/// Draw the waveform, the beat ticks, the cue flags and the phrase strip.
+///
+/// Returns the fraction of the track that was clicked, if it was.
+pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Option<f32> {
+    let width = ui.available_width();
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click_and_drag());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, theme::BOOTH);
+
+    if wave.columns() == 0 {
+        let message = "not analysed yet";
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            message,
+            theme::mono(theme::SMALL),
+            theme::DIM,
+        );
+        return None;
+    }
+
+    // The centre line sits slightly above the middle, leaving room under the
+    // wave for the beat ticks without them overlapping it.
+    let middle = rect.top() + rect.height() * 0.52;
+    let reach = rect.height() * 0.40;
+
+    // One screen column per pixel, sampled from however many picture columns
+    // that works out to — so a wide window shows more detail rather than a
+    // stretched copy of the same 1,200.
+    let pixels = (rect.width().round() as usize).max(1);
+    let colors = [theme::BAND_LOW, theme::BAND_MID, theme::BAND_HIGH];
+    for pixel in 0..pixels {
+        let from = pixel * wave.columns() / pixels;
+        let to = ((pixel + 1) * wave.columns() / pixels).max(from + 1);
+
+        // The peak across the columns this pixel covers, not the mean: a
+        // waveform that averages its way through a kick drum stops showing
+        // where the kick is, which is the only thing it is being read for.
+        let mut peaks = [0.0f32; 3];
+        for index in from..to.min(wave.columns()) {
+            let column = wave.column(index);
+            for (peak, value) in peaks.iter_mut().zip(column) {
+                *peak = peak.max(value);
+            }
+        }
+
+        let x = rect.left() + pixel as f32;
+        for (band, color) in peaks.iter().zip(colors) {
+            let half = band * reach;
+            if half <= 0.0 {
+                continue;
+            }
+            painter.rect_filled(
+                Rect::from_min_max(
+                    egui::pos2(x, middle - half),
+                    egui::pos2(x + 1.0, middle + half),
+                ),
+                0.0,
+                color,
+            );
+        }
+    }
+
+    beat_ticks(&painter, rect, wave);
+    cue_flags(&painter, rect, wave);
+
+    if let Some(position) = wave.position {
+        let x = rect.left() + rect.width() * position.clamp(0.0, 1.0);
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            Stroke::new(1.0, theme::TEXT),
+        );
+    }
+
+    response.interact_pointer_pos().map(|at| ((at.x - rect.left()) / rect.width()).clamp(0.0, 1.0))
+}
+
+/// Ticks along the bottom, tall on the downbeat.
+///
+/// They are drawn from the grid rather than from the tempo, so a grid that
+/// drifts — which is the case this whole format handles well and most software
+/// handles badly — is visible as ticks that drift.
+fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
+    if wave.beat_ms.is_empty() || wave.duration_secs <= 0.0 {
+        return;
+    }
+    let total_ms = wave.duration_secs * 1000.0;
+    let faint = theme::TEXT.gamma_multiply(0.28);
+
+    // At a normal window width there are more beats than pixels, so draw every
+    // bar line and only as many beats as will read as separate marks.
+    let spacing = rect.width() / wave.beat_ms.len() as f32;
+    let every_beat = spacing >= 3.0;
+
+    for (index, time) in wave.beat_ms.iter().enumerate() {
+        let bar = index % 4 == 0;
+        if !bar && !every_beat {
+            continue;
+        }
+        let x = rect.left() + rect.width() * (*time as f64 / total_ms).clamp(0.0, 1.0) as f32;
+        let height = if bar { 9.0 } else { 4.0 };
+        painter.line_segment(
+            [egui::pos2(x, rect.bottom() - height), egui::pos2(x, rect.bottom())],
+            Stroke::new(1.0, faint),
+        );
+    }
+}
+
+/// A line and a flag per cue, with its letter.
+fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
+    if wave.duration_secs <= 0.0 {
+        return;
+    }
+    let total_ms = wave.duration_secs * 1000.0;
+
+    for cue in wave.cues {
+        let fraction = (cue.time_ms as f64 / total_ms).clamp(0.0, 1.0) as f32;
+        let x = rect.left() + rect.width() * fraction;
+        let color = Color32::from_rgb(cue.color[0], cue.color[1], cue.color[2]);
+
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom() - 10.0)],
+            Stroke::new(1.5, color),
+        );
+        // A flag, pointing the way the cue reads: from the marker into the
+        // track.
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(x - 4.5, rect.top()),
+                egui::pos2(x + 6.0, rect.top()),
+                egui::pos2(x + 0.75, rect.top() + 9.0),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+        painter.text(
+            egui::pos2(x + 8.0, rect.top() + 1.0),
+            egui::Align2::LEFT_TOP,
+            cue.name(),
+            theme::mono(9.5),
+            color,
+        );
+    }
+}
+
+/// The phrase strip: one block per section, as wide as the section is long.
+pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, STRIP_HEIGHT), Sense::hover());
+    let painter = ui.painter_at(rect);
+    if phrases.is_empty() || duration_secs <= 0.0 {
+        return;
+    }
+    let total_ms = duration_secs * 1000.0;
+
+    for phrase in phrases {
+        let from = rect.left() + rect.width() * (phrase.start_ms as f64 / total_ms) as f32;
+        let to = rect.left() + rect.width() * (phrase.end_ms as f64 / total_ms) as f32;
+        // A one-pixel gap between blocks, which is what makes them read as
+        // separate phrases rather than as a colour bar.
+        let block =
+            Rect::from_min_max(egui::pos2(from, rect.top()), egui::pos2(to - 1.0, rect.bottom()));
+        if block.width() <= 0.0 {
+            continue;
+        }
+        let color = theme::phrase_color(&phrase.kind);
+        painter.rect_filled(block, 0.0, color);
+
+        // The name only goes in when it fits; a clipped label is worse than
+        // the colour on its own, which already says what the phrase is.
+        let label = theme::label_text(&phrase.kind);
+        let galley =
+            painter.layout_no_wrap(label, theme::sans(9.0), Color32::from_rgb(0x0F, 0x13, 0x16));
+        if galley.size().x + 8.0 < block.width() {
+            painter.galley(
+                egui::pos2(block.left() + 4.0, block.center().y - galley.size().y / 2.0),
+                galley,
+                Color32::BLACK,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bands(columns: &[[u8; 3]]) -> Vec<u8> {
+        columns.iter().flatten().copied().collect()
+    }
+
+    fn wave(bytes: &[u8]) -> Waveform<'_> {
+        Waveform { bands: bytes, duration_secs: 10.0, beat_ms: &[], cues: &[], position: None }
+    }
+
+    #[test]
+    fn a_column_is_read_lows_first_whatever_order_it_is_stored_in() {
+        // The format stores mid, high, low; the picture is painted low, mid,
+        // high, so that the quieter bands land on top of the louder one.
+        let bytes = bands(&[[51, 102, 255]]);
+        let wave = wave(&bytes);
+        let [low, mid, high] = wave.column(0);
+        assert!((low - 1.0).abs() < 0.01, "low should be the third byte: {low}");
+        assert!((mid - 0.2).abs() < 0.01, "mid should be the first byte: {mid}");
+        assert!((high - 0.4).abs() < 0.01, "high should be the second byte: {high}");
+    }
+
+    #[test]
+    fn a_short_or_ragged_picture_does_not_panic() {
+        // A truncated file should draw as much as it has rather than crash the
+        // window that is showing it.
+        let bytes = vec![10, 20];
+        let wave = wave(&bytes);
+        assert_eq!(wave.columns(), 0);
+        assert_eq!(wave.column(5), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_column_count_is_the_number_of_whole_columns() {
+        let bytes = bands(&[[1, 2, 3], [4, 5, 6]]);
+        assert_eq!(wave(&bytes).columns(), 2);
+        assert_eq!(wave(&[]).columns(), 0);
+    }
+}

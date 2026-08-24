@@ -745,6 +745,36 @@ not the grid, so the beats stay tracked against the audio.
 **Cross-checks** against `rekordcrate`, an independent implementation of both formats,
 because our own reader agreeing with our own writer proves nothing.
 
+**`booth/`** — §6's interface, as its own program rather than a mode of the batch tool.
+One window: the query bar across the top, the collection down the left, the browser with
+the prep editor beneath it rather than in place of it, and the dock along the bottom.
+
+- **`query.rs`** — the language of §6.2. One parse produces both the terms that filter and
+  the spans the bar paints, so what is highlighted is what is being matched. A term that
+  does not parse matches nothing and is struck through, rather than being ignored — an
+  ignored typo silently widens a search and looks like it worked. `bpm:128` finds a 128.02
+  grid, and so does `bpm:124-128`: two forms of the same question must not disagree.
+- **`library.rs`** — the collection. It describes what is on disk and never writes audio or
+  changes a tag, which is what makes it safe to rebuild from a rescan. Saved atomically;
+  a file that will not parse is an error rather than a fresh start, because replacing a
+  real collection with an empty one is the worst thing a loader can do.
+- **`sync.rs`** — the delta and the preflight. Whether a track needs rewriting is decided
+  by a fingerprint over what the *player* will see, so a moved cue counts and a play count
+  does not; a tempo that differs below the stored two decimals is not a change. The
+  path-length check calls the writer's own `on_drive_path`, so the preflight cannot come to
+  a different answer than the writer it is predicting.
+- **`wave.rs`** — the three-band waveform, painted from the same `PWV6` bytes the drive
+  will carry, peak-per-pixel so a kick stays visible, with the grid ticks and cue flags
+  over it and the phrase strip beneath.
+
+`booth/tests/end_to_end.rs` runs the whole spine on real audio — import, analyse, query,
+plan, preflight, write — and reads the resulting `export.pdb` back with the independent
+parser.
+
+What the interface does *not* yet do: tag editing, cue editing by hand, a play history, or
+importing an existing rekordbox library. The prep it writes is the prep the analysers
+produced.
+
 ### What the first pass turned up
 
 Comparing the documentation against a real rekordbox export and against a second parser

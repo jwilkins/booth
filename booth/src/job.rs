@@ -1,0 +1,702 @@
+//! The work, and the thread it happens on.
+//!
+//! Nothing here draws, and nothing here holds the collection. A job is handed
+//! everything it needs when it starts, and reports back as [`Update`]s that the
+//! window folds into the library. That is what keeps a five-minute stem render
+//! from freezing the browser, and what lets the browser stay usable while a
+//! drive is being written.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
+use musicai::analysis;
+use musicai::audio::decode::decode_file;
+use musicai::cli::{ExportArgs, InputArgs, StemsArgs};
+use musicai::report::{Event, Reporter};
+use musicai::stems::{Backend, Stem};
+
+use crate::library::{energy_from, CueMark, Phrase, StemKit, Track};
+use crate::theme::CUE_COLORS;
+
+/// What the window has asked for.
+pub enum Job {
+    /// Walk the paths and read what each file says about itself. Fast: no
+    /// decoding beyond what the tags need.
+    Import { paths: Vec<PathBuf>, recursive: bool },
+    /// Listen to each track: grid, key, phrases, cues, loudness, waveform.
+    Analyze(Vec<(u32, PathBuf)>),
+    /// Render stem kits.
+    Separate { tracks: Vec<(u32, PathBuf)>, out_dir: PathBuf, backend: Backend },
+    /// Write a drive.
+    Sync { args: Box<ExportArgs>, files: Vec<PathBuf> },
+}
+
+impl Job {
+    /// What the queue indicator calls it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Job::Import { .. } => "reading",
+            Job::Analyze(_) => "analysing",
+            Job::Separate { .. } => "stems",
+            Job::Sync { .. } => "writing",
+        }
+    }
+}
+
+/// Something the worker found out.
+pub enum Update {
+    /// A file the import walked to, and the record read out of it.
+    Imported(Box<Track>),
+    /// One track, listened to.
+    Analyzed(Box<Analyzed>),
+    /// A stem kit finished rendering.
+    Separated {
+        id: u32,
+        kit: StemKit,
+    },
+    Progress {
+        done: usize,
+        total: usize,
+    },
+    /// A line for the log, from a command that reports its own.
+    Line(String),
+    Failed {
+        path: PathBuf,
+        message: String,
+    },
+    /// The job ended. `Err` carries the message to show.
+    Done(Result<(), String>),
+}
+
+/// Everything one pass of the analysers learned, ready to be folded into the
+/// record the library already holds.
+pub struct Analyzed {
+    pub id: u32,
+    pub bpm: f64,
+    pub grid_confidence: f32,
+    pub has_grid: bool,
+    pub beats: usize,
+    pub key: String,
+    pub key_confidence: f32,
+    pub energy: u8,
+    pub phrases: Vec<Phrase>,
+    pub cues: Vec<CueMark>,
+    pub loudness_lufs: Option<f64>,
+    pub peak_dbtp: Option<f64>,
+    pub duration_secs: f64,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// The three-band preview: 1,200 columns of mid, high, low, exactly as the
+    /// analysis file stores it. The waveform panel paints straight from this.
+    pub bands: Vec<u8>,
+}
+
+/// Read what a file says about itself, without decoding it.
+///
+/// Everything here comes from the container: the tags, the size on disk, and —
+/// for a WAV — the header field that says whether the samples are floats, which
+/// is the single most common way a file that plays on a laptop refuses to load
+/// in a booth.
+pub fn read_record(id: u32, path: &Path) -> Track {
+    let mut track = Track::placeholder(id);
+    track.path = path.to_path_buf();
+    track.format = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    track.bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    track.float_samples = is_float_wav(path);
+
+    let metadata = musicai::tag::read_metadata(path).unwrap_or_default();
+    track.artist = metadata.artist.unwrap_or_default();
+    track.album = metadata.album.unwrap_or_default();
+    track.title = metadata
+        .title
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    track.year = metadata.date.as_deref().and_then(|d| d.get(..4)?.parse().ok());
+    track
+}
+
+/// Whether a WAV holds floating-point samples.
+///
+/// Reads the `fmt ` chunk rather than decoding: format 3 is IEEE float, and
+/// format 0xFFFE is extensible, whose sub-format's first two bytes say the same
+/// thing. Anything that is not a RIFF/WAVE file is not a float WAV.
+fn is_float_wav(path: &Path) -> bool {
+    use std::io::Read;
+
+    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else { return false };
+    let mut header = [0u8; 4096];
+    let Ok(read) = file.read(&mut header) else { return false };
+    let header = &header[..read];
+    if header.len() < 44 || &header[..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return false;
+    }
+
+    // Walk the chunks: `fmt ` is normally first, but nothing requires it.
+    let mut at = 12;
+    while at + 8 <= header.len() {
+        let id = &header[at..at + 4];
+        let size = u32::from_le_bytes(header[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = at + 8;
+        if id == b"fmt " && body + 2 <= header.len() {
+            let format = u16::from_le_bytes(header[body..body + 2].try_into().unwrap());
+            return match format {
+                3 => true,
+                0xFFFE if body + 26 <= header.len() => {
+                    u16::from_le_bytes(header[body + 24..body + 26].try_into().unwrap()) == 3
+                }
+                _ => false,
+            };
+        }
+        // Chunks are padded to an even length.
+        at = body + size + (size & 1);
+    }
+    false
+}
+
+/// Listen to one track.
+pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
+    let audio = decode_file(path)?;
+    let analysis = analysis::analyze(&audio);
+    let waveform = musicai::export::waveform::analyze(&audio);
+    let loudness = musicai::loudness::measure(&audio).ok();
+
+    let beat_ms: Vec<u32> = analysis.grid.beats.iter().map(|b| b.time_ms).collect();
+    let phrases = analysis
+        .structure
+        .sections
+        .iter()
+        .map(|section| Phrase {
+            start_ms: beat_time(&beat_ms, section.start_beat),
+            end_ms: beat_time(&beat_ms, section.end_beat),
+            kind: section.kind.label().to_string(),
+        })
+        .collect();
+
+    let cues = analysis
+        .cues
+        .iter()
+        .map(|cue| CueMark {
+            letter: cue.hot_cue,
+            time_ms: cue.time_ms,
+            label: cue.comment.clone().unwrap_or_default(),
+            color: cue
+                .color
+                .map(|rgb| [rgb.r, rgb.g, rgb.b])
+                .unwrap_or_else(|| cue_color(cue.hot_cue)),
+        })
+        .collect();
+
+    // The energy meter reads the loudest phrase rather than the average: what
+    // decides where a record sits in a crate is how hard it goes at its peak,
+    // not how much of it is quiet.
+    let intensity = analysis.structure.sections.iter().map(|s| s.intensity).fold(0.0f32, f32::max);
+
+    Ok(Analyzed {
+        id,
+        bpm: analysis.bpm,
+        grid_confidence: analysis.confidence,
+        has_grid: analysis.found_beats(),
+        beats: analysis.grid.beats.len(),
+        key: analysis.camelot(),
+        key_confidence: analysis.key.as_ref().map(|k| k.confidence).unwrap_or(0.0),
+        energy: energy_from(intensity),
+        phrases,
+        cues,
+        loudness_lufs: loudness.as_ref().map(|l| l.integrated_lufs),
+        peak_dbtp: loudness.as_ref().map(|l| 20.0 * l.true_peak.max(1e-9).log10()),
+        duration_secs: audio.duration_secs(),
+        sample_rate: audio.sample_rate,
+        channels: audio.channels() as u16,
+        bands: waveform.band_preview,
+    })
+}
+
+fn beat_time(beats: &[u32], beat_number: u16) -> u32 {
+    let index = beat_number.saturating_sub(1) as usize;
+    beats.get(index).copied().unwrap_or_else(|| beats.last().copied().unwrap_or(0))
+}
+
+fn cue_color(letter: u8) -> [u8; 3] {
+    let color = CUE_COLORS[(letter.saturating_sub(1) as usize) % CUE_COLORS.len()];
+    [color.r(), color.g(), color.b()]
+}
+
+/// Which stems were written for a track, by looking for them.
+///
+/// The separator names its outputs `<stem-name>` beside the track's file stem,
+/// so the kit is a fact about the disk rather than something to remember. A
+/// library that believes it has stems it does not have is a library that
+/// promises an acapella at the wrong moment.
+pub fn find_stems(out_dir: &Path, source: &Path) -> StemKit {
+    let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let find = |name: &str| -> Option<PathBuf> {
+        ["wav", "flac", "mp3"]
+            .iter()
+            .map(|extension| out_dir.join(format!("{stem}-{name}.{extension}")))
+            .find(|path| path.exists())
+    };
+    StemKit {
+        vocals: find(Stem::Vocals.name()),
+        melody: find(Stem::Melody.name()),
+        drums: find(Stem::Drums.name()),
+    }
+}
+
+// -- running ---------------------------------------------------------------
+
+/// A reporter that forwards a command's own progress to the window.
+struct Channel {
+    tx: Sender<Update>,
+    cancel: Arc<AtomicBool>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Reporter for Channel {
+    fn event(&self, event: Event) {
+        let update = match event {
+            Event::Progress { done, total } => Update::Progress { done, total },
+            Event::Started { total } => Update::Progress { done: 0, total },
+            Event::Line(text) | Event::Heading(text) | Event::Summary(text) => Update::Line(text),
+            Event::Failed { path, message } => Update::Failed { path, message },
+            // The window keeps its own count of what finished; a command's
+            // summary of its own run would be a second, disagreeing one.
+            Event::Stage { .. } | Event::Finished { .. } => return,
+        };
+        let _ = self.tx.send(update);
+        (self.wake)();
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// Owns the worker thread and the channel back from it.
+pub struct Runner {
+    rx: Receiver<Update>,
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+    /// What is running, for the queue indicator.
+    pub name: &'static str,
+}
+
+impl Runner {
+    pub fn start(job: Job, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let (tx, rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let name = job.name();
+        let reporter = Channel { tx: tx.clone(), cancel: Arc::clone(&cancel), wake };
+
+        let handle = std::thread::spawn(move || {
+            let result = run(job, &reporter);
+            let _ = tx.send(Update::Done(result.map_err(|e| format!("{e:#}"))));
+            (reporter.wake)();
+        });
+
+        Self { rx, cancel, handle: Some(handle), name }
+    }
+
+    /// Everything that has arrived since the last look.
+    pub fn drain(&self) -> Vec<Update> {
+        let mut updates = Vec::new();
+        while let Ok(update) = self.rx.try_recv() {
+            updates.push(update);
+        }
+        updates
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn join(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for Runner {
+    fn drop(&mut self) {
+        // Closing the window mid-render should not leave a thread writing files
+        // into a directory nobody is watching.
+        self.cancel();
+    }
+}
+
+fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
+    match job {
+        Job::Import { paths, recursive } => import(&paths, recursive, reporter),
+        Job::Analyze(tracks) => analyze_all(&tracks, reporter),
+        Job::Separate { tracks, out_dir, backend } => {
+            separate(&tracks, &out_dir, backend, reporter)
+        }
+        Job::Sync { args, files } => {
+            // The file list was settled when the plan was drawn up, so the
+            // command is told exactly what to write rather than walking a
+            // folder again and possibly finding something else.
+            let mut args = *args;
+            args.input = InputArgs { inputs: files, recursive: false };
+            musicai::commands::export(&args, reporter)
+        }
+    }
+}
+
+fn import(paths: &[PathBuf], recursive: bool, reporter: &Channel) -> anyhow::Result<()> {
+    let files = musicai::discover::collect(paths, recursive)?;
+    let total = files.len();
+    for (done, path) in files.iter().enumerate() {
+        if reporter.cancelled() {
+            break;
+        }
+        // The id is filled in by the window, which owns the counter; zero here
+        // means "not yet placed".
+        let _ = reporter.tx.send(Update::Imported(Box::new(read_record(0, path))));
+        let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+fn analyze_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<()> {
+    use rayon::prelude::*;
+    use std::sync::atomic::AtomicUsize;
+
+    let total = tracks.len();
+    let done = AtomicUsize::new(0);
+
+    // In parallel, because analysis is the slow part of adding a crate and it
+    // is pure measurement — nothing here writes anything.
+    tracks.par_iter().for_each(|(id, path)| {
+        if reporter.cancelled() {
+            return;
+        }
+        match analyze_file(*id, path) {
+            Ok(analyzed) => {
+                let _ = reporter.tx.send(Update::Analyzed(Box::new(analyzed)));
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
+            }
+        }
+        let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = reporter.tx.send(Update::Progress { done: finished, total });
+        (reporter.wake)();
+    });
+    Ok(())
+}
+
+fn separate(
+    tracks: &[(u32, PathBuf)],
+    out_dir: &Path,
+    backend: Backend,
+    reporter: &Channel,
+) -> anyhow::Result<()> {
+    let mut args = StemsArgs::defaults();
+    args.backend = backend;
+    args.out_dir = out_dir.to_path_buf();
+
+    // One file at a time, so that a kit becomes available as soon as it is
+    // rendered rather than at the end of the batch: a DJ waiting on stems for
+    // one record should get that record back, not a progress bar.
+    for (id, path) in tracks {
+        if reporter.cancelled() {
+            break;
+        }
+        args.input = InputArgs { inputs: vec![path.clone()], recursive: false };
+        match musicai::commands::stems_files(&args, std::slice::from_ref(path), reporter) {
+            Ok(()) => {
+                let kit = find_stems(out_dir, path);
+                let _ = reporter.tx.send(Update::Separated { id: *id, kit });
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
+            }
+        }
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use musicai::audio::encode::{write_file, Codec, EncodeOptions};
+    use musicai::audio::Audio;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("booth-job-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A file with kicks on the beat, which is the least the analysers can work
+    /// with: a bare tone has no onsets, and the tempo detector is right to
+    /// refuse it rather than invent a grid.
+    fn write_beats(path: &Path, bpm: f64, bars: usize) {
+        let rate = 44_100usize;
+        let period = 60.0 / bpm;
+        let beats = bars * 4;
+        let lead_in = rate / 2;
+        let frames = lead_in + (rate as f64 * period * beats as f64) as usize + rate;
+        let mut plane = vec![0.0f32; frames];
+        for beat in 0..beats {
+            let start = lead_in + (rate as f64 * period * beat as f64) as usize;
+            let (hz, gain) = if beat % 4 == 0 { (55.0, 1.0) } else { (150.0, 0.5) };
+            for i in 0..rate / 8 {
+                let Some(sample) = plane.get_mut(start + i) else { break };
+                let t = i as f32 / rate as f32;
+                *sample += gain * (-30.0 * t).exp() * (std::f32::consts::TAU * hz * t).sin();
+            }
+        }
+        let audio = Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_file(path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn a_record_is_read_without_decoding_the_audio() {
+        let dir = scratch("record");
+        let path = dir.join("track.wav");
+        write_beats(&path, 128.0, 4);
+
+        let track = read_record(7, &path);
+        assert_eq!(track.id, 7);
+        assert_eq!(track.format, "wav");
+        assert_eq!(track.title, "track", "the file name, until a tag says otherwise");
+        assert!(track.bytes > 0);
+        assert!(!track.analyzed, "reading a record is not analysing it");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_float_wav_is_spotted_from_its_header() {
+        let dir = scratch("float");
+        let integer = dir.join("integer.wav");
+        write_beats(&integer, 128.0, 1);
+        assert!(!is_float_wav(&integer));
+
+        // Hand-built, because the encoder here does not write float files —
+        // they arrive from other people's exports, which is the whole problem.
+        let float = dir.join("float.wav");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&44_100u32.to_le_bytes());
+        bytes.extend_from_slice(&352_800u32.to_le_bytes());
+        bytes.extend_from_slice(&8u16.to_le_bytes());
+        bytes.extend_from_slice(&32u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        std::fs::write(&float, &bytes).unwrap();
+
+        assert!(is_float_wav(&float));
+        assert!(read_record(1, &float).float_samples);
+        // And it is exactly the kind of thing the sidebar counts.
+        assert!(read_record(1, &float).needs_attention().is_some());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_flac_is_never_a_float_wav() {
+        let dir = scratch("not-wav");
+        let path = dir.join("track.flac");
+        write_beats(&dir.join("source.wav"), 128.0, 1);
+        std::fs::copy(dir.join("source.wav"), &path).unwrap();
+        // A .flac extension short-circuits before the header is even read.
+        assert!(!is_float_wav(&path));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn analysis_produces_everything_a_row_needs() {
+        let dir = scratch("analyze");
+        let path = dir.join("track.wav");
+        write_beats(&path, 128.0, 8);
+
+        let analyzed = analyze_file(3, &path).unwrap();
+        assert_eq!(analyzed.id, 3);
+        assert!(analyzed.has_grid);
+        assert!((analyzed.bpm - 128.0).abs() < 1.0, "{} BPM", analyzed.bpm);
+        assert!(analyzed.beats > 0);
+        assert!(analyzed.energy >= 1 && analyzed.energy <= 5);
+        assert!(analyzed.loudness_lufs.is_some());
+        assert_eq!(analyzed.sample_rate, 44_100);
+        assert_eq!(analyzed.channels, 2);
+        // The waveform is the three-band preview, which is what the panel draws.
+        assert_eq!(analyzed.bands.len(), 1_200 * 3);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn phrases_are_placed_in_milliseconds_rather_than_beats() {
+        let dir = scratch("phrases");
+        let path = dir.join("track.wav");
+        write_beats(&path, 128.0, 16);
+
+        let analyzed = analyze_file(1, &path).unwrap();
+        for phrase in &analyzed.phrases {
+            assert!(phrase.end_ms >= phrase.start_ms, "{phrase:?}");
+            assert!(
+                (phrase.end_ms as f64) <= analyzed.duration_secs * 1000.0 + 1_000.0,
+                "a phrase ran past the end of the track: {phrase:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_track_with_no_beat_reports_that_rather_than_guessing() {
+        let dir = scratch("drone");
+        let path = dir.join("drone.wav");
+        let rate = 44_100;
+        let samples: Vec<f32> = (0..rate * 8)
+            .map(|i| 0.2 * (std::f32::consts::TAU * 220.0 * i as f32 / rate as f32).sin())
+            .collect();
+        let audio = Audio::new(rate as u32, vec![samples.clone(), samples]).unwrap();
+        write_file(&path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+
+        let analyzed = analyze_file(1, &path).unwrap();
+        assert!(!analyzed.has_grid);
+        assert_eq!(analyzed.beats, 0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stem_kit_is_found_by_looking_rather_than_by_remembering() {
+        let dir = scratch("stems");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let source = dir.join("Roll With The Punches.flac");
+
+        assert!(find_stems(&out, &source).is_empty());
+
+        for stem in ["vocals", "melody"] {
+            std::fs::write(out.join(format!("Roll With The Punches-{stem}.wav")), b"").unwrap();
+        }
+        let kit = find_stems(&out, &source);
+        assert!(kit.vocals.is_some() && kit.melody.is_some());
+        assert!(!kit.is_complete(), "two of three is not a kit");
+
+        std::fs::write(out.join("Roll With The Punches-drums.wav"), b"").unwrap();
+        assert!(find_stems(&out, &source).is_complete());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_import_reports_every_file_it_walked_to() {
+        let dir = scratch("import");
+        write_beats(&dir.join("a.wav"), 128.0, 1);
+        write_beats(&dir.join("nested").join("b.wav"), 128.0, 1);
+
+        let mut runner = Runner::start(
+            Job::Import { paths: vec![dir.clone()], recursive: true },
+            Arc::new(|| {}),
+        );
+        runner.join();
+
+        let updates = runner.drain();
+        let names: Vec<String> = updates
+            .iter()
+            .filter_map(|u| match u {
+                Update::Imported(track) => {
+                    Some(track.path.file_name()?.to_string_lossy().into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(matches!(updates.last(), Some(Update::Done(Ok(())))));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_analysis_job_reports_one_result_per_track_and_finishes() {
+        let dir = scratch("analyze-job");
+        let a = dir.join("a.wav");
+        let b = dir.join("b.wav");
+        write_beats(&a, 128.0, 4);
+        write_beats(&b, 140.0, 4);
+
+        let mut runner = Runner::start(Job::Analyze(vec![(1, a), (2, b)]), Arc::new(|| {}));
+        runner.join();
+
+        let updates = runner.drain();
+        let mut ids: Vec<u32> = updates
+            .iter()
+            .filter_map(|u| match u {
+                Update::Analyzed(analyzed) => Some(analyzed.id),
+                _ => None,
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
+        assert!(matches!(updates.last(), Some(Update::Done(Ok(())))));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_will_not_decode_fails_alone() {
+        let dir = scratch("bad");
+        let good = dir.join("good.wav");
+        let bad = dir.join("bad.wav");
+        write_beats(&good, 128.0, 4);
+        std::fs::write(&bad, b"not a wav").unwrap();
+
+        let mut runner = Runner::start(Job::Analyze(vec![(1, good), (2, bad)]), Arc::new(|| {}));
+        runner.join();
+
+        let updates = runner.drain();
+        assert!(updates.iter().any(|u| matches!(u, Update::Analyzed(a) if a.id == 1)));
+        assert!(updates.iter().any(|u| matches!(u, Update::Failed { .. })));
+        // The job as a whole still ends tidily: one bad file is not a crash.
+        assert!(matches!(updates.last(), Some(Update::Done(Ok(())))));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cancelling_stops_the_run() {
+        let dir = scratch("cancel");
+        for i in 0..4 {
+            write_beats(&dir.join(format!("{i}.wav")), 128.0, 4);
+        }
+
+        let mut runner = Runner::start(
+            Job::Import { paths: vec![dir.clone()], recursive: false },
+            Arc::new(|| {}),
+        );
+        runner.cancel();
+        runner.join();
+
+        // However far it got, the job ends tidily rather than half-way.
+        assert!(matches!(runner.drain().last(), Some(Update::Done(Ok(())))));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

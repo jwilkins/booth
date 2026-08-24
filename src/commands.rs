@@ -372,7 +372,7 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow::anyhow!("{} has no usable file name", path.display()))?;
     let artist = metadata.artist.clone().unwrap_or_else(|| "Unknown Artist".to_string());
-    let on_drive = format!("/Contents/{}/{}", safe_component(&artist), filename);
+    let on_drive = on_drive_path(&artist, filename);
     if on_drive.len() > MAX_DRIVE_PATH {
         bail!("{} characters is longer than a player will follow", on_drive.len());
     }
@@ -440,6 +440,25 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
         phrases: listened.structure.sections.len(),
         cues: listened.cues.iter().filter(|c| c.is_hot()).count(),
     })
+}
+
+/// Where a track's audio lands on the drive.
+///
+/// Public because anything that wants to warn about a path before it is written
+/// has to be able to work out the same path the writer will use. A preflight
+/// that reimplements this rule is a preflight that will eventually disagree
+/// with it, and pass a drive the writer then refuses.
+pub fn on_drive_path(artist: &str, filename: &str) -> String {
+    format!("/Contents/{}/{}", safe_component(artist), filename)
+}
+
+/// The longest on-drive path a player will follow, for callers checking one
+/// before it is written.
+pub const MAX_ON_DRIVE_PATH: usize = MAX_DRIVE_PATH;
+
+/// Whether a player can open a file with this extension.
+pub fn is_playable(extension: &str) -> bool {
+    PLAYABLE.contains(&extension.to_ascii_lowercase().as_str())
 }
 
 /// A folder name a FAT filesystem and a player will both accept.

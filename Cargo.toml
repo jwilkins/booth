@@ -1,10 +1,16 @@
 [workspace]
-members = ["gui"]
+members = ["booth", "gui"]
 
-# The window lives in its own crate so that eframe and its several hundred
+# The windows live in their own crates so that eframe and its several hundred
 # dependencies stay out of the command-line tool entirely: `cargo build` still
 # builds just the CLI, and the CLI keeps its own (much lower) minimum Rust
 # version.
+#
+# There are two of them because they are two different programs. `gui` is a
+# batch tool: pick files, pick a task, run it. `booth` is a library — it holds a
+# collection, and the work it does is in service of what goes on a drive. The
+# second is not a tab of the first, and trying to make it one produces a worse
+# version of both.
 
 [package]
 name = "musicai"
