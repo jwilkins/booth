@@ -397,8 +397,10 @@ pub struct NormalizeArgs {
     #[arg(long, default_value = "-normalized")]
     pub suffix: String,
 
-    /// Bit depth for wav and flac output.
-    #[arg(long, value_name = "BITS", default_value_t = 16)]
+    /// Bit depth for wav and flac output. Stems default to 24-bit: they are
+    /// already-processed audio, and quantising them to 16-bit throws away
+    /// headroom for no benefit at their file sizes.
+    #[arg(long, value_name = "BITS", default_value_t = 24)]
     pub bit_depth: u16,
 
     /// Bitrate in kbps for mp3 output.
@@ -459,8 +461,10 @@ pub struct StemsArgs {
     #[arg(long, value_enum, value_delimiter = ',', default_values_t = Stem::ALL)]
     pub only: Vec<Stem>,
 
-    /// Bit depth for wav and flac output.
-    #[arg(long, value_name = "BITS", default_value_t = 16)]
+    /// Bit depth for wav and flac output. Stems default to 24-bit: they are
+    /// already-processed audio, and quantising them to 16-bit throws away
+    /// headroom for no benefit at their file sizes.
+    #[arg(long, value_name = "BITS", default_value_t = 24)]
     pub bit_depth: u16,
 
     /// Bitrate in kbps for mp3 output.
@@ -552,6 +556,17 @@ pub struct DemucsArgs {
     /// Torch device for demucs, e.g. cpu or cuda.
     #[arg(long, value_name = "DEVICE")]
     pub demucs_device: Option<String>,
+
+    /// Test-time shifts: demucs separates the track this many extra times at
+    /// small random offsets and averages the results, smoothing artefacts at a
+    /// roughly linear cost in time. 0 is demucs' default; 1 or 2 is cleaner.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub demucs_shifts: u32,
+
+    /// Window overlap for demucs, 0.0 to just under 1.0. More overlap means
+    /// fewer seams between windows and more compute. Demucs' default is 0.25.
+    #[arg(long, value_name = "FRACTION", default_value_t = 0.25)]
+    pub demucs_overlap: f32,
 
     /// What to do when demucs is not installed. `ask` offers to install it,
     /// but only on macOS and only when there is a terminal to answer on.

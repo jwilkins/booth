@@ -902,7 +902,7 @@ fn separate_one(
         }
     }
 
-    let separated = match args.backend {
+    let mut separated = match args.backend {
         Backend::Dsp => {
             let audio = decode_file(path)?;
             dsp::separate(&audio, config)?
@@ -916,6 +916,8 @@ fn separate_one(
                 .unwrap_or_else(|| args.demucs.demucs_bin.clone().into_os_string());
             demucs_config.model = args.demucs.demucs_model.clone();
             demucs_config.device = args.demucs.demucs_device.clone();
+            demucs_config.shifts = args.demucs.demucs_shifts;
+            demucs_config.overlap = args.demucs.demucs_overlap;
 
             let result = demucs::separate(path, &demucs_config);
             // Demucs' own output is an intermediate; the stems we write are the
@@ -925,7 +927,13 @@ fn separate_one(
         }
     };
 
-    write_stems(&track, &separated, args, encode, codec, path)
+    // Bring the stems under full scale before writing, by one shared gain, so
+    // an integer format does not clip a stem that peaks above the mix. A hair
+    // under 0 dBFS, since the true peak between samples can sit a touch above
+    // the highest sample.
+    let attenuation = separated.fit_under(0.98);
+
+    write_stems(&track, &separated, args, encode, codec, path, attenuation)
 }
 
 /// Where a stem goes: beside its siblings, named after the track it came from,
@@ -934,6 +942,7 @@ fn stem_path(out_dir: &Path, track: &str, stem: Stem, codec: Codec) -> PathBuf {
     out_dir.join(format!("{}-{}.{}", track, stem.name(), codec.extension()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_stems(
     track: &str,
     separated: &StemSet,
@@ -941,6 +950,7 @@ fn write_stems(
     encode: &EncodeOptions,
     codec: Codec,
     source: &Path,
+    attenuation: Option<f32>,
 ) -> Result<Vec<String>> {
     let mut written = Vec::new();
     for stem in &args.only {
@@ -954,13 +964,20 @@ fn write_stems(
         }
 
         let mut line = format!("wrote {}", out.display());
-        if report.clipped_anything() {
-            // A stem can peak higher than the mix it came from, so this
-            // happens on loud masters even though the input never clipped.
-            line.push_str(&format!(
-                " — warning: {} samples clipped; the stem peaks above full scale",
-                report.clipped
-            ));
+        if let Some(gain_db) = attenuation {
+            // The stems were pulled down together to fit under full scale. Said
+            // once, on the first line, rather than as a warning per stem: it is
+            // expected, not a fault, and the shared gain keeps them in balance.
+            if *stem == args.only[0] {
+                line.push_str(&format!(
+                    " (stems attenuated {gain_db:.1} dB to stay under full scale)"
+                ));
+            }
+        } else if report.clipped_anything() {
+            // With the shared attenuation this should not happen, but if a
+            // format's own rounding pushes a sample over, say so rather than
+            // hide it.
+            line.push_str(&format!(" — warning: {} samples clipped", report.clipped));
         }
         written.push(line);
     }

@@ -275,18 +275,37 @@ and are not the obvious values. Two in particular:
 Memory scales with track length: a five-minute stereo track peaks around 1.1 GB, or 0.8 GB with
 `--overlap 2`, which also roughly halves the runtime.
 
-### Stems can clip
+### Stems stay under full scale
 
 Separated stems peak **above** the mix they came from — the split redistributes energy, so a stem
-may exceed full scale even when the original never did. On a loud master that means clipping on
-the way into an integer format, and `musicai` says so per file:
+may exceed full scale even when the original never did. Two things happen so that this does not turn
+into clipping:
+
+- Demucs is asked for `--float32` output. Left to itself it writes 16-bit wav and clips the stem at
+  the source, before `musicai` ever sees it — audible on loud masters. Float carries the peaks
+  through intact.
+- Before writing, the stems are pulled down together by a single gain so the loudest sample across
+  all of them sits just under full scale. One shared gain rather than one per stem, so they stay in
+  balance and still add back up to the track — which is what lets an acapella and an instrumental be
+  played together in time. The attenuation is reported once:
 
 ```
-wrote stems/track-melody.flac — warning: 52 samples clipped; the stem peaks above full scale
+wrote stems/track-vocals.flac (stems attenuated -2.4 dB to stay under full scale)
 ```
 
-Raising `--bit-depth` does not help, since the limit is range rather than precision. Normalize the
-stems afterwards, or separate a quieter copy of the track.
+Stems default to **24-bit** wav/flac for the same reason — they are already-processed audio, and
+there is no reason to quantise them to 16.
+
+### Getting cleaner separation from demucs
+
+The default model, `htdemucs`, is a good all-rounder. Two levers trade time for fewer artefacts:
+
+- `--demucs-model htdemucs_ft` — the fine-tuned model. Noticeably cleaner, about four times slower.
+- `--demucs-shifts 1` (or `2`) — separates the track again at small offsets and averages, smoothing
+  artefacts, at a roughly linear cost in time.
+- `--demucs-overlap 0.5` — more overlap between analysis windows, fewer seams, more compute.
+
+On a GPU (`--demucs-device cuda` or `mps`) the time cost of these is much easier to absorb.
 
 ## Tag
 
