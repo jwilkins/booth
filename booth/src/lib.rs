@@ -16,6 +16,7 @@ pub mod app;
 pub mod config;
 pub mod job;
 pub mod library;
+pub mod log;
 pub mod player;
 pub mod query;
 pub mod rows;

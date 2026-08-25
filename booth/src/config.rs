@@ -62,6 +62,10 @@ pub struct Config {
     /// Where rendered stem kits go.
     pub stems_path: PathBuf,
     pub on_external: OnExternal,
+    /// Which column the browser is ordered by. A preference rather than part
+    /// of the collection: it describes how this person likes to look at their
+    /// music, not anything about the music.
+    pub sort: crate::rows::Sort,
     /// Whether editing a track's artist, title or album also rewrites the tags
     /// in the file itself.
     ///
@@ -76,6 +80,7 @@ impl Default for Config {
             library_path: default_library_path(),
             stems_path: data_dir().join("stems"),
             on_external: OnExternal::default(),
+            sort: crate::rows::Sort::default(),
             write_tags_to_files: false,
         }
     }

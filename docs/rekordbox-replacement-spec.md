@@ -787,6 +787,11 @@ would not — a cue's name, a tag — deliberately does not.
 `booth/tests/keeping_a_copy.rs` covers the copy-in rule and the join between editing and
 the delta.
 
+- **`log.rs`** — what happened, in order, with times, to a ring buffer the window shows and
+  a file that survives the window closing. It earned itself on the first run: it found an
+  analysis that could never succeed being restarted on every frame, a failure reported
+  twice, and two ungrammatical counts.
+
 - **`player.rs`** — the auditioning deck §2 asks for, at one deck rather than two. Tracks
   are decoded whole so that seeking anywhere is free, which is what checking a cue is made
   of; the mixing is a pure function of a buffer, a sound and a position, so the resampling,

@@ -11,6 +11,96 @@ use eframe::egui::{self, Color32, Rect, Sense, Ui, Vec2};
 use crate::library::Track;
 use crate::theme;
 
+/// A column, which is both something to draw and something to sort by.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Column {
+    Artist,
+    Title,
+    Bpm,
+    Key,
+    Energy,
+    Stems,
+    /// Where the file is.
+    Location,
+}
+
+impl Column {
+    pub const ALL: [Column; 7] = [
+        Column::Artist,
+        Column::Title,
+        Column::Bpm,
+        Column::Key,
+        Column::Energy,
+        Column::Stems,
+        Column::Location,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Column::Artist => "Artist",
+            Column::Title => "Title",
+            Column::Bpm => "BPM",
+            Column::Key => "Key",
+            Column::Energy => "Energy",
+            Column::Stems => "Stems",
+            Column::Location => "Location",
+        }
+    }
+
+    /// Which way round the first click sorts.
+    ///
+    /// Names read forwards; a measurement is nearly always wanted loudest or
+    /// fastest first, because that is the end of a crate a set is built from.
+    pub fn starts_descending(self) -> bool {
+        matches!(self, Column::Bpm | Column::Energy)
+    }
+
+    fn width(self, widths: &Widths) -> f32 {
+        match self {
+            Column::Artist => widths.artist,
+            Column::Title => widths.title,
+            Column::Bpm => widths.bpm,
+            Column::Key => widths.key,
+            Column::Energy => widths.energy,
+            Column::Stems => widths.stems,
+            Column::Location => widths.location,
+        }
+    }
+}
+
+/// Which column the list is ordered by, and which way.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Sort {
+    pub column: Column,
+    pub descending: bool,
+}
+
+impl Default for Sort {
+    fn default() -> Self {
+        Self { column: Column::Artist, descending: false }
+    }
+}
+
+impl Sort {
+    /// What clicking a header does: the same column turns round, a different
+    /// one starts however that column prefers to start.
+    pub fn clicked(self, column: Column) -> Self {
+        match self.column == column {
+            true => Self { column, descending: !self.descending },
+            false => Self { column, descending: column.starts_descending() },
+        }
+    }
+
+    /// The mark next to the column being sorted by.
+    pub fn arrow(self) -> &'static str {
+        match self.descending {
+            true => "\u{25BE}",
+            false => "\u{25B4}",
+        }
+    }
+}
+
 /// The width of each column, in the order they are drawn.
 pub struct Widths {
     pub artist: f32,
@@ -19,6 +109,7 @@ pub struct Widths {
     pub key: f32,
     pub energy: f32,
     pub stems: f32,
+    pub location: f32,
 }
 
 /// How tall one line is.
@@ -38,36 +129,68 @@ pub fn columns(total: f32) -> Widths {
     // which is narrower than the word above it.
     let energy = 64.0;
     let stems = 88.0;
-    let names = (total - bpm - key - energy - stems - 24.0).max(160.0);
-    Widths { artist: names * 0.38, title: names * 0.62, bpm, key, energy, stems }
+    // The names and the location share what is left. The location gets the
+    // smallest share of the three because it is the one that can be read from
+    // its tail — a folder name — while a title cannot.
+    let flexible = (total - bpm - key - energy - stems - 24.0).max(240.0);
+    Widths {
+        artist: flexible * 0.28,
+        title: flexible * 0.44,
+        location: flexible * 0.28,
+        bpm,
+        key,
+        energy,
+        stems,
+    }
 }
 
-pub fn header_row(ui: &mut Ui, widths: &Widths) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
+/// Draw the header. Returns the column whose name was clicked.
+pub fn header_row(ui: &mut Ui, widths: &Widths, sort: Sort) -> Option<Column> {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::click());
     let painter = ui.painter_at(rect);
+    let pointer = response.hover_pos();
+    let mut clicked = None;
     let mut x = rect.left();
 
-    for (name, width) in [
-        ("Artist", widths.artist),
-        ("Title", widths.title),
-        ("BPM", widths.bpm),
-        ("Key", widths.key),
-        ("Energy", widths.energy),
-        ("Stems", widths.stems),
-    ] {
+    for column in Column::ALL {
+        let width = column.width(widths);
+        // The whole column's width is the target, not just the word: a
+        // ten-point label is a small thing to hit twice in a row.
+        let area = Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(width, rect.height()));
+        let over = pointer.is_some_and(|at| area.contains(at));
+        let on = sort.column == column;
+
+        if over {
+            painter.rect_filled(area, 0.0, theme::BOOTH_2);
+        }
+        if over && response.clicked() {
+            clicked = Some(column);
+        }
+
+        let color = if on { theme::AMBER } else { theme::DIM };
+        let text = match on {
+            true => format!("{} {}", theme::label_text(column.name()), sort.arrow()),
+            false => theme::label_text(column.name()),
+        };
         painter.text(
             egui::pos2(x, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            theme::label_text(name),
+            text,
             theme::sans(theme::LABEL),
-            theme::DIM,
+            color,
         );
         x += width;
+    }
+
+    if pointer.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     painter.line_segment(
         [egui::pos2(rect.left(), rect.bottom()), egui::pos2(rect.right(), rect.bottom())],
         egui::Stroke::new(1.0, theme::RULE),
     );
+    clicked
 }
 
 /// What the pointer did to a row.
@@ -89,7 +212,10 @@ pub fn row(
 ) -> Option<Hit> {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
-    let response = response.on_hover_text("double-click to hear it");
+    let response = response.on_hover_text(match track.path.parent() {
+        Some(_) => format!("{}\ndouble-click to hear it", track.path.display()),
+        None => "double-click to hear it".to_string(),
+    });
     let painter = ui.painter_at(rect);
 
     if selected {
@@ -146,6 +272,12 @@ pub fn row(
             if indented { theme::DIM } else { theme::AMBER },
         );
     }
+    x += widths.stems;
+
+    // The folder rather than the whole path: the tail is what tells one place
+    // from another, and the full thing is on the row's hover and in the
+    // inspector.
+    text(&painter, rect, x, widths.location, &folder_of(track), theme::DIM, false);
 
     // A double click is also a click, so the double is checked first: opening a
     // row selects it too, and reporting both would start playback and then
@@ -154,6 +286,99 @@ pub fn row(
         (true, _) => Some(Hit::Opened),
         (_, true) => Some(Hit::Clicked),
         _ => None,
+    }
+}
+
+/// Order two tracks by a column.
+///
+/// A track with nothing in the column always sorts last, whichever way round
+/// the sort is: an ungridded track is not slower than every other track, and
+/// burying the ones still to be worked on under a reversed sort would hide
+/// exactly the ones being looked for. Ties fall back to artist and title so
+/// that the order is stable rather than whatever the collection happened to be
+/// in.
+pub fn compare(a: &Track, b: &Track, sort: Sort) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let missing = |track: &Track| match sort.column {
+        Column::Artist => track.artist.trim().is_empty(),
+        Column::Title => track.title.trim().is_empty(),
+        Column::Bpm => !track.has_grid || track.bpm <= 0.0,
+        Column::Key => track.key.is_empty(),
+        Column::Energy => track.energy == 0,
+        Column::Stems => track.stems.is_empty(),
+        Column::Location => track.path.as_os_str().is_empty(),
+    };
+    match (missing(a), missing(b)) {
+        (true, true) => return names(a, b),
+        (true, false) => return Ordering::Greater,
+        (false, true) => return Ordering::Less,
+        (false, false) => {}
+    }
+
+    let order = match sort.column {
+        Column::Artist => text_of(&a.artist).cmp(&text_of(&b.artist)),
+        Column::Title => text_of(&a.title).cmp(&text_of(&b.title)),
+        Column::Bpm => a.bpm.total_cmp(&b.bpm),
+        // By the wheel's own order — 1A, 1B, 2A — rather than alphabetically,
+        // which would put 10A between 1A and 2A and make the column useless for
+        // the one thing it is read for.
+        Column::Key => wheel(&a.key).cmp(&wheel(&b.key)),
+        Column::Energy => a.energy.cmp(&b.energy),
+        Column::Stems => a.stems.is_complete().cmp(&b.stems.is_complete()),
+        Column::Location => a.path.cmp(&b.path),
+    };
+    let order = match sort.descending {
+        true => order.reverse(),
+        false => order,
+    };
+    order.then_with(|| names(a, b))
+}
+
+fn names(a: &Track, b: &Track) -> std::cmp::Ordering {
+    text_of(&a.artist)
+        .cmp(&text_of(&b.artist))
+        .then_with(|| text_of(&a.title).cmp(&text_of(&b.title)))
+}
+
+/// Case-insensitively, because a crate sorted with the capitals first is not
+/// sorted in any way a person means.
+fn text_of(value: &str) -> String {
+    value.to_lowercase()
+}
+
+/// A Camelot key as a number the wheel's order agrees with.
+fn wheel(key: &str) -> u32 {
+    let trimmed = key.trim();
+    let Some(letter) = trimmed.chars().last() else { return u32::MAX };
+    let number: u32 = trimmed[..trimmed.len() - letter.len_utf8()].parse().unwrap_or(u32::MAX / 4);
+    let side = match letter.to_ascii_uppercase() {
+        'A' => 0,
+        'B' => 1,
+        _ => 2,
+    };
+    number * 4 + side
+}
+
+/// The folder a track's file is in, shortened for a column.
+///
+/// Home is `~`, because most of a path under it is the same for every track and
+/// says nothing. A file at the filesystem root, or with no parent at all, reads
+/// as the path itself rather than as an empty cell.
+pub fn folder_of(track: &Track) -> String {
+    // A bare file name has a parent, and it is the empty path — so "has a
+    // parent" is not the same question as "is in a folder", and only the second
+    // one has a useful answer here.
+    let parent = track.path.parent().filter(|parent| !parent.as_os_str().is_empty());
+    let Some(parent) = parent else {
+        return track.path.display().to_string();
+    };
+    let shown = parent.display().to_string();
+    match std::env::var_os("HOME").map(|home| home.to_string_lossy().into_owned()) {
+        Some(home) if !home.is_empty() && shown.starts_with(&home) => {
+            format!("~{}", &shown[home.len()..])
+        }
+        _ => shown,
     }
 }
 
@@ -211,6 +436,7 @@ fn pill(painter: &egui::Painter, rect: Rect, x: f32, content: &str, color: Color
 mod tests {
     use super::*;
     use crate::library::Role;
+    use std::path::PathBuf;
 
     #[test]
     fn the_names_get_whatever_the_numbers_do_not() {
@@ -229,6 +455,164 @@ mod tests {
         assert!(widths.artist > 0.0 && widths.title > 0.0);
         assert_eq!(widths.bpm, 58.0, "the fixed columns stay fixed");
         assert_eq!(widths.energy, 64.0);
+    }
+
+    fn track(id: u32, artist: &str, title: &str, bpm: f64, key: &str) -> Track {
+        let mut track = Track::placeholder(id);
+        track.artist = artist.into();
+        track.title = title.into();
+        track.bpm = bpm;
+        track.has_grid = bpm > 0.0;
+        track.key = key.into();
+        track.energy = 3;
+        track
+    }
+
+    fn order(mut tracks: Vec<Track>, sort: Sort) -> Vec<String> {
+        tracks.sort_by(|a, b| compare(a, b, sort));
+        tracks.into_iter().map(|t| t.title).collect()
+    }
+
+    #[test]
+    fn clicking_a_column_sorts_by_it_and_clicking_again_turns_it_round() {
+        let sort = Sort::default();
+        assert_eq!(sort.column, Column::Artist);
+
+        let by_title = sort.clicked(Column::Title);
+        assert_eq!(by_title.column, Column::Title);
+        assert!(!by_title.descending, "names read forwards first");
+
+        assert!(by_title.clicked(Column::Title).descending, "the same column turns round");
+        assert!(!by_title.clicked(Column::Title).clicked(Column::Title).descending);
+    }
+
+    #[test]
+    fn a_measurement_starts_at_the_loud_end() {
+        // A tempo or an energy is nearly always wanted highest first: that is
+        // the end of a crate a set gets built from.
+        assert!(Sort::default().clicked(Column::Bpm).descending);
+        assert!(Sort::default().clicked(Column::Energy).descending);
+        assert!(!Sort::default().clicked(Column::Location).descending);
+    }
+
+    #[test]
+    fn text_sorts_without_the_capitals_first() {
+        let tracks =
+            vec![track(1, "batu", "lower", 128.0, "8A"), track(2, "Alpha", "upper", 128.0, "8A")];
+        let sort = Sort { column: Column::Artist, descending: false };
+        assert_eq!(order(tracks, sort), vec!["upper", "lower"]);
+    }
+
+    #[test]
+    fn a_tempo_sorts_as_a_number_rather_than_as_text() {
+        let tracks = vec![
+            track(1, "a", "ninety", 90.0, "8A"),
+            track(2, "b", "one-seventy", 170.0, "8A"),
+            track(3, "c", "one-twenty-eight", 128.0, "8A"),
+        ];
+        let sort = Sort { column: Column::Bpm, descending: false };
+        assert_eq!(order(tracks.clone(), sort), vec!["ninety", "one-twenty-eight", "one-seventy"]);
+
+        let sort = Sort { column: Column::Bpm, descending: true };
+        assert_eq!(order(tracks, sort), vec!["one-seventy", "one-twenty-eight", "ninety"]);
+    }
+
+    #[test]
+    fn keys_sort_around_the_wheel_rather_than_alphabetically() {
+        // Alphabetically, 10A falls between 1A and 2A, which makes the column
+        // useless for the one thing it is read for.
+        let tracks = vec![
+            track(1, "a", "ten", 128.0, "10A"),
+            track(2, "b", "one", 128.0, "1A"),
+            track(3, "c", "two", 128.0, "2A"),
+            track(4, "d", "one-b", 128.0, "1B"),
+        ];
+        let sort = Sort { column: Column::Key, descending: false };
+        assert_eq!(order(tracks, sort), vec!["one", "one-b", "two", "ten"]);
+    }
+
+    #[test]
+    fn a_track_with_nothing_in_the_column_sorts_last_either_way() {
+        // Reversing a sort must not bury the tracks still to be worked on
+        // under everything else — they are usually what is being looked for.
+        let mut ungridded = track(3, "c", "no grid", 0.0, "");
+        ungridded.has_grid = false;
+        let tracks =
+            vec![track(1, "a", "slow", 90.0, "8A"), track(2, "b", "fast", 170.0, "8A"), ungridded];
+
+        for descending in [false, true] {
+            let sort = Sort { column: Column::Bpm, descending };
+            let listed = order(tracks.clone(), sort);
+            assert_eq!(listed.last().unwrap(), "no grid", "descending: {descending}");
+        }
+    }
+
+    #[test]
+    fn a_missing_key_sorts_last_too() {
+        let tracks = vec![
+            track(1, "a", "keyed", 128.0, "8A"),
+            track(2, "b", "no key", 128.0, ""),
+            track(3, "c", "also keyed", 128.0, "2A"),
+        ];
+        for descending in [false, true] {
+            let sort = Sort { column: Column::Key, descending };
+            assert_eq!(order(tracks.clone(), sort).last().unwrap(), "no key");
+        }
+    }
+
+    #[test]
+    fn a_tie_falls_back_to_the_names_so_the_order_is_stable() {
+        // Every tempo the same, so only the fallback decides — and it has to
+        // decide the same way every time the list is rebuilt.
+        let tracks = vec![
+            track(1, "Zed", "z", 128.0, "8A"),
+            track(2, "Alpha", "a", 128.0, "8A"),
+            track(3, "Mid", "m", 128.0, "8A"),
+        ];
+        let sort = Sort { column: Column::Bpm, descending: false };
+        assert_eq!(order(tracks.clone(), sort), vec!["a", "m", "z"]);
+        assert_eq!(order(tracks, sort), vec!["a", "m", "z"], "twice the same");
+    }
+
+    #[test]
+    fn sorting_by_location_groups_a_folder_together() {
+        let mut one = track(1, "a", "first", 128.0, "8A");
+        let mut two = track(2, "b", "second", 128.0, "8A");
+        let mut three = track(3, "c", "third", 128.0, "8A");
+        one.path = "/music/Batu/x.flac".into();
+        two.path = "/downloads/y.flac".into();
+        three.path = "/music/Batu/a.flac".into();
+
+        let sort = Sort { column: Column::Location, descending: false };
+        assert_eq!(order(vec![one, two, three], sort), vec!["second", "third", "first"]);
+    }
+
+    #[test]
+    fn a_location_is_shortened_at_the_home_directory() {
+        let mut track = Track::placeholder(1);
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !home.is_empty() {
+            track.path = PathBuf::from(format!("{home}/Music/Booth/Batu/Marius.flac"));
+            assert_eq!(folder_of(&track), "~/Music/Booth/Batu");
+        }
+
+        track.path = "/mnt/usb/Batu/Marius.flac".into();
+        assert_eq!(folder_of(&track), "/mnt/usb/Batu");
+    }
+
+    #[test]
+    fn a_file_with_no_folder_still_shows_something() {
+        let mut track = Track::placeholder(1);
+        track.path = "Marius.flac".into();
+        // Not an empty cell: the answer to "where is this" is never nowhere.
+        assert!(!folder_of(&track).is_empty());
+    }
+
+    #[test]
+    fn every_column_fits_in_the_window() {
+        let widths = columns(1200.0);
+        let total: f32 = Column::ALL.iter().map(|c| c.width(&widths)).sum();
+        assert!(total <= 1200.0, "the columns overflowed: {total}");
     }
 
     #[test]

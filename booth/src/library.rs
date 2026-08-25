@@ -506,6 +506,17 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+/// "1 track", "2 tracks".
+///
+/// Here rather than in the window because the log needs it too, and a run whose
+/// log says "1 tracks" reads like nobody checked.
+pub fn plural(count: usize, noun: &str) -> String {
+    match count {
+        1 => format!("1 {noun}"),
+        n => format!("{n} {noun}s"),
+    }
+}
+
 /// Now, in seconds since the Unix epoch.
 pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()

@@ -17,16 +17,13 @@ use musicai::stems::Backend;
 
 use crate::config::{Config, OnExternal};
 use crate::job::{self, Adoptable, Job, Retag, Runner, Update};
-use crate::library::{now, Drive, Library, Playlist, SavedQuery, Track, Written};
+use crate::library::{now, plural, Drive, Library, Playlist, SavedQuery, Track, Written};
 use crate::player::Player;
 use crate::query::{self, Context, Paint, Query};
 use crate::rows;
 use crate::sync::{self, Level, Plan};
 use crate::theme;
 use crate::wave;
-
-/// How many log lines to keep.
-const MAX_LOG: usize = 500;
 
 /// How much room under the list the prep editor needs.
 ///
@@ -65,6 +62,8 @@ pub struct App {
 
     /// The rows the query produced, rebuilt whenever anything changes.
     rows: Vec<Row>,
+    /// Which column the browser is ordered by.
+    sort: rows::Sort,
     selected: Option<u32>,
     /// The three-band waveform of the selected track, once it has been read.
     waveform: Option<(u32, Vec<u8>)>,
@@ -80,13 +79,16 @@ pub struct App {
     /// arrives.
     loading: Option<(u32, bool)>,
 
+    /// Whether the log is opened out, and how much of it is shown.
+    log_open: bool,
+    log_level: crate::log::Level,
+
     runner: Option<Runner>,
     /// Work waiting for the runner. Jobs chain — an import that turns up
     /// external files queues the copy behind itself — and a queue is the only
     /// honest way to say so.
     queued: VecDeque<Job>,
     progress: Option<(usize, usize)>,
-    log: Vec<(String, Color32)>,
 
     /// The drive the dock is showing, as an index into the library's drives.
     drive: usize,
@@ -109,6 +111,11 @@ pub struct App {
     playlist_entry: String,
     /// The tag being typed in the inspector.
     tag_entry: String,
+    /// When the running job started, for saying how long it took.
+    started: Option<std::time::Instant>,
+    /// Tracks whose waveform has already been asked for once this run, so a
+    /// measurement that cannot succeed is not attempted on every frame.
+    remeasured: std::collections::HashSet<u32>,
     /// Where the playhead sits in the selected track, in milliseconds. It is
     /// where a new cue goes, so it is a position rather than a playing thing —
     /// nothing here makes a sound.
@@ -143,6 +150,8 @@ enum Pending {
     RemoveTag(u32, String),
     CommitEdit,
     CancelEdit,
+    /// The list needs rebuilding in a new order.
+    Resort,
     WriteTags(u32),
     /// Move a cue to a new time, or add one if it is not there yet.
     PlaceCue {
@@ -222,6 +231,7 @@ impl App {
 
         let config_path = Config::path();
         let config = Config::load(&config_path);
+        let config_sort = config.sort;
         let library_path = Library::default_path();
         let (library, status) = match Library::load(&library_path) {
             Ok(library) => {
@@ -233,6 +243,19 @@ impl App {
             Err(e) => (Library::new(), format!("could not read {}: {e:#}", library_path.display())),
         };
 
+        crate::info!(
+            "collection {} — {}, {}, {}",
+            library_path.display(),
+            plural(library.tracks.len(), "track"),
+            plural(library.playlists.len(), "playlist"),
+            plural(library.drives.len(), "drive")
+        );
+        crate::info!(
+            "library folder {} — music from elsewhere: {}",
+            config.library_path.display(),
+            config.on_external.label().to_lowercase()
+        );
+
         let mut app = Self {
             library,
             library_path,
@@ -243,15 +266,17 @@ impl App {
             view: View::All,
             playlist: String::new(),
             rows: Vec::new(),
+            sort: config_sort,
             selected: None,
             waveform: None,
+            log_open: false,
+            log_level: crate::log::Level::Info,
             player: None,
             player_problem: None,
             loading: None,
             runner: None,
             queued: VecDeque::new(),
             progress: None,
-            log: Vec::new(),
             drive: 0,
             plan: Plan::default(),
             sheet: false,
@@ -262,6 +287,8 @@ impl App {
             focus_bar: false,
             playlist_entry: String::new(),
             tag_entry: String::new(),
+            started: None,
+            remeasured: std::collections::HashSet::new(),
             playhead_ms: None,
             cue_entry: (None, String::new()),
             pending: Vec::new(),
@@ -275,8 +302,14 @@ impl App {
         // The device is opened once, at startup, and kept: opening one per
         // track costs a noticeable gap and, on some hosts, a click.
         match Player::open() {
-            Ok(player) => app.player = Some(player),
-            Err(e) => app.player_problem = Some(format!("{e:#}")),
+            Ok(player) => {
+                crate::info!("audio out at {} Hz", player.out_rate());
+                app.player = Some(player);
+            }
+            Err(e) => {
+                crate::warn!("no audio out: {e:#}");
+                app.player_problem = Some(format!("{e:#}"));
+            }
         }
 
         // Lets the layout check open the window on the sync sheet, which is
@@ -287,6 +320,10 @@ impl App {
         if let Some(which) = std::env::var_os("BOOTH_OPEN_SHEET") {
             match which.to_string_lossy().as_ref() {
                 "settings" => app.settings = true,
+                "log" => {
+                    app.log_open = true;
+                    app.log_level = crate::log::Level::Debug;
+                }
                 "adopt" => app.asking = app.library.tracks.iter().map(|t| t.id).take(3).collect(),
                 _ => app.sheet = true,
             }
@@ -303,12 +340,18 @@ impl App {
         self.runner.is_some()
     }
 
+    /// Say something to the user, and to the log.
+    ///
+    /// One call rather than two so that what the window showed and what the
+    /// file recorded cannot disagree about a run.
     fn note(&mut self, text: impl Into<String>, color: Color32) {
-        self.log.push((text.into(), color));
-        if self.log.len() > MAX_LOG {
-            let excess = self.log.len() - MAX_LOG;
-            self.log.drain(0..excess);
-        }
+        let text = text.into();
+        let level = match color {
+            theme::ALERT => crate::log::Level::Error,
+            theme::AMBER => crate::log::Level::Warn,
+            _ => crate::log::Level::Info,
+        };
+        crate::log::record(level, text);
     }
 
     // -- the list ----------------------------------------------------------
@@ -319,6 +362,7 @@ impl App {
     /// typed query are the same mechanism — there is no second filtering path
     /// that could disagree with the one the bar describes.
     fn rebuild(&mut self) {
+        let started = std::time::Instant::now();
         self.query = Query::parse(&self.text);
 
         let duplicates = self
@@ -337,7 +381,7 @@ impl App {
         let context =
             Context { now: now(), drives: &drives, playlists: &playlists, duplicates: &duplicates };
 
-        let in_view: Vec<Track> = self
+        let mut in_view: Vec<Track> = self
             .library
             .tracks
             .iter()
@@ -356,6 +400,11 @@ impl App {
             .cloned()
             .collect();
 
+        // Sorted before the companions are added, so a stem stays under the
+        // track it came from however the list is ordered.
+        let sort = self.sort;
+        in_view.sort_by(|a, b| rows::compare(a, b, sort));
+
         // The companions come after the query rather than through it: an
         // acapella is shown because its parent matched, which is what keeps a
         // stem kit from splitting away from the record it belongs to.
@@ -373,6 +422,19 @@ impl App {
             self.waveform = None;
         }
         self.replan();
+
+        crate::debug!(
+            "listed {} of {} ({}) by {} in {:.1} ms{}",
+            self.rows.iter().filter(|row| !row.indented).count(),
+            plural(self.library.tracks.len(), "track"),
+            plural(self.rows.len(), "row"),
+            self.sort.column.name(),
+            started.elapsed().as_secs_f64() * 1000.0,
+            match self.text.trim().is_empty() {
+                true => String::new(),
+                false => format!(" — query {:?}", self.text.trim()),
+            }
+        );
     }
 
     fn replan(&mut self) {
@@ -408,6 +470,7 @@ impl App {
 
     /// Queue a job, and run it if nothing else is.
     fn start(&mut self, job: Job) {
+        crate::debug!("queued {} ({} waiting)", job.name(), self.queued.len());
         self.queued.push_back(job);
         self.pump();
     }
@@ -418,6 +481,8 @@ impl App {
             return;
         }
         let Some(job) = self.queued.pop_front() else { return };
+        crate::info!("started {}", job.name());
+        self.started = Some(std::time::Instant::now());
         self.progress = Some((0, 0));
         self.runner = Some(Runner::start(job, self.wake.clone()));
     }
@@ -506,6 +571,11 @@ impl App {
         // copy-in policy is about. The copy is queued first, and the analysis
         // behind it, so it runs against whatever the track's path is by then.
         let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
+        // Asking for it by hand clears the "already tried" mark: the file may
+        // have been put back since.
+        for id in &ids {
+            self.remeasured.remove(id);
+        }
         self.ensure_local(&ids);
         self.start(Job::Analyze(waiting));
     }
@@ -564,6 +634,12 @@ impl App {
                     changed = true;
                 }
                 Update::Decoded { id, sound } => {
+                    crate::debug!(
+                        "decoded #{id}: {:.1}s, {} Hz, {} ch",
+                        sound.duration_secs(),
+                        sound.rate,
+                        sound.channels
+                    );
                     if let Some(player) = &mut self.player {
                         player.load(id, sound);
                         if let Some(ms) = self.playhead_ms {
@@ -575,6 +651,7 @@ impl App {
                     }
                 }
                 Update::Adopted { id, to } => {
+                    crate::info!("#{id} copied into the library: {}", to.display());
                     if let Some(track) = self.library.get_mut(id) {
                         // The record now points at the copy. The original is
                         // untouched on disk; the collection simply stops
@@ -584,6 +661,16 @@ impl App {
                     changed = true;
                 }
                 Update::Analyzed(analyzed) => {
+                    crate::debug!(
+                        "analysed #{}: {:.2} BPM (confidence {:.1}), key {}, {} beats, {} phrases, {} cues",
+                        analyzed.id,
+                        analyzed.bpm,
+                        analyzed.grid_confidence,
+                        if analyzed.key.is_empty() { "none" } else { &analyzed.key },
+                        analyzed.beats,
+                        analyzed.phrases.len(),
+                        analyzed.cues.len()
+                    );
                     if let Some(track) = self.library.get_mut(analyzed.id) {
                         track.bpm = analyzed.bpm;
                         track.grid_confidence = analyzed.grid_confidence;
@@ -621,6 +708,7 @@ impl App {
                 Update::Failed { path, message } => {
                     // Whatever failed, nothing is arriving for the deck now.
                     self.loading = None;
+                    crate::error!("{}: {message}", path.display());
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                     self.note(
                         format!(
@@ -632,9 +720,19 @@ impl App {
                 }
                 Update::Done(result) => {
                     finished = true;
+                    let took = self
+                        .started
+                        .take()
+                        .map(|at| format!(" in {:.1}s", at.elapsed().as_secs_f32()))
+                        .unwrap_or_default();
+                    let name = self.runner.as_ref().map(|r| r.name).unwrap_or("job");
                     match result {
-                        Ok(()) => self.status = "done".into(),
+                        Ok(()) => {
+                            crate::info!("finished {name}{took}");
+                            self.status = "done".into();
+                        }
                         Err(message) => {
+                            crate::error!("{name} failed{took}: {message}");
                             self.status = message.clone();
                             self.note(message, theme::ALERT);
                         }
@@ -663,8 +761,13 @@ impl App {
     }
 
     fn save(&mut self) {
-        if let Err(e) = self.library.save(&self.library_path) {
-            self.note(format!("could not save the collection: {e:#}"), theme::ALERT);
+        match self.library.save(&self.library_path) {
+            Ok(()) => crate::debug!(
+                "saved {}, {}",
+                plural(self.library.tracks.len(), "track"),
+                plural(self.library.playlists.len(), "playlist")
+            ),
+            Err(e) => self.note(format!("could not save the collection: {e:#}"), theme::ALERT),
         }
     }
 
@@ -739,15 +842,6 @@ impl App {
         self.drive = self.library.drives.len() - 1;
         self.replan();
         self.save();
-    }
-}
-
-/// "1 track", "2 tracks".
-fn plural(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
     }
 }
 
@@ -1193,7 +1287,20 @@ impl App {
 
     fn rows_table(&mut self, ui: &mut Ui) {
         let widths = rows::columns(ui.available_width());
-        rows::header_row(ui, &widths);
+        if let Some(column) = rows::header_row(ui, &widths, self.sort) {
+            let was = self.sort;
+            self.sort = self.sort.clicked(column);
+            self.config.sort = self.sort;
+            let _ = self.config.save(&self.config_path);
+            crate::debug!(
+                "sort {} {} (was {} {})",
+                self.sort.column.name(),
+                if self.sort.descending { "descending" } else { "ascending" },
+                was.column.name(),
+                if was.descending { "descending" } else { "ascending" }
+            );
+            self.pending.push(Pending::Resort);
+        }
 
         let mut hit = None;
         for line in &self.rows {
@@ -1317,8 +1424,18 @@ impl App {
                 Some(cached) => self.waveform = Some((track.id, cached)),
                 // Nothing cached — analysed by an older version, or the cache
                 // was cleared. Measure it again, once, in the background.
-                None if !self.running() => {
-                    self.start(Job::Analyze(vec![(track.id, track.path.clone())]))
+                //
+                // Once, and remembered: this runs every frame the track is
+                // selected, so a track that cannot be measured — its file has
+                // moved, it will not decode — would otherwise start a job,
+                // fail, and start another one for as long as it stayed
+                // selected.
+                None if !self.running()
+                    && !self.remeasured.contains(&track.id)
+                    && track.path.exists() =>
+                {
+                    self.remeasured.insert(track.id);
+                    self.start(Job::Analyze(vec![(track.id, track.path.clone())]));
                 }
                 None => {}
             }
@@ -1824,7 +1941,11 @@ impl App {
         if pending.is_empty() {
             return;
         }
+        // Two different consequences: `touched` means the collection changed
+        // and has to be written; `relist` means only the order or the view did.
+        // Sorting a list is not a reason to rewrite a library.
         let mut touched = false;
+        let mut relist = false;
 
         for action in pending {
             match action {
@@ -1839,7 +1960,7 @@ impl App {
                             self.view = View::All;
                             self.text.clear();
                         }
-                        touched = true;
+                        relist = true;
                     }
                 }
                 Pending::Forget(id) => {
@@ -1874,6 +1995,7 @@ impl App {
                     }
                 }
                 Pending::CancelEdit => self.editing = None,
+                Pending::Resort => relist = true,
                 Pending::WriteTags(id) => self.write_tags(id),
                 Pending::PlaceCue { id, letter, time_ms } => {
                     self.place_cue(id, letter, time_ms);
@@ -1906,6 +2028,8 @@ impl App {
 
         if touched {
             self.save();
+        }
+        if touched || relist {
             self.rebuild();
         }
     }
@@ -2060,16 +2184,128 @@ impl App {
             }
         });
 
-        // The log sits under the dock, at the size of a couple of lines: enough
-        // to see what just happened without it becoming the window.
-        if !self.log.is_empty() {
-            ui.add_space(4.0);
-            egui::ScrollArea::vertical().max_height(52.0).stick_to_bottom(true).show(ui, |ui| {
-                for (text, color) in &self.log {
-                    ui.label(RichText::new(text).font(theme::mono(10.5)).color(*color));
+        self.log_panel(ui);
+    }
+
+    /// What is going on, in as much or as little detail as asked for.
+    ///
+    /// Two lines by default and half the window when opened, because the two
+    /// questions it answers are different: "did that work" wants the last line,
+    /// and "why did that not work" wants all of them.
+    fn log_panel(&mut self, ui: &mut Ui) {
+        let entries = crate::log::entries(self.log_level);
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            let arrow = if self.log_open { "\u{25BE}" } else { "\u{25B8}" };
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!("{arrow} {}", theme::label_text("Log")))
+                            .size(theme::LABEL)
+                            .color(theme::DIM)
+                            .strong(),
+                    )
+                    .fill(theme::BOOTH),
+                )
+                .on_hover_text(format!(
+                    "{} lines · also written to {}",
+                    entries.len(),
+                    crate::log::default_path().display()
+                ))
+                .clicked()
+            {
+                self.log_open = !self.log_open;
+            }
+
+            if self.log_open {
+                for level in crate::log::Level::SHOWN {
+                    let on = self.log_level == level;
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(level.label()).font(theme::mono(10.0)).color(if on {
+                                    theme::BOOTH
+                                } else {
+                                    theme::DIM
+                                }),
+                            )
+                            .fill(if on {
+                                theme::AMBER
+                            } else {
+                                theme::BOOTH
+                            }),
+                        )
+                        .on_hover_text(format!("show {level} and above"))
+                        .clicked()
+                    {
+                        self.log_level = level;
+                    }
+                }
+                ui.separator();
+                if ui.button(RichText::new("clear").size(theme::SMALL)).clicked() {
+                    crate::log::clear();
+                }
+                if ui
+                    .button(RichText::new("copy").size(theme::SMALL))
+                    .on_hover_text("Put the whole log on the clipboard")
+                    .clicked()
+                {
+                    let text: Vec<String> = entries.iter().map(|entry| entry.line()).collect();
+                    ui.ctx().copy_text(text.join("\n"));
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "{} lines · {}",
+                        entries.len(),
+                        crate::log::default_path().display()
+                    ))
+                    .font(theme::mono(10.0))
+                    .color(theme::DIM),
+                );
+            }
+        });
+
+        // Collapsed, only the last couple of lines: enough to see what just
+        // happened without the log becoming the window.
+        // Opened, it takes whatever the dock has been dragged to; collapsed,
+        // it is two lines whatever that is.
+        let height = match self.log_open {
+            true => ui.available_height().max(60.0),
+            false => 30.0,
+        };
+        egui::ScrollArea::vertical()
+            .max_height(height)
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                let shown = match self.log_open {
+                    true => &entries[..],
+                    false => &entries[entries.len().saturating_sub(2)..],
+                };
+                for entry in shown {
+                    let color = match entry.level {
+                        crate::log::Level::Error => theme::ALERT,
+                        crate::log::Level::Warn => theme::AMBER,
+                        crate::log::Level::Info => theme::TEXT,
+                        _ => theme::DIM,
+                    };
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(
+                            RichText::new(entry.stamp()).font(theme::mono(10.0)).color(theme::DIM),
+                        );
+                        if self.log_open {
+                            ui.label(
+                                RichText::new(entry.level.tag())
+                                    .font(theme::mono(10.0))
+                                    .color(color),
+                            );
+                        }
+                        ui.label(RichText::new(&entry.text).font(theme::mono(10.5)).color(color));
+                    });
                 }
             });
-        }
     }
 
     /// The sheet: what would change, then whether it can.

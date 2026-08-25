@@ -46,7 +46,7 @@ impl Job {
     pub fn name(&self) -> &'static str {
         match self {
             Job::Import { .. } => "reading",
-            Job::Adopt { .. } => "copying in",
+            Job::Adopt { .. } => "copying",
             Job::Retag(_) => "tagging",
             Job::Decode { .. } => "loading",
             Job::Analyze(_) => "analysing",
@@ -393,6 +393,15 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             // command is told exactly what to write rather than walking a
             // folder again and possibly finding something else.
             let mut args = *args;
+            crate::info!(
+                "writing {} files to {}",
+                files.len(),
+                args.drive
+                    .as_ref()
+                    .or(args.image.as_ref())
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            );
             args.input = InputArgs { inputs: files, recursive: false };
             musicai::commands::export(&args, reporter)
         }
@@ -402,6 +411,11 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
 fn import(paths: &[PathBuf], recursive: bool, reporter: &Channel) -> anyhow::Result<()> {
     let files = musicai::discover::collect(paths, recursive)?;
     let total = files.len();
+    crate::info!(
+        "walked {} and found {}",
+        crate::library::plural(paths.len(), "path"),
+        crate::library::plural(total, "playable file")
+    );
     for (done, path) in files.iter().enumerate() {
         if reporter.cancelled() {
             break;
@@ -428,8 +442,14 @@ fn analyze_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<
         if reporter.cancelled() {
             return;
         }
+        let started = std::time::Instant::now();
         match analyze_file(*id, path) {
             Ok(analyzed) => {
+                crate::debug!(
+                    "listened to {} in {:.1}s",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    started.elapsed().as_secs_f32()
+                );
                 let _ = reporter.tx.send(Update::Analyzed(Box::new(analyzed)));
             }
             Err(e) => {
@@ -456,12 +476,11 @@ fn adopt(tracks: &[Adoptable], config: &Config, reporter: &Channel) -> anyhow::R
         if reporter.cancelled() {
             break;
         }
+        crate::debug!("copying {} in", track.path.display());
         match config::copy_in(config, &track.artist, &track.path) {
+            // The window logs this one with where it landed, so there is no
+            // line here: two records of one copy is one too many.
             Ok(to) => {
-                let _ = reporter.tx.send(Update::Line(format!(
-                    "copied {} into the library",
-                    track.path.file_name().unwrap_or_default().to_string_lossy()
-                )));
                 let _ = reporter.tx.send(Update::Adopted { id: track.id, to });
             }
             Err(e) => {
@@ -548,9 +567,16 @@ fn separate(
             break;
         }
         args.input = InputArgs { inputs: vec![path.clone()], recursive: false };
+        crate::info!("separating {}", path.file_name().unwrap_or_default().to_string_lossy());
         match musicai::commands::stems_files(&args, std::slice::from_ref(path), reporter) {
             Ok(()) => {
                 let kit = find_stems(out_dir, path);
+                crate::debug!(
+                    "stems for #{id}: vocals {}, melody {}, drums {}",
+                    kit.vocals.is_some(),
+                    kit.melody.is_some(),
+                    kit.drums.is_some()
+                );
                 let _ = reporter.tx.send(Update::Separated { id: *id, kit });
             }
             Err(e) => {

@@ -110,10 +110,21 @@ inspector.
 
 ## What the columns mean
 
-Stem companions are indented under the track they came from, and exist only
-when all three stem files are on disk. The energy meter is a rank from 1 to 5,
-taken from the loudest phrase's onset strength: it sorts a crate from tool to
-peak-time record and deliberately claims no more precision than that.
+Artist, Title, BPM, Key, Energy, Stems, Location. **Click a heading to sort by
+it**; click again to reverse. Names start forwards, measurements start at the
+loud end, and the choice is remembered between runs.
+
+A track with nothing in the column always sorts last, whichever way round — an
+ungridded track is not slower than every other track, and reversing a sort must
+not bury the ones still to be worked on. Keys sort around the wheel rather than
+alphabetically, so 9A comes before 11B and the column is worth reading.
+
+Stem companions are indented under the track they came from, stay under it in
+every sort, and exist only when all three stem files are on disk. The energy
+meter is a rank from 1 to 5, taken from the loudest phrase's onset strength: it
+sorts a crate from tool to peak-time record and deliberately claims no more
+precision than that. Location shows the folder, shortened at `~`, with the whole
+path on hover.
 
 ## The sync sheet
 
@@ -132,6 +143,17 @@ command: the database and every analysis file are read back off the drive by a
 parser that shares no code with the writer. Until that passes, the drive is not
 finished.
 
+## The log
+
+Along the bottom. Collapsed it is the last two lines; opened it fills the dock,
+which can be dragged taller, and can be filtered by level, cleared, or copied
+whole.
+
+Everything also goes to `booth.log` in the data directory, and the previous
+run's is kept beside it as `booth.log.1` — the run worth reading is usually the
+one that just ended badly. `BOOTH_LOG=warn` turns it down; `off` turns it off.
+The default is everything.
+
 ## Where things are kept
 
 `$XDG_DATA_HOME/booth` on Linux, `~/Library/Application Support/Booth` on macOS,
@@ -147,6 +169,7 @@ or wherever `BOOTH_DATA_DIR` points.
 - `waveforms/` — one cached three-band picture per track, so arrow-keying down a
   crate moves the waveform instead of re-analysing each row.
 - `stems/` — rendered stem kits.
+- `booth.log`, `booth.log.1` — this run and the one before it.
 
 The collection itself never writes audio or changes a tag — it describes what is
 on disk, which is what makes it safe to rebuild from a rescan at any point. The
