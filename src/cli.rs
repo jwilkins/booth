@@ -212,6 +212,17 @@ impl StemsArgs {
     pub fn vbr(&self) -> Option<u8> {
         (!self.stem_cbr).then_some(self.stem_vbr)
     }
+
+    /// The model to separate with: whatever was named, else what the chosen
+    /// quality implies.
+    pub fn model(&self) -> String {
+        self.demucs.demucs_model.clone().unwrap_or_else(|| self.quality.model().to_string())
+    }
+
+    /// Likewise for the number of test-time shifts.
+    pub fn shifts(&self) -> u32 {
+        self.demucs.demucs_shifts.unwrap_or_else(|| self.quality.shifts())
+    }
 }
 
 impl ExportArgs {
@@ -389,6 +400,55 @@ pub struct ExportArgs {
     pub companions: Vec<(PathBuf, PathBuf)>,
 }
 
+/// How much work a separation is worth.
+///
+/// The two ends of a real trade: the fine-tuned model with test-time shifts is
+/// roughly eight times the work of demucs' own defaults and separates
+/// noticeably better. A stem is rendered once and then played for years, so the
+/// default is the slow one — but a first pass over a whole library, or a laptop
+/// with somewhere else to be, wants the other.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum StemQuality {
+    /// `htdemucs_ft` with two shifts. Cleaner, and about eight times slower.
+    High,
+    /// `htdemucs` with no shifts — demucs' own defaults.
+    Standard,
+}
+
+impl StemQuality {
+    pub const ALL: [StemQuality; 2] = [StemQuality::High, StemQuality::Standard];
+
+    pub fn model(self) -> &'static str {
+        match self {
+            StemQuality::High => "htdemucs_ft",
+            StemQuality::Standard => "htdemucs",
+        }
+    }
+
+    pub fn shifts(self) -> u32 {
+        match self {
+            StemQuality::High => 2,
+            StemQuality::Standard => 0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StemQuality::High => "high",
+            StemQuality::Standard => "standard",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            StemQuality::High => {
+                "htdemucs_ft with two shifts — cleaner, and roughly eight times slower"
+            }
+            StemQuality::Standard => "htdemucs, no shifts — demucs' own defaults",
+        }
+    }
+}
+
 /// What a stem kit is written as.
 ///
 /// Deliberately narrower than [`Codec`]: a wav stem is enormous for no benefit,
@@ -514,6 +574,10 @@ pub struct StemsArgs {
     #[arg(long, value_enum, default_value_t = Backend::Demucs)]
     pub backend: Backend,
 
+    /// How much work to spend separating. See [`StemQuality`].
+    #[arg(long, value_enum, default_value_t = StemQuality::High)]
+    pub quality: StemQuality,
+
     /// Directory to write stems into, as <dir>/<track>-<stem>.<ext>.
     #[arg(long, short = 'o', value_name = "DIR", default_value = "stems")]
     pub out_dir: PathBuf,
@@ -636,11 +700,10 @@ pub struct DemucsArgs {
 
     /// Pretrained model name to pass to demucs.
     ///
-    /// `htdemucs_ft` is the fine-tuned model: four specialist models rather
-    /// than one, so roughly four times slower and noticeably cleaner. `htdemucs`
-    /// is the faster base model.
-    #[arg(long, value_name = "NAME", default_value = "htdemucs_ft")]
-    pub demucs_model: String,
+    /// Overrides whatever `--quality` would have chosen. Left unset, `high`
+    /// gives `htdemucs_ft` and `standard` gives `htdemucs`.
+    #[arg(long, value_name = "NAME")]
+    pub demucs_model: Option<String>,
 
     /// Torch device for demucs, e.g. cpu or cuda.
     #[arg(long, value_name = "DEVICE")]
@@ -648,13 +711,11 @@ pub struct DemucsArgs {
 
     /// Test-time shifts: demucs separates the track this many extra times at
     /// small random offsets and averages the results, smoothing artefacts at a
-    /// roughly linear cost in time. 0 is demucs' default; 2 is ours.
+    /// roughly linear cost in time.
     ///
-    /// With the fine-tuned model this makes a separation roughly eight times
-    /// the work of demucs' own defaults. Pass `--demucs-shifts 0
-    /// --demucs-model htdemucs` for a fast draft.
-    #[arg(long, value_name = "N", default_value_t = 2)]
-    pub demucs_shifts: u32,
+    /// Overrides `--quality`. Left unset, `high` gives 2 and `standard` gives 0.
+    #[arg(long, value_name = "N")]
+    pub demucs_shifts: Option<u32>,
 
     /// Window overlap for demucs, 0.0 to just under 1.0. More overlap means
     /// fewer seams between windows and more compute. Demucs' default is 0.25.

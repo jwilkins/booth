@@ -679,6 +679,7 @@ impl App {
             tracks: waiting,
             out_dir: self.config.stems_path.clone(),
             backend: Backend::Demucs,
+            quality: self.config.stem_quality.to_cli(),
         });
     }
 
@@ -1670,19 +1671,34 @@ impl App {
             self.pending.push(Pending::TogglePlayback(track.id));
         }
 
-        let position = match loaded {
-            true => player.position_secs(),
-            false => 0.0,
+        // Where it is, in the unit a set is counted in. The playhead rather
+        // than the deck when the deck is not on this track, so the reading
+        // follows the marker being placed.
+        let at_ms = match loaded {
+            true => (player.position_secs() * 1000.0) as u32,
+            false => self.playhead_ms.unwrap_or(0),
         };
+        let length = self.config.length;
         ui.label(
-            RichText::new(format!(
-                "{} / {}",
-                time_text((position * 1000.0) as u32),
-                time_text((track.duration_secs * 1000.0) as u32)
-            ))
+            RichText::new(match beat_at(track, at_ms) {
+                Some(beat) => length.elapsed_and_left(beat, track.beats),
+                // No grid, so no bars to count in — the clock is all there is.
+                None => format!(
+                    "{} / {}",
+                    time_text(at_ms),
+                    time_text((track.duration_secs * 1000.0) as u32)
+                ),
+            })
             .font(theme::mono(10.5))
             .color(if loaded { theme::TEXT } else { theme::DIM }),
-        );
+        )
+        .on_hover_text(format!(
+            "{} of {} — {} / {}",
+            length.position(beat_at(track, at_ms).unwrap_or(0)),
+            length.describe(track.beats),
+            time_text(at_ms),
+            time_text((track.duration_secs * 1000.0) as u32)
+        ));
 
         let mut gain = player.gain();
         if ui
@@ -2844,6 +2860,26 @@ impl App {
                 }
 
                 ui.add_space(14.0);
+                pane_label(ui, "Stem quality");
+                for quality in crate::config::Quality::ALL {
+                    if ui
+                        .radio_value(&mut self.config.stem_quality, quality, quality.label())
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    ui.label(RichText::new(quality.blurb()).color(theme::DIM).size(theme::SMALL));
+                }
+                ui.label(
+                    RichText::new(
+                        "A kit is rendered once and then played for years, so the slow one is \
+                         the default. The fast one is for a first pass over a whole library.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+
+                ui.add_space(14.0);
                 pane_label(ui, "Track length");
                 ui.horizontal(|ui| {
                     for unit in crate::config::Length::ALL {
@@ -3363,6 +3399,25 @@ fn beat_times(track: &Track) -> Vec<u32> {
     (0..count).map(|i| (start + i as f64 * period_ms).round() as u32).collect()
 }
 
+/// Which beat a moment in a track falls on, counting the first as zero.
+///
+/// `None` when there is no grid to count against: a track nobody has analysed
+/// has no bars, and inventing some from a tempo of zero would be worse than
+/// showing the clock.
+fn beat_at(track: &Track, at_ms: u32) -> Option<usize> {
+    if !track.has_grid || track.bpm <= 0.0 {
+        return None;
+    }
+    let beats = beat_times(track);
+    let first = beats.first().copied().unwrap_or(0);
+    if at_ms < first {
+        return Some(0);
+    }
+    let period_ms = 60_000.0 / track.bpm;
+    let index = ((at_ms - first) as f64 / period_ms).floor() as usize;
+    Some(index.min(track.beats.saturating_sub(1)))
+}
+
 /// A position in a track, as minutes, seconds and hundredths.
 fn time_text(ms: u32) -> String {
     let total = ms / 1000;
@@ -3474,6 +3529,57 @@ mod tests {
         // Refusing to place a cue because the tracker found no beats would be
         // the wrong way round: the cue is what the user is sure of.
         assert_eq!(snap_to(&[], 1_234, 1), 1_234);
+    }
+
+    #[test]
+    fn a_moment_in_a_track_lands_on_the_beat_it_falls_within() {
+        let mut track = Track::placeholder(1);
+        track.has_grid = true;
+        track.bpm = 120.0;
+        track.duration_secs = 60.0;
+        track.beats = 120;
+
+        // 500 ms a beat, and a moment belongs to the beat it is inside rather
+        // than the nearest one — the third beat starts at 1000 ms and is still
+        // the third beat at 1499.
+        assert_eq!(beat_at(&track, 0), Some(0));
+        assert_eq!(beat_at(&track, 499), Some(0));
+        assert_eq!(beat_at(&track, 500), Some(1));
+        assert_eq!(beat_at(&track, 1_499), Some(2));
+
+        // Past the end it stops at the last beat rather than counting on.
+        assert_eq!(beat_at(&track, 999_999), Some(119));
+    }
+
+    #[test]
+    fn a_track_with_no_grid_has_no_beat_to_be_at() {
+        // No bars to count in, so the transport shows the clock instead of
+        // inventing a position from a tempo of zero.
+        let mut track = Track::placeholder(1);
+        assert_eq!(beat_at(&track, 1_000), None);
+        track.has_grid = true;
+        assert_eq!(beat_at(&track, 1_000), None, "a zero tempo would divide by zero");
+    }
+
+    #[test]
+    fn a_grid_that_starts_late_counts_from_its_first_beat() {
+        let mut track = Track::placeholder(1);
+        track.has_grid = true;
+        track.bpm = 120.0;
+        track.duration_secs = 60.0;
+        track.beats = 120;
+        track.cues.push(CueMark {
+            letter: 0,
+            time_ms: 2_000,
+            label: String::new(),
+            color: [0, 0, 0],
+        });
+
+        // Anything before the first beat is the first beat, not a negative one.
+        let first = beat_times(&track).first().copied().unwrap();
+        assert_eq!(beat_at(&track, first.saturating_sub(1)), Some(0));
+        assert_eq!(beat_at(&track, first), Some(0));
+        assert_eq!(beat_at(&track, first + 500), Some(1));
     }
 
     #[test]

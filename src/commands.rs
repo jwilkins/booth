@@ -972,9 +972,9 @@ fn separate_one(
             demucs_config.program = demucs_bin
                 .map(|p| p.to_os_string())
                 .unwrap_or_else(|| args.demucs.demucs_bin.clone().into_os_string());
-            demucs_config.model = args.demucs.demucs_model.clone();
+            demucs_config.model = args.model();
             demucs_config.device = args.demucs.demucs_device.clone();
-            demucs_config.shifts = args.demucs.demucs_shifts;
+            demucs_config.shifts = args.shifts();
             demucs_config.overlap = args.demucs.demucs_overlap;
 
             let result = demucs::separate(path, &demucs_config);

@@ -34,7 +34,12 @@ pub enum Job {
     /// Write a track's artist, title and album back into the file's own tags.
     Retag(Vec<Retag>),
     /// Render stem kits.
-    Separate { tracks: Vec<(u32, PathBuf)>, out_dir: PathBuf, backend: Backend },
+    Separate {
+        tracks: Vec<(u32, PathBuf)>,
+        out_dir: PathBuf,
+        backend: Backend,
+        quality: musicai::cli::StemQuality,
+    },
     /// Decode one track into memory so it can be auditioned.
     Decode { id: u32, path: PathBuf },
     /// Measure how loud each stem is across a track, for colouring its
@@ -530,8 +535,8 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             (reporter.wake)();
             Ok(())
         }
-        Job::Separate { tracks, out_dir, backend } => {
-            separate(&tracks, &out_dir, backend, reporter)
+        Job::Separate { tracks, out_dir, backend, quality } => {
+            separate(&tracks, &out_dir, backend, quality, reporter)
         }
         Job::Sync { args, files } => {
             // The file list was settled when the plan was drawn up, so the
@@ -698,15 +703,17 @@ fn separate(
     tracks: &[(u32, PathBuf)],
     out_dir: &Path,
     backend: Backend,
+    quality: musicai::cli::StemQuality,
     reporter: &Channel,
 ) -> anyhow::Result<()> {
     let mut args = StemsArgs::defaults();
     args.backend = backend;
+    args.quality = quality;
     args.out_dir = out_dir.to_path_buf();
     crate::info!(
         "separating with {} shifts={}, writing {}{}",
-        args.demucs.demucs_model,
-        args.demucs.demucs_shifts,
+        args.model(),
+        args.shifts(),
         args.format.name(),
         match args.vbr() {
             Some(quality) => format!(" V{quality}"),

@@ -158,6 +158,18 @@ is trimmed from the **front**, so the file name is always the part that
 survives — a path clipped at the end is every file in a folder looking
 identical.
 
+## Where you are in a track
+
+The transport reads `12.3 · -172`: bar 12, beat 3, with 172 bars left. Bars and
+beats both count from one, the way a DJ counts out loud — `1.1 1.2 1.3 1.4 2.1`
+— and it fits in the width a timecode would take. The elapsed half is a
+position and the remaining half is a count, so they are deliberately written
+differently: printing both as `12.3` would invite reading a remainder as a
+place in the track. The clock is on the hover.
+
+Settings switches the whole thing to beats. A track with no grid has no bars to
+count in, so it shows the clock instead of inventing a position.
+
 ## Colouring the waveform
 
 Three modes, on the right of the cue row, remembered between runs:
@@ -172,6 +184,20 @@ Three modes, on the right of the cue row, remembered between runs:
   themselves — a band split can say where the bass is, and only a separation can
   say where the *voice* is. Without a kit it falls back to frequency rather than
   drawing nothing.
+
+## Stem quality
+
+Two choices in Settings, **high** by default:
+
+- **high** — `htdemucs_ft` with two shifts. Four specialist models rather than
+  one, each run twice more at small offsets and averaged: roughly eight times
+  the work of demucs' own defaults, and noticeably cleaner.
+- **standard** — `htdemucs`, no shifts. Demucs' own defaults.
+
+A kit is rendered once and then played for years, so the slow one is the
+default; the fast one is for a first pass over a whole library. On the command
+line it is `--quality high|standard`, and `--demucs-model` / `--demucs-shifts`
+still override whichever it picked.
 
 ## The sync sheet
 

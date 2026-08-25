@@ -794,6 +794,12 @@ the delta.
   confidence. Case and punctuation are not a disagreement, or half a library becomes a
   question.
 
+Positions read in bars and beats — `1.1 1.2 1.3 1.4 2.1` — with the bars remaining
+alongside, which is §6's own request for a readout a DJ can act on rather than one they
+have to convert. Four beats to the bar, because the drive's own format counts that way:
+its beat numbers run 1 to 4, so a library counting 3/4 bars would be telling the truth
+about the music and lying about the drive.
+
 - **`log.rs`** — what happened, in order, with times, to a ring buffer the window shows and
   a file that survives the window closing. It earned itself on the first run: it found an
   analysis that could never succeed being restarted on every frame, a failure reported

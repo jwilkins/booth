@@ -89,6 +89,34 @@ impl Length {
         }
     }
 
+    /// Where a beat falls, counted from the top of the track.
+    ///
+    /// `1.1 1.2 1.3 1.4 2.1` — the bar, then the beat within it, both counted
+    /// from one. It is the way a DJ counts out loud, and it is four characters,
+    /// which is what makes it worth having over a timecode.
+    ///
+    /// In beats it is just the beat number, because a bar-and-beat reading is
+    /// the whole point of the other setting.
+    pub fn position(self, beat: usize) -> String {
+        match self {
+            Length::Bars => format!("{}.{}", beat / 4 + 1, beat % 4 + 1),
+            Length::Beats => format!("{}", beat + 1),
+        }
+    }
+
+    /// Where the playhead is and how much is left, in one compact reading.
+    ///
+    /// Elapsed as a position, remaining as a count with a minus in front of it
+    /// — the way a player shows time and remain. They are different kinds of
+    /// thing and are deliberately not written the same way: a position is
+    /// one-based and a count is not, and printing both as `12.3` would invite
+    /// reading a remainder as a place in the track.
+    pub fn elapsed_and_left(self, beat: usize, total_beats: usize) -> String {
+        let played = beat.min(total_beats);
+        let left = total_beats.saturating_sub(played);
+        format!("{} · -{}", self.position(played), self.count(left))
+    }
+
     /// The count and its unit, singular where it should be.
     pub fn describe(self, beats: usize) -> String {
         let count = self.count(beats);
@@ -97,6 +125,38 @@ impl Length {
             (1, Length::Beats) => "1 beat".to_string(),
             (n, unit) => format!("{n} {}", unit.label()),
         }
+    }
+}
+
+/// How much work a separation is worth.
+///
+/// The command line owns the real definition — which model, how many shifts —
+/// and this is the same two choices in a form that can be saved with the rest
+/// of the settings. Keeping the mapping in one place is what stops the window
+/// and the tool disagreeing about what "high" means.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Quality {
+    #[default]
+    High,
+    Standard,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 2] = [Quality::High, Quality::Standard];
+
+    pub fn to_cli(self) -> musicai::cli::StemQuality {
+        match self {
+            Quality::High => musicai::cli::StemQuality::High,
+            Quality::Standard => musicai::cli::StemQuality::Standard,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        self.to_cli().label()
+    }
+
+    pub fn blurb(self) -> &'static str {
+        self.to_cli().blurb()
     }
 }
 
@@ -116,6 +176,8 @@ pub struct Config {
     pub paint: crate::wave::Paint,
     /// Whether a track's length reads as bars or as beats.
     pub length: Length,
+    /// How much work a separation is worth.
+    pub stem_quality: Quality,
     /// Whether analysis also fingerprints a track and looks up what it is.
     pub identify: bool,
     /// AcoustID API key. Free from https://acoustid.org/new-application.
@@ -146,6 +208,7 @@ impl Default for Config {
             sort: crate::rows::Sort::default(),
             paint: crate::wave::Paint::default(),
             length: Length::default(),
+            stem_quality: Quality::default(),
             identify: true,
             acoustid_key: String::new(),
             // High, because the cost of being wrong is a library that quietly
@@ -376,6 +439,48 @@ mod tests {
     }
 
     #[test]
+    fn a_position_counts_the_way_a_dj_counts_out_loud() {
+        // 1.1 1.2 1.3 1.4 2.1 — bars and beats both from one.
+        let readings: Vec<String> = (0..5).map(|beat| Length::Bars.position(beat)).collect();
+        assert_eq!(readings, vec!["1.1", "1.2", "1.3", "1.4", "2.1"]);
+        // The top of the track is the first beat of the first bar, not zero.
+        assert_eq!(Length::Bars.position(0), "1.1");
+        assert_eq!(Length::Bars.position(63), "16.4");
+        assert_eq!(Length::Bars.position(64), "17.1");
+    }
+
+    #[test]
+    fn in_beats_a_position_is_just_the_beat_number() {
+        assert_eq!(Length::Beats.position(0), "1");
+        assert_eq!(Length::Beats.position(63), "64");
+    }
+
+    #[test]
+    fn a_reading_says_where_it_is_and_how_much_is_left() {
+        let total = 64 * 4;
+        assert_eq!(Length::Bars.elapsed_and_left(64, total), "17.1 · -48");
+        assert_eq!(Length::Bars.elapsed_and_left(0, total), "1.1 · -64");
+        // At the very end nothing is left, and the count does not go negative.
+        assert_eq!(Length::Bars.elapsed_and_left(total, total), "65.1 · -0");
+        assert_eq!(Length::Bars.elapsed_and_left(total + 99, total), "65.1 · -0");
+    }
+
+    #[test]
+    fn a_reading_in_beats_uses_beats_for_both_halves() {
+        assert_eq!(Length::Beats.elapsed_and_left(7, 32), "8 · -25");
+    }
+
+    #[test]
+    fn stems_are_rendered_well_by_default() {
+        // Rendered once, played for years: the slow one is the right default.
+        assert_eq!(Config::default().stem_quality, Quality::High);
+        assert_eq!(Quality::High.to_cli().model(), "htdemucs_ft");
+        assert_eq!(Quality::High.to_cli().shifts(), 2);
+        assert_eq!(Quality::Standard.to_cli().model(), "htdemucs");
+        assert_eq!(Quality::Standard.to_cli().shifts(), 0);
+    }
+
+    #[test]
     fn one_of_something_is_not_ones() {
         assert_eq!(Length::Bars.describe(4), "1 bar");
         assert_eq!(Length::Beats.describe(1), "1 beat");
@@ -395,6 +500,7 @@ mod tests {
         config.autotag_score = 0.75;
         config.paint = crate::wave::Paint::Stems;
         config.length = Length::Beats;
+        config.stem_quality = Quality::Standard;
         config.sort = crate::rows::Sort { column: crate::rows::Column::Bpm, descending: true };
         config.save(&path).unwrap();
 
