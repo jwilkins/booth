@@ -54,7 +54,7 @@ impl OnExternal {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Where audio copied into the collection is kept.
@@ -66,6 +66,21 @@ pub struct Config {
     /// of the collection: it describes how this person likes to look at their
     /// music, not anything about the music.
     pub sort: crate::rows::Sort,
+    /// How the waveform is coloured.
+    pub paint: crate::wave::Paint,
+    /// Whether analysis also fingerprints a track and looks up what it is.
+    pub identify: bool,
+    /// AcoustID API key. Free from https://acoustid.org/new-application.
+    ///
+    /// Empty means no lookups; the window says so rather than failing quietly.
+    /// `ACOUSTID_API_KEY` in the environment is used when this is empty, so a
+    /// key never has to be written into a file to try the feature.
+    pub acoustid_key: String,
+    /// The confidence at or above which a match is written in without asking.
+    ///
+    /// Below it, and for anything that disagrees with the file's own tags, the
+    /// match becomes a question instead.
+    pub autotag_score: f64,
     /// Whether editing a track's artist, title or album also rewrites the tags
     /// in the file itself.
     ///
@@ -81,6 +96,12 @@ impl Default for Config {
             stems_path: data_dir().join("stems"),
             on_external: OnExternal::default(),
             sort: crate::rows::Sort::default(),
+            paint: crate::wave::Paint::default(),
+            identify: true,
+            acoustid_key: String::new(),
+            // High, because the cost of being wrong is a library that quietly
+            // renamed somebody's records. Anything less certain is a question.
+            autotag_score: 0.9,
             write_tags_to_files: false,
         }
     }
@@ -96,6 +117,15 @@ fn default_library_path() -> PathBuf {
 }
 
 impl Config {
+    /// The key to use, from the settings or the environment.
+    pub fn key(&self) -> Option<String> {
+        let configured = self.acoustid_key.trim();
+        if !configured.is_empty() {
+            return Some(configured.to_string());
+        }
+        std::env::var("ACOUSTID_API_KEY").ok().filter(|key| !key.trim().is_empty())
+    }
+
     pub fn path() -> PathBuf {
         data_dir().join("config.json")
     }
@@ -250,6 +280,36 @@ mod tests {
     }
 
     #[test]
+    fn a_key_comes_from_the_settings_or_the_environment() {
+        let mut config = Config::default();
+        assert_eq!(config.acoustid_key, "");
+
+        config.acoustid_key = "  typed-in  ".into();
+        assert_eq!(config.key().as_deref(), Some("typed-in"), "trimmed, because it is pasted");
+
+        // Blank means the environment gets a turn, so a key can be tried
+        // without writing it into a file.
+        config.acoustid_key = "   ".into();
+        // SAFETY: single-threaded test, and the variable is read back at once.
+        unsafe { std::env::set_var("ACOUSTID_API_KEY", "from-env") };
+        assert_eq!(config.key().as_deref(), Some("from-env"));
+        unsafe { std::env::set_var("ACOUSTID_API_KEY", "") };
+        assert_eq!(config.key(), None, "an empty variable is not a key");
+        unsafe { std::env::remove_var("ACOUSTID_API_KEY") };
+        assert_eq!(config.key(), None);
+    }
+
+    #[test]
+    fn the_bar_for_writing_a_name_in_unasked_is_high() {
+        // Being wrong here renames somebody's records without them noticing,
+        // so the default sits well above the floor questions start at.
+        let config = Config::default();
+        assert!(config.autotag_score >= 0.9);
+        assert!(config.autotag_score > crate::identify::FLOOR);
+        assert!(config.identify, "a fingerprint is most of what fills a bare file in");
+    }
+
+    #[test]
     fn settings_survive_a_round_trip() {
         let dir = scratch("roundtrip");
         let path = dir.join("config.json");
@@ -257,6 +317,10 @@ mod tests {
         let mut config = config_in(&dir);
         config.on_external = OnExternal::Ask;
         config.write_tags_to_files = true;
+        config.acoustid_key = "abc123".into();
+        config.autotag_score = 0.75;
+        config.paint = crate::wave::Paint::Stems;
+        config.sort = crate::rows::Sort { column: crate::rows::Column::Bpm, descending: true };
         config.save(&path).unwrap();
 
         assert_eq!(Config::load(&path), config);

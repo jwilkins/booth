@@ -33,6 +33,15 @@ pub const BAND_LOW: Color32 = BLUE;
 pub const BAND_MID: Color32 = AMBER;
 pub const BAND_HIGH: Color32 = TEXT;
 
+/// What each stem is drawn as, when the waveform is coloured by them.
+///
+/// Deliberately not the band colours: a picture coloured by what is playing has
+/// to be told apart at a glance from one coloured by frequency, or the two
+/// modes look like the same picture disagreeing with itself.
+pub const STEM_VOCALS: Color32 = Color32::from_rgb(0xE0, 0x7A, 0xB0);
+pub const STEM_DRUMS: Color32 = Color32::from_rgb(0xE2, 0xA0, 0x3F);
+pub const STEM_MELODY: Color32 = Color32::from_rgb(0x4F, 0xC3, 0xC7);
+
 /// The colour of each phrase in the strip under the waveform.
 pub fn phrase_color(kind: &str) -> Color32 {
     match kind {

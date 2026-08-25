@@ -25,6 +25,55 @@ use crate::sync::{self, Level, Plan};
 use crate::theme;
 use crate::wave;
 
+/// What the log window is showing.
+///
+/// Behind an `Arc` because the window is a viewport of its own, drawn by a
+/// callback that egui keeps and calls on its own terms — it cannot borrow the
+/// application, so what it needs has to be shared rather than passed.
+#[derive(Default)]
+pub struct LogWindow {
+    open: std::sync::atomic::AtomicBool,
+    /// The lowest level shown, as a [`crate::log::Level`] code.
+    level: std::sync::atomic::AtomicU8,
+    /// Whether it follows the tail.
+    follow: std::sync::atomic::AtomicBool,
+}
+
+impl LogWindow {
+    fn is_open(&self) -> bool {
+        self.open.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_open(&self, open: bool) {
+        self.open.store(open, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn level(&self) -> crate::log::Level {
+        crate::log::Level::SHOWN
+            .get(self.level.load(std::sync::atomic::Ordering::Relaxed) as usize)
+            .copied()
+            .unwrap_or(crate::log::Level::Debug)
+    }
+
+    fn set_level(&self, level: crate::log::Level) {
+        let index = crate::log::Level::SHOWN.iter().position(|l| *l == level).unwrap_or(0);
+        self.level.store(index as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn follows(&self) -> bool {
+        self.follow.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_follow(&self, follow: bool) {
+        self.follow.store(follow, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Marks a "have we tried this yet" entry as being about stem envelopes rather
+/// than about the waveform, so one set can hold both without them colliding.
+/// Track ids come from a counter that starts at one, so the top bit is free.
+const STEM_MARK: u32 = 0x8000_0000;
+
 /// How much room under the list the prep editor needs.
 ///
 /// Added up from its parts rather than guessed, because the failure is silent:
@@ -67,6 +116,8 @@ pub struct App {
     selected: Option<u32>,
     /// The three-band waveform of the selected track, once it has been read.
     waveform: Option<(u32, Vec<u8>)>,
+    /// Its per-stem loudness, when a kit has been measured.
+    envelopes: Option<(u32, wave::StemEnvelopes)>,
 
     /// The deck, if a device could be opened. `None` on a machine with no
     /// sound card, over SSH, or under a headless test — a library tool that
@@ -79,9 +130,8 @@ pub struct App {
     /// arrives.
     loading: Option<(u32, bool)>,
 
-    /// Whether the log is opened out, and how much of it is shown.
-    log_open: bool,
-    log_level: crate::log::Level,
+    /// The log window, and what it is showing.
+    log: Arc<LogWindow>,
 
     runner: Option<Runner>,
     /// Work waiting for the runner. Jobs chain — an import that turns up
@@ -100,6 +150,8 @@ pub struct App {
     /// Tracks found outside the library, waiting for an answer. Only ever set
     /// when the policy is to ask.
     asking: Vec<u32>,
+    /// Fingerprint matches that need a person to decide.
+    questions: Vec<crate::identify::Question>,
     /// The track whose fields are being edited, and the text as typed. Kept
     /// apart from the collection so that a half-typed name is not a name.
     editing: Option<Edit>,
@@ -160,6 +212,13 @@ enum Pending {
         time_ms: u32,
     },
     TogglePlayback(u32),
+    /// Change how the waveform is coloured.
+    PaintAs(wave::Paint),
+    /// Take or refuse one fingerprint match.
+    AnswerMatch {
+        id: u32,
+        take: bool,
+    },
     /// Move the deck to a position in a track, if that track is on it.
     SeekDeck {
         id: u32,
@@ -269,8 +328,12 @@ impl App {
             sort: config_sort,
             selected: None,
             waveform: None,
-            log_open: false,
-            log_level: crate::log::Level::Info,
+            envelopes: None,
+            log: {
+                let window = Arc::new(LogWindow::default());
+                window.set_follow(true);
+                window
+            },
             player: None,
             player_problem: None,
             loading: None,
@@ -282,6 +345,7 @@ impl App {
             sheet: false,
             settings: false,
             asking: Vec::new(),
+            questions: Vec::new(),
             editing: None,
             pick: None,
             focus_bar: false,
@@ -321,8 +385,8 @@ impl App {
             match which.to_string_lossy().as_ref() {
                 "settings" => app.settings = true,
                 "log" => {
-                    app.log_open = true;
-                    app.log_level = crate::log::Level::Debug;
+                    app.log.set_open(true);
+                    app.log.set_level(crate::log::Level::Debug);
                 }
                 "adopt" => app.asking = app.library.tracks.iter().map(|t| t.id).take(3).collect(),
                 _ => app.sheet = true,
@@ -420,6 +484,7 @@ impl App {
         if !self.rows.iter().any(|row| Some(row.track.id) == self.selected) {
             self.selected = self.rows.first().map(|row| row.track.id);
             self.waveform = None;
+            self.envelopes = None;
         }
         self.replan();
 
@@ -463,6 +528,7 @@ impl App {
         if Some(id) != self.selected {
             self.selected = Some(id);
             self.waveform = None;
+            self.envelopes = None;
         }
     }
 
@@ -571,13 +637,29 @@ impl App {
         // copy-in policy is about. The copy is queued first, and the analysis
         // behind it, so it runs against whatever the track's path is by then.
         let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
+        let identify = self.config.identify;
         // Asking for it by hand clears the "already tried" mark: the file may
         // have been put back since.
         for id in &ids {
             self.remeasured.remove(id);
         }
         self.ensure_local(&ids);
-        self.start(Job::Analyze(waiting));
+        self.start(Job::Analyze(waiting.clone()));
+
+        // Listening to a track and asking what it is are the same errand, so
+        // they are queued together — but the lookup is paced by two services'
+        // rate limits, so it goes behind the analysis rather than in front.
+        if identify {
+            if let Some(key) = self.config.key() {
+                let unnamed: Vec<(u32, PathBuf)> = waiting
+                    .into_iter()
+                    .filter(|(id, _)| self.library.get(*id).is_some_and(|track| !track.identified))
+                    .collect();
+                if !unnamed.is_empty() {
+                    self.start(Job::Identify { tracks: unnamed, key });
+                }
+            }
+        }
     }
 
     fn render_stems(&mut self) {
@@ -648,6 +730,24 @@ impl App {
                         if self.loading.take().is_some_and(|(_, play)| play) {
                             player.play();
                         }
+                    }
+                }
+                Update::Identified { id, best } => {
+                    if let Some(track) = self.library.get_mut(id) {
+                        track.identified = true;
+                    }
+                    if let Some(found) = best {
+                        self.consider(id, found);
+                    }
+                    changed = true;
+                }
+                Update::Envelopes { id, envelopes } => {
+                    crate::debug!("measured stems for #{id}: {} columns", envelopes.columns());
+                    if let Err(e) = crate::library::cache_envelopes(id, &envelopes) {
+                        crate::warn!("could not cache the stem envelopes: {e}");
+                    }
+                    if Some(id) == self.selected {
+                        self.envelopes = Some((id, envelopes));
                     }
                 }
                 Update::Adopted { id, to } => {
@@ -896,6 +996,8 @@ impl eframe::App for App {
         if !self.asking.is_empty() {
             self.adopt_sheet(ctx);
         }
+        self.questions_sheet(ctx);
+        self.log_window(ctx);
 
         // Everything the panels asked for happens here, after they have all
         // drawn, so no panel ever reads a collection halfway through a change.
@@ -1227,6 +1329,17 @@ impl App {
             {
                 self.analyze_unprepared();
             }
+            let unnamed =
+                self.rows.iter().filter(|row| !row.indented && !row.track.identified).count();
+            if ui
+                .add_enabled(idle && unnamed > 0, egui::Button::new(format!("Identify {unnamed}")))
+                .on_hover_text(
+                    "Fingerprint and look up what these are, filling in the names they lack",
+                )
+                .clicked()
+            {
+                self.identify_showing();
+            }
             if ui
                 .add_enabled(idle && unstemmed > 0, egui::Button::new(format!("Stems {unstemmed}")))
                 .on_hover_text("Render a vocals/melody/drums kit with demucs")
@@ -1313,6 +1426,7 @@ impl App {
             if Some(id) != self.selected {
                 self.selected = Some(id);
                 self.waveform = None;
+                self.envelopes = None;
                 // A different track: start it from the top rather than from
                 // wherever the last one's playhead happened to be.
                 self.playhead_ms = None;
@@ -1350,6 +1464,12 @@ impl App {
         };
         let beat_ms = beat_times(&track);
         let playhead = self.playhead_ms;
+        let paint = self.config.paint;
+        let envelopes = match &self.envelopes {
+            Some((id, measured)) if *id == track.id => Some(measured),
+            _ => None,
+        };
+        let has_envelopes = envelopes.is_some();
         let waveform = wave::Waveform {
             bands,
             duration_secs: track.duration_secs,
@@ -1357,6 +1477,8 @@ impl App {
             cues: &track.cues,
             position: playhead
                 .map(|ms| (ms as f64 / (track.duration_secs * 1000.0).max(1.0)) as f32),
+            paint,
+            stems: envelopes,
         };
         // Drawn before anything below touches the collection: `waveform`
         // borrows the cached picture out of the window's own state, and that
@@ -1380,6 +1502,7 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
+
             measurement(ui, "grid", &grid_text(&track), track.has_grid);
             measurement(
                 ui,
@@ -1419,6 +1542,24 @@ impl App {
         // The waveform is only read when it is looked at: a collection of
         // thousands cannot keep every picture in memory, and re-measuring one
         // track takes less time than the click that asked for it.
+        // Colouring by stems needs them measured. Once per run per track, the
+        // same way the waveform is: a kit that will not decode must not start a
+        // job on every frame.
+        if paint == wave::Paint::Stems
+            && !has_envelopes
+            && track.stems.is_complete()
+            && !self.remeasured.contains(&(track.id | STEM_MARK))
+        {
+            match crate::library::cached_envelopes(track.id) {
+                Some(cached) => self.envelopes = Some((track.id, cached)),
+                None if !self.running() => {
+                    self.remeasured.insert(track.id | STEM_MARK);
+                    self.start(Job::StemEnvelopes { id: track.id, kit: track.stems.clone() });
+                }
+                None => {}
+            }
+        }
+
         if !has_bands && track.analyzed {
             match crate::library::cached_waveform(track.id) {
                 Some(cached) => self.waveform = Some((track.id, cached)),
@@ -1560,6 +1701,7 @@ impl App {
     /// it. Everything is snapped to the grid on the way in, so a cue placed by
     /// eye still lands on a beat.
     fn cue_strip(&mut self, ui: &mut Ui, track: &Track) {
+        let paint = self.config.paint;
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             self.transport(ui, track);
@@ -1647,6 +1789,42 @@ impl App {
                     );
                 }
             }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                // Right to left, so the modes read in their usual order.
+                for mode in wave::Paint::ALL.iter().rev().copied() {
+                    let on = paint == mode;
+                    // Stem colouring is offered whatever the track has, and
+                    // falls back to frequency without a kit — greying it out
+                    // would hide that the choice is remembered for next time.
+                    let ready = mode != wave::Paint::Stems || track.stems.is_complete();
+                    let color = match (on, ready) {
+                        (true, _) => theme::BOOTH,
+                        (false, true) => theme::DIM,
+                        (false, false) => theme::RULE,
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(mode.label()).font(theme::mono(10.0)).color(color),
+                            )
+                            .fill(if on {
+                                theme::AMBER
+                            } else {
+                                theme::BOOTH
+                            }),
+                        )
+                        .on_hover_text(match ready {
+                            true => mode.blurb().to_string(),
+                            false => format!("{} — no kit rendered yet", mode.blurb()),
+                        })
+                        .clicked()
+                    {
+                        self.pending.push(Pending::PaintAs(mode));
+                    }
+                }
+            });
 
             // Naming the cue under the playhead, which is the one just placed
             // or just jumped to.
@@ -2001,6 +2179,29 @@ impl App {
                     self.place_cue(id, letter, time_ms);
                     touched = true;
                 }
+                Pending::PaintAs(mode) => {
+                    self.config.paint = mode;
+                    if let Err(e) = self.config.save(&self.config_path) {
+                        crate::warn!("could not save the settings: {e:#}");
+                    }
+                    crate::debug!("waveform coloured by {}", mode.label());
+                }
+                Pending::AnswerMatch { id, take } => {
+                    if let Some(at) = self.questions.iter().position(|q| q.id == id) {
+                        let question = self.questions.remove(at);
+                        if take {
+                            self.apply_match(id, &question.candidate);
+                        } else {
+                            crate::info!("#{id} kept its own name over the fingerprint");
+                            // Marked as answered, so the same question is not
+                            // asked again on the next pass.
+                            if let Some(track) = self.library.get_mut(id) {
+                                track.from_tags = true;
+                            }
+                        }
+                        touched = true;
+                    }
+                }
                 Pending::TogglePlayback(id) => self.toggle_playback(id),
                 Pending::SeekDeck { id, time_ms } => {
                     if let Some(player) = &self.player {
@@ -2031,6 +2232,87 @@ impl App {
         }
         if touched || relist {
             self.rebuild();
+        }
+    }
+
+    // -- identification ----------------------------------------------------
+
+    /// Fingerprint whatever showing is still unidentified.
+    fn identify_showing(&mut self) {
+        let Some(key) = self.config.key() else {
+            self.note(
+                "no AcoustID key — put one in Settings, or set ACOUSTID_API_KEY",
+                theme::AMBER,
+            );
+            return;
+        };
+        let waiting: Vec<(u32, PathBuf)> = self
+            .rows
+            .iter()
+            .filter(|row| !row.indented && !row.track.identified && row.track.path.exists())
+            .map(|row| (row.track.id, row.track.path.clone()))
+            .collect();
+        if waiting.is_empty() {
+            self.note("nothing showing needs identifying", theme::DIM);
+            return;
+        }
+        let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
+        self.ensure_local(&ids);
+        self.start(Job::Identify { tracks: waiting, key });
+    }
+
+    /// Decide what to do with one match, and do it.
+    fn consider(&mut self, id: u32, found: crate::identify::Match) {
+        let Some(track) = self.library.get(id) else { return };
+        let decision = crate::identify::decide(track, &found, self.config.autotag_score);
+        crate::debug!("#{id} {} at {:.0}%: {decision:?}", found.describe(), found.score * 100.0);
+
+        match decision {
+            crate::identify::Decision::Apply => self.apply_match(id, &found),
+            crate::identify::Decision::Ask => {
+                let question = crate::identify::Question {
+                    id,
+                    current: match crate::identify::source_of(track) {
+                        "nothing" => "not named".to_string(),
+                        _ => format!("{} — {}", track.artist, track.title),
+                    },
+                    source: crate::identify::source_of(track),
+                    candidate: found,
+                };
+                if !self.questions.iter().any(|q| q.id == id) {
+                    self.questions.push(question);
+                }
+            }
+            crate::identify::Decision::Reject => {}
+        }
+    }
+
+    /// Write a match into a track's record.
+    ///
+    /// Only ever fills or replaces the names it has; nothing here touches the
+    /// file, which is what the tag write-back is for and is separately asked
+    /// for.
+    fn apply_match(&mut self, id: u32, found: &crate::identify::Match) {
+        let Some(track) = self.library.get_mut(id) else { return };
+        if !found.artist.trim().is_empty() {
+            track.artist = found.artist.trim().to_string();
+        }
+        if !found.title.trim().is_empty() {
+            track.title = found.title.trim().to_string();
+        }
+        if !found.album.trim().is_empty() {
+            track.album = found.album.trim().to_string();
+        }
+        if let Some(year) = found.year {
+            track.year = Some(year);
+        }
+        // Its names are now an answer rather than a guess, so a later
+        // fingerprint will ask before overriding them.
+        track.from_tags = true;
+        crate::info!("#{id} named from its fingerprint: {}", found.describe());
+
+        if self.config.write_tags_to_files {
+            self.write_tags(id);
         }
     }
 
@@ -2187,128 +2469,307 @@ impl App {
         self.log_panel(ui);
     }
 
-    /// What is going on, in as much or as little detail as asked for.
+    /// The last couple of lines, and the way to the rest.
     ///
-    /// Two lines by default and half the window when opened, because the two
-    /// questions it answers are different: "did that work" wants the last line,
-    /// and "why did that not work" wants all of them.
+    /// Two lines is what "did that work" needs. Everything else — reading a
+    /// run, comparing two moments, following along while something long
+    /// happens — wants a window that does not fight the browser for space, so
+    /// that is what it gets.
     fn log_panel(&mut self, ui: &mut Ui) {
-        let entries = crate::log::entries(self.log_level);
+        let entries = crate::log::entries(crate::log::Level::Info);
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
-            let arrow = if self.log_open { "\u{25BE}" } else { "\u{25B8}" };
             if ui
                 .add(
                     egui::Button::new(
-                        RichText::new(format!("{arrow} {}", theme::label_text("Log")))
+                        RichText::new(theme::label_text("Log"))
                             .size(theme::LABEL)
                             .color(theme::DIM)
                             .strong(),
                     )
                     .fill(theme::BOOTH),
                 )
-                .on_hover_text(format!(
-                    "{} lines · also written to {}",
-                    entries.len(),
-                    crate::log::default_path().display()
-                ))
+                .on_hover_text("Open the log in its own window")
                 .clicked()
             {
-                self.log_open = !self.log_open;
+                self.log.set_open(true);
             }
 
-            if self.log_open {
-                for level in crate::log::Level::SHOWN {
-                    let on = self.log_level == level;
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(level.label()).font(theme::mono(10.0)).color(if on {
-                                    theme::BOOTH
-                                } else {
-                                    theme::DIM
-                                }),
-                            )
-                            .fill(if on {
-                                theme::AMBER
-                            } else {
-                                theme::BOOTH
-                            }),
-                        )
-                        .on_hover_text(format!("show {level} and above"))
-                        .clicked()
-                    {
-                        self.log_level = level;
-                    }
-                }
-                ui.separator();
-                if ui.button(RichText::new("clear").size(theme::SMALL)).clicked() {
-                    crate::log::clear();
-                }
-                if ui
-                    .button(RichText::new("copy").size(theme::SMALL))
-                    .on_hover_text("Put the whole log on the clipboard")
-                    .clicked()
-                {
-                    let text: Vec<String> = entries.iter().map(|entry| entry.line()).collect();
-                    ui.ctx().copy_text(text.join("\n"));
-                }
-                ui.label(
-                    RichText::new(format!(
-                        "{} lines · {}",
-                        entries.len(),
-                        crate::log::default_path().display()
-                    ))
-                    .font(theme::mono(10.0))
-                    .color(theme::DIM),
-                );
-            }
-        });
-
-        // Collapsed, only the last couple of lines: enough to see what just
-        // happened without the log becoming the window.
-        // Opened, it takes whatever the dock has been dragged to; collapsed,
-        // it is two lines whatever that is.
-        let height = match self.log_open {
-            true => ui.available_height().max(60.0),
-            false => 30.0,
-        };
-        egui::ScrollArea::vertical()
-            .max_height(height)
-            .auto_shrink([false, false])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                let shown = match self.log_open {
-                    true => &entries[..],
-                    false => &entries[entries.len().saturating_sub(2)..],
-                };
-                for entry in shown {
-                    let color = match entry.level {
+            let last = entries.last();
+            let (text, color) = match last {
+                Some(entry) => (
+                    entry.text.clone(),
+                    match entry.level {
                         crate::log::Level::Error => theme::ALERT,
                         crate::log::Level::Warn => theme::AMBER,
-                        crate::log::Level::Info => theme::TEXT,
                         _ => theme::DIM,
-                    };
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(
-                            RichText::new(entry.stamp()).font(theme::mono(10.0)).color(theme::DIM),
-                        );
-                        if self.log_open {
-                            ui.label(
-                                RichText::new(entry.level.tag())
-                                    .font(theme::mono(10.0))
-                                    .color(color),
-                            );
-                        }
-                        ui.label(RichText::new(&entry.text).font(theme::mono(10.5)).color(color));
-                    });
-                }
-            });
+                    },
+                ),
+                None => ("nothing yet".to_string(), theme::DIM),
+            };
+            ui.label(RichText::new(text).font(theme::mono(10.5)).color(color));
+        });
     }
 
-    /// The sheet: what would change, then whether it can.
+    /// What the fingerprints found that a person has to decide.
+    ///
+    /// One row per track: what it says now and where that came from, against
+    /// what the audio was identified as and how sure that is. Both are shown in
+    /// full, because the whole reason this is a question is that they disagree.
+    fn questions_sheet(&mut self, ctx: &egui::Context) {
+        let questions = self.questions.clone();
+        if questions.is_empty() {
+            return;
+        }
+        let threshold = self.config.autotag_score;
+        let mut open = true;
+
+        egui::Window::new(format!("{} to check", plural(questions.len(), "match")))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(760.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "Identified by fingerprint. Anything at {:.0}% or above is applied \
+                         without asking, unless it disagrees with the file's own tags — those \
+                         are somebody's answer already.",
+                        threshold * 100.0
+                    ))
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for question in &questions {
+                        let confident = question.candidate.score >= threshold;
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("{:.0}%", question.candidate.score * 100.0))
+                                    .font(theme::mono(11.0))
+                                    .color(if confident { theme::GO } else { theme::AMBER }),
+                            );
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(question.candidate.describe()).color(theme::TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "now: {} — from {}",
+                                        question.current, question.source
+                                    ))
+                                    .font(theme::mono(10.0))
+                                    .color(theme::DIM),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Keep mine").clicked() {
+                                        self.pending.push(Pending::AnswerMatch {
+                                            id: question.id,
+                                            take: false,
+                                        });
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Use this")
+                                                    .color(theme::BOOTH)
+                                                    .strong(),
+                                            )
+                                            .fill(theme::AMBER),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.pending.push(Pending::AnswerMatch {
+                                            id: question.id,
+                                            take: true,
+                                        });
+                                    }
+                                },
+                            );
+                        });
+                        ui.separator();
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Use all").clicked() {
+                        for question in &questions {
+                            self.pending.push(Pending::AnswerMatch { id: question.id, take: true });
+                        }
+                    }
+                    if ui.button("Keep all of mine").clicked() {
+                        for question in &questions {
+                            self.pending
+                                .push(Pending::AnswerMatch { id: question.id, take: false });
+                        }
+                    }
+                    ui.label(
+                        RichText::new("Nothing is written to any file by answering these.")
+                            .color(theme::DIM)
+                            .size(theme::SMALL),
+                    );
+                });
+            });
+
+        if !open {
+            self.questions.clear();
+        }
+    }
+
+    /// The log, in a window of its own.
+    ///
+    /// A deferred viewport rather than an egui window inside the main one: it
+    /// is a real OS window, so it can be put on a second screen, left open
+    /// beside the browser, and resized without taking anything from the
+    /// collection.
+    fn log_window(&mut self, ctx: &egui::Context) {
+        if !self.log.is_open() {
+            return;
+        }
+        let log = Arc::clone(&self.log);
+
+        ctx.show_viewport_deferred(
+            egui::ViewportId::from_hash_of("booth-log"),
+            egui::ViewportBuilder::default()
+                .with_title("Booth — log")
+                .with_inner_size([980.0, 560.0])
+                .with_min_inner_size([420.0, 200.0]),
+            move |ctx, _class| {
+                let level = log.level();
+                let entries = crate::log::entries(level);
+
+                egui::TopBottomPanel::top("log-bar")
+                    .frame(
+                        egui::Frame::NONE
+                            .fill(theme::BOOTH_2)
+                            .inner_margin(egui::Margin::symmetric(10, 7)),
+                    )
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            for shown in crate::log::Level::SHOWN {
+                                let on = level == shown;
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(shown.label())
+                                                .font(theme::mono(10.5))
+                                                .color(if on { theme::BOOTH } else { theme::DIM }),
+                                        )
+                                        .fill(if on {
+                                            theme::AMBER
+                                        } else {
+                                            theme::BOOTH
+                                        }),
+                                    )
+                                    .on_hover_text(format!("show {shown} and above"))
+                                    .clicked()
+                                {
+                                    log.set_level(shown);
+                                }
+                            }
+
+                            ui.separator();
+                            let mut follow = log.follows();
+                            if ui
+                                .checkbox(&mut follow, "follow")
+                                .on_hover_text("Stay at the newest line")
+                                .changed()
+                            {
+                                log.set_follow(follow);
+                            }
+                            if ui.button("clear").clicked() {
+                                crate::log::clear();
+                            }
+                            if ui
+                                .button("copy")
+                                .on_hover_text("Put everything shown on the clipboard")
+                                .clicked()
+                            {
+                                let text: Vec<String> =
+                                    entries.iter().map(|entry| entry.line()).collect();
+                                ctx.copy_text(text.join("\n"));
+                            }
+
+                            // Just the count on the bar: a full path here is
+                            // long enough to reach back across the buttons,
+                            // and it is one hover away.
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(crate::library::plural(
+                                            entries.len(),
+                                            "line",
+                                        ))
+                                        .font(theme::mono(10.0))
+                                        .color(theme::DIM),
+                                    )
+                                    .on_hover_text(
+                                        crate::log::default_path().display().to_string(),
+                                    );
+                                },
+                            );
+                        });
+                    });
+
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(theme::BOOTH).inner_margin(egui::Margin::same(8)))
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::both()
+                            .auto_shrink([false, false])
+                            .stick_to_bottom(log.follows())
+                            .show_rows(ui, 14.0, entries.len(), |ui, range| {
+                                for entry in &entries[range] {
+                                    let color = match entry.level {
+                                        crate::log::Level::Error => theme::ALERT,
+                                        crate::log::Level::Warn => theme::AMBER,
+                                        crate::log::Level::Info => theme::TEXT,
+                                        _ => theme::DIM,
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 8.0;
+                                        ui.label(
+                                            RichText::new(entry.stamp())
+                                                .font(theme::mono(10.5))
+                                                .color(theme::DIM),
+                                        );
+                                        ui.label(
+                                            RichText::new(entry.level.tag())
+                                                .font(theme::mono(10.5))
+                                                .color(color),
+                                        );
+                                        ui.label(
+                                            RichText::new(&entry.text)
+                                                .font(theme::mono(11.0))
+                                                .color(color),
+                                        );
+                                    });
+                                }
+                            });
+                    });
+
+                // While it follows the tail it has to repaint to show new
+                // lines; parked at a position, it can sit still.
+                if log.follows() {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                }
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    log.set_open(false);
+                }
+            },
+        );
+    }
+
+    /// The sheet: what would change, then whether it can.    /// The sheet: what would change, then whether it can.
     /// Where the music is kept, and what to do about music that is not there.
     fn settings_sheet(&mut self, ctx: &egui::Context) {
         let mut open = true;
@@ -2362,6 +2823,60 @@ impl App {
                     ui.label(RichText::new(policy.blurb()).color(theme::DIM).size(theme::SMALL));
                     ui.add_space(4.0);
                 }
+
+                ui.add_space(14.0);
+                pane_label(ui, "Identifying tracks");
+                if ui
+                    .checkbox(
+                        &mut self.config.identify,
+                        "Fingerprint tracks when analysing, and fill in missing names",
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("AcoustID key").color(theme::DIM).size(theme::SMALL));
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.config.acoustid_key)
+                                .desired_width(ui.available_width())
+                                .font(theme::mono(11.0))
+                                .hint_text(
+                                    RichText::new(match std::env::var("ACOUSTID_API_KEY") {
+                                        Ok(_) => "using ACOUSTID_API_KEY",
+                                        Err(_) => "free from acoustid.org/new-application",
+                                    })
+                                    .monospace()
+                                    .color(theme::DIM),
+                                ),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+                let mut percent = self.config.autotag_score * 100.0;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut percent, 50.0..=100.0)
+                            .suffix("%")
+                            .text("apply without asking at"),
+                    )
+                    .changed()
+                {
+                    self.config.autotag_score = percent / 100.0;
+                    changed = true;
+                }
+                ui.label(
+                    RichText::new(
+                        "Below this, and for anything that disagrees with a name already in \
+                         the file's tags, the match is put to you instead. Nothing under 50% \
+                         is offered at all.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
 
                 ui.add_space(10.0);
                 pane_label(ui, "Tags");

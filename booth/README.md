@@ -90,6 +90,34 @@ Cue times, names and the track's names all go through the drive delta, so an
 edit shows as *changed* on the next sync — except a cue's name, which the player
 never sees.
 
+## Identifying tracks
+
+Analysis also fingerprints each track and asks AcoustID and MusicBrainz what it
+is, filling in names the file does not carry. It needs a free key from
+[acoustid.org](https://acoustid.org/new-application), in Settings or as
+`ACOUSTID_API_KEY`; without one the rest still works and the window says so.
+
+What happens to a match depends on how sure it is and on what the track already
+claims:
+
+- **No names of its own** — applied at or above the threshold, otherwise asked.
+- **Named off its file name** — a file name is a guess, so a confident match
+  replaces it.
+- **Named from the file's own tags** — that is somebody's answer already, so a
+  disagreement is always a question, at any confidence.
+- **Agrees with what is there** — nothing to ask; the album and year get filled
+  in if they were missing.
+- **Below 50%** — never offered at all.
+
+The threshold is a slider in Settings, defaulting to 90%: being wrong here
+renames somebody's records without them noticing. Questions collect into one
+sheet showing both sides and the score. Answering one changes the collection
+only — never a file, unless you have turned on the tag write-back.
+
+Lookups are paced to what the two services ask for (three a second, and one a
+second respectively). That pacing is theirs and is not adjustable: getting
+somebody's address blocked would be real harm.
+
 ## Keeping a local copy
 
 A file played from a download folder, a network share or someone else's stick is
@@ -123,8 +151,27 @@ Stem companions are indented under the track they came from, stay under it in
 every sort, and exist only when all three stem files are on disk. The energy
 meter is a rank from 1 to 5, taken from the loudest phrase's onset strength: it
 sorts a crate from tool to peak-time record and deliberately claims no more
-precision than that. Location shows the folder, shortened at `~`, with the whole
-path on hover.
+precision than that.
+
+Location is the whole path, shortened at `~`. When the column is too narrow it
+is trimmed from the **front**, so the file name is always the part that
+survives — a path clipped at the end is every file in a folder looking
+identical.
+
+## Colouring the waveform
+
+Three modes, on the right of the cue row, remembered between runs:
+
+- **bands** — low, mid and high stacked in their own colours. Easiest for
+  finding the kick, because the low band is drawn on its own.
+- **colour** — one shape, hue mixed from the frequency content: bass blue,
+  mid-range amber, treble washing towards white. This is the picture the player
+  itself draws, so it is the one to prep against.
+- **stems** — one shape, hue from which stem is loudest: vocals rose, melody
+  teal, drums amber. Needs a rendered kit, and measures the stem files
+  themselves — a band split can say where the bass is, and only a separation can
+  say where the *voice* is. Without a kit it falls back to frequency rather than
+  drawing nothing.
 
 ## The sync sheet
 
@@ -145,9 +192,10 @@ finished.
 
 ## The log
 
-Along the bottom. Collapsed it is the last two lines; opened it fills the dock,
-which can be dragged taller, and can be filtered by level, cleared, or copied
-whole.
+The dock shows the last line. **LOG** opens the whole thing in a window of its
+own — a real one, so it can go on a second screen and stay open beside the
+browser without taking anything from the collection. Filter by level, follow the
+tail or park it, clear, or copy everything shown.
 
 Everything also goes to `booth.log` in the data directory, and the previous
 run's is kept beside it as `booth.log.1` — the run worth reading is usually the
@@ -169,6 +217,7 @@ or wherever `BOOTH_DATA_DIR` points.
 - `waveforms/` — one cached three-band picture per track, so arrow-keying down a
   crate moves the waveform instead of re-analysing each row.
 - `stems/` — rendered stem kits.
+- `waveforms/*.stems` — per-stem loudness, for colouring by what is playing.
 - `booth.log`, `booth.log.1` — this run and the one before it.
 
 The collection itself never writes audio or changes a tag — it describes what is
@@ -182,6 +231,7 @@ asked for, and neither ever moves or deletes an original.
   independent parser, which is not the same as validation against hardware.
 - A CDJ-3000X reads this format only in its compatibility mode. Device Library
   Plus has no public specification.
+- Stem colouring needs the kit rendered first, which is minutes a track.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with
   its confidence for that reason.

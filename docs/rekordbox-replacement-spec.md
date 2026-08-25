@@ -787,6 +787,13 @@ would not — a cue's name, a tag — deliberately does not.
 `booth/tests/keeping_a_copy.rs` covers the copy-in rule and the join between editing and
 the delta.
 
+- **`identify.rs`** — ANA-6's automatic half, and the judgement around it. The lookup is the
+  easy part; the useful part is deciding when a fingerprint may overwrite what a file says.
+  A name off a file name is a guess and loses to a confident match; a name out of the
+  file's own tags is somebody's answer and is never replaced without asking, at any
+  confidence. Case and punctuation are not a disagreement, or half a library becomes a
+  question.
+
 - **`log.rs`** — what happened, in order, with times, to a ring buffer the window shows and
   a file that survives the window closing. It earned itself on the first run: it found an
   analysis that could never succeed being restarted on every frame, a failure reported

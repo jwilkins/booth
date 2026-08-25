@@ -274,10 +274,17 @@ pub fn row(
     }
     x += widths.stems;
 
-    // The folder rather than the whole path: the tail is what tells one place
-    // from another, and the full thing is on the row's hover and in the
-    // inspector.
-    text(&painter, rect, x, widths.location, &folder_of(track), theme::DIM, false);
+    // The whole path, trimmed from the front when it will not fit, so that the
+    // file name is always the part that survives.
+    let font = theme::mono(10.0);
+    let location = fit_tail(&painter, &font, &location_of(track), widths.location - 8.0);
+    painter.text(
+        egui::pos2(x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        location,
+        font,
+        theme::DIM,
+    );
 
     // A double click is also a click, so the double is checked first: opening a
     // row selects it too, and reporting both would start playback and then
@@ -360,26 +367,59 @@ fn wheel(key: &str) -> u32 {
     number * 4 + side
 }
 
-/// The folder a track's file is in, shortened for a column.
+/// Where a track's file is, folder and file name both.
 ///
 /// Home is `~`, because most of a path under it is the same for every track and
-/// says nothing. A file at the filesystem root, or with no parent at all, reads
-/// as the path itself rather than as an empty cell.
-pub fn folder_of(track: &Track) -> String {
-    // A bare file name has a parent, and it is the empty path — so "has a
-    // parent" is not the same question as "is in a folder", and only the second
-    // one has a useful answer here.
-    let parent = track.path.parent().filter(|parent| !parent.as_os_str().is_empty());
-    let Some(parent) = parent else {
-        return track.path.display().to_string();
-    };
-    let shown = parent.display().to_string();
+/// says nothing. When the column is too narrow for the rest, it is the *front*
+/// that goes — see [`fit_tail`] — because the end is the part that identifies
+/// the file.
+pub fn location_of(track: &Track) -> String {
+    let shown = track.path.display().to_string();
     match std::env::var_os("HOME").map(|home| home.to_string_lossy().into_owned()) {
         Some(home) if !home.is_empty() && shown.starts_with(&home) => {
             format!("~{}", &shown[home.len()..])
         }
         _ => shown,
     }
+}
+
+/// Trim a string from the front until it fits, marking where it was cut.
+///
+/// The opposite of the usual truncation, and deliberately: a path clipped at
+/// the end is every path in the same folder looking identical, which is the one
+/// thing this column exists not to do.
+fn fit_tail(painter: &egui::Painter, font: &egui::FontId, text: &str, width: f32) -> String {
+    let measure = |value: &str| {
+        painter.layout_no_wrap(value.to_string(), font.clone(), Color32::WHITE).size().x
+    };
+    if measure(text) <= width {
+        return text.to_string();
+    }
+
+    // Cut on path separators where possible, so what is left still reads as a
+    // path rather than as a word chopped in half.
+    let mut best: Option<String> = None;
+    for (at, _) in text.match_indices('/') {
+        let candidate = format!("…{}", &text[at..]);
+        if measure(&candidate) <= width {
+            best = Some(candidate);
+            break;
+        }
+    }
+    if let Some(fitted) = best {
+        return fitted;
+    }
+
+    // No separator left that fits: fall back to characters, so a very narrow
+    // column still shows the end of the file name rather than nothing.
+    let mut start = 0;
+    for (at, _) in text.char_indices() {
+        start = at;
+        if measure(&format!("…{}", &text[at..])) <= width {
+            break;
+        }
+    }
+    format!("…{}", &text[start..])
 }
 
 fn text(
@@ -588,24 +628,30 @@ mod tests {
     }
 
     #[test]
-    fn a_location_is_shortened_at_the_home_directory() {
+    fn a_location_is_the_whole_path_shortened_at_home() {
         let mut track = Track::placeholder(1);
         let home = std::env::var("HOME").unwrap_or_default();
         if !home.is_empty() {
             track.path = PathBuf::from(format!("{home}/Music/Booth/Batu/Marius.flac"));
-            assert_eq!(folder_of(&track), "~/Music/Booth/Batu");
+            assert_eq!(location_of(&track), "~/Music/Booth/Batu/Marius.flac");
         }
 
         track.path = "/mnt/usb/Batu/Marius.flac".into();
-        assert_eq!(folder_of(&track), "/mnt/usb/Batu");
+        assert_eq!(location_of(&track), "/mnt/usb/Batu/Marius.flac");
     }
 
     #[test]
-    fn a_file_with_no_folder_still_shows_something() {
+    fn a_location_always_names_the_file() {
         let mut track = Track::placeholder(1);
         track.path = "Marius.flac".into();
-        // Not an empty cell: the answer to "where is this" is never nowhere.
-        assert!(!folder_of(&track).is_empty());
+        assert_eq!(location_of(&track), "Marius.flac");
+
+        // Two files in the same folder are two different locations, which is
+        // the whole reason the file name is in there.
+        let mut other = Track::placeholder(2);
+        track.path = "/music/Batu/a.flac".into();
+        other.path = "/music/Batu/b.flac".into();
+        assert_ne!(location_of(&track), location_of(&other));
     }
 
     #[test]

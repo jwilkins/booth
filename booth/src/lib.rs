@@ -14,6 +14,7 @@
 
 pub mod app;
 pub mod config;
+pub mod identify;
 pub mod job;
 pub mod library;
 pub mod log;

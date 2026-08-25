@@ -37,6 +37,11 @@ pub enum Job {
     Separate { tracks: Vec<(u32, PathBuf)>, out_dir: PathBuf, backend: Backend },
     /// Decode one track into memory so it can be auditioned.
     Decode { id: u32, path: PathBuf },
+    /// Measure how loud each stem is across a track, for colouring its
+    /// waveform by what is playing rather than by frequency.
+    StemEnvelopes { id: u32, kit: StemKit },
+    /// Fingerprint tracks and ask AcoustID what they are.
+    Identify { tracks: Vec<(u32, PathBuf)>, key: String },
     /// Write a drive.
     Sync { args: Box<ExportArgs>, files: Vec<PathBuf> },
 }
@@ -49,6 +54,8 @@ impl Job {
             Job::Adopt { .. } => "copying",
             Job::Retag(_) => "tagging",
             Job::Decode { .. } => "loading",
+            Job::StemEnvelopes { .. } => "measuring stems",
+            Job::Identify { .. } => "identifying",
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Sync { .. } => "writing",
@@ -84,6 +91,17 @@ pub enum Update {
     Decoded {
         id: u32,
         sound: Arc<crate::player::Sound>,
+    },
+    /// What a fingerprint said a track is. Empty when nothing matched, which
+    /// is itself worth recording so it is not asked again.
+    Identified {
+        id: u32,
+        best: Option<crate::identify::Match>,
+    },
+    /// Per-stem loudness for one track's waveform.
+    Envelopes {
+        id: u32,
+        envelopes: crate::wave::StemEnvelopes,
     },
     /// A file was copied into the library, and the track now lives there.
     Adopted {
@@ -146,11 +164,15 @@ pub fn read_record(id: u32, path: &Path) -> Track {
     track.float_samples = is_float_wav(path);
 
     let metadata = musicai::tag::read_metadata(path).unwrap_or_default();
-    track.artist = metadata.artist.unwrap_or_default();
+    let tagged_title = metadata.title.filter(|t| !t.trim().is_empty());
+    let tagged_artist = metadata.artist.filter(|a| !a.trim().is_empty());
+    // Both, not either: a file with an artist and no title has not been tagged
+    // in any way worth defending against a fingerprint.
+    track.from_tags = tagged_title.is_some() && tagged_artist.is_some();
+
+    track.artist = tagged_artist.unwrap_or_default();
     track.album = metadata.album.unwrap_or_default();
-    track.title = metadata
-        .title
-        .filter(|t| !t.trim().is_empty())
+    track.title = tagged_title
         .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_default();
     track.year = metadata.date.as_deref().and_then(|d| d.get(..4)?.parse().ok());
@@ -266,6 +288,122 @@ fn cue_color(letter: u8) -> [u8; 3] {
     [color.r(), color.g(), color.b()]
 }
 
+/// Fingerprint each track and ask what it is.
+///
+/// One at a time and paced, because both services ask for that: AcoustID wants
+/// no more than three requests a second and MusicBrainz wants one. A library
+/// tool that gets someone's IP blocked has done them real harm, so the pacing
+/// is the services' own and is not configurable down.
+fn identify(tracks: &[(u32, PathBuf)], key: &str, reporter: &Channel) -> anyhow::Result<()> {
+    use musicai::tag::{acoustid, fingerprint, musicbrainz};
+
+    let mut acoustid = acoustid::Client::new(key.to_string(), acoustid::DEFAULT_MIN_INTERVAL);
+    let mut brainz = musicbrainz::Client::new(std::time::Duration::from_millis(1_100));
+    let total = tracks.len();
+
+    for (done, (id, path)) in tracks.iter().enumerate() {
+        if reporter.cancelled() {
+            break;
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+
+        let looked_up = (|| -> anyhow::Result<Option<crate::identify::Match>> {
+            let audio = decode_file(path)?;
+            let print = fingerprint::fingerprint(&audio)?;
+            let candidates = acoustid.lookup(&print)?;
+            crate::debug!("{name}: {} candidates", candidates.len());
+
+            // The best one only. A list of near-misses is not a question
+            // anybody can answer better than the top score can.
+            let Some(best) = candidates
+                .into_iter()
+                .max_by(|a, b| a.score.total_cmp(&b.score))
+                .filter(|best| best.score >= crate::identify::FLOOR)
+            else {
+                return Ok(None);
+            };
+
+            let mut found = crate::identify::Match {
+                score: best.score,
+                artist: best.artist.clone().unwrap_or_default(),
+                title: best.title.clone().unwrap_or_default(),
+                recording_mbid: best.recording_mbid.clone(),
+                acoustid: best.acoustid.clone(),
+                ..Default::default()
+            };
+
+            // MusicBrainz for the album and the year, which AcoustID does not
+            // carry. A failure here is not a failure of the identification.
+            match brainz.lookup_recording(&best.recording_mbid) {
+                Ok(recording) => {
+                    let metadata =
+                        musicai::tag::Metadata::from_musicbrainz(&recording, Some(&best.acoustid));
+                    if let Some(artist) = metadata.artist {
+                        found.artist = artist;
+                    }
+                    if let Some(title) = metadata.title {
+                        found.title = title;
+                    }
+                    found.album = metadata.album.unwrap_or_default();
+                    found.year =
+                        metadata.date.as_deref().and_then(|date| date.get(..4)?.parse().ok());
+                }
+                Err(e) => crate::warn!("{name}: musicbrainz lookup failed: {e:#}"),
+            }
+            Ok(Some(found))
+        })();
+
+        match looked_up {
+            Ok(best) => {
+                match &best {
+                    Some(found) => crate::info!(
+                        "{name}: {} ({:.0}% confident)",
+                        found.describe(),
+                        found.score * 100.0
+                    ),
+                    None => crate::info!("{name}: no match"),
+                }
+                let _ = reporter.tx.send(Update::Identified { id: *id, best });
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
+            }
+        }
+        let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// How loud each stem is, column by column, on the same grid as the waveform.
+///
+/// Measured from the rendered files rather than inferred from the mix, which is
+/// the whole point: a band split can say where the bass is, and only a
+/// separation can say where the voice is.
+pub fn stem_envelopes(kit: &StemKit) -> anyhow::Result<crate::wave::StemEnvelopes> {
+    let measure = |path: Option<&PathBuf>| -> anyhow::Result<Vec<u8>> {
+        let Some(path) = path else { return Ok(Vec::new()) };
+        let audio = decode_file(path)?;
+        let waveform = musicai::export::waveform::analyze(&audio);
+        // The three band bytes of each column, collapsed to how much is there:
+        // for colouring, what matters is which stem is loudest, not what it is
+        // made of.
+        Ok(waveform
+            .band_preview
+            .chunks(3)
+            .map(|column| column.iter().copied().max().unwrap_or(0))
+            .collect())
+    };
+
+    Ok(crate::wave::StemEnvelopes {
+        vocals: measure(kit.vocals.as_ref())?,
+        melody: measure(kit.melody.as_ref())?,
+        drums: measure(kit.drums.as_ref())?,
+    })
+}
+
 /// Which stems were written for a track, by looking for them.
 ///
 /// The separator names its outputs `<stem-name>` beside the track's file stem,
@@ -375,6 +513,13 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Analyze(tracks) => analyze_all(&tracks, reporter),
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
         Job::Retag(tracks) => retag(&tracks, reporter),
+        Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
+        Job::StemEnvelopes { id, kit } => {
+            let envelopes = stem_envelopes(&kit)?;
+            let _ = reporter.tx.send(Update::Envelopes { id, envelopes });
+            (reporter.wake)();
+            Ok(())
+        }
         Job::Decode { id, path } => {
             // Decoded whole rather than streamed: a track is tens of megabytes
             // as f32, auditioning wants instant seeking anywhere in it, and the

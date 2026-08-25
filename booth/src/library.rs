@@ -151,6 +151,17 @@ pub struct Track {
     /// and no cues, which is different from having been analysed and found to
     /// have none.
     pub analyzed: bool,
+    /// Whether the artist and title came out of the file's own tags rather than
+    /// off its file name.
+    ///
+    /// The difference matters when a fingerprint disagrees with them: a tag is
+    /// somebody's answer, and a file name is a guess.
+    #[serde(default)]
+    pub from_tags: bool,
+    /// Whether a fingerprint lookup has been tried, so a track with no match is
+    /// not looked up again on every pass.
+    #[serde(default)]
+    pub identified: bool,
 }
 
 impl Track {
@@ -190,6 +201,8 @@ impl Track {
             role: Role::Track,
             parent: None,
             analyzed: false,
+            from_tags: false,
+            identified: false,
         }
     }
 
@@ -491,6 +504,39 @@ pub fn cached_waveform(id: u32) -> Option<Vec<u8>> {
     std::fs::read(waveform_path(id)).ok().filter(|bands| !bands.is_empty())
 }
 
+/// Where a track's per-stem loudness is cached.
+pub fn envelopes_path(id: u32) -> PathBuf {
+    data_dir().join("waveforms").join(format!("{id:08}.stems"))
+}
+
+/// Keep a track's stem envelopes. Written as the three planes end to end, with
+/// a length so they can be split again.
+pub fn cache_envelopes(id: u32, envelopes: &crate::wave::StemEnvelopes) -> std::io::Result<()> {
+    let path = envelopes_path(id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let columns = envelopes.columns();
+    let mut bytes = (columns as u32).to_le_bytes().to_vec();
+    for plane in [&envelopes.vocals, &envelopes.melody, &envelopes.drums] {
+        bytes.extend_from_slice(&plane[..columns]);
+    }
+    std::fs::write(path, bytes)
+}
+
+/// Read them back, if they are there and whole.
+pub fn cached_envelopes(id: u32) -> Option<crate::wave::StemEnvelopes> {
+    let bytes = std::fs::read(envelopes_path(id)).ok()?;
+    let columns = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+    // A file that is the wrong length is a file from a different version or a
+    // half-finished write; there is nothing to salvage from part of it.
+    if columns == 0 || bytes.len() != 4 + columns * 3 {
+        return None;
+    }
+    let plane = |n: usize| bytes[4 + n * columns..4 + (n + 1) * columns].to_vec();
+    Some(crate::wave::StemEnvelopes { vocals: plane(0), melody: plane(1), drums: plane(2) })
+}
+
 /// Where this program keeps its data.
 pub fn data_dir() -> PathBuf {
     if let Some(explicit) = std::env::var_os("BOOTH_DATA_DIR") {
@@ -678,6 +724,53 @@ mod tests {
             assert!(level >= previous, "energy went down at {step}");
             previous = level;
         }
+    }
+
+    #[test]
+    fn stem_envelopes_survive_the_cache() {
+        let dir = scratch("envelopes");
+        // SAFETY: single-threaded test; the variable is only read to place the
+        // cache somewhere disposable.
+        unsafe { std::env::set_var("BOOTH_DATA_DIR", &dir) };
+
+        let envelopes = crate::wave::StemEnvelopes {
+            vocals: vec![1, 2, 3, 4],
+            melody: vec![5, 6, 7, 8],
+            drums: vec![9, 10, 11, 12],
+        };
+        cache_envelopes(7, &envelopes).unwrap();
+        assert_eq!(cached_envelopes(7), Some(envelopes));
+        assert_eq!(cached_envelopes(8), None, "nothing was written for that one");
+
+        // A file of the wrong length is from another version or a half-done
+        // write; there is nothing to salvage from part of it.
+        std::fs::write(envelopes_path(9), b"short").unwrap();
+        assert_eq!(cached_envelopes(9), None);
+
+        unsafe { std::env::remove_var("BOOTH_DATA_DIR") };
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ragged_envelopes_are_cached_as_the_part_that_lines_up() {
+        let dir = scratch("envelopes-ragged");
+        unsafe { std::env::set_var("BOOTH_DATA_DIR", &dir) };
+
+        // One stem measured shorter than the others: what is kept is the part
+        // all three agree on, because a colour needs all three.
+        let envelopes = crate::wave::StemEnvelopes {
+            vocals: vec![1, 2, 3],
+            melody: vec![4, 5],
+            drums: vec![6, 7, 8, 9],
+        };
+        cache_envelopes(1, &envelopes).unwrap();
+        let read = cached_envelopes(1).unwrap();
+        assert_eq!(read.columns(), 2);
+        assert_eq!(read.vocals, vec![1, 2]);
+        assert_eq!(read.drums, vec![6, 7]);
+
+        unsafe { std::env::remove_var("BOOTH_DATA_DIR") };
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
