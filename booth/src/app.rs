@@ -18,6 +18,7 @@ use musicai::stems::Backend;
 use crate::config::{Config, OnExternal};
 use crate::job::{self, Adoptable, Job, Retag, Runner, Update};
 use crate::library::{now, Drive, Library, Playlist, SavedQuery, Track, Written};
+use crate::player::Player;
 use crate::query::{self, Context, Paint, Query};
 use crate::rows;
 use crate::sync::{self, Level, Plan};
@@ -67,6 +68,17 @@ pub struct App {
     selected: Option<u32>,
     /// The three-band waveform of the selected track, once it has been read.
     waveform: Option<(u32, Vec<u8>)>,
+
+    /// The deck, if a device could be opened. `None` on a machine with no
+    /// sound card, over SSH, or under a headless test — a library tool that
+    /// will not start without speakers is worse than one that cannot audition.
+    player: Option<Player>,
+    /// Why there is no deck, for the transport to say once rather than
+    /// silently doing nothing.
+    player_problem: Option<String>,
+    /// A track being decoded for playback, and whether to start it when it
+    /// arrives.
+    loading: Option<(u32, bool)>,
 
     runner: Option<Runner>,
     /// Work waiting for the runner. Jobs chain — an import that turns up
@@ -136,6 +148,12 @@ enum Pending {
     PlaceCue {
         id: u32,
         letter: u8,
+        time_ms: u32,
+    },
+    TogglePlayback(u32),
+    /// Move the deck to a position in a track, if that track is on it.
+    SeekDeck {
+        id: u32,
         time_ms: u32,
     },
     RemoveCue {
@@ -227,6 +245,9 @@ impl App {
             rows: Vec::new(),
             selected: None,
             waveform: None,
+            player: None,
+            player_problem: None,
+            loading: None,
             runner: None,
             queued: VecDeque::new(),
             progress: None,
@@ -250,6 +271,13 @@ impl App {
             wake_installed: false,
         };
         app.rebuild();
+
+        // The device is opened once, at startup, and kept: opening one per
+        // track costs a noticeable gap and, on some hosts, a click.
+        match Player::open() {
+            Ok(player) => app.player = Some(player),
+            Err(e) => app.player_problem = Some(format!("{e:#}")),
+        }
 
         // Lets the layout check open the window on the sync sheet, which is
         // otherwise two clicks in. Animations are switched off with it, because
@@ -535,6 +563,17 @@ impl App {
                     imported.push(id);
                     changed = true;
                 }
+                Update::Decoded { id, sound } => {
+                    if let Some(player) = &mut self.player {
+                        player.load(id, sound);
+                        if let Some(ms) = self.playhead_ms {
+                            player.seek_secs(ms as f64 / 1000.0);
+                        }
+                        if self.loading.take().is_some_and(|(_, play)| play) {
+                            player.play();
+                        }
+                    }
+                }
                 Update::Adopted { id, to } => {
                     if let Some(track) = self.library.get_mut(id) {
                         // The record now points at the copy. The original is
@@ -580,6 +619,8 @@ impl App {
                 Update::Progress { done, total } => self.progress = Some((done, total)),
                 Update::Line(text) => self.note(text, theme::TEXT),
                 Update::Failed { path, message } => {
+                    // Whatever failed, nothing is arriving for the deck now.
+                    self.loading = None;
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                     self.note(
                         format!(
@@ -734,6 +775,7 @@ impl eframe::App for App {
         }
         self.take_dropped(ctx);
         self.keys(ctx);
+        self.follow_playback(ctx);
 
         egui::TopBottomPanel::top("bar").frame(bar_frame()).show(ctx, |ui| self.command_bar(ui));
         egui::TopBottomPanel::bottom("dock").frame(bar_frame()).show(ctx, |ui| self.dock(ui));
@@ -826,7 +868,31 @@ impl App {
             if i.key_pressed(egui::Key::ArrowUp) {
                 self.step(-1);
             }
+            if i.key_pressed(egui::Key::Space) {
+                if let Some(id) = self.selected {
+                    self.pending.push(Pending::TogglePlayback(id));
+                }
+            }
         });
+    }
+
+    /// Keep the playhead on the deck's position while it plays, and keep the
+    /// window repainting so it moves.
+    ///
+    /// The playhead is the deck's when the deck is running and the window's
+    /// when it is not — which is what lets a cue be placed by clicking while
+    /// something is paused, without playback dragging the marker away.
+    fn follow_playback(&mut self, ctx: &egui::Context) {
+        let Some(player) = &self.player else { return };
+        let Some(id) = player.loaded() else { return };
+        if !player.is_playing() || self.selected != Some(id) {
+            return;
+        }
+        self.playhead_ms = Some((player.position_secs() * 1000.0) as u32);
+        // Sixty times a second while playing, and not at all otherwise: a
+        // library browser has no business spinning a core to redraw a static
+        // window.
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 
     fn command_bar(&mut self, ui: &mut Ui) {
@@ -1129,17 +1195,23 @@ impl App {
         let widths = rows::columns(ui.available_width());
         rows::header_row(ui, &widths);
 
-        let mut clicked = None;
+        let mut hit = None;
         for line in &self.rows {
             let selected = Some(line.track.id) == self.selected;
-            if rows::row(ui, &line.track, line.indented, selected, &widths) {
-                clicked = Some(line.track.id);
+            if let Some(what) = rows::row(ui, &line.track, line.indented, selected, &widths) {
+                hit = Some((line.track.id, what));
             }
         }
-        if let Some(id) = clicked {
+        if let Some((id, what)) = hit {
             if Some(id) != self.selected {
                 self.selected = Some(id);
                 self.waveform = None;
+                // A different track: start it from the top rather than from
+                // wherever the last one's playhead happened to be.
+                self.playhead_ms = None;
+            }
+            if what == rows::Hit::Opened {
+                self.pending.push(Pending::TogglePlayback(id));
             }
         }
 
@@ -1186,7 +1258,10 @@ impl App {
         wave::phrase_strip(ui, &track.phrases, track.duration_secs);
 
         match touched {
-            Some(wave::Touched::Scrubbed(ms)) => self.playhead_ms = Some(ms),
+            Some(wave::Touched::Scrubbed(ms)) => {
+                self.playhead_ms = Some(ms);
+                self.pending.push(Pending::SeekDeck { id: track.id, time_ms: ms });
+            }
             Some(wave::Touched::Moved { letter, time_ms }) => {
                 self.pending.push(Pending::PlaceCue { id: track.id, letter, time_ms })
             }
@@ -1250,6 +1325,117 @@ impl App {
         }
     }
 
+    // -- the deck ----------------------------------------------------------
+
+    /// Play a track, decoding it first if it is not the one already loaded.
+    fn audition(&mut self, id: u32, from_secs: Option<f64>) {
+        let Some(player) = &self.player else { return };
+        let Some(track) = self.library.get(id) else { return };
+        if !track.path.exists() {
+            self.note("that file is not where it was", theme::ALERT);
+            return;
+        }
+
+        if player.loaded() == Some(id) {
+            if let Some(secs) = from_secs {
+                player.seek_secs(secs);
+            }
+            player.play();
+            return;
+        }
+
+        // Playing a file is reaching for it, so this is one of the moments the
+        // copy-in policy is about. The copy is queued first and the decode
+        // behind it, so what plays is whatever the track's path is by then.
+        let path = track.path.clone();
+        self.ensure_local(&[id]);
+        self.loading = Some((id, true));
+        self.start(Job::Decode { id, path });
+        if let Some(secs) = from_secs {
+            // Remembered for when it lands: the deck cannot be seeked to a
+            // position in a track it has not been given yet.
+            self.playhead_ms = Some((secs * 1000.0) as u32);
+        }
+    }
+
+    /// Space, and the transport under the waveform.
+    fn transport(&mut self, ui: &mut Ui, track: &Track) {
+        let Some(player) = &self.player else {
+            // Short, because this row is mostly cue buttons and the reason is
+            // rarely actionable; the whole of it is one hover away.
+            if let Some(problem) = &self.player_problem {
+                ui.label(RichText::new("no audio out").color(theme::DIM).size(theme::SMALL))
+                    .on_hover_text(problem);
+            }
+            return;
+        };
+
+        let loaded = player.loaded() == Some(track.id);
+        let playing = loaded && player.is_playing();
+        let waiting = self.loading.is_some_and(|(id, _)| id == track.id);
+
+        let label = match (playing, waiting) {
+            (_, true) => theme::SPINNER,
+            (true, _) => "\u{23F8}",
+            (false, _) => "\u{25B6}",
+        };
+        if ui
+            .add(
+                egui::Button::new(RichText::new(label).font(theme::mono(12.0)).color(theme::BOOTH))
+                    .fill(if playing { theme::GO } else { theme::AMBER })
+                    .min_size(egui::vec2(30.0, 18.0)),
+            )
+            .on_hover_text("Space")
+            .clicked()
+        {
+            // Recorded rather than acted on: the deck is borrowed for the rest
+            // of this row, and starting a track needs it back.
+            self.pending.push(Pending::TogglePlayback(track.id));
+        }
+
+        let position = match loaded {
+            true => player.position_secs(),
+            false => 0.0,
+        };
+        ui.label(
+            RichText::new(format!(
+                "{} / {}",
+                time_text((position * 1000.0) as u32),
+                time_text((track.duration_secs * 1000.0) as u32)
+            ))
+            .font(theme::mono(10.5))
+            .color(if loaded { theme::TEXT } else { theme::DIM }),
+        );
+
+        let mut gain = player.gain();
+        if ui
+            .add(
+                egui::Slider::new(&mut gain, 0.0..=1.0)
+                    .show_value(false)
+                    .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.4 }),
+            )
+            .on_hover_text(format!("volume {:.0}%", gain * 100.0))
+            .changed()
+        {
+            player.set_gain(gain);
+        }
+    }
+
+    /// Start or stop, loading the track first if it is not the one on the deck.
+    fn toggle_playback(&mut self, id: u32) {
+        let Some(player) = &self.player else { return };
+        match player.loaded() == Some(id) {
+            true => player.toggle(),
+            // Playing a different track starts from wherever the playhead was
+            // put, which is what makes clicking a waveform and pressing space
+            // one gesture rather than two.
+            false => {
+                let from = self.playhead_ms.map(|ms| ms as f64 / 1000.0);
+                self.audition(id, from);
+            }
+        }
+    }
+
     /// The eight hot cues, as eight buttons.
     ///
     /// One press per cue, the way a player has it: an empty slot takes the
@@ -1259,6 +1445,8 @@ impl App {
     fn cue_strip(&mut self, ui: &mut Ui, track: &Track) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
+            self.transport(ui, track);
+            ui.separator();
             ui.label(
                 RichText::new(theme::label_text("Cues"))
                     .size(theme::LABEL)
@@ -1307,7 +1495,13 @@ impl App {
                         (Some(_), true) => {
                             self.pending.push(Pending::RemoveCue { id: track.id, letter })
                         }
-                        (Some(cue), false) => self.playhead_ms = Some(cue.time_ms),
+                        // Jumping to a cue takes the deck with it, so an ear
+                        // can check a cue rather than only an eye.
+                        (Some(cue), false) => {
+                            self.playhead_ms = Some(cue.time_ms);
+                            self.pending
+                                .push(Pending::SeekDeck { id: track.id, time_ms: cue.time_ms });
+                        }
                         (None, _) => {
                             if let Some(time_ms) = at {
                                 self.pending.push(Pending::PlaceCue {
@@ -1684,6 +1878,14 @@ impl App {
                 Pending::PlaceCue { id, letter, time_ms } => {
                     self.place_cue(id, letter, time_ms);
                     touched = true;
+                }
+                Pending::TogglePlayback(id) => self.toggle_playback(id),
+                Pending::SeekDeck { id, time_ms } => {
+                    if let Some(player) = &self.player {
+                        if player.loaded() == Some(id) {
+                            player.seek_secs(time_ms as f64 / 1000.0);
+                        }
+                    }
                 }
                 Pending::RemoveCue { id, letter } => {
                     if let Some(track) = self.library.get_mut(id) {

@@ -12,6 +12,11 @@ cargo run -p booth
 Anything named on the command line is imported at startup, and files can be
 dropped onto the window.
 
+On Linux the audio output needs ALSA's headers at build time
+(`apt install libasound2-dev`, or `alsa-lib-devel`). macOS and Windows need
+nothing extra. Without a working output device the window still opens and does
+everything else; the transport says `no audio out` instead.
+
 ## One window
 
 There are no modes. The query bar is across the top, the collection down the
@@ -60,6 +65,18 @@ rather than appearing to work.
 tagging a track does not queue a 40 MB rewrite. A tag already in use is offered
 as one click, and a new one that differs only in case joins the existing tag
 rather than starting a second one that queries miss.
+
+## Playing
+
+Double-click a row, or press **space**, to hear the selected track. Clicking the
+waveform moves the playhead and takes playback with it; pressing a cue jumps
+both. That is the point of having a deck at all — a cue placed by eye is a
+guess, and the ear is what says whether it is on the beat.
+
+One deck, and it audition only: no pitch, no sync, no mixing. The track is
+decoded whole in the background so that seeking anywhere is instant, which is
+what checking cues is made of. A file whose rate differs from the output
+device's is resampled on the way out.
 
 **Cues.** Click the waveform to put the playhead somewhere, then press an empty
 cue button to place a cue there. A full button jumps the playhead to it;
@@ -147,6 +164,8 @@ asked for, and neither ever moves or deletes an original.
   its confidence for that reason.
 - Cues and grids are never written back to the source files — they live in the
   collection and on the drive. Names can be, on request.
-- Nothing plays. The playhead is a position for placing cues against, not a
-  transport.
+- One deck, and no pitch, sync or mixing — it is for auditioning, not
+  performing. The spec asks for two decks eventually.
+- Playback resamples linearly, which is right for auditioning and is not what
+  anyone would master through.
 - Cue colours are assigned by slot rather than chosen.

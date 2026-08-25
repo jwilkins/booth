@@ -35,6 +35,8 @@ pub enum Job {
     Retag(Vec<Retag>),
     /// Render stem kits.
     Separate { tracks: Vec<(u32, PathBuf)>, out_dir: PathBuf, backend: Backend },
+    /// Decode one track into memory so it can be auditioned.
+    Decode { id: u32, path: PathBuf },
     /// Write a drive.
     Sync { args: Box<ExportArgs>, files: Vec<PathBuf> },
 }
@@ -46,6 +48,7 @@ impl Job {
             Job::Import { .. } => "reading",
             Job::Adopt { .. } => "copying in",
             Job::Retag(_) => "tagging",
+            Job::Decode { .. } => "loading",
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Sync { .. } => "writing",
@@ -77,6 +80,11 @@ pub enum Update {
     Imported(Box<Track>),
     /// One track, listened to.
     Analyzed(Box<Analyzed>),
+    /// A track was decoded and is ready to play.
+    Decoded {
+        id: u32,
+        sound: Arc<crate::player::Sound>,
+    },
     /// A file was copied into the library, and the track now lives there.
     Adopted {
         id: u32,
@@ -367,6 +375,16 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Analyze(tracks) => analyze_all(&tracks, reporter),
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
         Job::Retag(tracks) => retag(&tracks, reporter),
+        Job::Decode { id, path } => {
+            // Decoded whole rather than streamed: a track is tens of megabytes
+            // as f32, auditioning wants instant seeking anywhere in it, and the
+            // analysers already decode the same way.
+            let audio = decode_file(&path)?;
+            let sound = Arc::new(crate::player::Sound::from_audio(&audio));
+            let _ = reporter.tx.send(Update::Decoded { id, sound });
+            (reporter.wake)();
+            Ok(())
+        }
         Job::Separate { tracks, out_dir, backend } => {
             separate(&tracks, &out_dir, backend, reporter)
         }

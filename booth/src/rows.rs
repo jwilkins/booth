@@ -70,10 +70,26 @@ pub fn header_row(ui: &mut Ui, widths: &Widths) {
     );
 }
 
-/// Draw one line. Returns whether it was clicked.
-pub fn row(ui: &mut Ui, track: &Track, indented: bool, selected: bool, widths: &Widths) -> bool {
+/// What the pointer did to a row.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Hit {
+    /// Selected it.
+    Clicked,
+    /// Asked to hear it.
+    Opened,
+}
+
+/// Draw one line. Returns what the pointer did, if anything.
+pub fn row(
+    ui: &mut Ui,
+    track: &Track,
+    indented: bool,
+    selected: bool,
+    widths: &Widths,
+) -> Option<Hit> {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
+    let response = response.on_hover_text("double-click to hear it");
     let painter = ui.painter_at(rect);
 
     if selected {
@@ -131,7 +147,14 @@ pub fn row(ui: &mut Ui, track: &Track, indented: bool, selected: bool, widths: &
         );
     }
 
-    response.clicked()
+    // A double click is also a click, so the double is checked first: opening a
+    // row selects it too, and reporting both would start playback and then
+    // immediately be told to select something.
+    match (response.double_clicked(), response.clicked()) {
+        (true, _) => Some(Hit::Opened),
+        (_, true) => Some(Hit::Clicked),
+        _ => None,
+    }
 }
 
 fn text(

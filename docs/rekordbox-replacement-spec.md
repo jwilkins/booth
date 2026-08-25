@@ -787,9 +787,15 @@ would not — a cue's name, a tag — deliberately does not.
 `booth/tests/keeping_a_copy.rs` covers the copy-in rule and the join between editing and
 the delta.
 
+- **`player.rs`** — the auditioning deck §2 asks for, at one deck rather than two. Tracks
+  are decoded whole so that seeking anywhere is free, which is what checking a cue is made
+  of; the mixing is a pure function of a buffer, a sound and a position, so the resampling,
+  the channel mapping and running off the end are all tested without opening a device. A
+  machine with no sound card still gets a library — the transport says so and everything
+  else works.
+
 What the interface does *not* yet do: a play history, importing an existing rekordbox
-library, choosing cue colours, or playing anything — the playhead is a position to place
-cues against, not a transport.
+library, choosing cue colours, or a second deck to mix against.
 
 ### What the first pass turned up
 
