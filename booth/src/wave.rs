@@ -47,10 +47,25 @@ impl Waveform<'_> {
     }
 }
 
+/// What the pointer did to the waveform.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Touched {
+    /// The playhead was moved here, in milliseconds.
+    Scrubbed(u32),
+    /// A cue was dragged to here.
+    Moved { letter: u8, time_ms: u32 },
+}
+
+/// How close to a cue's line the pointer has to be to take hold of it, in
+/// points. Wide enough to grab without aiming, narrow enough that two cues a
+/// bar apart are still two things.
+const GRAB: f32 = 5.0;
+
 /// Draw the waveform, the beat ticks, the cue flags and the phrase strip.
 ///
-/// Returns the fraction of the track that was clicked, if it was.
-pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Option<f32> {
+/// Returns what the pointer did, if anything. Dragging a cue moves it; clicking
+/// anywhere else moves the playhead.
+pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Option<Touched> {
     let width = ui.available_width();
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click_and_drag());
@@ -112,7 +127,8 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Option<f32> {
     }
 
     beat_ticks(&painter, rect, wave);
-    cue_flags(&painter, rect, wave);
+    let held = dragged_cue(ui, &response, rect, wave);
+    cue_flags(&painter, rect, wave, held);
 
     if let Some(position) = wave.position {
         let x = rect.left() + rect.width() * position.clamp(0.0, 1.0);
@@ -122,7 +138,65 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Option<f32> {
         );
     }
 
-    response.interact_pointer_pos().map(|at| ((at.x - rect.left()) / rect.width()).clamp(0.0, 1.0))
+    // The pointer changes over a cue, which is the only signal that it can be
+    // taken hold of at all.
+    if held.is_some() || cue_under(&response, rect, wave).is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+
+    let at = response.interact_pointer_pos()?;
+    let time_ms = time_at(rect, wave, at.x);
+    match held {
+        Some(letter) => Some(Touched::Moved { letter, time_ms }),
+        // A drag that started on empty space is a scrub, not a cue move.
+        None if response.dragged() || response.clicked() => Some(Touched::Scrubbed(time_ms)),
+        None => None,
+    }
+}
+
+/// Where a horizontal position falls in the track.
+fn time_at(rect: Rect, wave: &Waveform<'_>, x: f32) -> u32 {
+    let fraction = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+    (fraction * wave.duration_secs * 1000.0).round() as u32
+}
+
+/// Which cue the pointer is over, if any.
+fn cue_under(response: &egui::Response, rect: Rect, wave: &Waveform<'_>) -> Option<u8> {
+    let at = response.hover_pos().or_else(|| response.interact_pointer_pos())?;
+    if wave.duration_secs <= 0.0 {
+        return None;
+    }
+    wave.cues
+        .iter()
+        .map(|cue| (cue.letter, cue_x(rect, wave, cue.time_ms)))
+        .filter(|(_, x)| (x - at.x).abs() <= GRAB)
+        .min_by(|a, b| (a.1 - at.x).abs().total_cmp(&(b.1 - at.x).abs()))
+        .map(|(letter, _)| letter)
+}
+
+fn cue_x(rect: Rect, wave: &Waveform<'_>, time_ms: u32) -> f32 {
+    let total_ms = (wave.duration_secs * 1000.0).max(1.0);
+    rect.left() + rect.width() * (time_ms as f64 / total_ms).clamp(0.0, 1.0) as f32
+}
+
+/// The cue being dragged, remembered for the length of the drag.
+///
+/// Which cue is under the pointer is decided once, when the drag starts:
+/// re-deciding every frame would let a fast drag hand over to a cue it passed.
+fn dragged_cue(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'_>) -> Option<u8> {
+    let id = response.id.with("dragging-cue");
+    if response.drag_started() {
+        let under = cue_under(response, rect, wave);
+        ui.ctx().memory_mut(|memory| memory.data.insert_temp(id, under));
+    }
+    if response.drag_stopped() {
+        ui.ctx().memory_mut(|memory| memory.data.remove::<Option<u8>>(id));
+        return None;
+    }
+    if !response.dragged() {
+        return None;
+    }
+    ui.ctx().memory(|memory| memory.data.get_temp::<Option<u8>>(id)).flatten()
 }
 
 /// Ticks along the bottom, tall on the downbeat.
@@ -156,8 +230,9 @@ fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
     }
 }
 
-/// A line and a flag per cue, with its letter.
-fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
+/// A line and a flag per cue, with its letter. The one being dragged is drawn
+/// brighter, so it is clear which one moved.
+fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Option<u8>) {
     if wave.duration_secs <= 0.0 {
         return;
     }
@@ -166,7 +241,10 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
     for cue in wave.cues {
         let fraction = (cue.time_ms as f64 / total_ms).clamp(0.0, 1.0) as f32;
         let x = rect.left() + rect.width() * fraction;
-        let color = Color32::from_rgb(cue.color[0], cue.color[1], cue.color[2]);
+        let mut color = Color32::from_rgb(cue.color[0], cue.color[1], cue.color[2]);
+        if held == Some(cue.letter) {
+            color = theme::TEXT;
+        }
 
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom() - 10.0)],

@@ -771,9 +771,25 @@ the prep editor beneath it rather than in place of it, and the dock along the bo
 plan, preflight, write — and reads the resulting `export.pdb` back with the independent
 parser.
 
-What the interface does *not* yet do: tag editing, cue editing by hand, a play history, or
-importing an existing rekordbox library. The prep it writes is the prep the analysers
-produced.
+- **`config.rs`** — where music is kept, and what to do about music that is not kept there.
+  A file played from a download folder or a borrowed stick is a file that can be gone on the
+  night, so anything reached for from outside the library folder is copied in by default —
+  copied, never moved, and never over the top of a different file that shares its name.
+
+PREP-1 and PREP-2's manual halves are in: the inspector's names are editable, with an
+explicit and separately-controlled write-back to the file's own tags (FLAC and MP3; a WAV
+says it has nowhere to put them rather than appearing to work), free-form tags that stay in
+the collection rather than reaching the drive, and cue editing against the waveform —
+click to place the playhead, a button per slot, drag to move, snapped to the beat and the
+memory cue to the bar. What the player would see goes through the drive delta; what it
+would not — a cue's name, a tag — deliberately does not.
+
+`booth/tests/keeping_a_copy.rs` covers the copy-in rule and the join between editing and
+the delta.
+
+What the interface does *not* yet do: a play history, importing an existing rekordbox
+library, choosing cue colours, or playing anything — the playhead is a position to place
+cues against, not a transport.
 
 ### What the first pass turned up
 

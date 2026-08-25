@@ -13,6 +13,7 @@
 //! them. The binary is [`app::App`] and a `main` that shows it.
 
 pub mod app;
+pub mod config;
 pub mod job;
 pub mod library;
 pub mod query;

@@ -18,6 +18,7 @@ use musicai::cli::{ExportArgs, InputArgs, StemsArgs};
 use musicai::report::{Event, Reporter};
 use musicai::stems::{Backend, Stem};
 
+use crate::config::{self, Config};
 use crate::library::{energy_from, CueMark, Phrase, StemKit, Track};
 use crate::theme::CUE_COLORS;
 
@@ -28,6 +29,10 @@ pub enum Job {
     Import { paths: Vec<PathBuf>, recursive: bool },
     /// Listen to each track: grid, key, phrases, cues, loudness, waveform.
     Analyze(Vec<(u32, PathBuf)>),
+    /// Take a copy of tracks whose files are outside the library folder.
+    Adopt { tracks: Vec<Adoptable>, config: Box<Config> },
+    /// Write a track's artist, title and album back into the file's own tags.
+    Retag(Vec<Retag>),
     /// Render stem kits.
     Separate { tracks: Vec<(u32, PathBuf)>, out_dir: PathBuf, backend: Backend },
     /// Write a drive.
@@ -39,11 +44,31 @@ impl Job {
     pub fn name(&self) -> &'static str {
         match self {
             Job::Import { .. } => "reading",
+            Job::Adopt { .. } => "copying in",
+            Job::Retag(_) => "tagging",
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Sync { .. } => "writing",
         }
     }
+}
+
+/// A track whose file should be copied into the library.
+pub struct Adoptable {
+    pub id: u32,
+    pub path: PathBuf,
+    /// The artist folder it goes under.
+    pub artist: String,
+}
+
+/// One track's tags, as the collection now has them.
+pub struct Retag {
+    pub id: u32,
+    pub path: PathBuf,
+    pub artist: String,
+    pub title: String,
+    pub album: String,
+    pub date: Option<String>,
 }
 
 /// Something the worker found out.
@@ -52,6 +77,11 @@ pub enum Update {
     Imported(Box<Track>),
     /// One track, listened to.
     Analyzed(Box<Analyzed>),
+    /// A file was copied into the library, and the track now lives there.
+    Adopted {
+        id: u32,
+        to: PathBuf,
+    },
     /// A stem kit finished rendering.
     Separated {
         id: u32,
@@ -335,6 +365,8 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
     match job {
         Job::Import { paths, recursive } => import(&paths, recursive, reporter),
         Job::Analyze(tracks) => analyze_all(&tracks, reporter),
+        Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
+        Job::Retag(tracks) => retag(&tracks, reporter),
         Job::Separate { tracks, out_dir, backend } => {
             separate(&tracks, &out_dir, backend, reporter)
         }
@@ -393,6 +425,91 @@ fn analyze_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<
         (reporter.wake)();
     });
     Ok(())
+}
+
+/// Copy files into the library folder, one at a time.
+///
+/// The originals are left alone. Nothing here deletes or moves anything: a
+/// person who pointed at a folder of borrowed music should get their music
+/// back exactly as they lent it.
+fn adopt(tracks: &[Adoptable], config: &Config, reporter: &Channel) -> anyhow::Result<()> {
+    let total = tracks.len();
+    for (done, track) in tracks.iter().enumerate() {
+        if reporter.cancelled() {
+            break;
+        }
+        match config::copy_in(config, &track.artist, &track.path) {
+            Ok(to) => {
+                let _ = reporter.tx.send(Update::Line(format!(
+                    "copied {} into the library",
+                    track.path.file_name().unwrap_or_default().to_string_lossy()
+                )));
+                let _ = reporter.tx.send(Update::Adopted { id: track.id, to });
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: track.path.clone(), message: format!("{e:#}") });
+            }
+        }
+        let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// Write the collection's names back into the files' own tags.
+///
+/// Only ever the fields a person edited in the inspector, and only when they
+/// asked for it: the collection is the working copy, and rewriting somebody's
+/// files is not something to do as a side effect of fixing a spelling.
+fn retag(tracks: &[Retag], reporter: &Channel) -> anyhow::Result<()> {
+    let total = tracks.len();
+    for (done, track) in tracks.iter().enumerate() {
+        if reporter.cancelled() {
+            break;
+        }
+        let metadata = musicai::tag::Metadata {
+            title: non_empty(&track.title),
+            artist: non_empty(&track.artist),
+            album: non_empty(&track.album),
+            date: track.date.clone(),
+            ..Default::default()
+        };
+        // Overwrite: the collection is what the user just edited, so it is the
+        // answer, not a suggestion to be merged with what is already there.
+        match musicai::tag::write_tags(
+            &track.path,
+            &metadata,
+            musicai::tag::OnExisting::Overwrite,
+            None,
+        ) {
+            Ok(outcome) => {
+                let fields: Vec<&str> = outcome.written.iter().map(|field| field.label()).collect();
+                let _ = reporter.tx.send(Update::Line(format!(
+                    "{}: {}",
+                    track.path.file_name().unwrap_or_default().to_string_lossy(),
+                    match fields.is_empty() {
+                        true => "already tagged that way".to_string(),
+                        false => format!("wrote {}", fields.join(", ")),
+                    }
+                )));
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: track.path.clone(), message: format!("{e:#}") });
+            }
+        }
+        let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+fn non_empty(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn separate(
