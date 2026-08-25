@@ -883,6 +883,24 @@ impl App {
             .map(|track| track.path.clone())
             .chain(self.plan.stems.iter().cloned())
             .collect();
+
+        // Which stem came from which track, so each one takes its parent's
+        // grid, cues, key and phrases rather than being listened to alone.
+        let companions: Vec<(PathBuf, PathBuf)> = self
+            .plan
+            .writes()
+            .iter()
+            .filter_map(|id| self.library.get(*id))
+            .flat_map(|track| {
+                track
+                    .stems
+                    .each()
+                    .into_iter()
+                    .filter_map(|(_, stem)| stem.cloned())
+                    .map(|stem| (stem, track.path.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         if files.is_empty() {
             self.note("nothing to write", theme::DIM);
             return;
@@ -896,6 +914,7 @@ impl App {
             args.drive = Some(drive.path.clone());
         }
         args.playlist = drive.playlist.clone();
+        args.companions = companions;
 
         // The drive's record is updated before the write rather than after,
         // because the fingerprints being recorded are the ones being written.
@@ -1503,7 +1522,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
 
-            measurement(ui, "grid", &grid_text(&track), track.has_grid);
+            measurement(ui, "grid", &grid_text(&track, self.config.length), track.has_grid);
             measurement(
                 ui,
                 "key",
@@ -2825,6 +2844,21 @@ impl App {
                 }
 
                 ui.add_space(14.0);
+                pane_label(ui, "Track length");
+                ui.horizontal(|ui| {
+                    for unit in crate::config::Length::ALL {
+                        if ui.radio_value(&mut self.config.length, unit, unit.label()).changed() {
+                            changed = true;
+                        }
+                    }
+                    ui.label(
+                        RichText::new("Four beats to the bar, as the drive's own format counts.")
+                            .color(theme::DIM)
+                            .size(theme::SMALL),
+                    );
+                });
+
+                ui.add_space(14.0);
                 pane_label(ui, "Identifying tracks");
                 if ui
                     .checkbox(
@@ -3302,14 +3336,14 @@ fn measurement(ui: &mut Ui, name: &str, value: &str, good: bool) {
     });
 }
 
-fn grid_text(track: &Track) -> String {
+fn grid_text(track: &Track, length: crate::config::Length) -> String {
     if !track.analyzed {
         return "not analysed".to_string();
     }
     if !track.has_grid {
         return "none found".to_string();
     }
-    format!("{:.2} · {} beats", track.bpm, track.beats)
+    format!("{:.2} · {}", track.bpm, length.describe(track.beats))
 }
 
 /// A track's beat times, reconstructed from its tempo and its first cue.

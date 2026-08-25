@@ -703,6 +703,16 @@ fn separate(
     let mut args = StemsArgs::defaults();
     args.backend = backend;
     args.out_dir = out_dir.to_path_buf();
+    crate::info!(
+        "separating with {} shifts={}, writing {}{}",
+        args.demucs.demucs_model,
+        args.demucs.demucs_shifts,
+        args.format.name(),
+        match args.vbr() {
+            Some(quality) => format!(" V{quality}"),
+            None => format!(" {} kbps", args.bitrate),
+        }
+    );
 
     // One file at a time, so that a kit becomes available as soon as it is
     // rendered rather than at the end of the batch: a DJ waiting on stems for

@@ -54,6 +54,52 @@ impl OnExternal {
     }
 }
 
+/// Whether a track's length reads as bars or as beats.
+///
+/// Bars by default, because that is the unit a set is built in: an intro is
+/// eight bars, a phrase is sixteen, and a DJ counting beats is doing arithmetic
+/// nobody asked for.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Length {
+    #[default]
+    Bars,
+    Beats,
+}
+
+impl Length {
+    pub const ALL: [Length; 2] = [Length::Bars, Length::Beats];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Length::Bars => "bars",
+            Length::Beats => "beats",
+        }
+    }
+
+    /// How long a track is, in whichever unit this is.
+    ///
+    /// Four beats to the bar. Everything else here assumes 4/4, because the
+    /// format the drive is written in does too — its beat numbers run 1 to 4 —
+    /// so a library that counted 3/4 bars would be telling the truth about the
+    /// music and lying about the drive.
+    pub fn count(self, beats: usize) -> usize {
+        match self {
+            Length::Bars => beats / 4,
+            Length::Beats => beats,
+        }
+    }
+
+    /// The count and its unit, singular where it should be.
+    pub fn describe(self, beats: usize) -> String {
+        let count = self.count(beats);
+        match (count, self) {
+            (1, Length::Bars) => "1 bar".to_string(),
+            (1, Length::Beats) => "1 beat".to_string(),
+            (n, unit) => format!("{n} {}", unit.label()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -68,6 +114,8 @@ pub struct Config {
     pub sort: crate::rows::Sort,
     /// How the waveform is coloured.
     pub paint: crate::wave::Paint,
+    /// Whether a track's length reads as bars or as beats.
+    pub length: Length,
     /// Whether analysis also fingerprints a track and looks up what it is.
     pub identify: bool,
     /// AcoustID API key. Free from https://acoustid.org/new-application.
@@ -97,6 +145,7 @@ impl Default for Config {
             on_external: OnExternal::default(),
             sort: crate::rows::Sort::default(),
             paint: crate::wave::Paint::default(),
+            length: Length::default(),
             identify: true,
             acoustid_key: String::new(),
             // High, because the cost of being wrong is a library that quietly
@@ -310,6 +359,31 @@ mod tests {
     }
 
     #[test]
+    fn a_length_reads_in_bars_by_default() {
+        // The unit a set is built in. Eight bars of intro is a thing a DJ
+        // thinks; thirty-two beats of intro is arithmetic.
+        assert_eq!(Config::default().length, Length::Bars);
+        assert_eq!(Length::Bars.count(736), 184);
+        assert_eq!(Length::Beats.count(736), 736);
+    }
+
+    #[test]
+    fn a_part_bar_at_the_end_does_not_round_up_to_a_whole_one() {
+        // 183 bars and three beats is 183 bars, not 184: a bar that is not
+        // there is not a bar to cue into.
+        assert_eq!(Length::Bars.count(735), 183);
+        assert_eq!(Length::Bars.count(3), 0);
+    }
+
+    #[test]
+    fn one_of_something_is_not_ones() {
+        assert_eq!(Length::Bars.describe(4), "1 bar");
+        assert_eq!(Length::Beats.describe(1), "1 beat");
+        assert_eq!(Length::Bars.describe(8), "2 bars");
+        assert_eq!(Length::Beats.describe(0), "0 beats");
+    }
+
+    #[test]
     fn settings_survive_a_round_trip() {
         let dir = scratch("roundtrip");
         let path = dir.join("config.json");
@@ -320,6 +394,7 @@ mod tests {
         config.acoustid_key = "abc123".into();
         config.autotag_score = 0.75;
         config.paint = crate::wave::Paint::Stems;
+        config.length = Length::Beats;
         config.sort = crate::rows::Sort { column: crate::rows::Column::Bpm, descending: true };
         config.save(&path).unwrap();
 

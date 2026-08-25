@@ -207,6 +207,13 @@ defaults_from_clap!(RunArgs, "run", Run);
 defaults_from_clap!(StemsArgs, "stems", Stems);
 defaults_from_clap!(TagArgs, "tag", Tag);
 
+impl StemsArgs {
+    /// The VBR quality to write mp3 stems at, or `None` for a constant bitrate.
+    pub fn vbr(&self) -> Option<u8> {
+        (!self.stem_cbr).then_some(self.stem_vbr)
+    }
+}
+
 impl ExportArgs {
     /// The same trick as the macro, with one extra step.
     ///
@@ -365,6 +372,51 @@ pub struct ExportArgs {
     /// Report what would be written without touching the drive.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Files that are stems of another track, as (stem, parent) pairs.
+    ///
+    /// A stem is the same audio with parts removed, so it has the same tempo,
+    /// the same downbeats and the same structure — and a hot cue set on the
+    /// track has to land in the same place on its acapella, or the two cannot
+    /// be played against each other. So a companion takes the parent's grid,
+    /// cues, key and phrases rather than being analysed on its own, where a
+    /// vocal with no drums in it would produce a grid of its own and a
+    /// different one.
+    ///
+    /// Not a command-line option: it comes from a library that knows which file
+    /// came from which, and there is no way to say it on one line.
+    #[arg(skip)]
+    pub companions: Vec<(PathBuf, PathBuf)>,
+}
+
+/// What a stem kit is written as.
+///
+/// Deliberately narrower than [`Codec`]: a wav stem is enormous for no benefit,
+/// and "the same as the input" would give a wav track wav stems.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum StemFormat {
+    /// Variable-bitrate by default. Roughly a fifth of the size of flac.
+    Mp3,
+    /// Lossless, for a kit that will be worked on further.
+    Flac,
+}
+
+impl StemFormat {
+    pub const ALL: [StemFormat; 2] = [StemFormat::Mp3, StemFormat::Flac];
+
+    pub fn codec(self) -> Codec {
+        match self {
+            StemFormat::Mp3 => Codec::Mp3,
+            StemFormat::Flac => Codec::Flac,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StemFormat::Mp3 => "mp3",
+            StemFormat::Flac => "flac",
+        }
+    }
 }
 
 /// Whether normalization rewrites the audio or only tags it.
@@ -466,10 +518,25 @@ pub struct StemsArgs {
     #[arg(long, short = 'o', value_name = "DIR", default_value = "stems")]
     pub out_dir: PathBuf,
 
-    /// Output format for the stems. Defaults to matching each input, so an
-    /// mp3 yields mp3 stems and a flac yields flac.
-    #[arg(long, value_enum, value_name = "FORMAT")]
-    pub format: Option<Codec>,
+    /// Output format for the stems.
+    ///
+    /// mp3 or flac, and mp3 by default: a stem kit is three more files per
+    /// track, and a library of lossless ones is four times the disk for audio
+    /// that is played under something else.
+    #[arg(long, value_enum, value_name = "FORMAT", default_value_t = StemFormat::Mp3)]
+    pub format: StemFormat,
+
+    /// Variable-bitrate quality for mp3 stems, on LAME's `-V` scale: 0 is
+    /// biggest and best, 9 smallest and worst. 2 is the usual "high quality"
+    /// setting, averaging around 190 kbps.
+    ///
+    /// Pass `--stem-cbr` for a constant bitrate instead.
+    #[arg(long, value_name = "0-9", default_value_t = 2)]
+    pub stem_vbr: u8,
+
+    /// Write stems at a constant bitrate — `--bitrate` — rather than VBR.
+    #[arg(long)]
+    pub stem_cbr: bool,
 
     /// Do not copy the source file's tags onto its stems.
     #[arg(long)]
@@ -568,7 +635,11 @@ pub struct DemucsArgs {
     pub demucs_bin: PathBuf,
 
     /// Pretrained model name to pass to demucs.
-    #[arg(long, value_name = "NAME", default_value = "htdemucs")]
+    ///
+    /// `htdemucs_ft` is the fine-tuned model: four specialist models rather
+    /// than one, so roughly four times slower and noticeably cleaner. `htdemucs`
+    /// is the faster base model.
+    #[arg(long, value_name = "NAME", default_value = "htdemucs_ft")]
     pub demucs_model: String,
 
     /// Torch device for demucs, e.g. cpu or cuda.
@@ -577,8 +648,12 @@ pub struct DemucsArgs {
 
     /// Test-time shifts: demucs separates the track this many extra times at
     /// small random offsets and averages the results, smoothing artefacts at a
-    /// roughly linear cost in time. 0 is demucs' default; 1 or 2 is cleaner.
-    #[arg(long, value_name = "N", default_value_t = 0)]
+    /// roughly linear cost in time. 0 is demucs' default; 2 is ours.
+    ///
+    /// With the fine-tuned model this makes a separation roughly eight times
+    /// the work of demucs' own defaults. Pass `--demucs-shifts 0
+    /// --demucs-model htdemucs` for a fast draft.
+    #[arg(long, value_name = "N", default_value_t = 2)]
     pub demucs_shifts: u32,
 
     /// Window overlap for demucs, 0.0 to just under 1.0. More overlap means

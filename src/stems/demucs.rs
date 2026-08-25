@@ -38,6 +38,10 @@ pub struct Config {
     /// Test-time shifts: demucs separates the track several times at small
     /// random offsets and averages them, which smooths artefacts at a roughly
     /// linear cost in time. Demucs' own default is 0; more is cleaner.
+    ///
+    /// Ours is 2, which is a deliberate trade: a stem is rendered once and then
+    /// played for years, so minutes spent here are cheap against a vocal that
+    /// warbles every time it is used.
     pub shifts: u32,
     /// How much neighbouring windows overlap, 0.0 to just under 1.0. More
     /// overlap means fewer seams between windows, and more compute. Demucs'
@@ -51,9 +55,13 @@ impl Config {
     pub fn new(work_dir: PathBuf) -> Self {
         Self {
             program: OsString::from("demucs"),
-            model: "htdemucs".to_string(),
+            // The fine-tuned model rather than the base one. It is four
+            // specialist models rather than one, so it costs about four times
+            // as long and separates noticeably better — which is the right way
+            // round for a render that happens once.
+            model: "htdemucs_ft".to_string(),
             device: None,
-            shifts: 0,
+            shifts: 2,
             overlap: 0.25,
             work_dir,
         }

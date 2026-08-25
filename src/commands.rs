@@ -202,6 +202,7 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
     let mut tracks = Vec::new();
     let mut failures = Vec::new();
     let mut lines = Vec::new();
+    let analyses = Analyses::default();
 
     for (batch, chunk) in files.chunks(BATCH).enumerate() {
         let first_id = (batch * BATCH) as u32 + 1;
@@ -212,7 +213,7 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
                 if progress.cancelled() {
                     return Ok(Prepared::skipped());
                 }
-                let outcome = prepare(args, path, first_id + i as u32);
+                let outcome = prepare(args, path, first_id + i as u32, &analyses);
                 progress.tick();
                 outcome
             })
@@ -354,7 +355,33 @@ fn open_destination(args: &ExportArgs, files: &[PathBuf]) -> Result<Destination>
     Ok(Destination::Image(std::sync::Mutex::new(DriveImage::create(image, capacity, &args.label)?)))
 }
 
-fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
+/// The analysis of a track, kept so that its stems can share it.
+type Shared = std::sync::Arc<analysis::TrackAnalysis>;
+
+/// Analyses already done, by the file they were done on.
+///
+/// A track with two stems would otherwise be listened to three times, and the
+/// three would not necessarily agree — which is the whole thing this is here to
+/// prevent.
+#[derive(Default)]
+struct Analyses(std::sync::Mutex<BTreeMap<PathBuf, Shared>>);
+
+impl Analyses {
+    /// The analysis of one file, doing the work only if nobody else has.
+    fn of(&self, path: &Path, bpm: Option<f64>) -> Result<Shared> {
+        if let Some(done) = self.0.lock().ok().and_then(|cache| cache.get(path).cloned()) {
+            return Ok(done);
+        }
+        let audio = decode_file(path)?;
+        let listened: Shared = std::sync::Arc::new(analysis::analyze_at(&audio, bpm));
+        if let Ok(mut cache) = self.0.lock() {
+            cache.insert(path.to_path_buf(), Shared::clone(&listened));
+        }
+        Ok(listened)
+    }
+}
+
+fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Result<Prepared> {
     let extension =
         path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     if !PLAYABLE.contains(&extension.as_str()) {
@@ -383,10 +410,21 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32) -> Result<Prepared> {
     let analyze_dir = format!("/PIONEER/USBANLZ/P{:03}/{id:08X}", id % 1000);
     let analyze_path = format!("{analyze_dir}/ANLZ0000.DAT");
 
-    let listened = analysis::analyze_at(&audio, args.bpm);
+    // A stem takes its parent's grid, cues, key and phrases. Its own would be
+    // measured from audio with most of the track removed — a vocal with no
+    // drums under it — and a cue that does not line up with the one on the
+    // parent is worse than no cue at all.
+    let listened = match args.companions.iter().find(|(stem, _)| stem == path) {
+        Some((_, parent)) => analyses.of(parent, args.bpm).with_context(|| {
+            format!("analysing {} for its stem {}", parent.display(), path.display())
+        })?,
+        None => analyses.of(path, args.bpm)?,
+    };
     if !listened.found_beats() {
         bail!("no beat could be found; pass --bpm to say what the tempo is");
     }
+    // The picture, though, is of this file: an acapella that drew the whole
+    // track's waveform would be showing something that is not playing.
     let waveforms = waveform::analyze(&audio);
     let structure = listened.song_structure();
     let seek = seek_index(path);
@@ -592,6 +630,7 @@ fn normalize_reencode(
     let encode = EncodeOptions {
         bit_depth: args.bit_depth,
         mp3_bitrate: args.bitrate,
+        mp3_vbr: None,
         dither: !args.no_dither,
     };
 
@@ -859,8 +898,15 @@ pub fn stems_files(args: &StemsArgs, files: &[PathBuf], reporter: &dyn Reporter)
         Backend::Dsp => None,
     };
 
-    let encode =
-        EncodeOptions { bit_depth: args.bit_depth, mp3_bitrate: args.bitrate, dither: true };
+    let encode = EncodeOptions {
+        bit_depth: args.bit_depth,
+        mp3_bitrate: args.bitrate,
+        // Stems are written VBR by default: they are long stretches of near
+        // silence between phrases, which is exactly what a constant bitrate
+        // spends the most on for the least.
+        mp3_vbr: args.vbr(),
+        dither: true,
+    };
 
     let mut failures = Vec::new();
     let progress = Progress::new(reporter, files.len());
@@ -901,17 +947,10 @@ fn separate_one(
         .to_string_lossy()
         .into_owned();
 
-    // Stems inherit the source's format unless told otherwise, so an mp3
-    // yields mp3 stems and a flac yields flac.
-    let codec = match args.format {
-        Some(codec) => codec,
-        None => Codec::from_path(path).with_context(|| {
-            format!(
-                "cannot tell what format {} is, so cannot match it for the stems; pass --format",
-                path.display()
-            )
-        })?,
-    };
+    // Never the source's format: a wav track would otherwise yield three wav
+    // stems, which is a gigabyte a record for audio that gets played under
+    // something else.
+    let codec = args.format.codec();
 
     // Check the destinations before doing the expensive part.
     for stem in &args.only {

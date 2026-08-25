@@ -171,6 +171,104 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
     assert_eq!(plan.delta(), "1 changed");
 }
 
+/// A stem written to a drive carries its parent's grid and cues.
+///
+/// The reason this matters: a hot cue set on the track has to land in the same
+/// place on its acapella, or the two cannot be played against each other. A
+/// stem analysed on its own — a vocal with no drums under it — would produce a
+/// grid of its own, and a different one.
+#[test]
+fn a_stem_takes_the_tracks_grid_rather_than_its_own() {
+    let scratch = Scratch::new("companions");
+    let music = scratch.0.join("music");
+    let parent = music.join("track.wav");
+    write_beats(&parent, 128.0, 8);
+
+    // A "stem" with the drums taken out: the same length and the same phase,
+    // but nothing percussive left for a beat tracker to find. On its own it
+    // would get no grid at all, which is exactly the case that has to work.
+    let vocal = music.join("track-vocals.wav");
+    let rate = 44_100usize;
+    let frames = (rate as f64 * (60.0 / 128.0) * 32.0) as usize + rate + rate / 2;
+    let plane: Vec<f32> = (0..frames)
+        .map(|i| 0.25 * (std::f32::consts::TAU * 330.0 * i as f32 / rate as f32).sin())
+        .collect();
+    let audio = Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap();
+    write_file(&vocal, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+
+    // On its own the vocal has no beat to find — which is the point.
+    let alone = musicai::analysis::analyze(&musicai::audio::decode::decode_file(&vocal).unwrap());
+    assert!(!alone.found_beats(), "the fixture is not a stem-like file");
+
+    let drive = scratch.0.join("USB");
+    let mut args = musicai::cli::ExportArgs::defaults();
+    args.drive = Some(drive.clone());
+    args.playlist = "tonight".into();
+    args.input =
+        musicai::cli::InputArgs { inputs: vec![parent.clone(), vocal.clone()], recursive: false };
+    args.companions = vec![(vocal.clone(), parent.clone())];
+
+    let reporter = musicai::report::Collected::new();
+    musicai::commands::export(&args, &reporter).expect("the drive should write");
+
+    // Both are on the drive: without the parent's grid, the stem would have
+    // been refused for having no beat.
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let tables = musicai::export::pdb::inspect(&bytes).unwrap();
+    let rows: usize = tables.iter().map(|t| t.rows).sum();
+    assert!(rows > 0);
+
+    let contents = drive.join("Contents");
+    let written: Vec<String> = walk(&contents)
+        .into_iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    assert!(written.contains(&"track.wav".to_string()), "{written:?}");
+    assert!(written.contains(&"track-vocals.wav".to_string()), "{written:?}");
+
+    // And the two analysis files agree about the beats, which is the thing
+    // that makes the pair playable together.
+    let grids = analysis_files(&drive);
+    assert_eq!(grids.len(), 2, "one analysis directory per track");
+    assert_eq!(grids[0], grids[1], "the stem's grid differs from its parent's");
+}
+
+/// Every file under a directory, recursively.
+fn walk(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else { return found };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match path.is_dir() {
+            true => found.extend(walk(&path)),
+            false => found.push(path),
+        }
+    }
+    found
+}
+
+/// The `PQTZ` beat grid out of every `.DAT` on the drive.
+///
+/// Found by scanning for the tag rather than by walking the file with our own
+/// reader: what is being checked is that two files hold the same bytes, and a
+/// reader that shares code with the writer could agree with both of them for
+/// the wrong reason.
+fn analysis_files(drive: &Path) -> Vec<Vec<u8>> {
+    let mut grids: Vec<Vec<u8>> = walk(&drive.join("PIONEER/USBANLZ"))
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|e| e == "DAT"))
+        .filter_map(|path| {
+            let bytes = std::fs::read(&path).ok()?;
+            let at = bytes.windows(4).position(|window| window == b"PQTZ")?;
+            // fourcc, then the header length, then the whole section's length.
+            let len = u32::from_be_bytes(bytes.get(at + 8..at + 12)?.try_into().ok()?) as usize;
+            Some(bytes.get(at..at + len)?.to_vec())
+        })
+        .collect();
+    grids.sort();
+    grids
+}
+
 /// A collection survives being closed and reopened with everything intact.
 #[test]
 fn a_collection_reopens_the_way_it_was_left() {

@@ -94,6 +94,7 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         bpm: None,
         playlist: "Sat 14/9".to_string(),
         dry_run: false,
+        companions: Vec::new(),
     }
 }
 
