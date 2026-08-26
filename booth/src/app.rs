@@ -164,6 +164,9 @@ pub struct App {
     tag_entry: String,
     /// When the running job started, for saying how long it took.
     started: Option<std::time::Instant>,
+    /// Tracks an import found the hardware will not play, waiting to be shown.
+    /// Cleared by answering the sheet, not by looking at it.
+    incompatible: Vec<u32>,
     /// Files waiting to have their tags rewritten, collected so that
     /// identifying a crate is one tagging job rather than one per track.
     to_retag: Vec<Retag>,
@@ -249,6 +252,8 @@ enum Pending {
     CopyPath(u32),
     /// Show the whole track again.
     FitWave,
+    /// Re-encode these into something a player opens.
+    Convert(Vec<u32>),
 }
 
 /// A track's names, while they are being edited.
@@ -369,6 +374,7 @@ impl App {
             playlist_entry: String::new(),
             tag_entry: String::new(),
             started: None,
+            incompatible: Vec::new(),
             to_retag: Vec::new(),
             remeasured: std::collections::HashSet::new(),
             re_enveloped: std::collections::HashSet::new(),
@@ -718,6 +724,22 @@ impl App {
         }
     }
 
+    /// Re-encode these into a format the hardware opens.
+    fn convert_tracks(&mut self, ids: &[u32]) {
+        let waiting: Vec<job::Convertible> = self
+            .files_for(ids)
+            .into_iter()
+            .map(|(id, path)| job::Convertible { id, path })
+            .collect();
+        if waiting.is_empty() {
+            self.note("nothing to convert", theme::DIM);
+            return;
+        }
+        crate::info!("converting {}", plural(waiting.len(), "file"));
+        self.incompatible.retain(|id| !ids.contains(id));
+        self.start(Job::Convert(waiting));
+    }
+
     /// Everything showing that has never been listened to.
     fn analyze_unprepared(&mut self) {
         let waiting = self.showing(|track| !track.analyzed);
@@ -835,6 +857,24 @@ impl App {
                     }
                     changed = true;
                 }
+                Update::Converted { id, to } => {
+                    crate::info!("#{id} converted to {}", to.display());
+                    if let Some(track) = self.library.get_mut(id) {
+                        // The record follows the new file. The original stays
+                        // where it was — a conversion that turns out wrong
+                        // should leave the thing it was made from behind.
+                        track.path = to.clone();
+                        track.format = "flac".into();
+                        track.float_samples = false;
+                        track.protected = false;
+                        track.bytes = std::fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
+                        // Everything measured came off the old file, so it is
+                        // measured again rather than assumed to carry over.
+                        track.analyzed = false;
+                    }
+                    self.remeasured.remove(&id);
+                    changed = true;
+                }
                 Update::Analyzed(analyzed) => {
                     crate::debug!(
                         "analysed #{}: {:.2} BPM (confidence {:.1}), key {}, {} beats, {} phrases, {} cues",
@@ -927,6 +967,7 @@ impl App {
         }
         if !imported.is_empty() {
             self.ensure_local(&imported);
+            self.check_compatibility(&imported);
         }
         if changed {
             self.rebuild();
@@ -1091,6 +1132,9 @@ impl eframe::App for App {
         }
         if !self.asking.is_empty() {
             self.adopt_sheet(ctx);
+        }
+        if !self.incompatible.is_empty() {
+            self.compatibility_sheet(ctx);
         }
         self.questions_sheet(ctx);
         self.log_window(ctx);
@@ -2391,6 +2435,7 @@ impl App {
                 }
                 Pending::Adopt(id) => self.adopt(&[id]),
                 Pending::FitWave => self.zoom = wave::Zoom::default(),
+                Pending::Convert(ids) => self.convert_tracks(&ids),
                 Pending::Analyze(id) => self.analyze_tracks(&[id]),
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
@@ -3317,6 +3362,139 @@ impl App {
     /// Only ever shown when the policy is to ask. It offers the same three
     /// answers the setting does, so that answering here is also a way of
     /// deciding it once.
+    /// Note which of these the hardware will not play.
+    ///
+    /// At import rather than at sync, which is the whole point: the check
+    /// before a write is the last chance to catch a file that will not load,
+    /// and by then the answer is "leave it behind". Asked when the file is
+    /// added, there is time to do something about it.
+    fn check_compatibility(&mut self, ids: &[u32]) {
+        for id in ids {
+            let Some(track) = self.library.get(*id) else { continue };
+            let Some(problem) = track.incompatibility() else { continue };
+            crate::warn!(
+                "{}: {} — {}",
+                track.path.file_name().unwrap_or_default().to_string_lossy(),
+                problem.what(),
+                problem.fix()
+            );
+            if !self.incompatible.contains(id) {
+                self.incompatible.push(*id);
+            }
+        }
+    }
+
+    /// What was just imported that a player will not open, and what to do.
+    fn compatibility_sheet(&mut self, ctx: &egui::Context) {
+        let waiting: Vec<(u32, String, PathBuf, musicai::compat::Problem)> = self
+            .incompatible
+            .iter()
+            .filter_map(|id| self.library.get(*id))
+            .filter_map(|track| {
+                track.incompatibility().map(|problem| {
+                    (track.id, track.display_title(), track.path.clone(), problem)
+                })
+            })
+            .collect();
+        if waiting.is_empty() {
+            self.incompatible.clear();
+            return;
+        }
+        let convertible: Vec<u32> =
+            waiting.iter().filter(|(_, _, _, p)| p.convertible()).map(|(id, ..)| *id).collect();
+
+        let mut open = true;
+        egui::Window::new(format!("{} a player will not open", plural(waiting.len(), "track")))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(600.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "These import, play here, and will be skipped when a drive is \
+                         written. A CDJ-3000 takes MP3 and AAC at 44.1–48 kHz, and WAV, \
+                         AIFF, FLAC and ALAC up to 96 kHz.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                    for (_, name, path, problem) in &waiting {
+                        ui.label(RichText::new(name).color(theme::TEXT).size(theme::SMALL));
+                        ui.label(
+                            RichText::new(format!("{} — {}", problem.what(), problem.fix()))
+                                .color(if problem.convertible() {
+                                    theme::AMBER
+                                } else {
+                                    theme::ALERT
+                                })
+                                .size(theme::SMALL),
+                        );
+                        ui.label(
+                            RichText::new(path.display().to_string())
+                                .font(theme::mono(9.5))
+                                .color(theme::DIM),
+                        );
+                        ui.add_space(4.0);
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if !convertible.is_empty()
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(theme::label_text(&format!(
+                                        "Convert {}",
+                                        plural(convertible.len(), "file")
+                                    )))
+                                    .size(11.0)
+                                    .color(theme::BOOTH)
+                                    .strong(),
+                                )
+                                .fill(theme::AMBER),
+                            )
+                            .on_hover_text(
+                                "Writes a FLAC beside each original and points the \
+                                 collection at it. The originals are not touched.",
+                            )
+                            .clicked()
+                    {
+                        self.pending.push(Pending::Convert(convertible.clone()));
+                    }
+                    if ui
+                        .button("Leave them")
+                        .on_hover_text("They stay in the collection and out of the drive.")
+                        .clicked()
+                    {
+                        self.incompatible.clear();
+                    }
+                    if convertible.len() < waiting.len() {
+                        ui.label(
+                            RichText::new(match convertible.is_empty() {
+                                true => "None of these can be converted here.".to_string(),
+                                false => format!(
+                                    "{} cannot be converted here.",
+                                    waiting.len() - convertible.len()
+                                ),
+                            })
+                            .color(theme::DIM)
+                            .size(theme::SMALL),
+                        );
+                    }
+                });
+            });
+        if !open {
+            self.incompatible.clear();
+        }
+    }
+
     fn adopt_sheet(&mut self, ctx: &egui::Context) {
         let waiting: Vec<(u32, String, PathBuf)> = self
             .asking

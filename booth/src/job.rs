@@ -33,6 +33,8 @@ pub enum Job {
     Adopt { tracks: Vec<Adoptable>, config: Box<Config> },
     /// Write a track's artist, title and album back into the file's own tags.
     Retag(Vec<Retag>),
+    /// Re-encode files a player will not open into ones it will.
+    Convert(Vec<Convertible>),
     /// Render stem kits.
     Separate {
         tracks: Vec<(u32, PathBuf)>,
@@ -62,6 +64,7 @@ impl Job {
         match self {
             Job::Import { .. } => "reading",
             Job::Adopt { .. } => "copying",
+            Job::Convert(_) => "converting",
             Job::Retag(_) => "tagging",
             Job::Decode { .. } => "loading",
             Job::StemEnvelopes { .. } => "measuring stems",
@@ -82,6 +85,12 @@ pub struct Adoptable {
 }
 
 /// One track's tags, as the collection now has them.
+/// A file to re-encode into something the hardware opens.
+pub struct Convertible {
+    pub id: u32,
+    pub path: PathBuf,
+}
+
 pub struct Retag {
     pub id: u32,
     pub path: PathBuf,
@@ -95,6 +104,8 @@ pub struct Retag {
 
 /// Something the worker found out.
 pub enum Update {
+    /// A file was re-encoded, and the collection should follow it.
+    Converted { id: u32, to: PathBuf },
     /// A file the import walked to, and the record read out of it.
     Imported(Box<Track>),
     /// One track, listened to.
@@ -184,6 +195,11 @@ pub fn read_record(id: u32, path: &Path) -> Track {
     track.format = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     track.bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     track.float_samples = is_float_wav(path);
+    // One 16-byte read, and only for the containers that can carry DRM. A
+    // protected purchase plays in the shop that sold it and nowhere else, and
+    // finding that out when it is added beats finding out in a booth.
+    track.protected = matches!(track.format.as_str(), "m4a" | "m4b" | "m4p" | "mp4" | "aac")
+        && musicai::audio::mp4::is_protected(path);
 
     let metadata = musicai::tag::read_metadata(path).unwrap_or_default();
     let tagged_title = metadata.title.filter(|t| !t.trim().is_empty());
@@ -581,6 +597,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Import { paths, recursive } => import(&paths, recursive, reporter),
         Job::Analyze(tracks) => analyze_all(&tracks, reporter),
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
+        Job::Convert(tracks) => convert(&tracks, reporter),
         Job::Retag(tracks) => retag(&tracks, reporter),
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
         Job::StemEnvelopes { id, kit } => {
@@ -706,6 +723,76 @@ fn adopt(tracks: &[Adoptable], config: &Config, reporter: &Channel) -> anyhow::R
         (reporter.wake)();
     }
     Ok(())
+}
+
+/// Re-encode a file into something the hardware opens, beside the original.
+///
+/// FLAC, always. The sources worth converting are a lossless format nothing
+/// opens or a float WAV, and both deserve a lossless destination — re-encoding
+/// somebody's master to MP3 to get it onto a stick is a decision they should
+/// make deliberately rather than have made for them by a warning dialog.
+///
+/// The original is never touched. What comes back is a second file, and the
+/// collection is repointed at it; if the conversion turns out to be wrong, the
+/// thing it was made from is still there.
+fn convert(tracks: &[Convertible], reporter: &Channel) -> anyhow::Result<()> {
+    use musicai::audio::encode::{write_file, Codec, EncodeOptions};
+
+    let total = tracks.len();
+    for (done, track) in tracks.iter().enumerate() {
+        if reporter.cancelled() {
+            break;
+        }
+        let result = (|| -> anyhow::Result<PathBuf> {
+            let audio = decode_file(&track.path)?;
+            let to = unused_path(&track.path.with_extension("flac"));
+            crate::info!("converting {} to {}", track.path.display(), to.display());
+            write_file(&to, &audio, Codec::Flac, &EncodeOptions::default())?;
+
+            // The names come with it. A converted file that arrives untitled
+            // would look like a different record sitting next to the original.
+            let metadata = musicai::tag::read_metadata(&track.path).unwrap_or_default();
+            let _ = musicai::tag::write_tags(
+                &to,
+                &metadata,
+                musicai::tag::OnExisting::Overwrite,
+                None,
+            );
+            Ok(to)
+        })();
+
+        match result {
+            Ok(to) => {
+                let _ = reporter.tx.send(Update::Converted { id: track.id, to });
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: track.path.clone(), message: format!("{e:#}") });
+            }
+        }
+        let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// A path nothing is using yet, so a conversion never lands on top of a file
+/// that is already there.
+fn unused_path(wanted: &Path) -> PathBuf {
+    if !wanted.exists() {
+        return wanted.to_path_buf();
+    }
+    let stem = wanted.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let extension = wanted.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let parent = wanted.parent().unwrap_or(Path::new("."));
+    for n in 2..1_000 {
+        let candidate = parent.join(format!("{stem} ({n}).{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    wanted.to_path_buf()
 }
 
 /// Write the collection's names back into the files' own tags.

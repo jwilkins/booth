@@ -169,6 +169,10 @@ pub struct Track {
     /// not looked up again on every pass.
     #[serde(default)]
     pub identified: bool,
+    /// A FairPlay purchase, found by reading the container's brand at import.
+    /// Nothing here can convert one, so it is worth saying early.
+    #[serde(default)]
+    pub protected: bool,
 }
 
 impl Track {
@@ -211,6 +215,7 @@ impl Track {
             analyzed: false,
             from_tags: false,
             identified: false,
+            protected: false,
         }
     }
 
@@ -244,18 +249,40 @@ impl Track {
     ///
     /// These are the states that look fine in a file browser and fail in a
     /// booth, which is why they get their own count in the sidebar.
-    pub fn needs_attention(&self) -> Option<&'static str> {
-        if self.float_samples {
-            return Some("32-bit float, which a player will not open");
-        }
-        if self.sample_rate > 96_000 {
-            return Some("above the 96 kHz a player will accept");
+    pub fn needs_attention(&self) -> Option<String> {
+        if let Some(problem) = self.incompatibility() {
+            return Some(format!("{} — {}", problem.what(), problem.fix()));
         }
         if self.analyzed && !self.has_grid {
-            return Some("no beat grid could be found");
+            return Some("no beat grid could be found".into());
         }
         if self.analyzed && self.grid_confidence > 0.0 && self.grid_confidence < 2.0 {
-            return Some("the tempo is a guess");
+            return Some("the tempo is a guess".into());
+        }
+        None
+    }
+
+    /// The first reason the hardware will not play this file, if there is one.
+    ///
+    /// Read from what the scan already found rather than by opening the file
+    /// again, except for the one small header read that says whether an MP4 is
+    /// a protected purchase — and that answer is kept on the record from the
+    /// import, so this stays cheap enough to ask about every row.
+    pub fn incompatibility(&self) -> Option<musicai::compat::Problem> {
+        if self.protected {
+            return Some(musicai::compat::Problem::Protected);
+        }
+        // An empty format is a record nothing has looked at yet, not a file in
+        // a format nothing opens. Reporting the first as the second would put
+        // every freshly added track in the attention list.
+        if !self.format.is_empty() && !musicai::commands::is_playable(&self.format) {
+            return Some(musicai::compat::Problem::Format(self.format.clone()));
+        }
+        if self.float_samples {
+            return Some(musicai::compat::Problem::FloatSamples);
+        }
+        if self.sample_rate > 96_000 {
+            return Some(musicai::compat::Problem::TooFast(self.sample_rate));
         }
         None
     }
@@ -810,6 +837,18 @@ mod tests {
 
         track.has_grid = false;
         assert!(track.needs_attention().unwrap().contains("beat grid"));
+        track.has_grid = true;
+
+        // A format nothing opens, and a purchase nothing here can convert.
+        track.format = "ogg".into();
+        assert!(track.needs_attention().unwrap().contains("not a format a player opens"));
+        track.format = "m4a".into();
+        assert_eq!(track.needs_attention(), None, "a CDJ-3000 plays AAC and ALAC");
+
+        track.protected = true;
+        let said = track.needs_attention().unwrap();
+        assert!(said.contains("protected"), "{said}");
+        assert!(said.contains("cannot convert it"), "and it should not offer to: {said}");
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod analysis;
 pub mod audio;
 pub mod cli;
 pub mod commands;
+pub mod compat;
 pub mod discover;
 pub mod dsp;
 pub mod export;

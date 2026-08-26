@@ -436,3 +436,101 @@ fn a_wav_stem_is_left_alone_rather_than_failing() {
     copy_for_stem(&source, &stem_path, Stem::Drums).unwrap();
     assert!(decode_file(&stem_path).is_ok());
 }
+
+/// An MP4 container with no audio in it, which is all a tag writer sees.
+///
+/// Written by hand rather than encoded, because nothing in this crate encodes
+/// AAC and a test that needs `ffmpeg` on the machine is a test that does not
+/// run where the bug would be caught.
+fn bare_mp4(path: &PathBuf) {
+    fn atom(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    let mut ftyp = b"M4A ".to_vec();
+    ftyp.extend_from_slice(&0u32.to_be_bytes());
+    ftyp.extend_from_slice(b"M4A mp42isom");
+
+    let mut mvhd = Vec::new();
+    mvhd.extend_from_slice(&0u32.to_be_bytes()); // version and flags
+    mvhd.extend_from_slice(&0u32.to_be_bytes()); // created
+    mvhd.extend_from_slice(&0u32.to_be_bytes()); // modified
+    mvhd.extend_from_slice(&44_100u32.to_be_bytes()); // timescale
+    mvhd.extend_from_slice(&44_100u32.to_be_bytes()); // duration: one second
+    mvhd.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // rate
+    mvhd.extend_from_slice(&0x0100u16.to_be_bytes()); // volume
+    mvhd.extend_from_slice(&[0; 2]);
+    mvhd.extend_from_slice(&[0; 8]);
+    for value in [0x0001_0000i32, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000] {
+        mvhd.extend_from_slice(&value.to_be_bytes());
+    }
+    mvhd.extend_from_slice(&[0; 24]);
+    mvhd.extend_from_slice(&2u32.to_be_bytes()); // next track id
+
+    let mut file = atom(b"ftyp", &ftyp);
+    file.extend_from_slice(&atom(b"moov", &atom(b"mvhd", &mvhd)));
+    file.extend_from_slice(&atom(b"mdat", &[0; 16]));
+    std::fs::write(path, file).unwrap();
+}
+
+/// An `.m4a` used to fail with "cannot tell what kind of file this is", which
+/// is both untrue and unhelpful: the format is obvious from the name, and it
+/// carries a perfectly standard tag block. A CDJ-3000 plays AAC and ALAC, so a
+/// library full of them is a library that has to be taggable.
+#[test]
+fn an_m4a_carries_tags_like_anything_else() {
+    let scratch = Scratch::new("m4a");
+    let path = scratch.0.join("track.m4a");
+    bare_mp4(&path);
+
+    let outcome = write_tags(&path, &metadata(), OnExisting::Overwrite, None).unwrap();
+    assert!(outcome.written.contains(&Field::Title));
+    assert!(outcome.written.contains(&Field::RecordingMbid));
+
+    let read = musicai::tag::read_metadata(&path).unwrap();
+    assert_eq!(read.title.as_deref(), Some("Creep"));
+    assert_eq!(read.artist.as_deref(), Some("Radiohead"));
+    assert_eq!(read.album.as_deref(), Some("Pablo Honey"));
+    assert_eq!(read.track_number, Some(2));
+    assert_eq!(read.total_tracks, Some(12));
+    // The freeform atoms go under Picard's own names, so every other program
+    // that reads them finds them where it looks.
+    assert_eq!(read.recording_mbid.as_deref(), metadata().recording_mbid.as_deref());
+    assert_eq!(read.acoustid.as_deref(), metadata().acoustid.as_deref());
+}
+
+/// The same policy that protects a FLAC has to protect an M4A: a fingerprint
+/// lookup filling in blanks must not rename what somebody already tagged.
+#[test]
+fn an_m4a_keeps_what_is_already_there_when_asked_to() {
+    let scratch = Scratch::new("m4a-keep");
+    let path = scratch.0.join("track.m4a");
+    bare_mp4(&path);
+
+    let first = Metadata { artist: Some("Someone Who Was Here First".into()), ..Metadata::default() };
+    write_tags(&path, &first, OnExisting::Overwrite, None).unwrap();
+
+    let outcome = write_tags(&path, &metadata(), OnExisting::Keep, None).unwrap();
+    assert!(outcome.written.contains(&Field::Title), "the blank was filled");
+    assert!(!outcome.written.contains(&Field::Artist), "the artist was somebody's answer");
+
+    let read = musicai::tag::read_metadata(&path).unwrap();
+    assert_eq!(read.artist.as_deref(), Some("Someone Who Was Here First"));
+    assert_eq!(read.title.as_deref(), Some("Creep"));
+}
+
+/// A file that is not an MP4 at all — a renamed download, or a DRM'd purchase
+/// — says which of those it is rather than "cannot tell what kind of file".
+#[test]
+fn something_that_is_not_an_mp4_says_so() {
+    let scratch = Scratch::new("m4a-bogus");
+    let path = scratch.0.join("track.m4a");
+    std::fs::write(&path, b"this is not an MP4 by any reading").unwrap();
+
+    let error = write_tags(&path, &metadata(), OnExisting::Overwrite, None).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("not an MP4"), "unhelpful: {text}");
+}

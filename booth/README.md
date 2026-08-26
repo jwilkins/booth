@@ -71,9 +71,15 @@ the file stays anonymous to every other program that opens it — while replacin
 an artist somebody typed by hand is exactly the thing worth being careful about.
 
 The inspector's **Write these into the file** always overwrites, whatever the
-setting says: pressing it is somebody saying "these ones, now". FLAC and MP3
-only — a WAV has nowhere to put them, and says so rather than appearing to
+setting says: pressing it is somebody saying "these ones, now". FLAC, MP3, AIFF
+and M4A — a WAV has nowhere to put them, and says so rather than appearing to
 work.
+
+An `.m4a` carries iTunes-style atoms, and the freeform ones go under
+MusicBrainz Picard's names, so anything else that reads them finds them where
+it looks. A file that will not parse says which kind of not-parsing it is — a
+renamed download, a truncated file, or a protected purchase — rather than
+"cannot tell what kind of file this is".
 
 **Tags.** Free-form, and the collection's own — they never reach the drive, so
 tagging a track does not queue a 40 MB rewrite. A tag already in use is offered
@@ -290,6 +296,43 @@ on a small disk and stems on a big one. Both places are searched whichever is
 set, so changing the setting never makes a rendered kit disappear — it is
 minutes of work a track, and a preference must not look like a delete.
 
+## What a player will actually open
+
+A CDJ-3000 takes **MP3 and AAC at 44.1–48 kHz**, and **WAV, AIFF, FLAC and
+ALAC at 16 or 24-bit up to 96 kHz**. An `.m4a` is fine — it is an MP4 container
+holding AAC or ALAC, and the player reads both.
+
+What is not fine, and is checked when a file is imported rather than when a
+drive is written:
+
+| | |
+| --- | --- |
+| a container nothing opens | offered a conversion, if it can be decoded here |
+| 32-bit float WAV | offered a conversion to FLAC |
+| above 96 kHz | reported; resample it in an editor first |
+| a protected purchase | reported; nothing here can convert one |
+
+Import is the moment to ask, because it is the moment there is still time to do
+something. The check before a write is the last chance to catch a file that
+will not load, and by then the only answer is to leave it behind.
+
+Converting writes a **FLAC beside the original** and points the collection at
+it. The original is never touched, moved or deleted: a conversion that turns
+out wrong should leave the thing it was made from behind. Names come across
+with it.
+
+Two things are deliberately not offered. **Resampling**, because there is no
+resampler here worth writing a library through, and doing it badly once is
+permanent in a way that saying so is not. And a **format nothing here
+decodes** — an offer that would fail is worse than no offer, because it costs
+the time to find out.
+
+A protected file is not a broken file: it plays perfectly in whatever sold it.
+It is encrypted, and the only way to a playable copy is to get an unprotected
+one. It is flagged at import from the container's brand — including when it has
+been renamed to `.m4a` — so it turns up when it is added rather than on the
+night.
+
 ## The sync sheet
 
 The delta in the dock is the difference between the drive's playlist and what
@@ -361,3 +404,6 @@ asked for, and neither ever moves or deletes an original.
 - Playback resamples linearly, which is right for auditioning and is not what
   anyone would master through.
 - Cue colours are assigned by slot rather than chosen.
+- Ogg, Opus and WMA are recognised as unplayable but cannot be converted here:
+  nothing in this build decodes them.
+- Nothing resamples. A file above 96 kHz is reported and left alone.

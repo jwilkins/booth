@@ -340,3 +340,77 @@ fn filling_in_blanks_does_not_overwrite_what_is_already_tagged() {
     assert_eq!(read.title.as_deref(), Some("Roll With The Punches"), "the blank was filled");
     assert_eq!(read.album.as_deref(), Some("Livity Sound"));
 }
+
+/// Converting a file has to produce a real one, and leave the original where
+/// it was. The originals here are somebody's masters — a conversion that turns
+/// out wrong must leave the thing it was made from behind.
+#[test]
+fn converting_a_file_leaves_the_original_alone() {
+    use musicai::audio::encode::{write_file, Codec, EncodeOptions};
+    use musicai::audio::Audio;
+
+    let scratch = Scratch::new("convert");
+    let path = scratch.0.join("Sirens.wav");
+    let rate = 44_100usize;
+    let samples: Vec<f32> = (0..rate)
+        .map(|i| 0.4 * (std::f32::consts::TAU * 330.0 * i as f32 / rate as f32).sin())
+        .collect();
+    let audio = Audio::new(rate as u32, vec![samples.clone(), samples]).unwrap();
+    std::fs::create_dir_all(&scratch.0).unwrap();
+    write_file(&path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+    let before = std::fs::metadata(&path).unwrap().len();
+
+    let job = Job::Convert(vec![booth::job::Convertible { id: 1, path: path.clone() }]);
+    let mut runner = Runner::start(job, Arc::new(|| {}));
+    runner.join();
+    let updates = runner.drain();
+
+    let to = updates
+        .iter()
+        .find_map(|u| match u {
+            Update::Converted { id: 1, to } => Some(to.clone()),
+            _ => None,
+        })
+        .expect("it should have converted");
+
+    assert_eq!(to, scratch.0.join("Sirens.flac"));
+    assert!(to.exists(), "the converted file should be on disk");
+    assert!(path.exists(), "the original is never touched");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), before, "nor rewritten");
+
+    // And it decodes to the same music.
+    let back = musicai::audio::decode::decode_file(&to).unwrap();
+    assert_eq!(back.sample_rate, 44_100);
+    assert_eq!(back.channels(), 2);
+    assert!((back.duration_secs() - 1.0).abs() < 0.05, "{}", back.duration_secs());
+}
+
+/// Converting twice must not overwrite the first result.
+#[test]
+fn a_second_conversion_does_not_land_on_the_first() {
+    use musicai::audio::encode::{write_file, Codec, EncodeOptions};
+    use musicai::audio::Audio;
+
+    let scratch = Scratch::new("convert-twice");
+    let path = scratch.0.join("Vessel.wav");
+    let audio = Audio::new(44_100, vec![vec![0.1; 4_410], vec![0.1; 4_410]]).unwrap();
+    std::fs::create_dir_all(&scratch.0).unwrap();
+    write_file(&path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+    // Something is already sitting on the name the conversion wants.
+    std::fs::write(scratch.0.join("Vessel.flac"), b"not ours").unwrap();
+
+    let job = Job::Convert(vec![booth::job::Convertible { id: 1, path: path.clone() }]);
+    let mut runner = Runner::start(job, Arc::new(|| {}));
+    runner.join();
+
+    let to = runner
+        .drain()
+        .into_iter()
+        .find_map(|u| match u {
+            Update::Converted { to, .. } => Some(to),
+            _ => None,
+        })
+        .expect("it should have converted");
+    assert_eq!(to, scratch.0.join("Vessel (2).flac"));
+    assert_eq!(std::fs::read(scratch.0.join("Vessel.flac")).unwrap(), b"not ours");
+}
