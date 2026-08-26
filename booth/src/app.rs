@@ -69,11 +69,6 @@ impl LogWindow {
     }
 }
 
-/// Marks a "have we tried this yet" entry as being about stem envelopes rather
-/// than about the waveform, so one set can hold both without them colliding.
-/// Track ids come from a counter that starts at one, so the top bit is free.
-const STEM_MARK: u32 = 0x8000_0000;
-
 /// How much room under the list the prep editor needs.
 ///
 /// Added up from its parts rather than guessed, because the failure is silent:
@@ -169,9 +164,16 @@ pub struct App {
     tag_entry: String,
     /// When the running job started, for saying how long it took.
     started: Option<std::time::Instant>,
-    /// Tracks whose waveform has already been asked for once this run, so a
+    /// Files waiting to have their tags rewritten, collected so that
+    /// identifying a crate is one tagging job rather than one per track.
+    to_retag: Vec<Retag>,
+    /// Rows whose waveform has already been asked for once this run, so a
     /// measurement that cannot succeed is not attempted on every frame.
     remeasured: std::collections::HashSet<u32>,
+    /// The same for stem envelopes. A second set rather than a marker bit on
+    /// the first: companion ids use the top bit too, so a bit that meant
+    /// "stems" would sometimes also mean "acapella of track 3".
+    re_enveloped: std::collections::HashSet<u32>,
     /// Where the playhead sits in the selected track, in milliseconds. It is
     /// where a new cue goes, so it is a position rather than a playing thing —
     /// nothing here makes a sound.
@@ -367,7 +369,9 @@ impl App {
             playlist_entry: String::new(),
             tag_entry: String::new(),
             started: None,
+            to_retag: Vec::new(),
             remeasured: std::collections::HashSet::new(),
+            re_enveloped: std::collections::HashSet::new(),
             playhead_ms: None,
             cue_entry: (None, String::new()),
             pending: Vec::new(),
@@ -691,7 +695,7 @@ impl App {
         // read again rather than the cached one being kept.
         for id in &ids {
             self.remeasured.remove(id);
-            self.remeasured.remove(&(id | STEM_MARK));
+            self.re_enveloped.remove(id);
         }
         if self.selected.is_some_and(|selected| ids.contains(&selected)) {
             self.waveform = None;
@@ -733,12 +737,12 @@ impl App {
         }
         let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
         for id in &ids {
-            self.remeasured.remove(&(id | STEM_MARK));
+            self.re_enveloped.remove(id);
         }
         self.ensure_local(&ids);
         self.start(Job::Separate {
             tracks: waiting,
-            out_dir: self.config.stems_path.clone(),
+            stems_in: self.config.stems_location(),
             backend: Backend::Demucs,
             quality: self.config.stem_quality.to_cli(),
         });
@@ -756,6 +760,9 @@ impl App {
     fn collect(&mut self) {
         let Some(runner) = &self.runner else { return };
         let updates = runner.drain();
+        // Taken once, before the loop: an import looks for a kit already on
+        // disk for every file it finds, and the collection is borrowed by then.
+        let stems_in = self.config.stems_location();
         let mut finished = false;
         let mut changed = false;
         // What this job brought in, so that the copy-in policy can be applied
@@ -777,10 +784,7 @@ impl App {
                         merged.last_played = track.last_played;
                         merged.play_count = track.play_count;
                         merged.analyzed = track.analyzed;
-                        merged.stems = job::find_stems(
-                            &crate::library::data_dir().join("stems"),
-                            &merged.path,
-                        );
+                        merged.stems = job::find_stems(&stems_in, &merged.path);
                         *track = merged;
                     }
                     imported.push(id);
@@ -929,6 +933,7 @@ impl App {
         }
         // Whatever was queued behind this — the copy an import turned up, say —
         // starts now.
+        self.flush_retags();
         self.pump();
     }
 
@@ -1093,6 +1098,7 @@ impl eframe::App for App {
         // Everything the panels asked for happens here, after they have all
         // drawn, so no panel ever reads a collection halfway through a change.
         self.apply_pending(ctx);
+        self.flush_retags();
     }
 
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
@@ -1734,12 +1740,12 @@ impl App {
         if paint == wave::Paint::Stems
             && !has_envelopes
             && track.stems.is_complete()
-            && !self.remeasured.contains(&(track.id | STEM_MARK))
+            && !self.re_enveloped.contains(&track.id)
         {
             match crate::library::cached_envelopes(track.id) {
                 Some(cached) => self.envelopes = Some((track.id, cached)),
                 None if !self.running() => {
-                    self.remeasured.insert(track.id | STEM_MARK);
+                    self.re_enveloped.insert(track.id);
                     self.start(Job::StemEnvelopes { id: track.id, kit: track.stems.clone() });
                 }
                 None => {}
@@ -1774,8 +1780,20 @@ impl App {
     /// Play a track, decoding it first if it is not the one already loaded.
     fn audition(&mut self, id: u32, from_secs: Option<f64>) {
         let Some(player) = &self.player else { return };
-        let Some(track) = self.library.get(id) else { return };
-        if !track.path.exists() {
+        // `row` rather than `get`: a stem companion has an id of its own so it
+        // can be selected, but it is not in the collection — it is made when
+        // the list is built, and looking it up as a track finds nothing.
+        let Some(track) = self.library.row(id) else { return };
+        let sources = track.sources();
+        if sources.is_empty() {
+            self.note(
+                format!("no {} rendered for that track", track.role.stems()),
+                theme::ALERT,
+            );
+            return;
+        }
+        if let Some(missing) = sources.iter().find(|path| !path.exists()) {
+            crate::warn!("cannot play #{id}: {} is gone", missing.display());
             self.note("that file is not where it was", theme::ALERT);
             return;
         }
@@ -1791,10 +1809,17 @@ impl App {
         // Playing a file is reaching for it, so this is one of the moments the
         // copy-in policy is about. The copy is queued first and the decode
         // behind it, so what plays is whatever the track's path is by then.
-        let path = track.path.clone();
-        self.ensure_local(&[id]);
+        // Only a real track is copied: a stem belongs to wherever its parent
+        // ended up, and following it would put half a kit in the library.
+        crate::debug!(
+            "loading #{id} from {}",
+            sources.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" + ")
+        );
+        if track.role == crate::library::Role::Track {
+            self.ensure_local(&[id]);
+        }
         self.loading = Some((id, true));
-        self.start(Job::Decode { id, path });
+        self.start(Job::Decode { id, sources });
         if let Some(secs) = from_secs {
             // Remembered for when it lands: the deck cannot be seeked to a
             // position in a track it has not been given yet.
@@ -2132,10 +2157,12 @@ impl App {
             let taggable =
                 musicai::tag::Metadata::default().get(musicai::tag::Field::Title).is_none()
                     && matches!(track.format.as_str(), "flac" | "mp3");
-            if self.config.write_tags_to_files {
+            if self.config.write_tags != crate::config::WriteTags::Never {
                 ui.label(
-                    RichText::new(if taggable {
-                        "Saving also writes these into the file."
+                    RichText::new(if !taggable {
+                        "The file's own format carries no tags; only the collection changes."
+                    } else if self.config.write_tags == crate::config::WriteTags::Fill {
+                        "Saving also writes these into the file, where it has nothing."
                     } else {
                         "The file's own format carries no tags; only the collection changes."
                     })
@@ -2368,8 +2395,16 @@ impl App {
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
                 Pending::CopyPath(id) => {
-                    if let Some(track) = self.library.get(id) {
-                        let path = track.path.display().to_string();
+                    // A companion's path is its stems, not its parent's file:
+                    // copying the mix's path off an acapella row would be a
+                    // wrong answer rather than a missing one.
+                    if let Some(track) = self.library.row(id) {
+                        let path = track
+                            .sources()
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         ctx.copy_text(path.clone());
                         self.note(format!("copied {path}"), theme::TEXT);
                     }
@@ -2402,7 +2437,9 @@ impl App {
                 }
                 Pending::CancelEdit => self.editing = None,
                 Pending::Resort => relist = true,
-                Pending::WriteTags(id) => self.write_tags(id),
+                Pending::WriteTags(id) => {
+                    self.write_tags(id, musicai::tag::OnExisting::Overwrite)
+                }
                 Pending::PlaceCue { id, letter, time_ms } => {
                     self.place_cue(id, letter, time_ms);
                     touched = true;
@@ -2563,8 +2600,8 @@ impl App {
         track.from_tags = true;
         crate::info!("#{id} named from its fingerprint: {}", found.describe());
 
-        if self.config.write_tags_to_files {
-            self.write_tags(id);
+        if let Some(on_existing) = self.config.write_tags.on_existing() {
+            self.write_tags(id, on_existing);
         }
     }
 
@@ -2592,8 +2629,8 @@ impl App {
         track.album = edit.album.trim().to_string();
         track.year = edit.year.trim().parse().ok();
 
-        if self.config.write_tags_to_files {
-            self.write_tags(edit.id);
+        if let Some(on_existing) = self.config.write_tags.on_existing() {
+            self.write_tags(edit.id, on_existing);
         }
         self.save();
         self.rebuild();
@@ -2626,21 +2663,46 @@ impl App {
     }
 
     /// Write one track's names into the file's own tags.
-    fn write_tags(&mut self, id: u32) {
+    /// Put the collection's names into the file's own tag block.
+    ///
+    /// `on_existing` is the whole difference between the two ways this is
+    /// reached. The button in the inspector is somebody saying "these ones,
+    /// now", so it overwrites; the write-back that rides behind a fingerprint
+    /// lookup fills in blanks and leaves anything already there alone, because
+    /// nobody asked it to have an opinion about a value they typed.
+    fn write_tags(&mut self, id: u32, on_existing: musicai::tag::OnExisting) {
         let Some(track) = self.library.get(id) else { return };
         if !matches!(track.format.as_str(), "flac" | "mp3") {
             self.note(format!("a .{} carries no standard tag block", track.format), theme::AMBER);
             return;
         }
-        let job = Retag {
+        crate::debug!(
+            "tagging {} ({on_existing:?})",
+            track.path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        // Collected rather than started: identifying a crate produces a match
+        // per track, and one job per file would be forty "started tagging,
+        // finished tagging" lines for what is one errand.
+        self.to_retag.retain(|waiting| waiting.id != track.id);
+        self.to_retag.push(Retag {
             id: track.id,
             path: track.path.clone(),
             artist: track.artist.clone(),
             title: track.title.clone(),
             album: track.album.clone(),
             date: track.year.map(|year| year.to_string()),
-        };
-        self.start(Job::Retag(vec![job]));
+            on_existing,
+        });
+    }
+
+    /// Start the tagging that has piled up, if any has.
+    fn flush_retags(&mut self) {
+        if self.to_retag.is_empty() {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.to_retag);
+        crate::info!("tagging {}", plural(waiting.len(), "file"));
+        self.start(Job::Retag(waiting));
     }
 
     fn dock(&mut self, ui: &mut Ui) {
@@ -3167,39 +3229,56 @@ impl App {
 
                 ui.add_space(10.0);
                 pane_label(ui, "Tags");
-                if ui
-                    .checkbox(
-                        &mut self.config.write_tags_to_files,
-                        "Editing a name also rewrites the file's tags",
-                    )
-                    .changed()
-                {
-                    changed = true;
+                for level in crate::config::WriteTags::ALL {
+                    if ui.radio_value(&mut self.config.write_tags, level, level.label()).changed() {
+                        changed = true;
+                    }
+                    ui.label(RichText::new(level.blurb()).color(theme::DIM).size(theme::SMALL));
+                    ui.add_space(4.0);
                 }
                 ui.label(
                     RichText::new(
-                        "Off by default. A collection edit is cheap and reversible; \
-                         rewriting somebody's files is neither. FLAC and MP3 only — a WAV \
-                         has nowhere to put them.",
+                        "Filling in a blank is not the same act as overwriting somebody's \
+                         answer, which is why the middle one is the default: a lookup that \
+                         names an untagged file has found out something true about it. \
+                         FLAC and MP3 only — a WAV has nowhere to put them. The inspector's \
+                         own button always overwrites, whatever this says.",
                     )
                     .color(theme::DIM)
                     .size(theme::SMALL),
                 );
 
                 ui.add_space(14.0);
-                pane_label(ui, "Stems folder");
-                let mut shown = self.config.stems_path.display().to_string();
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut shown)
-                            .desired_width(ui.available_width())
-                            .font(theme::mono(11.0)),
-                    )
-                    .changed()
-                {
-                    self.config.stems_path = PathBuf::from(shown.trim());
-                    changed = true;
+                pane_label(ui, "Where stems go");
+                for where_ in [crate::config::StemsIn::Beside, crate::config::StemsIn::Folder] {
+                    if ui.radio_value(&mut self.config.stems_in, where_, where_.label()).changed() {
+                        changed = true;
+                    }
+                    ui.label(RichText::new(where_.blurb()).color(theme::DIM).size(theme::SMALL));
+                    ui.add_space(4.0);
                 }
+                if self.config.stems_in == crate::config::StemsIn::Folder {
+                    let mut shown = self.config.stems_path.display().to_string();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut shown)
+                                .desired_width(ui.available_width())
+                                .font(theme::mono(11.0)),
+                        )
+                        .changed()
+                    {
+                        self.config.stems_path = PathBuf::from(shown.trim());
+                        changed = true;
+                    }
+                }
+                ui.label(
+                    RichText::new(
+                        "Both places are searched whichever is set, so changing this never \
+                         loses a kit that is already rendered.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
 
                 ui.add_space(12.0);
                 let outside =

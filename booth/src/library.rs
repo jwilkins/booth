@@ -214,6 +214,22 @@ impl Track {
         }
     }
 
+    /// The file or files this row is actually made of.
+    ///
+    /// A track is its own file. An acapella is one stem. An instrumental is two
+    /// of them, summed — the separator writes four parts and never a mix of
+    /// three, so there is no single file to point at and pretending otherwise
+    /// would mean playing the vocal under the instrumental.
+    pub fn sources(&self) -> Vec<PathBuf> {
+        match self.role {
+            Role::Track => vec![self.path.clone()],
+            Role::Acapella => self.stems.vocals.iter().cloned().collect(),
+            Role::Instrumental => {
+                [&self.stems.melody, &self.stems.drums].iter().filter_map(|s| (*s).clone()).collect()
+            }
+        }
+    }
+
     /// The title as the browser shows it, with the stem suffix for a companion.
     pub fn display_title(&self) -> String {
         format!("{}{}", self.title, self.role.suffix())
@@ -409,10 +425,28 @@ impl Library {
                 id: companion_id(track.id, role),
                 role,
                 parent: Some(track.id),
-                stems: StemKit::default(),
+                // The kit stays on the companion rather than being blanked:
+                // it is what says which files the row is actually made of, and
+                // a row that cannot name its own audio cannot be played.
                 ..track.clone()
             })
             .collect()
+    }
+
+    /// A track, or one of the companion rows derived from one.
+    ///
+    /// The browser gives companions ids so they can be selected, but they are
+    /// not in the collection — they are made when the list is built. Anything
+    /// that takes an id off a row has to be able to get back to a track, or the
+    /// row silently does nothing, which is what a companion that would not play
+    /// was.
+    pub fn row(&self, id: u32) -> Option<Track> {
+        if let Some(track) = self.get(id) {
+            return Some(track.clone());
+        }
+        let (parent, role) = companion_of(id)?;
+        let track = self.get(parent)?;
+        self.companions(track).into_iter().find(|companion| companion.role == role)
     }
 
     /// Track ids by playlist name, for the query context.
@@ -486,12 +520,28 @@ impl Library {
 /// one, so a companion can have an id of its own — which the browser needs for
 /// selection — without ever colliding with a track.
 pub fn companion_id(parent: u32, role: Role) -> u32 {
-    let tag = match role {
+    0x8000_0000 | (parent << 2) | role_tag(role)
+}
+
+fn role_tag(role: Role) -> u32 {
+    match role {
         Role::Track => 0,
         Role::Acapella => 1,
         Role::Instrumental => 2,
+    }
+}
+
+/// The track and role a companion id was made from, or `None` for a real id.
+pub fn companion_of(id: u32) -> Option<(u32, Role)> {
+    if id & 0x8000_0000 == 0 {
+        return None;
+    }
+    let role = match id & 0b11 {
+        1 => Role::Acapella,
+        2 => Role::Instrumental,
+        _ => return None,
     };
-    0x8000_0000 | (parent << 2) | tag
+    Some(((id & 0x7FFF_FFFF) >> 2, role))
 }
 
 /// Where a track's three-band picture is cached.
@@ -657,6 +707,50 @@ mod tests {
         // A companion carries the parent's grid, because it is the same audio.
         assert_eq!(companions[0].bpm, track.bpm);
         assert_eq!(companions[0].parent, Some(id));
+    }
+
+    #[test]
+    fn a_companion_row_names_the_stems_it_is_made_of() {
+        let mut library = Library::new();
+        let id = library.add(Path::new("/music/Sirens.flac"));
+        {
+            let track = library.get_mut(id).unwrap();
+            track.stems.vocals = Some("/music/Sirens-vocals.mp3".into());
+            track.stems.melody = Some("/music/Sirens-melody.mp3".into());
+            track.stems.drums = Some("/music/Sirens-drums.mp3".into());
+        }
+
+        let acapella = library.row(companion_id(id, Role::Acapella)).unwrap();
+        // Not the parent's file: playing that would be playing the mix under
+        // a row that says acapella.
+        assert_eq!(acapella.sources(), vec![PathBuf::from("/music/Sirens-vocals.mp3")]);
+
+        let instrumental = library.row(companion_id(id, Role::Instrumental)).unwrap();
+        assert_eq!(
+            instrumental.sources(),
+            vec![
+                PathBuf::from("/music/Sirens-melody.mp3"),
+                PathBuf::from("/music/Sirens-drums.mp3")
+            ],
+            "an instrumental is two files summed; there is no single one to point at"
+        );
+
+        // A real id still comes back as itself.
+        assert_eq!(library.row(id).unwrap().sources(), vec![PathBuf::from("/music/Sirens.flac")]);
+        assert!(library.row(companion_id(9_999, Role::Acapella)).is_none());
+    }
+
+    #[test]
+    fn a_companion_id_can_be_taken_apart_again() {
+        // What lets a row that is not in the collection be acted on at all.
+        for role in [Role::Acapella, Role::Instrumental] {
+            for parent in [1u32, 2, 7, 1_000, 100_000] {
+                let id = companion_id(parent, role);
+                assert_eq!(companion_of(id), Some((parent, role)), "{id:#x}");
+            }
+        }
+        assert_eq!(companion_of(1), None, "a real id is not a companion");
+        assert_eq!(companion_of(companion_id(5, Role::Track)), None, "no such companion");
     }
 
     #[test]

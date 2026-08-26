@@ -477,7 +477,14 @@ fn wheel(key: &str) -> u32 {
 /// that goes — see [`fit_tail`] — because the end is the part that identifies
 /// the file.
 pub fn location_of(track: &Track) -> String {
-    let shown = track.path.display().to_string();
+    // For a companion, the stem it is made of rather than its parent's file:
+    // a row that names somebody else's path is worse than one that names none.
+    // An instrumental is two files, and the first of them is enough to say
+    // which folder to look in, which is what the column is read for.
+    let shown = match track.sources().first() {
+        Some(path) => path.display().to_string(),
+        None => track.path.display().to_string(),
+    };
     match std::env::var_os("HOME").map(|home| home.to_string_lossy().into_owned()) {
         Some(home) if !home.is_empty() && shown.starts_with(&home) => {
             format!("~{}", &shown[home.len()..])

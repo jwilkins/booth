@@ -36,12 +36,17 @@ pub enum Job {
     /// Render stem kits.
     Separate {
         tracks: Vec<(u32, PathBuf)>,
-        out_dir: PathBuf,
+        stems_in: crate::config::StemsLocation,
         backend: Backend,
         quality: musicai::cli::StemQuality,
     },
     /// Decode one track into memory so it can be auditioned.
-    Decode { id: u32, path: PathBuf },
+    Decode {
+        id: u32,
+        /// Summed when there is more than one, which is what an instrumental
+        /// is: the separator writes parts, never a mix of some of them.
+        sources: Vec<PathBuf>,
+    },
     /// Measure how loud each stem is across a track, for colouring its
     /// waveform by what is playing rather than by frequency.
     StemEnvelopes { id: u32, kit: StemKit },
@@ -84,6 +89,8 @@ pub struct Retag {
     pub title: String,
     pub album: String,
     pub date: Option<String>,
+    /// What to do about a field the file already has a value for.
+    pub on_existing: musicai::tag::OnExisting,
 }
 
 /// Something the worker found out.
@@ -432,12 +439,17 @@ pub fn stem_envelopes(kit: &StemKit) -> anyhow::Result<crate::wave::StemEnvelope
 /// so the kit is a fact about the disk rather than something to remember. A
 /// library that believes it has stems it does not have is a library that
 /// promises an acapella at the wrong moment.
-pub fn find_stems(out_dir: &Path, source: &Path) -> StemKit {
+pub fn find_stems(stems_in: &crate::config::StemsLocation, source: &Path) -> StemKit {
     let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let places = stems_in.search(source);
     let find = |name: &str| -> Option<PathBuf> {
-        ["wav", "flac", "mp3"]
+        places
             .iter()
-            .map(|extension| out_dir.join(format!("{stem}-{name}.{extension}")))
+            .flat_map(|dir| {
+                ["wav", "flac", "mp3"]
+                    .iter()
+                    .map(|extension| dir.join(format!("{stem}-{name}.{extension}")))
+            })
             .find(|path| path.exists())
     };
     StemKit {
@@ -448,6 +460,41 @@ pub fn find_stems(out_dir: &Path, source: &Path) -> StemKit {
 }
 
 // -- running ---------------------------------------------------------------
+
+/// Decode one file, or sum several into one sound.
+///
+/// Summed at unity and then brought back under full scale together, rather than
+/// halved on the way in: two stems of the same record are already the right
+/// balance against each other, and scaling them apart is a mix decision this
+/// has no business making. Only the total needs to fit.
+fn decode_sources(sources: &[PathBuf]) -> anyhow::Result<crate::player::Sound> {
+    let first = sources.first().ok_or_else(|| anyhow::anyhow!("nothing to play"))?;
+    let mut sound = crate::player::Sound::from_audio(&decode_file(first)?);
+    for path in &sources[1..] {
+        let next = crate::player::Sound::from_audio(&decode_file(path)?);
+        anyhow::ensure!(
+            next.rate == sound.rate && next.channels == sound.channels,
+            "{} does not match the stem beside it",
+            path.display()
+        );
+        if next.samples.len() > sound.samples.len() {
+            sound.samples.resize(next.samples.len(), 0.0);
+        }
+        for (into, from) in sound.samples.iter_mut().zip(&next.samples) {
+            *into += from;
+        }
+    }
+    if sources.len() > 1 {
+        let peak = sound.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        if peak > 1.0 {
+            let gain = 1.0 / peak;
+            for sample in &mut sound.samples {
+                *sample *= gain;
+            }
+        }
+    }
+    Ok(sound)
+}
 
 /// A reporter that forwards a command's own progress to the window.
 struct Channel {
@@ -542,18 +589,17 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             (reporter.wake)();
             Ok(())
         }
-        Job::Decode { id, path } => {
+        Job::Decode { id, sources } => {
             // Decoded whole rather than streamed: a track is tens of megabytes
             // as f32, auditioning wants instant seeking anywhere in it, and the
             // analysers already decode the same way.
-            let audio = decode_file(&path)?;
-            let sound = Arc::new(crate::player::Sound::from_audio(&audio));
+            let sound = Arc::new(decode_sources(&sources)?);
             let _ = reporter.tx.send(Update::Decoded { id, sound });
             (reporter.wake)();
             Ok(())
         }
-        Job::Separate { tracks, out_dir, backend, quality } => {
-            separate(&tracks, &out_dir, backend, quality, reporter)
+        Job::Separate { tracks, stems_in, backend, quality } => {
+            separate(&tracks, &stems_in, backend, quality, reporter)
         }
         Job::Sync { args, files } => {
             // The file list was settled when the plan was drawn up, so the
@@ -664,9 +710,10 @@ fn adopt(tracks: &[Adoptable], config: &Config, reporter: &Channel) -> anyhow::R
 
 /// Write the collection's names back into the files' own tags.
 ///
-/// Only ever the fields a person edited in the inspector, and only when they
-/// asked for it: the collection is the working copy, and rewriting somebody's
-/// files is not something to do as a side effect of fixing a spelling.
+/// Whether an existing value is replaced or left alone is decided by the caller
+/// and carried on each job: pressing the button in the inspector is an explicit
+/// instruction and overwrites, while the automatic write-back behind a
+/// fingerprint lookup only fills in blanks.
 fn retag(tracks: &[Retag], reporter: &Channel) -> anyhow::Result<()> {
     let total = tracks.len();
     for (done, track) in tracks.iter().enumerate() {
@@ -680,14 +727,7 @@ fn retag(tracks: &[Retag], reporter: &Channel) -> anyhow::Result<()> {
             date: track.date.clone(),
             ..Default::default()
         };
-        // Overwrite: the collection is what the user just edited, so it is the
-        // answer, not a suggestion to be merged with what is already there.
-        match musicai::tag::write_tags(
-            &track.path,
-            &metadata,
-            musicai::tag::OnExisting::Overwrite,
-            None,
-        ) {
+        match musicai::tag::write_tags(&track.path, &metadata, track.on_existing, None) {
             Ok(outcome) => {
                 let fields: Vec<&str> = outcome.written.iter().map(|field| field.label()).collect();
                 let _ = reporter.tx.send(Update::Line(format!(
@@ -718,7 +758,7 @@ fn non_empty(text: &str) -> Option<String> {
 
 fn separate(
     tracks: &[(u32, PathBuf)],
-    out_dir: &Path,
+    stems_in: &crate::config::StemsLocation,
     backend: Backend,
     quality: musicai::cli::StemQuality,
     reporter: &Channel,
@@ -726,7 +766,6 @@ fn separate(
     let mut args = StemsArgs::defaults();
     args.backend = backend;
     args.quality = quality;
-    args.out_dir = out_dir.to_path_buf();
     crate::info!(
         "separating with {} shifts={}, writing {}{}",
         args.model(),
@@ -746,10 +785,22 @@ fn separate(
             break;
         }
         args.input = InputArgs { inputs: vec![path.clone()], recursive: false };
-        crate::info!("separating {}", path.file_name().unwrap_or_default().to_string_lossy());
+        args.out_dir = stems_in.for_source(path);
+        crate::info!(
+            "separating {} into {}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            args.out_dir.display()
+        );
+        if let Err(e) = std::fs::create_dir_all(&args.out_dir) {
+            let _ = reporter.tx.send(Update::Failed {
+                path: path.clone(),
+                message: format!("cannot write to {}: {e}", args.out_dir.display()),
+            });
+            continue;
+        }
         match musicai::commands::stems_files(&args, std::slice::from_ref(path), reporter) {
             Ok(()) => {
-                let kit = find_stems(out_dir, path);
+                let kit = find_stems(stems_in, path);
                 crate::debug!(
                     "stems for #{id}: vocals {}, melody {}, drums {}",
                     kit.vocals.is_some(),
@@ -935,22 +986,55 @@ mod tests {
 
     #[test]
     fn a_stem_kit_is_found_by_looking_rather_than_by_remembering() {
+        use crate::config::{StemsIn, StemsLocation};
         let dir = scratch("stems");
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
         let source = dir.join("Roll With The Punches.flac");
+        let folder = StemsLocation { in_: StemsIn::Folder, folder: out.clone() };
 
-        assert!(find_stems(&out, &source).is_empty());
+        assert!(find_stems(&folder, &source).is_empty());
 
         for stem in ["vocals", "melody"] {
             std::fs::write(out.join(format!("Roll With The Punches-{stem}.wav")), b"").unwrap();
         }
-        let kit = find_stems(&out, &source);
+        let kit = find_stems(&folder, &source);
         assert!(kit.vocals.is_some() && kit.melody.is_some());
         assert!(!kit.is_complete(), "two of three is not a kit");
 
         std::fs::write(out.join("Roll With The Punches-drums.wav"), b"").unwrap();
-        assert!(find_stems(&out, &source).is_complete());
+        assert!(find_stems(&folder, &source).is_complete());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn changing_where_stems_go_does_not_lose_the_ones_already_rendered() {
+        use crate::config::{StemsIn, StemsLocation};
+        let dir = scratch("stems-moved");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let source = dir.join("Sirens.flac");
+        for stem in ["vocals", "melody", "drums"] {
+            std::fs::write(out.join(format!("Sirens-{stem}.mp3")), b"").unwrap();
+        }
+
+        // Rendered into the folder, then the setting changed to beside. A kit
+        // is minutes of work; switching a preference must not appear to delete
+        // one.
+        let beside = StemsLocation { in_: StemsIn::Beside, folder: out.clone() };
+        assert!(find_stems(&beside, &source).is_complete());
+
+        // And the other way round: rendered beside a track, then the setting
+        // changed to a folder that has never had anything put in it.
+        let beside_source = dir.join("Vessel.flac");
+        for stem in ["vocals", "melody", "drums"] {
+            std::fs::write(dir.join(format!("Vessel-{stem}.mp3")), b"").unwrap();
+        }
+        let elsewhere = dir.join("far-away");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let folder = StemsLocation { in_: StemsIn::Folder, folder: elsewhere };
+        assert!(find_stems(&folder, &beside_source).is_complete());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

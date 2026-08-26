@@ -55,11 +55,25 @@ an ignored typo silently widens a search and looks like it worked.
 
 ## Editing
 
-**Names.** The inspector's title, artist, album and year are editable. Saving
-changes the collection; the file on disk is untouched unless you ask, either
-with **Write these into the file** or by turning on the setting that makes every
-save do it. FLAC and MP3 only — a WAV has nowhere to put them, and says so
-rather than appearing to work.
+**Names.** The inspector's title, artist, album and year are editable. What
+reaches the file itself is a setting with three levels:
+
+- **never** — the collection keeps the names to itself.
+- **only where the file is blank** (the default) — a fingerprint lookup that
+  names an untagged file writes those names in; nothing already there is
+  touched.
+- **always** — every edit and every match rewrites the file's tags.
+
+The middle one is the default because filling in a blank is not the same act as
+overwriting somebody's answer. A lookup that identifies an untagged file has
+found out something true about it, and leaving that only in the collection means
+the file stays anonymous to every other program that opens it — while replacing
+an artist somebody typed by hand is exactly the thing worth being careful about.
+
+The inspector's **Write these into the file** always overwrites, whatever the
+setting says: pressing it is somebody saying "these ones, now". FLAC and MP3
+only — a WAV has nowhere to put them, and says so rather than appearing to
+work.
 
 **Tags.** Free-form, and the collection's own — they never reach the drive, so
 tagging a track does not queue a 40 MB rewrite. A tag already in use is offered
@@ -166,7 +180,15 @@ not bury the ones still to be worked on. Keys sort around the wheel rather than
 alphabetically, so 9A comes before 11B and the column is worth reading.
 
 Stem companions are indented under the track they came from, stay under it in
-every sort, and exist only when all three stem files are on disk.
+every sort, and exist only when all three stem files are on disk. **They play**:
+double-click an acapella and you hear the vocal stem. An instrumental is the
+melody and drum stems summed as it loads, because the separator writes parts and
+never a mix of some of them — there is no single file to point at, and playing
+one of the two would be an instrumental missing half of itself.
+
+The Location column and the right-click **copy the file path** on a companion
+name its stems rather than its parent's file: a row that names somebody else's
+path is worse than one that names none.
 
 ## The energy meter
 
@@ -256,6 +278,18 @@ default; the fast one is for a first pass over a whole library. On the command
 line it is `--quality high|standard`, and `--demucs-model` / `--demucs-shifts`
 still override whichever it picked.
 
+## Where stems go
+
+**Beside the track** by default — `Sirens.flac` yields `Sirens-vocals.mp3` in
+the same folder. A kit belongs to one record, so keeping it next to that record
+means copying the folder takes the stems with it, every other tool sees them,
+and there is no second place to remember to back up.
+
+The alternative is one folder for all of them, which is the case for a library
+on a small disk and stems on a big one. Both places are searched whichever is
+set, so changing the setting never makes a rendered kit disappear — it is
+minutes of work a track, and a preference must not look like a delete.
+
 ## The sync sheet
 
 The delta in the dock is the difference between the drive's playlist and what
@@ -300,7 +334,8 @@ or wherever `BOOTH_DATA_DIR` points.
 - `waveforms/` — one cached three-band picture per track, so arrow-keying down a
   crate moves the waveform instead of re-analysing each row. At 150 columns a
   second, so it can be zoomed into: about 135 kB for a five-minute track.
-- `stems/` — rendered stem kits.
+- `stems/` — rendered stem kits, when they are set to go in one folder rather
+  than beside their tracks.
 - `waveforms/*.stems` — per-stem loudness, for colouring by what is playing.
 - `booth.log`, `booth.log.1` — this run and the one before it.
 

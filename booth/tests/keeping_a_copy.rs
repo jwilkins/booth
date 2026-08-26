@@ -246,6 +246,7 @@ fn writing_tags_puts_the_collections_names_into_the_file() {
         title: "Roll With The Punches".into(),
         album: "Livity Sound".into(),
         date: Some("2019".into()),
+        on_existing: musicai::tag::OnExisting::Overwrite,
     }]);
     let mut runner = Runner::start(job, Arc::new(|| {}));
     runner.join();
@@ -277,6 +278,7 @@ fn a_format_with_no_tag_block_reports_that_it_has_none() {
         title: "Y".into(),
         album: String::new(),
         date: None,
+        on_existing: musicai::tag::OnExisting::Overwrite,
     }]);
     let mut runner = Runner::start(job, Arc::new(|| {}));
     runner.join();
@@ -289,4 +291,52 @@ fn a_format_with_no_tag_block_reports_that_it_has_none() {
     );
     // And the batch still ends cleanly rather than the thread dying.
     assert!(matches!(updates.last(), Some(Update::Done(Ok(())))));
+}
+
+/// The default write-back fills in what the file leaves blank and leaves the
+/// rest alone. Getting this backwards would mean a fingerprint lookup quietly
+/// renaming records somebody had already tagged by hand.
+#[test]
+fn filling_in_blanks_does_not_overwrite_what_is_already_tagged() {
+    use musicai::audio::encode::{write_file, Codec, EncodeOptions};
+    use musicai::audio::Audio;
+
+    let scratch = Scratch::new("retag-fill");
+    let path = scratch.0.join("track.flac");
+    let rate = 44_100usize;
+    let samples: Vec<f32> = (0..rate)
+        .map(|i| 0.1 * (std::f32::consts::TAU * 220.0 * i as f32 / rate as f32).sin())
+        .collect();
+    let audio = Audio::new(rate as u32, vec![samples.clone(), samples]).unwrap();
+    std::fs::create_dir_all(&scratch.0).unwrap();
+    write_file(&path, &audio, Codec::Flac, &EncodeOptions::default()).unwrap();
+
+    // The file already claims an artist, and has no album at all.
+    let existing = musicai::tag::Metadata {
+        artist: Some("Someone Who Was Here First".into()),
+        ..Default::default()
+    };
+    musicai::tag::write_tags(&path, &existing, musicai::tag::OnExisting::Overwrite, None).unwrap();
+
+    let job = Job::Retag(vec![booth::job::Retag {
+        id: 1,
+        path: path.clone(),
+        artist: "What The Fingerprint Said".into(),
+        title: "Roll With The Punches".into(),
+        album: "Livity Sound".into(),
+        date: None,
+        on_existing: musicai::tag::OnExisting::Keep,
+    }]);
+    let mut runner = Runner::start(job, Arc::new(|| {}));
+    runner.join();
+    assert!(matches!(runner.drain().last(), Some(Update::Done(Ok(())))));
+
+    let read = musicai::tag::read_metadata(&path).unwrap();
+    assert_eq!(
+        read.artist.as_deref(),
+        Some("Someone Who Was Here First"),
+        "an artist already in the file is somebody's answer, not a blank"
+    );
+    assert_eq!(read.title.as_deref(), Some("Roll With The Punches"), "the blank was filled");
+    assert_eq!(read.album.as_deref(), Some("Livity Sound"));
 }

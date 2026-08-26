@@ -47,7 +47,7 @@ fn a_file_on_disk_becomes_samples_a_device_could_play() {
     let path = scratch.0.join("tone.wav");
     write_tone(&path, 1.0, 44_100);
 
-    let mut runner = Runner::start(Job::Decode { id: 7, path }, Arc::new(|| {}));
+    let mut runner = Runner::start(Job::Decode { id: 7, sources: vec![path] }, Arc::new(|| {}));
     runner.join();
 
     let sound = runner
@@ -82,7 +82,7 @@ fn a_track_decoded_at_one_rate_plays_at_another() {
     let path = scratch.0.join("tone.wav");
     write_tone(&path, 1.0, 44_100);
 
-    let mut runner = Runner::start(Job::Decode { id: 1, path }, Arc::new(|| {}));
+    let mut runner = Runner::start(Job::Decode { id: 1, sources: vec![path] }, Arc::new(|| {}));
     runner.join();
     let sound = runner
         .drain()
@@ -111,7 +111,7 @@ fn a_file_that_will_not_decode_reports_it_rather_than_playing_nothing() {
     let path = scratch.0.join("broken.wav");
     std::fs::write(&path, b"not a wav").unwrap();
 
-    let mut runner = Runner::start(Job::Decode { id: 1, path }, Arc::new(|| {}));
+    let mut runner = Runner::start(Job::Decode { id: 1, sources: vec![path] }, Arc::new(|| {}));
     runner.join();
 
     let updates = runner.drain();
@@ -175,4 +175,77 @@ fn a_deck_advances_while_it_plays_and_stops_when_paused() {
     // And seeking lands where it was told, playing or not.
     player.seek_secs(2.0);
     assert!((player.position_secs() - 2.0).abs() < 0.01);
+}
+
+/// An instrumental has no file of its own: it is the melody and drum stems
+/// summed. Playing one of the two would be an instrumental missing half of
+/// itself, which is the kind of wrong that sounds plausible until you A/B it.
+#[test]
+fn an_instrumental_is_its_two_stems_added_together() {
+    let scratch = Scratch::new("sum");
+    let melody = scratch.0.join("Sirens-melody.wav");
+    let drums = scratch.0.join("Sirens-drums.wav");
+    write_tone(&melody, 1.0, 44_100);
+    write_tone(&drums, 1.0, 44_100);
+
+    let one = decode(vec![melody.clone()]);
+    let both = decode(vec![melody, drums]);
+
+    assert_eq!(both.samples.len(), one.samples.len(), "summing must not change the length");
+    assert_eq!(both.rate, one.rate);
+    assert_eq!(both.channels, one.channels);
+
+    // Two copies of the same tone are twice the tone, brought back under full
+    // scale together rather than each being halved on the way in.
+    let peak = |sound: &Sound| sound.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(peak(&both) <= 1.0, "the sum has to fit: {}", peak(&both));
+    assert!(peak(&both) > 0.9, "and it should use the room it has: {}", peak(&both));
+
+    // The shape is the shape of the parts, not something new: every sample of
+    // the sum is the same multiple of the corresponding single-stem sample.
+    let ratio = both.samples[100] / one.samples[100];
+    for (index, (sum, single)) in both.samples.iter().zip(&one.samples).enumerate().take(4_000) {
+        if single.abs() > 0.05 {
+            assert!(
+                (sum / single - ratio).abs() < 0.01,
+                "sample {index} is not the same mix as the rest"
+            );
+        }
+    }
+}
+
+/// Two stems of different lengths — a separator can round differently per
+/// stem — must not truncate the longer one or read off the end of the shorter.
+#[test]
+fn stems_of_different_lengths_sum_to_the_longer_one() {
+    let scratch = Scratch::new("ragged");
+    let short = scratch.0.join("a-melody.wav");
+    let long = scratch.0.join("a-drums.wav");
+    write_tone(&short, 0.5, 44_100);
+    write_tone(&long, 1.0, 44_100);
+
+    let summed = decode(vec![short, long]);
+    assert!(
+        (summed.samples.len() as i64 - 44_100 * 2).abs() < 400,
+        "expected about a second of stereo, got {}",
+        summed.samples.len()
+    );
+}
+
+fn decode(sources: Vec<PathBuf>) -> Sound {
+    let mut runner = Runner::start(Job::Decode { id: 1, sources }, Arc::new(|| {}));
+    runner.join();
+    runner
+        .drain()
+        .into_iter()
+        .find_map(|update| match update {
+            Update::Decoded { sound, .. } => Some(sound),
+            _ => None,
+        })
+        .map(|sound| Sound {
+            samples: sound.samples.clone(),
+            channels: sound.channels,
+            rate: sound.rate,
+        })
+        .expect("it should have decoded")
 }

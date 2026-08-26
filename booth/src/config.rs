@@ -160,13 +160,85 @@ impl Quality {
     }
 }
 
+/// Where a rendered stem kit is kept.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StemsIn {
+    /// In the same folder as the track they came from.
+    ///
+    /// The default. A kit belongs to one record: keeping it beside that record
+    /// means copying the folder takes the stems with it, every other tool sees
+    /// them, and there is no second place to remember to back up. They are
+    /// named after the track, so they sort next to it.
+    #[default]
+    Beside,
+    /// All of them together in one folder, wherever `stems_path` points.
+    ///
+    /// For a library on a small disk with the stems on a big one, which is the
+    /// case the folder was there for.
+    Folder,
+}
+
+impl StemsIn {
+    pub fn label(self) -> &'static str {
+        match self {
+            StemsIn::Beside => "beside the track",
+            StemsIn::Folder => "one folder",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            StemsIn::Beside => "Next to the file they came from, named after it",
+            StemsIn::Folder => "All together, wherever the stems folder points",
+        }
+    }
+}
+
+/// Where stems are written, and everywhere they might already be.
+///
+/// Carried into the separation job as a value rather than as the whole config,
+/// because the job runs on another thread and needs no more than this.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StemsLocation {
+    pub in_: StemsIn,
+    pub folder: PathBuf,
+}
+
+impl StemsLocation {
+    /// Where a track's stems go.
+    pub fn for_source(&self, source: &Path) -> PathBuf {
+        match self.in_ {
+            StemsIn::Beside => source.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            StemsIn::Folder => self.folder.clone(),
+        }
+    }
+
+    /// Everywhere a kit for this track might be, best first.
+    ///
+    /// Both, always. Changing the setting must not make rendered stems vanish,
+    /// and a kit is minutes of work — finding one already on disk is worth a
+    /// second `exists` call.
+    pub fn search(&self, source: &Path) -> Vec<PathBuf> {
+        let mut places = vec![self.for_source(source)];
+        for other in [source.parent().unwrap_or(Path::new(".")).to_path_buf(), self.folder.clone()]
+        {
+            if !places.contains(&other) {
+                places.push(other);
+            }
+        }
+        places
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Where audio copied into the collection is kept.
     pub library_path: PathBuf,
-    /// Where rendered stem kits go.
+    /// Where rendered stem kits go, when they go in one folder.
     pub stems_path: PathBuf,
+    /// Whether a kit sits beside its track or in that folder.
+    pub stems_in: StemsIn,
     pub on_external: OnExternal,
     /// Which column the browser is ordered by. A preference rather than part
     /// of the collection: it describes how this person likes to look at their
@@ -191,12 +263,56 @@ pub struct Config {
     /// Below it, and for anything that disagrees with the file's own tags, the
     /// match becomes a question instead.
     pub autotag_score: f64,
-    /// Whether editing a track's artist, title or album also rewrites the tags
-    /// in the file itself.
+    /// How much of what the collection knows reaches the files themselves.
+    pub write_tags: WriteTags,
+}
+
+/// When a name in the collection is also written into the file's tag block.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WriteTags {
+    /// Never. The collection is the only record.
+    Never,
+    /// Only where the file says nothing.
     ///
-    /// Off by default: a collection edit is cheap and reversible, and rewriting
-    /// someone's files because they fixed a spelling in a browser is not.
-    pub write_tags_to_files: bool,
+    /// The default, and the asymmetry is the point: filling in a blank is not
+    /// the same act as overwriting somebody's answer. A fingerprint lookup that
+    /// names an untagged file has found out something true about it, and
+    /// leaving that only in the collection means the file stays anonymous to
+    /// every other program that opens it.
+    #[default]
+    Fill,
+    /// Every name change, including over a value already there.
+    Always,
+}
+
+impl WriteTags {
+    pub const ALL: [WriteTags; 3] = [WriteTags::Never, WriteTags::Fill, WriteTags::Always];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WriteTags::Never => "never",
+            WriteTags::Fill => "only where the file is blank",
+            WriteTags::Always => "always",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            WriteTags::Never => "The collection keeps the names to itself",
+            WriteTags::Fill => "A lookup fills in an untagged file; nothing is overwritten",
+            WriteTags::Always => "Every edit and every match rewrites the file's tags",
+        }
+    }
+
+    /// What to do about a field the file already has a value for, or `None`
+    /// when the file should not be touched at all.
+    pub fn on_existing(self) -> Option<musicai::tag::OnExisting> {
+        match self {
+            WriteTags::Never => None,
+            WriteTags::Fill => Some(musicai::tag::OnExisting::Keep),
+            WriteTags::Always => Some(musicai::tag::OnExisting::Overwrite),
+        }
+    }
 }
 
 impl Default for Config {
@@ -204,6 +320,7 @@ impl Default for Config {
         Self {
             library_path: default_library_path(),
             stems_path: data_dir().join("stems"),
+            stems_in: StemsIn::default(),
             on_external: OnExternal::default(),
             sort: crate::rows::Sort::default(),
             paint: crate::wave::Paint::default(),
@@ -214,7 +331,7 @@ impl Default for Config {
             // High, because the cost of being wrong is a library that quietly
             // renamed somebody's records. Anything less certain is a question.
             autotag_score: 0.9,
-            write_tags_to_files: false,
+            write_tags: WriteTags::default(),
         }
     }
 }
@@ -263,6 +380,11 @@ impl Config {
     }
 
     /// Whether a file is already inside the library folder.
+    /// Where stems go and where to look for ones already rendered.
+    pub fn stems_location(&self) -> StemsLocation {
+        StemsLocation { in_: self.stems_in, folder: self.stems_path.clone() }
+    }
+
     pub fn holds(&self, path: &Path) -> bool {
         // Compared after resolving both, so that a symlinked or relative path
         // into the library is recognised as being in it.
@@ -495,7 +617,7 @@ mod tests {
 
         let mut config = config_in(&dir);
         config.on_external = OnExternal::Ask;
-        config.write_tags_to_files = true;
+        config.write_tags = WriteTags::Always;
         config.acoustid_key = "abc123".into();
         config.autotag_score = 0.75;
         config.paint = crate::wave::Paint::Stems;
