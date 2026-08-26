@@ -31,6 +31,10 @@ const VOICE_LOW_HZ: f32 = 200.0;
 const VOICE_HIGH_HZ: f32 = 4_000.0;
 /// Kick drums and bass lines, for finding the downbeat.
 const LOW_HZ: f32 = 200.0;
+/// The energy measure stops here. Above it is the first thing a lossy codec
+/// throws away, and counting it would make the same record score lower as a
+/// 192k MP3 than as a FLAC — a fact about the file, not about the music.
+const CORE_HZ: f32 = 16_000.0;
 
 /// What one pass over a track measured, frame by frame.
 pub struct Features {
@@ -42,6 +46,15 @@ pub struct Features {
     /// The same, restricted to the bottom of the spectrum. A kick lands here
     /// and a hi-hat does not, which is how the downbeat is found.
     pub low_flux: Vec<f32>,
+    /// Onset strength per bin, over the part of the spectrum every format
+    /// keeps: the same quantity as [`Features::flux`] in units that mean
+    /// something on their own.
+    ///
+    /// `flux` is a sum over about a thousand bins, so its size says as much
+    /// about the window length as about the music, and it can only be read
+    /// against another frame of the same track. This can be read against
+    /// another track, which is what ranking a crate by how hard it goes needs.
+    pub density: Vec<f32>,
     /// Log energy in each of [`BANDS`] bands, frame-major.
     pub bands: Vec<f32>,
     /// Total energy per frame, in dB relative to full scale.
@@ -101,12 +114,14 @@ pub fn extract(audio: &Audio) -> Features {
     let band_of = band_map(bin_hz, bins);
     let voice_bins = bin_range(bin_hz, bins, VOICE_LOW_HZ, VOICE_HIGH_HZ);
     let low_bins = bin_range(bin_hz, bins, 0.0, LOW_HZ);
+    let core_bins = bin_range(bin_hz, bins, 0.0, CORE_HZ);
 
     let frames = if audio.frames() < N_FFT { 1 } else { (audio.frames() - N_FFT) / HOP + 1 };
     let mut features = Features {
         frame_rate: audio.sample_rate as f64 / HOP as f64,
         flux: Vec::with_capacity(frames),
         low_flux: Vec::with_capacity(frames),
+        density: Vec::with_capacity(frames),
         bands: Vec::with_capacity(frames * BANDS),
         level: Vec::with_capacity(frames),
         voice: Vec::with_capacity(frames),
@@ -152,11 +167,15 @@ pub fn extract(audio: &Audio) -> Features {
 
         let mut flux = 0.0f32;
         let mut low_flux = 0.0f32;
+        let mut core_flux = 0.0f32;
         for bin in 0..bins {
             let rise = (current[bin] - previous[bin]).max(0.0);
             flux += rise;
             if bin < low_bins.1 {
                 low_flux += rise;
+            }
+            if bin < core_bins.1 {
+                core_flux += rise;
             }
         }
         std::mem::swap(&mut previous, &mut current);
@@ -166,6 +185,7 @@ pub fn extract(audio: &Audio) -> Features {
         }
         features.flux.push(flux);
         features.low_flux.push(low_flux);
+        features.density.push(core_flux / core_bins.1.max(1) as f32);
         features.level.push(10.0 * ((total / bins as f64) + 1e-12).log10() as f32);
         features.voice.push((voiced / (total + 1e-12)) as f32);
     }
@@ -176,6 +196,9 @@ pub fn extract(audio: &Audio) -> Features {
         *first = 0.0;
     }
     if let Some(first) = features.low_flux.first_mut() {
+        *first = 0.0;
+    }
+    if let Some(first) = features.density.first_mut() {
         *first = 0.0;
     }
     features

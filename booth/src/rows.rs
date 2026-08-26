@@ -193,6 +193,46 @@ pub fn header_row(ui: &mut Ui, widths: &Widths, sort: Sort) -> Option<Column> {
     clicked
 }
 
+/// Something asked of one track from its own line.
+///
+/// Each of these already exists as a batch over everything showing. They are
+/// the same operations on a selection of one, deliberately: a re-analysis is
+/// not a different thing from a first analysis, and two code paths for it are
+/// how they come to disagree.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    Play,
+    Analyze,
+    Identify,
+    Separate,
+    CopyIn,
+    Reveal,
+    Forget,
+}
+
+impl Action {
+    /// What the menu item says, given what the track already has.
+    ///
+    /// Re-doing something is named as re-doing it. An item that reads
+    /// "Analyse" on a track that has already been analysed invites the reading
+    /// that nothing will happen.
+    pub fn label(self, track: &Track, menu: Menu) -> &'static str {
+        match self {
+            Action::Play if menu.playing => "Pause",
+            Action::Play => "Play",
+            Action::Analyze if track.analyzed => "Re-analyse",
+            Action::Analyze => "Analyse",
+            Action::Identify if track.identified => "Look up again",
+            Action::Identify => "Look up tags",
+            Action::Separate if !track.stems.is_empty() => "Render stems again",
+            Action::Separate => "Render stems",
+            Action::CopyIn => "Copy into the library",
+            Action::Reveal => "Copy the file path",
+            Action::Forget => "Remove from the collection",
+        }
+    }
+}
+
 /// What the pointer did to a row.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
@@ -200,6 +240,18 @@ pub enum Hit {
     Clicked,
     /// Asked to hear it.
     Opened,
+    /// Picked something out of the right-click menu.
+    Chose(Action),
+}
+
+/// What the menu needs to know that the row itself cannot see.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Menu {
+    /// Whether the file already sits under the library folder, which decides
+    /// whether copying it in is offered at all.
+    pub in_library: bool,
+    /// Whether anything is playing this track now.
+    pub playing: bool,
 }
 
 /// Draw one line. Returns what the pointer did, if anything.
@@ -209,12 +261,15 @@ pub fn row(
     indented: bool,
     selected: bool,
     widths: &Widths,
+    menu: Menu,
 ) -> Option<Hit> {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
     let response = response.on_hover_text(match track.path.parent() {
-        Some(_) => format!("{}\ndouble-click to hear it", track.path.display()),
-        None => "double-click to hear it".to_string(),
+        Some(_) => {
+            format!("{}\ndouble-click to hear it, right-click for the rest", track.path.display())
+        }
+        None => "double-click to hear it, right-click for the rest".to_string(),
     });
     let painter = ui.painter_at(rect);
 
@@ -286,6 +341,24 @@ pub fn row(
         theme::DIM,
     );
 
+    // A companion is a file the parent owns: there is nothing to analyse, look
+    // up or separate about it separately, and doing any of those to it would
+    // put a second answer beside the one it inherited.
+    let chosen = if indented {
+        context_menu(&response, track, menu, &[Action::Play, Action::Reveal])
+    } else {
+        let mut items = vec![Action::Play, Action::Analyze, Action::Identify, Action::Separate];
+        if !menu.in_library {
+            items.push(Action::CopyIn);
+        }
+        items.push(Action::Reveal);
+        items.push(Action::Forget);
+        context_menu(&response, track, menu, &items)
+    };
+    if let Some(action) = chosen {
+        return Some(Hit::Chose(action));
+    }
+
     // A double click is also a click, so the double is checked first: opening a
     // row selects it too, and reporting both would start playback and then
     // immediately be told to select something.
@@ -294,6 +367,36 @@ pub fn row(
         (_, true) => Some(Hit::Clicked),
         _ => None,
     }
+}
+
+/// The right-click menu, with a rule before the two items that are not undoable
+/// by clicking again.
+fn context_menu(
+    response: &egui::Response,
+    track: &Track,
+    menu: Menu,
+    items: &[Action],
+) -> Option<Action> {
+    let mut chosen = None;
+    response.context_menu(|ui| {
+        ui.set_min_width(190.0);
+        // The track it will act on, because a right-click does not select and
+        // a menu with no subject is a menu you have to guess at.
+        ui.label(egui::RichText::new(track.display_title()).color(theme::DIM).size(11.0));
+        ui.separator();
+        for &item in items {
+            if matches!(item, Action::CopyIn | Action::Forget) {
+                ui.separator();
+            }
+            let label = egui::RichText::new(item.label(track, menu))
+                .color(if item == Action::Forget { theme::ALERT } else { theme::TEXT });
+            if ui.button(label).clicked() {
+                chosen = Some(item);
+                ui.close();
+            }
+        }
+    });
+    chosen
 }
 
 /// Order two tracks by a column.

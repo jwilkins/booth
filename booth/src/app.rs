@@ -116,6 +116,10 @@ pub struct App {
     selected: Option<u32>,
     /// The three-band waveform of the selected track, once it has been read.
     waveform: Option<(u32, Vec<u8>)>,
+    /// Which part of the selected track's waveform is showing. Reset with the
+    /// selection: a view into one track means nothing in another, and carrying
+    /// it over lands you eight minutes into a four-minute record.
+    zoom: wave::Zoom,
     /// Its per-stem loudness, when a kit has been measured.
     envelopes: Option<(u32, wave::StemEnvelopes)>,
 
@@ -233,6 +237,16 @@ enum Pending {
         letter: u8,
         label: String,
     },
+    /// Listen to one track, whether or not it has been listened to before.
+    Analyze(u32),
+    /// Ask the fingerprint services about one track.
+    Identify(u32),
+    /// Render one track's stem kit.
+    Separate(u32),
+    /// Put one track's path on the clipboard.
+    CopyPath(u32),
+    /// Show the whole track again.
+    FitWave,
 }
 
 /// A track's names, while they are being edited.
@@ -328,6 +342,7 @@ impl App {
             sort: config_sort,
             selected: None,
             waveform: None,
+            zoom: wave::Zoom::default(),
             envelopes: None,
             log: {
                 let window = Arc::new(LogWindow::default());
@@ -484,6 +499,7 @@ impl App {
         if !self.rows.iter().any(|row| Some(row.track.id) == self.selected) {
             self.selected = self.rows.first().map(|row| row.track.id);
             self.waveform = None;
+            self.zoom = wave::Zoom::default();
             self.envelopes = None;
         }
         self.replan();
@@ -528,6 +544,7 @@ impl App {
         if Some(id) != self.selected {
             self.selected = Some(id);
             self.waveform = None;
+            self.zoom = wave::Zoom::default();
             self.envelopes = None;
         }
     }
@@ -621,27 +638,65 @@ impl App {
         self.start(Job::Adopt { tracks, config: Box::new(self.config.clone()) });
     }
 
-    /// Analyse everything showing that has not been analysed.
-    fn analyze_unprepared(&mut self) {
-        let waiting: Vec<(u32, PathBuf)> = self
-            .rows
+    /// The tracks showing that a batch action should act on.
+    ///
+    /// Companions are never included: they are rows, not files, and their
+    /// parent answers for them.
+    fn showing(&self, wanted: impl Fn(&Track) -> bool) -> Vec<u32> {
+        self.rows
             .iter()
-            .filter(|row| !row.indented && !row.track.analyzed)
-            .map(|row| (row.track.id, row.track.path.clone()))
-            .collect();
+            .filter(|row| !row.indented && wanted(&row.track))
+            .map(|row| row.track.id)
+            .collect()
+    }
+
+    /// Pair ids with the files they name, dropping any that have gone.
+    ///
+    /// A job handed a path that is not there fails per file and says so, which
+    /// is right for a batch and wasteful for one track the user just clicked;
+    /// this is where that is caught once.
+    fn files_for(&mut self, ids: &[u32]) -> Vec<(u32, PathBuf)> {
+        let mut found = Vec::new();
+        for id in ids {
+            let Some(track) = self.library.get(*id) else { continue };
+            match track.path.exists() {
+                true => found.push((track.id, track.path.clone())),
+                false => crate::warn!(
+                    "#{id} is not where it was: {}",
+                    track.path.display()
+                ),
+            }
+        }
+        found
+    }
+
+    /// Listen to these tracks, whether or not they have been listened to before.
+    ///
+    /// The same call behind the batch button and the one on a single row: a
+    /// re-analysis is not a different operation from a first one, and having
+    /// two of them is how they come to disagree.
+    fn analyze_tracks(&mut self, ids: &[u32]) {
+        let waiting = self.files_for(ids);
         if waiting.is_empty() {
-            self.note("nothing showing needs analysing", theme::DIM);
+            self.note("nothing to analyse", theme::DIM);
             return;
         }
+        crate::info!("analysing {}", plural(waiting.len(), "track"));
+
         // Reading a file is reaching for it, so this is one of the moments the
         // copy-in policy is about. The copy is queued first, and the analysis
         // behind it, so it runs against whatever the track's path is by then.
         let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
-        let identify = self.config.identify;
-        // Asking for it by hand clears the "already tried" mark: the file may
-        // have been put back since.
+        // Asking by hand clears the "already measured" mark, so the waveform is
+        // read again rather than the cached one being kept.
         for id in &ids {
             self.remeasured.remove(id);
+            self.remeasured.remove(&(id | STEM_MARK));
+        }
+        if self.selected.is_some_and(|selected| ids.contains(&selected)) {
+            self.waveform = None;
+            self.zoom = wave::Zoom::default();
+            self.envelopes = None;
         }
         self.ensure_local(&ids);
         self.start(Job::Analyze(waiting.clone()));
@@ -649,31 +704,37 @@ impl App {
         // Listening to a track and asking what it is are the same errand, so
         // they are queued together — but the lookup is paced by two services'
         // rate limits, so it goes behind the analysis rather than in front.
-        if identify {
-            if let Some(key) = self.config.key() {
-                let unnamed: Vec<(u32, PathBuf)> = waiting
-                    .into_iter()
-                    .filter(|(id, _)| self.library.get(*id).is_some_and(|track| !track.identified))
-                    .collect();
-                if !unnamed.is_empty() {
-                    self.start(Job::Identify { tracks: unnamed, key });
-                }
-            }
+        if self.config.identify {
+            let unnamed: Vec<u32> = waiting
+                .iter()
+                .map(|(id, _)| *id)
+                .filter(|id| self.library.get(*id).is_some_and(|track| !track.identified))
+                .collect();
+            self.identify_tracks(&unnamed, false);
         }
     }
 
-    fn render_stems(&mut self) {
-        let waiting: Vec<(u32, PathBuf)> = self
-            .rows
-            .iter()
-            .filter(|row| !row.indented && row.track.stems.is_empty())
-            .map(|row| (row.track.id, row.track.path.clone()))
-            .collect();
+    /// Everything showing that has never been listened to.
+    fn analyze_unprepared(&mut self) {
+        let waiting = self.showing(|track| !track.analyzed);
         if waiting.is_empty() {
-            self.note("everything showing already has a stem kit", theme::DIM);
+            self.note("nothing showing needs analysing", theme::DIM);
+            return;
+        }
+        self.analyze_tracks(&waiting);
+    }
+
+    /// Render stem kits for these tracks.
+    fn separate_tracks(&mut self, ids: &[u32]) {
+        let waiting = self.files_for(ids);
+        if waiting.is_empty() {
+            self.note("nothing to separate", theme::DIM);
             return;
         }
         let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
+        for id in &ids {
+            self.remeasured.remove(&(id | STEM_MARK));
+        }
         self.ensure_local(&ids);
         self.start(Job::Separate {
             tracks: waiting,
@@ -681,6 +742,15 @@ impl App {
             backend: Backend::Demucs,
             quality: self.config.stem_quality.to_cli(),
         });
+    }
+
+    fn render_stems(&mut self) {
+        let waiting = self.showing(|track| track.stems.is_empty());
+        if waiting.is_empty() {
+            self.note("everything showing already has a stem kit", theme::DIM);
+            return;
+        }
+        self.separate_tracks(&waiting);
     }
 
     fn collect(&mut self) {
@@ -780,6 +850,7 @@ impl App {
                         track.key = analyzed.key.clone();
                         track.key_confidence = analyzed.key_confidence;
                         track.energy = analyzed.energy;
+                        track.intensity = analyzed.intensity;
                         track.phrases = analyzed.phrases.clone();
                         track.cues = analyzed.cues.clone();
                         track.loudness_lufs = analyzed.loudness_lufs;
@@ -1021,7 +1092,7 @@ impl eframe::App for App {
 
         // Everything the panels asked for happens here, after they have all
         // drawn, so no panel ever reads a collection halfway through a change.
-        self.apply_pending();
+        self.apply_pending(ctx);
     }
 
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
@@ -1088,6 +1159,12 @@ impl App {
                 if let Some(id) = self.selected {
                     self.pending.push(Pending::TogglePlayback(id));
                 }
+            }
+            // Escape is the way back out of anything; here that is the whole
+            // track. It does nothing when the whole track is already showing,
+            // rather than being a key that sometimes means something else.
+            if i.key_pressed(egui::Key::Escape) && !self.zoom.is_fit() {
+                self.pending.push(Pending::FitWave);
             }
         });
     }
@@ -1435,24 +1512,48 @@ impl App {
             self.pending.push(Pending::Resort);
         }
 
+        let playing = self
+            .player
+            .as_ref()
+            .filter(|player| player.is_playing())
+            .and_then(|player| player.loaded());
         let mut hit = None;
         for line in &self.rows {
             let selected = Some(line.track.id) == self.selected;
-            if let Some(what) = rows::row(ui, &line.track, line.indented, selected, &widths) {
+            let menu = rows::Menu {
+                in_library: self.config.holds(&line.track.path),
+                playing: playing == Some(line.track.id),
+            };
+            if let Some(what) = rows::row(ui, &line.track, line.indented, selected, &widths, menu) {
                 hit = Some((line.track.id, what));
             }
         }
         if let Some((id, what)) = hit {
-            if Some(id) != self.selected {
+            // A right-click does not move the selection. The menu names the
+            // track it will act on, and stealing the selection would throw away
+            // whatever is loaded on the deck to run an errand on something else.
+            let selects = !matches!(what, rows::Hit::Chose(_));
+            if selects && Some(id) != self.selected {
                 self.selected = Some(id);
                 self.waveform = None;
+                self.zoom = wave::Zoom::default();
                 self.envelopes = None;
                 // A different track: start it from the top rather than from
                 // wherever the last one's playhead happened to be.
                 self.playhead_ms = None;
             }
-            if what == rows::Hit::Opened {
-                self.pending.push(Pending::TogglePlayback(id));
+            match what {
+                rows::Hit::Opened => self.pending.push(Pending::TogglePlayback(id)),
+                rows::Hit::Chose(action) => self.pending.push(match action {
+                    rows::Action::Play => Pending::TogglePlayback(id),
+                    rows::Action::Analyze => Pending::Analyze(id),
+                    rows::Action::Identify => Pending::Identify(id),
+                    rows::Action::Separate => Pending::Separate(id),
+                    rows::Action::CopyIn => Pending::Adopt(id),
+                    rows::Action::Reveal => Pending::CopyPath(id),
+                    rows::Action::Forget => Pending::Forget(id),
+                }),
+                rows::Hit::Clicked => {}
             }
         }
 
@@ -1499,14 +1600,16 @@ impl App {
                 .map(|ms| (ms as f64 / (track.duration_secs * 1000.0).max(1.0)) as f32),
             paint,
             stems: envelopes,
+            zoom: self.zoom,
         };
         // Drawn before anything below touches the collection: `waveform`
         // borrows the cached picture out of the window's own state, and that
         // borrow has to be finished with before the panel changes anything.
-        let touched = wave::show(ui, &waveform);
-        wave::phrase_strip(ui, &track.phrases, track.duration_secs);
+        let shown = wave::show(ui, &waveform);
+        let moved = wave::phrase_strip(ui, &track.phrases, track.duration_secs, shown.zoom);
+        let zoom = moved.unwrap_or(shown.zoom);
 
-        match touched {
+        match shown.touched {
             Some(wave::Touched::Scrubbed(ms)) => {
                 self.playhead_ms = Some(ms);
                 self.pending.push(Pending::SeekDeck { id: track.id, time_ms: ms });
@@ -1516,6 +1619,7 @@ impl App {
             }
             None => {}
         }
+        self.zoom = zoom;
 
         self.cue_strip(ui, &track);
 
@@ -1533,6 +1637,19 @@ impl App {
                     format!("{} {:.2}", track.key, track.key_confidence)
                 },
                 !track.key.is_empty(),
+            );
+            // The rank and the number it is a rank of, because five bars cannot
+            // say whether a track sat just under a threshold or nowhere near
+            // one — and a meter nobody can argue with is a meter nobody can
+            // correct.
+            measurement(
+                ui,
+                "energy",
+                &match track.energy {
+                    0 => "not measured".to_string(),
+                    rank => format!("{rank}/5 · {:.3}", track.intensity),
+                },
+                track.energy > 0,
             );
             measurement(ui, "phrase", &track.phrases.len().to_string(), !track.phrases.is_empty());
             measurement(ui, "cues", &track.cues.len().to_string(), !track.cues.is_empty());
@@ -1557,6 +1674,55 @@ impl App {
                 },
                 track.stems.is_complete(),
             );
+        });
+
+        // The same three jobs the toolbar runs over everything showing, aimed
+        // at the one track in front of you. They are named for what they will
+        // do to *this* track rather than generically, because the answer to
+        // "will this take twenty minutes" is different for a first pass and a
+        // re-run, and a button that hides which one it is cannot be trusted
+        // with a stem render.
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            let busy = self.runner.is_some();
+            let there = track.path.exists();
+            let reason = if !there {
+                Some("the file is not where it was")
+            } else if busy {
+                Some("something is already running")
+            } else {
+                None
+            };
+
+            let offer = |ui: &mut Ui, label: &str, hint: &str| {
+                let button = ui.add_enabled(reason.is_none(), egui::Button::new(label));
+                match reason {
+                    Some(why) => button.on_disabled_hover_text(why).clicked(),
+                    None => button.on_hover_text(hint).clicked(),
+                }
+            };
+
+            if offer(
+                ui,
+                if track.analyzed { "Re-analyse" } else { "Analyse" },
+                "Beats, key, phrases, cues and the waveform, measured again from the file.",
+            ) {
+                self.pending.push(Pending::Analyze(track.id));
+            }
+            if offer(
+                ui,
+                if track.identified { "Look up again" } else { "Look up tags" },
+                "Fingerprint it and ask AcoustID and MusicBrainz what it is.",
+            ) {
+                self.pending.push(Pending::Identify(track.id));
+            }
+            if offer(
+                ui,
+                if track.stems.is_empty() { "Render stems" } else { "Render stems again" },
+                "Separate it into vocals, melody and drums. Minutes, not seconds.",
+            ) {
+                self.pending.push(Pending::Separate(track.id));
+            }
         });
 
         // The waveform is only read when it is looked at: a collection of
@@ -1859,6 +2025,21 @@ impl App {
                         self.pending.push(Pending::PaintAs(mode));
                     }
                 }
+
+                // Only there when there is something to undo. A permanent
+                // "fit" next to the colour modes would read as a fourth mode.
+                if !self.zoom.is_fit() {
+                    ui.add_space(8.0);
+                    if ui
+                        .add(egui::Button::new(
+                            RichText::new("fit").font(theme::mono(10.0)).color(theme::DIM),
+                        ))
+                        .on_hover_text("Show the whole track again (esc)")
+                        .clicked()
+                    {
+                        self.pending.push(Pending::FitWave);
+                    }
+                }
             });
 
             // Naming the cue under the playhead, which is the one just placed
@@ -2149,7 +2330,7 @@ impl App {
     /// changes never appear in the same frame — a list that reordered itself
     /// under a half-drawn row would be worse than one that catches up next
     /// frame.
-    fn apply_pending(&mut self) {
+    fn apply_pending(&mut self, ctx: &egui::Context) {
         let pending = std::mem::take(&mut self.pending);
         if pending.is_empty() {
             return;
@@ -2166,6 +2347,7 @@ impl App {
                     if Some(id) != self.selected {
                         self.selected = Some(id);
                         self.waveform = None;
+                        self.zoom = wave::Zoom::default();
                         // Selecting from the neighbours list can leave the
                         // query showing something the track is not in; the
                         // browser widens rather than the selection being lost.
@@ -2181,6 +2363,17 @@ impl App {
                     touched = true;
                 }
                 Pending::Adopt(id) => self.adopt(&[id]),
+                Pending::FitWave => self.zoom = wave::Zoom::default(),
+                Pending::Analyze(id) => self.analyze_tracks(&[id]),
+                Pending::Identify(id) => self.identify_tracks(&[id], true),
+                Pending::Separate(id) => self.separate_tracks(&[id]),
+                Pending::CopyPath(id) => {
+                    if let Some(track) = self.library.get(id) {
+                        let path = track.path.display().to_string();
+                        ctx.copy_text(path.clone());
+                        self.note(format!("copied {path}"), theme::TEXT);
+                    }
+                }
                 Pending::AddTag(id, tag) => {
                     // Matched case-insensitively so that `Peak` joins `peak`
                     // rather than starting a second tag that queries miss.
@@ -2272,28 +2465,52 @@ impl App {
 
     // -- identification ----------------------------------------------------
 
-    /// Fingerprint whatever showing is still unidentified.
-    fn identify_showing(&mut self) {
+    /// Ask AcoustID and MusicBrainz what these tracks are.
+    ///
+    /// `announce` separates the two ways this is reached. Asked for directly,
+    /// silence would look like the button did nothing, so a missing key or an
+    /// empty selection is said out loud. Riding along behind an analysis, the
+    /// same two lines are noise about something the user did not ask for —
+    /// they still reach the log, which is where an unexplained absence of
+    /// names should be answered.
+    fn identify_tracks(&mut self, ids: &[u32], announce: bool) {
+        if ids.is_empty() {
+            if announce {
+                self.note("nothing to identify", theme::DIM);
+            }
+            return;
+        }
         let Some(key) = self.config.key() else {
-            self.note(
-                "no AcoustID key — put one in Settings, or set ACOUSTID_API_KEY",
-                theme::AMBER,
-            );
+            crate::warn!("no AcoustID key: {} left unidentified", plural(ids.len(), "track"));
+            if announce {
+                self.note(
+                    "no AcoustID key — put one in Settings, or set ACOUSTID_API_KEY",
+                    theme::AMBER,
+                );
+            }
             return;
         };
-        let waiting: Vec<(u32, PathBuf)> = self
-            .rows
-            .iter()
-            .filter(|row| !row.indented && !row.track.identified && row.track.path.exists())
-            .map(|row| (row.track.id, row.track.path.clone()))
-            .collect();
+        let waiting = self.files_for(ids);
+        if waiting.is_empty() {
+            if announce {
+                self.note("nothing to identify", theme::DIM);
+            }
+            return;
+        }
+        crate::info!("identifying {}", plural(waiting.len(), "track"));
+        let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
+        self.ensure_local(&ids);
+        self.start(Job::Identify { tracks: waiting, key });
+    }
+
+    /// Fingerprint whatever showing is still unidentified.
+    fn identify_showing(&mut self) {
+        let waiting = self.showing(|track| !track.identified);
         if waiting.is_empty() {
             self.note("nothing showing needs identifying", theme::DIM);
             return;
         }
-        let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
-        self.ensure_local(&ids);
-        self.start(Job::Identify { tracks: waiting, key });
+        self.identify_tracks(&waiting, true);
     }
 
     /// Decide what to do with one match, and do it.

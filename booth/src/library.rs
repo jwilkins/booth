@@ -129,8 +129,15 @@ pub struct Track {
     /// Camelot notation, e.g. `8A`, or empty when no key was found.
     pub key: String,
     pub key_confidence: f32,
-    /// 1 to 5, from how much is being played. See [`energy_from`].
+    /// 1 to 5, from how much is being played, or 0 for not measured.
+    /// See [`energy_from`].
     pub energy: u8,
+    /// The measurement behind the meter: peak onset density, in the units
+    /// `musicai::analysis::peak_intensity` reports. Kept so that the rank can
+    /// be argued with — five bars hide whether a track sat just under a
+    /// threshold or nowhere near one.
+    #[serde(default)]
+    pub intensity: f32,
     pub beats: usize,
     pub phrases: Vec<Phrase>,
     pub cues: Vec<CueMark>,
@@ -188,6 +195,7 @@ impl Track {
             key: String::new(),
             key_confidence: 0.0,
             energy: 0,
+            intensity: 0.0,
             beats: 0,
             phrases: Vec::new(),
             cues: Vec::new(),
@@ -242,21 +250,28 @@ impl Track {
     }
 }
 
-/// Turn a mean onset strength into the five-bar meter.
+/// Where one bar of the meter ends and the next begins, in the units
+/// `musicai::analysis::peak_intensity` reports: onset strength per bin per
+/// frame, over the loudest fifteen seconds of the track.
+///
+/// This is a calibration table, not a formula. It is spaced roughly
+/// logarithmically because the quantity is: the gap between a tool and a
+/// groove is a doubling, not an addition.
+const STEPS: [f32; 4] = [0.025, 0.055, 0.100, 0.170];
+
+/// Turn a peak onset density into the five-bar meter.
 ///
 /// It is a rank, not a measurement: what it has to do is sort a crate so that
-/// the tools are at one end and the peak-time records at the other. The
-/// thresholds come from the same onset envelope the phrase detector uses, and
-/// are deliberately coarse — a five-bar meter that claimed more precision than
-/// this would be inventing it.
+/// the tools are at one end and the peak-time records at the other. Zero means
+/// nothing was measured — an unanalysed track, or one with no sound in it —
+/// and reads as an empty meter rather than as the quietest possible record.
 pub fn energy_from(intensity: f32) -> u8 {
-    match intensity {
-        i if i < 0.6 => 1,
-        i if i < 1.2 => 2,
-        i if i < 2.0 => 3,
-        i if i < 3.2 => 4,
-        _ => 5,
+    // A NaN is not a quiet track; it is an answer that went wrong somewhere,
+    // and it has to fall out here rather than being ranked.
+    if intensity.is_nan() || intensity <= 0.0 {
+        return 0;
     }
+    1 + STEPS.iter().filter(|&&step| intensity >= step).count() as u8
 }
 
 /// A playlist, and the folder it sits in.
@@ -714,16 +729,26 @@ mod tests {
 
     #[test]
     fn energy_sorts_a_crate_from_tool_to_peak() {
-        assert_eq!(energy_from(0.2), 1);
-        assert_eq!(energy_from(1.5), 3);
-        assert_eq!(energy_from(6.0), 5);
+        assert_eq!(energy_from(0.015), 1);
+        assert_eq!(energy_from(0.07), 3);
+        assert_eq!(energy_from(0.30), 5);
         // Monotonic, which is the only property the meter really promises.
         let mut previous = 0;
-        for step in 0..60 {
-            let level = energy_from(step as f32 / 10.0);
+        for step in 1..400 {
+            let level = energy_from(step as f32 / 1000.0);
             assert!(level >= previous, "energy went down at {step}");
+            assert!((1..=5).contains(&level), "off the meter at {step}: {level}");
             previous = level;
         }
+    }
+
+    #[test]
+    fn nothing_measured_is_not_the_quietest_possible_record() {
+        // Zero is what an unanalysed track carries. Reading it as a rank of
+        // one would put every track still to be listened to at the tool end of
+        // the crate, where it looks like an answer.
+        assert_eq!(energy_from(0.0), 0);
+        assert_eq!(energy_from(f32::NAN), 0);
     }
 
     #[test]

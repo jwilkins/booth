@@ -143,6 +143,10 @@ pub struct Analyzed {
     pub key: String,
     pub key_confidence: f32,
     pub energy: u8,
+    /// The measurement the energy meter is a rank of, kept so the inspector can
+    /// show it and so a miscalibrated meter is diagnosable rather than just
+    /// wrong.
+    pub intensity: f32,
     pub phrases: Vec<Phrase>,
     pub cues: Vec<CueMark>,
     pub loudness_lufs: Option<f64>,
@@ -150,8 +154,14 @@ pub struct Analyzed {
     pub duration_secs: f64,
     pub sample_rate: u32,
     pub channels: u16,
-    /// The three-band preview: 1,200 columns of mid, high, low, exactly as the
-    /// analysis file stores it. The waveform panel paints straight from this.
+    /// The three-band picture: columns of mid, high, low, exactly as the
+    /// analysis file stores them. The waveform panel paints straight from this.
+    ///
+    /// The scrolling resolution rather than the preview one — 150 columns a
+    /// second instead of 1,200 for the whole track. The panel takes peaks
+    /// across whatever a pixel covers, so at a normal window it draws the same
+    /// picture either way; the difference is that zooming in has something to
+    /// find. About 135 kB for a five-minute track, against 30 MB for its stems.
     pub bands: Vec<u8>,
 }
 
@@ -258,10 +268,16 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
         })
         .collect();
 
-    // The energy meter reads the loudest phrase rather than the average: what
+    // The energy meter reads the loudest stretch rather than the average: what
     // decides where a record sits in a crate is how hard it goes at its peak,
-    // not how much of it is quiet.
-    let intensity = analysis.structure.sections.iter().map(|s| s.intensity).fold(0.0f32, f32::max);
+    // not how much of it is intro. The raw figure goes to the log because the
+    // five bars are a calibration of it, and a calibration is only as good as
+    // the numbers somebody looked at.
+    let intensity = analysis.intensity;
+    crate::debug!(
+        "#{id} peak onset density {intensity:.4} -> energy {}",
+        energy_from(intensity)
+    );
 
     Ok(Analyzed {
         id,
@@ -272,6 +288,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
         key: analysis.camelot(),
         key_confidence: analysis.key.as_ref().map(|k| k.confidence).unwrap_or(0.0),
         energy: energy_from(intensity),
+        intensity,
         phrases,
         cues,
         loudness_lufs: loudness.as_ref().map(|l| l.integrated_lufs),
@@ -279,7 +296,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
         duration_secs: audio.duration_secs(),
         sample_rate: audio.sample_rate,
         channels: audio.channels() as u16,
-        bands: waveform.band_preview,
+        bands: waveform.band_detail,
     })
 }
 
@@ -866,8 +883,17 @@ mod tests {
         assert!(analyzed.loudness_lufs.is_some());
         assert_eq!(analyzed.sample_rate, 44_100);
         assert_eq!(analyzed.channels, 2);
-        // The waveform is the three-band preview, which is what the panel draws.
-        assert_eq!(analyzed.bands.len(), 1_200 * 3);
+        // The waveform is kept at the scrolling resolution rather than the
+        // preview's fixed 1,200 columns, so that zooming in has something to
+        // find: 150 columns a second, three bytes each.
+        assert_eq!(analyzed.bands.len() % 3, 0);
+        let columns = analyzed.bands.len() / 3;
+        let expected = (analyzed.duration_secs * 150.0).round() as usize;
+        assert!(
+            columns.abs_diff(expected) <= 2,
+            "{columns} columns for {:.2}s, expected about {expected}",
+            analyzed.duration_secs
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

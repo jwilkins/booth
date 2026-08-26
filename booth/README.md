@@ -66,6 +66,24 @@ tagging a track does not queue a 40 MB rewrite. A tag already in use is offered
 as one click, and a new one that differs only in case joins the existing tag
 rather than starting a second one that queries miss.
 
+## Doing one track at a time
+
+Every batch job has a single-track twin. The prep editor under the waveform has
+**Analyse**, **Look up tags** and **Render stems** for whatever is selected, and
+right-clicking any row offers the same three plus play, copy-into-library, copy
+the path, and remove.
+
+A job that has already been done says so: the button reads **Re-analyse** rather
+than **Analyse**, because the honest answer to "will this take twenty minutes"
+is different for a first pass and a re-run. Re-analysing is the same code path
+as analysing — there is no separate re-do, which is how the two would come to
+disagree.
+
+Right-clicking does not move the selection, and the menu names the track it will
+act on. A stem companion offers only play and copy-path: it is a file its parent
+owns, and analysing it separately would put a second answer beside the one it
+inherited.
+
 ## Playing
 
 Double-click a row, or press **space**, to hear the selected track. Clicking the
@@ -148,10 +166,27 @@ not bury the ones still to be worked on. Keys sort around the wheel rather than
 alphabetically, so 9A comes before 11B and the column is worth reading.
 
 Stem companions are indented under the track they came from, stay under it in
-every sort, and exist only when all three stem files are on disk. The energy
-meter is a rank from 1 to 5, taken from the loudest phrase's onset strength: it
-sorts a crate from tool to peak-time record and deliberately claims no more
-precision than that.
+every sort, and exist only when all three stem files are on disk.
+
+## The energy meter
+
+Five blocks, a rank rather than a measurement: what it has to do is sort a crate
+so the tools are at one end and the peak-time records at the other. It is taken
+from the onset density of the loudest fifteen seconds of the track — the peak,
+because what decides where a record sits in a crate is how hard it goes at its
+best, not how much of it is intro.
+
+Measured off the frames rather than off the detected sections, so a track with
+no grid still gets one: not knowing where the bars are is no reason to claim not
+to know how busy it is. Everything above 16 kHz is left out, because it is the
+first thing a lossy codec throws away and counting it would score the same
+record lower as an MP3 than as a FLAC — a fact about the file, not the music.
+An empty meter means nothing was measured, which is not the same as the quietest
+possible record.
+
+The five thresholds are a calibration table, and the raw figure is shown beside
+the rank in the inspector (`3/5 · 0.072`) and logged for every analysis. If a
+library comes out lopsided, that number is the evidence for moving them.
 
 Location is the whole path, shortened at `~`. When the column is too narrow it
 is trimmed from the **front**, so the file name is always the part that
@@ -169,6 +204,28 @@ place in the track. The clock is on the hover.
 
 Settings switches the whole thing to beats. A track with no grid has no bars to
 count in, so it shows the clock instead of inventing a position.
+
+## Zooming the waveform
+
+The wheel zooms about the pointer — what you were looking at stays where it is
+rather than sliding off while you chase it. Shift, or a sideways wheel, pans.
+The phrase strip underneath always shows the whole track, so it doubles as the
+map: the window is drawn on it, and clicking anywhere on it jumps there. **fit**
+next to the colour modes, or **esc**, goes back to the whole track.
+
+While something is playing, the view follows the playhead — but only once the
+playhead has actually left it. Recentring every frame would be a scrolling
+waveform, which is a different instrument; what is wanted here is that the thing
+you zoomed in on does not vanish while you listen to it.
+
+The picture is cached at the scrolling resolution — 150 columns a second, the
+same detail the player draws from — rather than as a fixed 1,200 columns for the
+whole track. At a normal window it is the same picture either way, because a
+pixel takes the peak of whatever it covers; the difference is that zooming in
+has something to find. It costs about 135 kB a track, against 30 MB for its
+stems. Zooming stops where the picture runs out: past about one stored column
+per two pixels it would be stretching rather than revealing, and a staircase
+drawn confidently invites placing a cue against an edge that is not there.
 
 ## Colouring the waveform
 
@@ -241,7 +298,8 @@ or wherever `BOOTH_DATA_DIR` points.
   interrupted save leaves the previous one intact. A file that will not parse is
   an error rather than a fresh start.
 - `waveforms/` — one cached three-band picture per track, so arrow-keying down a
-  crate moves the waveform instead of re-analysing each row.
+  crate moves the waveform instead of re-analysing each row. At 150 columns a
+  second, so it can be zoomed into: about 135 kB for a five-minute track.
 - `stems/` — rendered stem kits.
 - `waveforms/*.stems` — per-stem loudness, for colouring by what is playing.
 - `booth.log`, `booth.log.1` — this run and the one before it.

@@ -30,6 +30,8 @@ pub struct TrackAnalysis {
     /// The musical key, or `None` when the track has no tonal centre to find —
     /// a drum tool, say. The confidence is carried on [`key::Detected`].
     pub key: Option<key::Detected>,
+    /// How hard the track goes where it goes hardest. See [`peak_intensity`].
+    pub intensity: f32,
 }
 
 impl TrackAnalysis {
@@ -70,6 +72,7 @@ pub fn analyze_at(audio: &Audio, bpm: Option<f64>) -> TrackAnalysis {
     let structure = structure::detect(&measured, &times);
     let cues = cues::suggest(&measured, &times, &structure);
     let key = key::detect(audio);
+    let intensity = peak_intensity(&measured);
 
     TrackAnalysis {
         grid: beats.grid,
@@ -78,7 +81,39 @@ pub fn analyze_at(audio: &Audio, bpm: Option<f64>) -> TrackAnalysis {
         structure,
         cues,
         key,
+        intensity,
     }
+}
+
+/// How long a stretch has to hold up before it counts as the track's peak.
+///
+/// Long enough that a single crash cymbal cannot speak for a record, short
+/// enough to sit inside one phrase of a club track — eight bars at 128.
+const PEAK_SECS: f64 = 15.0;
+
+/// The onset density of the loudest sustained stretch of a track.
+///
+/// The peak rather than the average, because what decides where a record sits
+/// in a crate is how hard it goes at its best, not how much of it is intro.
+/// Measured off the frames rather than off the detected sections, so a track
+/// with no grid — and therefore no sections — still gets a reading: not
+/// knowing where the bars are is no reason to claim not to know how busy it is.
+pub fn peak_intensity(features: &features::Features) -> f32 {
+    let density = &features.density;
+    if density.is_empty() {
+        return 0.0;
+    }
+    let window = ((PEAK_SECS * features.frame_rate).round() as usize).clamp(1, density.len());
+
+    // A running sum: the envelope of a long track is tens of thousands of
+    // frames, and this is asked for once per analysis, not per frame.
+    let mut sum: f64 = density[..window].iter().map(|&d| d as f64).sum();
+    let mut best = sum;
+    for start in 1..=density.len() - window {
+        sum += density[start + window - 1] as f64 - density[start - 1] as f64;
+        best = best.max(sum);
+    }
+    (best / window as f64) as f32
 }
 
 #[cfg(test)]
