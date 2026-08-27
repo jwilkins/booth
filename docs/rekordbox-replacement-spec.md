@@ -1,31 +1,96 @@
-# Booth — a functional specification for a rekordbox replacement
+# Booth — a rekordbox replacement
 
-*Working title. Draft 1, August 2026.*
+*Working title. Draft 2, August 2026. §1 and §2 are the pitch; §3 onwards is the
+specification behind it; §14 is what runs today, including what it gets wrong.*
 
-## 1. The thesis
+## 1. What this is
 
-Rekordbox is not loved. It is *load-bearing*. Every club in the world has CDJs behind
-the booth, a CDJ will only play a drive that has been prepared in a particular way, and
-rekordbox is the only program most DJs know that prepares one. The lock-in is not the
-software; it is the **on-drive format**. Everything else — the browser, the analysis, the
-subscription tiers, the cloud — rides along on that one dependency.
+Booth is a music library and a USB drive writer for CDJs. Import your collection, let
+it analyse, set your cues, write a stick, play the gig. It runs on your own machine,
+it costs nothing, and there is no account to make.
 
-So the product is not "a nicer rekordbox". The product is:
+Three reasons to use it instead of rekordbox.
 
-> **A library you own, and a drive writer you trust, that makes a CDJ-3000 do things
-> rekordbox cannot make it do.**
+### Stems on a standalone CDJ
 
-Two of those three are table stakes. The third is where this repository comes in. The
-CDJ-3000 has no stem separation at all in standalone mode — rekordbox's Track Separation
-lives in Performance mode, on a computer, and needs the computer to stay plugged in.
-`musicai` already separates a track into vocals / melody / drums locally, offline, with
-demucs, preserving sample alignment. Rendered ahead of time and written onto the drive as
-first-class tracks with the parent's beatgrid and cues, that gives a **standalone
-CDJ-3000 acapellas, instrumentals and drum tools with no computer in the booth** — a
-capability the flagship's own software does not offer on that hardware, and which Engine
-DJ shipped (pre-rendered, not real-time) to some acclaim.
+Load an acapella onto deck 2 with no laptop in the booth. Rekordbox's Track Separation
+runs in Performance mode with a computer plugged in, so a CDJ-3000 standing on its own
+has no stems — the flagship player cannot do the flagship trick.
 
-That is the wedge. The rest of this document is what has to be true around it.
+Booth separates tracks at home with demucs and writes the results onto the drive as
+ordinary tracks, each one inheriting its parent's beatgrid, phrases and hot cues
+unmodified. Hit the same cue letter on both decks and they are phase-locked, because
+both players are reading the same grid from the same analysis.
+
+That gets you acapellas, instrumentals, drum tools and long ambient blends on club
+hardware, prepared in advance. Engine DJ shipped exactly this and DJs took to it; it
+cannot touch a Pioneer player.
+
+### A drive that was checked before you left the house
+
+Rekordbox writes a stick and you find out how it went in front of an audience. In
+October 2025 a CDJ-3000 firmware update shipped that read only the newer database
+format, and DJs plugged in drives that had worked for years to be shown an empty
+screen — music still on the stick, playlists gone.
+
+Booth reads every drive back after writing it, using a parser that shares no code with
+the writer, and the sync sheet refuses to report success until that read passes.
+
+Files are checked twice. When one enters the library — the moment there is still time to
+do something about it — booth opens the real headers and says whether a player will take
+it: a container nothing opens, a protected purchase, 32-bit float samples out of a DAW, a
+sample rate above the 96 kHz ceiling. Then again before the copy, for the things only a
+drive can fail: paths longer than a player will follow, tracks with no beat grid, and
+whether what you are writing fits. Those rules are the CDJ-3000's, from AlphaTheta's own
+documentation; letting you name a different player and checking against *its* rules is
+EXP-3, and is not built yet.
+
+### A library that is yours
+
+Your collection lives in one plain file, and your audio stays where you already keep
+it. Nothing is stored in a shape that needs this program to read it, so you can sync it
+with any Dropbox, NAS or drive you already own and read it with ordinary tools. No
+feature is gated behind a licence check, nothing needs the network, and everything the
+window does the command line does too, with `--json` on every command. If this project
+stops being maintained tomorrow, your prep work is still readable.
+
+### What it will not do
+
+**It does not write a drive a CDJ-3000X will play.** The 3000X reads the OneLibrary
+database and does not fall back to the legacy one, and OneLibrary's schema has never
+been published. §4 sets out precisely where that stands, what is and is not in the
+way, and what would change it. If a 3000X is what the club puts in front of you, this
+is not your tool yet — and the current answer, writing the legacy drive here and
+handing off to free rekordbox for the last step, is clunky.
+
+There is also no video, no lighting, no DVS, no streaming-service integration and no
+cloud. Every one of those is a place rekordbox spends its engineering budget and its
+users' money, and none of them is why anyone opens a library program on a Tuesday
+afternoon.
+
+### Where it has got to
+
+The analysis, the library, the interface, the drive writer and the stem pipeline all
+run, and so does importing a rekordbox library. Drives are verified against an
+independent parser on every write. They have **not yet been played on a CDJ**, which is
+the one thing standing between this and a first release.
+
+Known gaps, so that nothing above reads as more finished than it is: a drive carries one
+playlist rather than a folder tree; the compatibility target is fixed at the CDJ-3000
+rather than chosen; the preflight does not yet check the filesystem or the folder limits;
+stem companions reach the drive but do not sort under their parents in the browse list;
+the beatgrid and key detectors have no measured accuracy figures against a labelled set;
+there is no play history and nothing reads a drive back after a gig; and the preview deck
+is one deck, not two. §14 is the detailed status and does not round up.
+
+### Why the lock-in exists at all
+
+Nobody picks rekordbox on the merits. A CDJ plays a drive only if it was prepared in a
+particular way, rekordbox is the program most DJs know that prepares one, and
+everything else it sells — the browser, the analysis, the subscription tiers, the
+cloud — rides on that single dependency. The lock-in is the **on-drive format**, not
+the software. Write the format and the rest is ordinary competition, which rekordbox
+has never had to face.
 
 ## 2. Scope
 
@@ -81,8 +146,8 @@ screen: music still on the stick, playlists gone. AlphaTheta suspended the firmw
 told venues to roll back to 3.20. Separately, 7.1.1 was reported to insert random time
 skips that shift an already-correct beatgrid.
 
-The lesson is not "AlphaTheta is careless". It is that **nobody verifies the drive
-before it goes to the gig**. The software writes, and the DJ finds out in front of an
+AlphaTheta's carelessness is not the interesting part. **Nobody verifies a drive
+before it goes to the gig** — the software writes, and the DJ finds out in front of an
 audience.
 
 → **The drive is verified by reading it back the way a player would** (SAFE-1..SAFE-5).
@@ -125,9 +190,9 @@ because we sync files and a plain-text-adjacent database, not a proprietary serv
 
 ### 3.6 The library tools are powerful and unpleasant
 
-My Tag, Intelligent Playlists, Related Tracks and phrase analysis are genuinely good
-ideas; the browser wrapped around them is, in one reviewer's phrase, "powerful but not
-always elegant". Intelligent Playlists cap at 1,000 tracks. Third-party plug-ins are not
+My Tag, Intelligent Playlists, Related Tracks and phrase analysis are good ideas; the
+browser wrapped around them is, in one reviewer's phrase, "powerful but not always
+elegant". Intelligent Playlists cap at 1,000 tracks. Third-party plug-ins are not
 supported at all, and there is no scripting surface. The most-quoted user review of
 rekordbox on AlternativeTo is four words long: "clunky, no customization".
 
@@ -155,8 +220,8 @@ DJs already pay Lexicon for.
 
 ## 4. The constraint: how a CDJ actually reads a drive
 
-Everything in §5 onwards is ordinary software. This section is the part that decides
-whether the project is possible at all, so it comes first.
+Everything from §5 onwards is ordinary software. This section decides whether the
+project is possible, so it comes first.
 
 A prepared drive is a `/PIONEER/` (and now `/CONTENTS/`) tree containing a database of
 tracks and playlists, plus one analysis file per track holding the beatgrid, cues and
@@ -168,13 +233,12 @@ waveforms. There are three generations of that database:
 | **Device Library Plus** | `exportLibrary.db` | **Encrypted** SQLite | No | OPUS-QUAD and later |
 | **OneLibrary** | Device Library Plus, rebranded and opened to partners | Encrypted SQLite | **No** — spec not public | CDJ-3000X, CDJ-1500X, XDJ-AZ, XDJ-AN, OPUS-QUAD, OMNIS-DUO; djay Pro and rekordbox write it, Traktor announced |
 
-Three things about that table are worth stating flatly, because all three are
-easy to assume the other way round.
+Three things about that table are easy to assume the wrong way round.
 
 **For the newer formats, encryption is not the blocker — the schema is.** Both
 `master.db` and `exportLibrary.db` are SQLCipher, and for both the key is fixed
-rather than machine- or licence-dependent, which means neither is a
-cryptographic obstacle at all: `pyrekordbox` reads `master.db` routinely, and
+rather than machine- or licence-dependent, so neither is a cryptographic
+obstacle: `pyrekordbox` reads `master.db` routinely, and
 the `exportLibrary.db` key has been recovered and published as well (it is
 stored obfuscated rather than derived — Base85 over an XOR blob). What is
 missing for OneLibrary is the **schema**: which tables, which columns, which
@@ -185,8 +249,8 @@ None of that is published, and as of this writing nobody has demonstrated an
 That distinction decides the roadmap. Being able to *open* an
 `exportLibrary.db` that rekordbox wrote is the first step of the reverse
 engineering, not the end of it — the same position `export.pdb` was in before
-someone did the work. Support for a player is demonstrated by a player playing
-a drive, and until that has happened, having the key is a beginning.
+someone did the work. A player is supported when a player plays the drive.
+Until then, holding the key is a start and nothing more.
 
 **The CDJ-3000X does not fall back to a legacy drive.** AlphaTheta's own
 compatibility notice lists Device Library as "–" for the CDJ-3000X, and the
@@ -242,7 +306,7 @@ against *that player's* rules, not against ours.
   here and has to be said out loud to anyone who buys into the project.
 - **v1 offers an interoperability escape hatch for OneLibrary hardware**: write the
   legacy database, then hand off to rekordbox (which is free in Export mode) or djay to
-  produce the OneLibrary database from it. Clunky, honest, and it works on day one.
+  produce the OneLibrary database from it. Clunky, and it works on day one.
 - **A OneLibrary writer is a phase-2 deliverable contingent on a licence.** It is
   tracked as a risk in §12, not as a promise.
 
@@ -261,8 +325,8 @@ From AlphaTheta's own documentation and the CDJ-3000 specifications:
   is known to survive and say so at export time rather than silently truncating.
 - SD, where present, is limited to 32 GB.
 
-These are not trivia. Every one of them is a way for a drive to look correct on the
-laptop and fail in the booth, and every one of them is checked in SAFE-2.
+Every one of these is a way for a drive to look correct on the laptop and fail in the
+booth, and every one is checked in SAFE-2.
 
 ## 5. Principles
 
@@ -277,7 +341,7 @@ laptop and fail in the booth, and every one of them is checked in SAFE-2.
    was corrected.
 5. **Slow work runs in the background and survives being interrupted.** Stem separation
    is minutes per track. It queues, it resumes, it never blocks browsing.
-6. **Do not become the thing.** No subscription tiering of features, no cloud that owns
+6. **Do not become rekordbox.** No subscription tiering of features, no cloud that owns
    the library, no mode split.
 
 ## 6. The user interface
@@ -313,7 +377,7 @@ the words mean.
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Four things about that layout are deliberate.
+Four choices in that layout carry the weight.
 
 **The command bar is the search.** One field, always focused on `⌘K`, taking a query
 language rather than a set of dropdowns (§6.3). Everything the browser can filter by is
@@ -584,9 +648,9 @@ exactly what this codebase already does, plus a drive writer.
 
 Real-time separation on the player is impossible without AlphaTheta implementing it, and
 this spec does not pretend otherwise. If you did not prepare a companion, you do not have
-one. That is a genuine step down from Serato or VirtualDJ on a laptop, and the honest
-positioning is "stems on club hardware, prepared in advance" — the same trade Engine DJ
-makes, on the hardware Engine DJ cannot touch.
+one. That is a step down from Serato or VirtualDJ on a laptop, and the claim is
+narrower than theirs: stems on club hardware, prepared in advance. It is the trade
+Engine DJ makes, on the hardware Engine DJ cannot touch.
 
 ## 9. Architecture
 
@@ -620,7 +684,7 @@ pipeline, and a job model in `gui/src/job.rs` that already runs long work off th
 thread with cancellation. The parts that do not exist are the library, the analysis
 (beatgrid, key, phrase, waveforms) and the drive writer.
 
-Two dependency decisions worth stating now:
+Two dependency decisions:
 
 - **`rekordcrate` for `export.pdb`.** It is Rust, it models the tables the players need,
   and it implements `BinWrite` as well as `BinRead`. Where it does not cover a table we
@@ -650,9 +714,9 @@ Two dependency decisions worth stating now:
 | Cost | $10–$36 / month | subscription | free with hardware | **perpetual / open** |
 | Lighting, video, DVS, streaming | ✅ | ✅ | partial | **❌ — deliberately** |
 
-The honest reading of that table: rekordbox wins on breadth of ecosystem features and on
-OneLibrary hardware until phase 2 lands. We win on everything a DJ does between buying a
-track and playing it.
+Read that table plainly: rekordbox wins on breadth of ecosystem features, and on
+OneLibrary hardware until phase 2 lands. Booth wins on everything a DJ does between
+buying a track and playing it.
 
 ## 11. Roadmap
 
@@ -688,7 +752,7 @@ export format).
 | **Legal pressure** over format interoperability. | Medium. | Reading and writing a file format for interoperability is well-trodden ground and the format documentation is already public and long-standing. Ship no AlphaTheta code, no circumvention of a technical protection measure on copyrighted works, and take advice before touching OneLibrary's encryption. |
 | **A bad drive at a gig destroys trust instantly.** | High. | This is the entire justification for §7.5. The product's promise is reliability; one silent failure costs more than any feature gains. |
 | **Beatgrid and key quality are hard**, and DJs are unforgiving. | Medium-high. | Ship measured accuracy figures against hand-labelled sets (ANA-2, ANA-4), make editing fast enough that imperfection is survivable, and allow third-party analysers (INTEROP-4). |
-| **Stem rendering is slow and large.** | Medium. | Per-playlist opt-in, GPU support, honest time and size estimates before the queue starts (STEM-10, STEM-11). |
+| **Stem rendering is slow and large.** | Medium. | Per-playlist opt-in, GPU support, real time and size estimates before the queue starts (STEM-10, STEM-11). |
 | **The audience is small and conservative.** | Medium. | Win on the drive first. A tool that only replaces the export step, and does it more safely, is already worth using — the library replaces rekordbox afterwards, not on day one. |
 
 ## 13. Open questions
@@ -712,8 +776,35 @@ export format).
 
 ## 14. Development status
 
-Phase 0 is nearly done: a drive can be written, and the tracks on it are analysed rather
-than described by hand. What exists:
+*Current as of August 2026.*
+
+Phase 0 is nearly done: a drive can be written, the tracks on it are analysed rather than
+described by hand, and there is a window to do the preparing in. What is left of it is a
+player — every drive so far has been checked by a parser, which is not the same as being
+played by a CDJ.
+
+| Area | State |
+|---|---|
+| Analysis — tempo, grid, downbeat, key, structure, cues (ANA-1..5) | Runs on real audio, seconds a track. No accuracy figures against a labelled set yet. |
+| Waveforms, all five packings including the 3-band (ANA-6) | Written and read back. Not yet seen on a player. |
+| Loudness and true peak (ANA-7) | Done, from the existing `src/loudness.rs`. |
+| Drive writer — `export.pdb`, ANLZ, disk image (EXP-1) | Writes; verified by an independent parser; **unverified on hardware**. One playlist per drive — the folder tree of §6 is not exported yet. |
+| Delta sync and preflight (EXP-2, SAFE-2) | Done, and the file checks run at import as well as at write. |
+| Medium checks (SAFE-3) | Free space and path length only. Filesystem type, folder depth and per-folder file counts are not checked. |
+| Compatibility target (EXP-3) | Not built. The rules are the CDJ-3000's, in `src/compat.rs`, and are not yet selectable. |
+| Read-back verification (SAFE-1) | Done, by readers that share no code with the writers. |
+| The library and query language (LIB-1..5) | Done, and saved queries are smart playlists with no cap — but the store is a JSON document, where LIB-1 asks for SQLite under a published schema. It is readable without this program either way; the swap is still owed. |
+| The window (§6) | One window, query bar, browser, prep editor, dock. Built. |
+| Preparation — cues, tags, ratings, bulk and per-track (PREP-1..5) | Done, bar user-chosen cue colours. |
+| Preview deck (PREP-6) | One deck, not two. Enough to audition and set cues. |
+| Stems, rendered and playable (STEM-1..3, 7, 11, 12) | Done, in the window and on the drive, inheriting the parent's analysis. Browse-list adjacency (STEM-8), quality scoring (STEM-6) and the drive's loudness pass (STEM-4, STEM-5) are not. |
+| rekordbox import (INTEROP-1) | Done, from the encrypted `master.db`. |
+| OneLibrary (INTEROP-5, EXP-3 for the 3000X) | Reads and dumps a schema. Writes nothing. |
+| Serato, Traktor, Engine DJ (INTEROP-2) | Not started. |
+| Play history and booth round-trip (HIST-1..3) | Not started. |
+| Plug-in interface (INTEROP-4) | Not started. |
+
+The rest of this section is what that consists of.
 
 **`src/export/`** — the drive.
 
@@ -755,13 +846,41 @@ offline, and every decision visible.
   keys, reported as Camelot and classical with a confidence. `Key::parse` reads the
   notations a library stores, both for measuring against one and, later, for importing one.
 
-**Commands.** `musicai export` builds the drive and `musicai anlz` writes one track's
-analysis; both listen to the audio, and both read back what they wrote before reporting
-success. `--bpm` is an override rather than a requirement — and it overrides the *tempo*,
+**Commands.** `musicai export` builds the drive, `musicai anlz` writes one track's
+analysis, and `musicai rekordbox read` and `rekordbox schema` open the two encrypted
+databases; the first two listen to the audio, and both read back what they wrote before
+reporting success. `--bpm` is an override rather than a requirement — and it overrides the *tempo*,
 not the grid, so the beats stay tracked against the audio.
 
 **Cross-checks** against `rekordcrate`, an independent implementation of both formats,
 because our own reader agreeing with our own writer proves nothing.
+
+**`src/rekordbox/`** — the other library, INTEROP-1 and the first step of INTEROP-5.
+
+- **`master.rs`** — rekordbox 6 and 7's own collection, which is a SQLite file encrypted
+  with SQLCipher under a key that is fixed rather than derived from the machine or the
+  licence. Tracks, the playlist tree, grids, hot cues, keys, ratings, play counts and My
+  Tags all come across. Every column is looked up rather than assumed, because the schema
+  moved between 6 and 7 and will move again: a library that arrives without colours is
+  worth having; one that refuses to arrive because a column was renamed is not.
+- The merge never overwrites. Tracks are matched by path — the only thing two libraries
+  share — and what comes across is what is missing here. Where this program has
+  measured something itself, that measurement stays, because it is the one the waveform
+  was drawn from and the cues were placed against. Play counts, My Tags and the star
+  rating have no local equivalent and are taken whenever rekordbox holds more of them.
+  Importing the same library twice changes nothing the second time, which is a test.
+- **The key is not bundled.** There is a constant to compile one into and the reasoning is
+  written beside it; otherwise it is read from Settings or `REKORDBOX_KEY`, and the tool
+  says where to get one rather than failing obscurely.
+- **`onelibrary.rs`** — opens an `exportLibrary.db` and prints its tables, columns and row
+  counts, and that is all it does. Its key is public too, so the encryption was never what
+  stood in the way; the schema is, and this is where learning it starts. It is not player
+  support and §4 says why.
+
+`tests/rekordbox_library.rs` and `tests/rekordbox_database.rs` build real SQLCipher
+fixtures rather than mocking one: written encrypted, closed, and reopened through the path
+a real library takes — including that plain SQLite cannot read them and that a wrong key
+is refused.
 
 **`booth/`** — §6's interface, as its own program rather than a mode of the batch tool.
 One window: the query bar across the top, the collection down the left, the browser with
@@ -830,8 +949,29 @@ about the music and lying about the drive.
   machine with no sound card still gets a library — the transport says so and everything
   else works.
 
-What the interface does *not* yet do: a play history, importing an existing rekordbox
-library, choosing cue colours, or a second deck to mix against.
+- **Stems, in the window.** `S` on a selection queues the separation; companion rows
+  appear beneath their parents in the browser and play — an acapella is the vocal stem, an
+  instrumental is the melody and drum stems summed as it loads, because the separator
+  writes parts and never a mix of some of them. Stems are written beside their track by
+  default (`Sirens.flac` yields `Sirens-vocals.mp3`) so that copying a folder takes the kit
+  with it; the single-folder layout stays for a library on a small disk. Both places are
+  searched whichever is set, because a kit is minutes of work and changing a preference
+  must not look like a delete.
+
+- **Per-track actions.** Analyse, identify and separate each have a single-track twin —
+  three buttons in the prep editor, a right-click menu on every row — calling what the
+  batch calls rather than reimplementing it, since two implementations is how a
+  re-analysis comes to disagree with a first one.
+
+- **Playability, checked at import.** A container nothing opens, 32-bit float, above
+  96 kHz and DRM are caught when the file arrives rather than when the drive is written,
+  because import is the moment there is still time to do something about it. Conversion
+  writes a FLAC beside the original and repoints the collection at it, never touching what
+  it was made from, and is offered only where it would work. M4A files carry their tags
+  both ways now, and a file that will not parse says which kind of not-parsing it is.
+
+What the interface does *not* yet do: a play history, reading edits back off a drive after
+a gig, choosing cue colours by hand, or a second deck to mix against.
 
 ### What the first pass turned up
 
@@ -858,7 +998,7 @@ On a synthetic hundred-second arrangement at 126 BPM, with the drums entering at
 dropping out at 24 for a vocal breakdown, returning at 32, and a second vocal at 48, the
 detector reports 126.05 BPM and cues at 0.02 s (intro), 15.23 s (drop), 45.71 s (break),
 60.94 s (drop) and 91.43 s (vocal) — every boundary on the correct bar. That is a
-synthetic track and a favourable one; the honest limits are:
+synthetic track and a favourable one. The limits:
 
 - **Vocals are inferred, not separated.** Centred energy in the vocal band finds a sung
   line over a wide backing and also fires on a centred lead. The stems would answer it
@@ -884,7 +1024,7 @@ guest mounts partition 1 as FAT32 at `/media/usb/sdb1`, which is exactly what we
 write.
 
 It is not a substitute for the real thing and it does not remove the hardware
-requirement, for three reasons worth writing down:
+requirement, for three reasons:
 
 - **Apple Silicon macOS only.** HVF, vmnet and CoreAudio. There is no Linux build, so it
   cannot run in CI, and the checks that gate a merge stay the parser-based ones.
@@ -894,15 +1034,18 @@ requirement, for three reasons worth writing down:
   recreation. A drive it accepts is strong evidence; a drive a CDJ accepts is proof.
 
 What it can settle that nothing else here can: whether the database is browsable, whether
-the three-band waveform draws, whether phrases appear under it, and — the one genuinely
-open question in the format — whether a cue point written as type 1 shows up at all.
+the three-band waveform draws, whether phrases appear under it, and — the one open
+question left in the format — whether a cue point written as type 1 shows up at all.
 
 ### Next
 
 1. A player, emulated or real. Everything here is checked against a parser, which is not
    the same as checked against a CDJ, and closing that gap is what is left of phase 0.
 2. Accuracy run over a real library — the harness exists (`examples/eval.rs`); it needs
-   the audio, which means running it on the machine the library lives on.
+   the audio, which means running it on the machine the library lives on. ANA-2 and ANA-4
+   are the only requirements here stated as numbers, and the numbers are still unmeasured.
+3. Stem quality scoring (STEM-6) and the drive's own loudness pass (STEM-4, STEM-5), which
+   are what separate a rendered kit from one that is safe to play loud.
 
 ## 15. Sources
 
