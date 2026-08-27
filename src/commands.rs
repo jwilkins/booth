@@ -1428,6 +1428,94 @@ fn elide(text: &str, width: usize) -> String {
     }
 }
 
+// -- rekordbox's own libraries ---------------------------------------------
+
+/// Find the database somebody meant, given a path that may be either the file
+/// or the drive it sits on.
+fn rekordbox_database(path: &Path) -> Result<PathBuf> {
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(found) = crate::rekordbox::onelibrary::find(path) {
+        return Ok(found);
+    }
+    for candidate in ["master.db", "rekordbox/master.db"] {
+        let joined = path.join(candidate);
+        if joined.is_file() {
+            return Ok(joined);
+        }
+    }
+    bail!("no rekordbox database under {}", path.display())
+}
+
+pub fn rekordbox(args: &crate::cli::RekordboxCommand, reporter: &dyn Reporter) -> Result<()> {
+    use crate::cli::RekordboxCommand;
+    use crate::report::Event;
+
+    let (args, schema_only) = match args {
+        RekordboxCommand::Read(args) => (args, false),
+        RekordboxCommand::Schema(args) => (args, true),
+    };
+    let path = rekordbox_database(&args.path)?;
+    let key = crate::rekordbox::resolve(args.key.as_deref())?;
+    let connection = crate::rekordbox::open(&path, &key)?;
+    reporter.event(Event::Heading(format!("{}", path.display())));
+
+    if schema_only {
+        let shapes = crate::rekordbox::onelibrary::describe(&connection)?;
+        for line in crate::rekordbox::onelibrary::report(&shapes).lines() {
+            reporter.event(Event::Line(line.to_string()));
+        }
+        return Ok(());
+    }
+
+    // A OneLibrary drive is a different schema, and reading it as a master.db
+    // would report an empty library rather than the wrong one — which is worse,
+    // because an empty answer looks like an answer.
+    let tables = crate::rekordbox::tables(&connection)?;
+    if !tables.iter().any(|(name, _)| name == "djmdContent") {
+        reporter.event(Event::Summary(
+            "this is not a rekordbox master.db. If it is a OneLibrary drive, its schema is \
+             not published and nothing here can read it as a library yet — `rekordbox schema` \
+             will describe it."
+                .into(),
+        ));
+        return Ok(());
+    }
+
+    let collection = crate::rekordbox::master::read(&connection)?;
+    reporter.event(Event::Line(format!(
+        "{} tracks, {} playlists",
+        collection.tracks.len(),
+        collection.playlists.len()
+    )));
+    for track in &collection.tracks {
+        let mut line = format!("{} — {}", track.artist, track.title);
+        if track.bpm > 0.0 {
+            line.push_str(&format!("  {:.2}", track.bpm));
+        }
+        if !track.key.is_empty() {
+            line.push_str(&format!("  {}", track.key));
+        }
+        if !track.cues.is_empty() {
+            line.push_str(&format!("  {} cues", track.cues.len()));
+        }
+        reporter.event(Event::Line(line));
+    }
+    for playlist in &collection.playlists {
+        let where_ = match playlist.folder.is_empty() {
+            true => playlist.name.clone(),
+            false => format!("{}/{}", playlist.folder, playlist.name),
+        };
+        reporter.event(Event::Line(format!(
+            "playlist {where_} ({} tracks){}",
+            playlist.track_ids.len(),
+            if playlist.was_smart { " — was smart" } else { "" }
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

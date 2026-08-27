@@ -219,6 +219,94 @@ impl Track {
         }
     }
 
+    /// Take from a rekordbox record whatever this one does not already have.
+    ///
+    /// The rule throughout is that nothing already here is overwritten.
+    /// rekordbox's opinion of a file is not better for being older, and where
+    /// this program has measured something itself, that measurement is the one
+    /// the waveform was drawn from and the cues were placed against — half of
+    /// each would be worse than either. What comes across is what is *missing*.
+    ///
+    /// Returns whether anything changed.
+    pub fn fill_from(&mut self, from: &musicai::rekordbox::master::Track) -> bool {
+        let track = self;
+        let mut touched = false;
+        let fill = |into: &mut String, value: &str| {
+            if into.trim().is_empty() && !value.trim().is_empty() {
+                *into = value.trim().to_string();
+                return true;
+            }
+            false
+        };
+        touched |= fill(&mut track.artist, &from.artist);
+        touched |= fill(&mut track.album, &from.album);
+        // A title is never empty here — the scan falls back to the file name —
+        // so it is only replaced when this one is still that fallback.
+        let untitled = track.title.trim().is_empty()
+            || track.path.file_stem().is_some_and(|stem| *stem == *track.title);
+        if untitled && !from.title.trim().is_empty() {
+            track.title = from.title.trim().to_string();
+            touched = true;
+        }
+        if track.year.is_none() {
+            track.year = from.year;
+            touched |= from.year.is_some();
+        }
+
+        // Taken only when there is no grid here at all. Keyed on the grid
+        // rather than on whether this program has analysed the file, for two
+        // reasons: analysing and finding no beat leaves a track that would
+        // rather have rekordbox's grid than none, and keying on `analyzed`
+        // means the condition is still true after the grid has been taken —
+        // so a second import would report a change it did not make.
+        if !track.has_grid && from.bpm > 0.0 {
+            track.bpm = from.bpm;
+            track.has_grid = true;
+            touched = true;
+        }
+        if track.key.trim().is_empty() && !from.key.trim().is_empty() {
+            track.key = from.key.trim().to_string();
+            touched = true;
+        }
+        if track.cues.is_empty() && !from.cues.is_empty() {
+            track.cues = from
+                .cues
+                .iter()
+                .map(|cue| CueMark {
+                    letter: cue.letter,
+                    time_ms: cue.time_ms,
+                    label: cue.label.clone(),
+                    color: crate::job::cue_color(cue.letter),
+                })
+                .collect();
+            touched = true;
+        }
+
+        // These have no equivalent anywhere else, so they are taken whenever
+        // rekordbox has more of them: a play count is a fact about history
+        // that this program was not around for.
+        if from.play_count > track.play_count {
+            track.play_count = from.play_count;
+            touched = true;
+        }
+        for tag in &from.my_tags {
+            if !track.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                track.tags.push(tag.clone());
+                touched = true;
+            }
+        }
+        if from.rating > 0 {
+            let star = format!("{}\u{2605}", from.rating);
+            if !track.tags.contains(&star) {
+                track.tags.push(star);
+                touched = true;
+            }
+        }
+        track.tags.sort();
+        track.tags.dedup();
+        touched
+    }
+
     /// The file or files this row is actually made of.
     ///
     /// A track is its own file. An acapella is one stem. An instrumental is two
@@ -734,6 +822,117 @@ mod tests {
         // A companion carries the parent's grid, because it is the same audio.
         assert_eq!(companions[0].bpm, track.bpm);
         assert_eq!(companions[0].parent, Some(id));
+    }
+
+    fn rekordbox_track() -> musicai::rekordbox::master::Track {
+        musicai::rekordbox::master::Track {
+            id: "c1".into(),
+            path: "/music/a.flac".into(),
+            artist: "Peverelist".into(),
+            title: "Roll With The Punches".into(),
+            album: "Livity Sound".into(),
+            genre: "Techno".into(),
+            year: Some(2019),
+            bpm: 128.02,
+            key: "8A".into(),
+            rating: 4,
+            comment: "peak".into(),
+            play_count: 17,
+            duration_secs: 372.0,
+            cues: vec![musicai::rekordbox::master::Cue {
+                letter: 1,
+                time_ms: 30_000,
+                label: "drop".into(),
+            }],
+            my_tags: vec!["peak time".into()],
+        }
+    }
+
+    #[test]
+    fn an_import_fills_in_what_is_missing_and_nothing_else() {
+        let mut track = Track::placeholder(1);
+        track.path = "/music/a.flac".into();
+        assert!(track.fill_from(&rekordbox_track()));
+
+        assert_eq!(track.artist, "Peverelist");
+        assert_eq!(track.title, "Roll With The Punches");
+        assert_eq!(track.album, "Livity Sound");
+        assert_eq!(track.year, Some(2019));
+        assert_eq!(track.key, "8A");
+        assert!((track.bpm - 128.02).abs() < 1e-9);
+        assert!(track.has_grid);
+        assert_eq!(track.play_count, 17);
+        assert_eq!(track.cues.len(), 1);
+        assert_eq!(track.cues[0].letter, 1);
+        assert_eq!(track.cues[0].time_ms, 30_000);
+        // My Tags become tags, and a rating becomes one too — this program has
+        // no stars, and losing them entirely would be worse than a tag.
+        assert!(track.tags.contains(&"peak time".to_string()));
+        assert!(track.tags.iter().any(|t| t.starts_with('4')), "{:?}", track.tags);
+    }
+
+    #[test]
+    fn an_import_never_overwrites_work_already_done_here() {
+        let mut track = Track::placeholder(1);
+        track.path = "/music/a.flac".into();
+        track.artist = "Someone Else".into();
+        track.title = "A Better Title".into();
+        track.key = "3A".into();
+        track.year = Some(2001);
+        // Measured here, which is the case that matters: the grid on screen and
+        // the cues placed against it have to stay one thing.
+        track.analyzed = true;
+        track.has_grid = true;
+        track.bpm = 174.0;
+        track.cues = vec![CueMark {
+            letter: 1,
+            time_ms: 1_234,
+            label: "mine".into(),
+            color: [1, 2, 3],
+        }];
+
+        track.fill_from(&rekordbox_track());
+
+        assert_eq!(track.artist, "Someone Else");
+        assert_eq!(track.title, "A Better Title");
+        assert_eq!(track.key, "3A");
+        assert_eq!(track.year, Some(2001));
+        assert_eq!(track.bpm, 174.0, "an analysed grid is not replaced");
+        assert_eq!(track.cues.len(), 1);
+        assert_eq!(track.cues[0].time_ms, 1_234, "cues already placed are kept");
+        // The things it has no other way to know still come across.
+        assert_eq!(track.play_count, 17);
+        assert!(track.tags.contains(&"peak time".to_string()));
+    }
+
+    #[test]
+    fn a_grid_is_taken_only_when_nothing_here_has_measured_one() {
+        // Not analysed: rekordbox's grid is better than no grid.
+        let mut track = Track::placeholder(1);
+        assert!(track.fill_from(&rekordbox_track()));
+        assert!((track.bpm - 128.02).abs() < 1e-9);
+        assert!(track.has_grid);
+    }
+
+    #[test]
+    fn a_title_that_is_only_the_file_name_is_not_an_answer() {
+        // The scan titles an untagged file after itself. That is a placeholder,
+        // and rekordbox knowing better is the whole point of importing.
+        let mut track = Track::placeholder(1);
+        track.path = "/music/01 - track.flac".into();
+        track.title = "01 - track".into();
+        track.fill_from(&rekordbox_track());
+        assert_eq!(track.title, "Roll With The Punches");
+    }
+
+    #[test]
+    fn importing_the_same_library_twice_changes_nothing_the_second_time() {
+        let mut track = Track::placeholder(1);
+        track.path = "/music/a.flac".into();
+        assert!(track.fill_from(&rekordbox_track()));
+        let once = track.clone();
+        assert!(!track.fill_from(&rekordbox_track()), "the second pass has nothing to do");
+        assert_eq!(track, once, "and it changed nothing");
     }
 
     #[test]

@@ -30,6 +30,7 @@ fn run() -> Result<()> {
         Some(Command::Run(args)) => commands::run(args, &reporter),
         Some(Command::Stems(args)) => commands::stems(args, &reporter),
         Some(Command::Tag(args)) => commands::tag(args, &reporter),
+        Some(Command::Rekordbox(command)) => commands::rekordbox(command, &reporter),
         // No subcommand: the paths given are a pipeline run.
         None => commands::run(&cli.run, &reporter),
     }

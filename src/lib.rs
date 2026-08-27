@@ -14,6 +14,7 @@ pub mod dsp;
 pub mod export;
 pub mod loudness;
 pub mod normalize;
+pub mod rekordbox;
 pub mod report;
 pub mod stems;
 pub mod tag;

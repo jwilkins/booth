@@ -56,6 +56,34 @@ pub enum Command {
     Stems(StemsArgs),
     /// Identify files by sound and write metadata tags from MusicBrainz.
     Tag(TagArgs),
+    /// Read rekordbox's own encrypted libraries.
+    #[command(subcommand)]
+    Rekordbox(RekordboxCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RekordboxCommand {
+    /// List what is in a rekordbox library, without changing anything.
+    ///
+    /// Point it at `master.db` from a rekordbox installation, or at a mounted
+    /// OneLibrary drive.
+    Read(RekordboxArgs),
+    /// Describe the tables of a database, for a format nobody has published.
+    ///
+    /// This is how the OneLibrary schema gets learned. It reads; it does not
+    /// write a drive, and having the key does not make it able to.
+    Schema(RekordboxArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct RekordboxArgs {
+    /// The `master.db`, the `exportLibrary.db`, or the drive holding one.
+    pub path: PathBuf,
+
+    /// The SQLCipher key. Defaults to `REKORDBOX_KEY`, then to whatever this
+    /// build was compiled with.
+    #[arg(long, value_name = "HEX")]
+    pub key: Option<String>,
 }
 
 /// One step of the pipeline.

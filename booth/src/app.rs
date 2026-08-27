@@ -300,6 +300,8 @@ struct Row {
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Picking {
     Music,
+    /// A rekordbox `master.db`, or the folder holding one.
+    Rekordbox,
     Drive,
     Image,
     LibraryFolder,
@@ -724,6 +726,123 @@ impl App {
         }
     }
 
+    // -- rekordbox -------------------------------------------------------
+
+    fn import_rekordbox(&mut self, path: PathBuf) {
+        let key = match musicai::rekordbox::resolve(self.config.rekordbox_key()) {
+            Ok(key) => key,
+            Err(e) => {
+                crate::warn!("{e:#}");
+                self.note(format!("{e:#}"), theme::AMBER);
+                return;
+            }
+        };
+        crate::info!("reading {}", path.display());
+        self.start(Job::Rekordbox { path, key });
+    }
+
+    /// Merge a rekordbox library into the collection.
+    ///
+    /// Matched by file path, because that is the only thing the two libraries
+    /// genuinely share — an id means nothing across them, and matching on
+    /// artist and title would merge two versions of a record.
+    ///
+    /// Nothing already here is overwritten. A track this program has analysed
+    /// has a grid it measured itself, and rekordbox's opinion of the same file
+    /// is not better for being older; what comes across is what is *missing* —
+    /// names on an untitled file, cues where there are none, the play count and
+    /// the rating and the My Tags, which this program has no other way to know.
+    /// Files rekordbox knows about that are not here yet are added.
+    fn merge_rekordbox(&mut self, collection: &musicai::rekordbox::master::Collection) -> String {
+        use std::collections::HashMap;
+
+        let mut by_path: HashMap<PathBuf, u32> =
+            self.library.tracks.iter().map(|t| (t.path.clone(), t.id)).collect();
+
+        let mut added = 0usize;
+        let mut filled = 0usize;
+        let mut missing = 0usize;
+        // rekordbox id to this collection's id, so the playlists can be
+        // rebuilt afterwards.
+        let mut ours: HashMap<String, u32> = HashMap::new();
+
+        for track in &collection.tracks {
+            let id = match by_path.get(&track.path) {
+                Some(id) => *id,
+                None => {
+                    // A path rekordbox has and this does not. It is still worth
+                    // adding: a track whose file has moved is a track to go
+                    // looking for, and it carries all its prep with it.
+                    if !track.path.exists() {
+                        missing += 1;
+                    }
+                    let id = self.library.add(&track.path);
+                    by_path.insert(track.path.clone(), id);
+                    added += 1;
+                    id
+                }
+            };
+            ours.insert(track.id.clone(), id);
+            if self.library.get_mut(id).is_some_and(|into| into.fill_from(track)) {
+                filled += 1;
+            }
+        }
+
+        let playlists = self.merge_rekordbox_playlists(collection, &ours);
+
+        crate::info!(
+            "rekordbox: added {added}, filled in {filled}, {playlists} playlists, \
+             {missing} whose files are not where rekordbox left them"
+        );
+        let mut said = format!(
+            "rekordbox: {} added, {} filled in, {}",
+            added,
+            filled,
+            plural(playlists, "playlist")
+        );
+        if missing > 0 {
+            said.push_str(&format!(" · {missing} files not where rekordbox left them"));
+        }
+        said
+    }
+
+    /// Bring the playlists across, keeping their folders.
+    fn merge_rekordbox_playlists(
+        &mut self,
+        collection: &musicai::rekordbox::master::Collection,
+        ours: &std::collections::HashMap<String, u32>,
+    ) -> usize {
+        let mut brought = 0;
+        for playlist in &collection.playlists {
+            let tracks: Vec<u32> =
+                playlist.track_ids.iter().filter_map(|id| ours.get(id).copied()).collect();
+            if tracks.is_empty() {
+                continue;
+            }
+            // A playlist of the same name in the same folder is the same
+            // playlist, and re-importing must not leave two of it.
+            let existing = self.library.playlists.iter_mut().find(|p| {
+                p.name == playlist.name && p.folder == playlist.folder
+            });
+            match existing {
+                Some(found) => {
+                    for id in tracks {
+                        if !found.tracks.contains(&id) {
+                            found.tracks.push(id);
+                        }
+                    }
+                }
+                None => self.library.playlists.push(crate::library::Playlist {
+                    name: playlist.name.clone(),
+                    folder: playlist.folder.clone(),
+                    tracks,
+                }),
+            }
+            brought += 1;
+        }
+        brought
+    }
+
     /// Re-encode these into a format the hardware opens.
     fn convert_tracks(&mut self, ids: &[u32]) {
         let waiting: Vec<job::Convertible> = self
@@ -855,6 +974,11 @@ impl App {
                         // depending on it.
                         track.path = to;
                     }
+                    changed = true;
+                }
+                Update::Rekordbox(collection) => {
+                    let brought = self.merge_rekordbox(&collection);
+                    self.note(brought, theme::GO);
                     changed = true;
                 }
                 Update::Converted { id, to } => {
@@ -3294,6 +3418,43 @@ impl App {
                 );
 
                 ui.add_space(14.0);
+                pane_label(ui, "rekordbox");
+                ui.label(
+                    RichText::new(
+                        "rekordbox keeps its library in an encrypted SQLite file. The key is \
+                         the same on every installation; this build does not carry one. \
+                         `python -m pyrekordbox download-key` prints it, or leave this blank \
+                         and set REKORDBOX_KEY.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+                let mut key = self.config.rekordbox_key.clone();
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut key)
+                            .desired_width(ui.available_width())
+                            .hint_text("SQLCipher key")
+                            .password(true)
+                            .font(theme::mono(11.0)),
+                    )
+                    .changed()
+                {
+                    self.config.rekordbox_key = key.trim().to_string();
+                    changed = true;
+                }
+                if ui
+                    .button("Import a rekordbox library")
+                    .on_hover_text(
+                        "Reads master.db. Nothing already here is overwritten — what comes \
+                         across is what is missing, plus the playlists.",
+                    )
+                    .clicked()
+                {
+                    self.want_pick = Some(Picking::Rekordbox);
+                }
+
+                ui.add_space(14.0);
                 pane_label(ui, "Where stems go");
                 for where_ in [crate::config::StemsIn::Beside, crate::config::StemsIn::Folder] {
                     if ui.radio_value(&mut self.config.stems_in, where_, where_.label()).changed() {
@@ -3773,6 +3934,15 @@ impl App {
                         .map(|f| f.path().to_path_buf())
                         .collect()
                 }
+                Picking::Rekordbox => block_on(
+                    dialog
+                        .set_title("rekordbox master.db")
+                        .add_filter("rekordbox library", &["db"])
+                        .pick_file(),
+                )
+                .into_iter()
+                .map(|f| f.path().to_path_buf())
+                .collect(),
                 Picking::Image => block_on(
                     dialog
                         .set_title("Write the drive image to")
@@ -3797,6 +3967,11 @@ impl App {
 
         match what {
             Picking::Music if !paths.is_empty() => self.import(paths),
+            Picking::Rekordbox => {
+                if let Some(path) = paths.into_iter().next() {
+                    self.import_rekordbox(path);
+                }
+            }
             Picking::Drive => {
                 if let Some(path) = paths.into_iter().next() {
                     self.add_drive(path, false);

@@ -296,6 +296,51 @@ on a small disk and stems on a big one. Both places are searched whichever is
 set, so changing the setting never makes a rendered kit disappear — it is
 minutes of work a track, and a preference must not look like a delete.
 
+## Importing a rekordbox library
+
+rekordbox keeps its library in `master.db`, a SQLCipher-encrypted SQLite file.
+The key is the same on every installation — it is not derived from your machine
+or your licence — so this is a matter of having it, not of breaking anything.
+**This build does not carry one.** Put it in Settings or set `REKORDBOX_KEY`;
+`python -m pyrekordbox download-key` prints one. There is a
+`BUNDLED_KEY` constant in `src/rekordbox/mod.rs` if you would rather compile it
+in.
+
+Settings → **Import a rekordbox library** brings across tracks, playlists and
+their folders, beat grids, hot cues, keys, ratings, play counts and My Tags.
+On the command line, `musicai rekordbox read <path>` lists what is in one
+without changing anything.
+
+**Nothing already here is overwritten.** Tracks are matched by file path —
+the only thing the two libraries genuinely share — and what comes across is
+what is *missing*: names on an untitled file, a grid where there is none, cues
+where there are none. rekordbox's opinion of a file is not better for being
+older, and where this program has measured something itself, that measurement
+is the one the waveform was drawn from and the cues were placed against. Half
+of each would be worse than either.
+
+Some things have no equivalent and are taken whenever rekordbox has more of
+them: play counts, because they are history this program was not around for;
+My Tags, which become tags; and the star rating, which becomes a tag like `4★`
+because there are no stars here and losing it entirely would be worse.
+
+Importing the same library twice changes nothing the second time.
+
+## OneLibrary, and what it would take
+
+`exportLibrary.db` is what a CDJ-3000X reads instead of `export.pdb`. It is
+SQLCipher too, and its key is fixed as well, so **the encryption is not what
+stands in the way**. The schema is: which tables a player reads, which columns
+it requires, and what state the rest of the drive has to be left in. None of
+that is published, and nobody has yet demonstrated an `exportLibrary.db`
+written from scratch that a CDJ-3000X will play.
+
+So `musicai rekordbox schema <drive>` opens one and prints its tables, columns
+and row counts, and that is deliberately all it does. It is where the reverse
+engineering starts — the same position `export.pdb` was in before somebody did
+the work — and it is not player support. Support is demonstrated by a player
+playing a drive.
+
 ## What a player will actually open
 
 A CDJ-3000 takes **MP3 and AAC at 44.1–48 kHz**, and **WAV, AIFF, FLAC and
@@ -391,8 +436,10 @@ asked for, and neither ever moves or deletes an original.
 
 - No player has read a drive this wrote. The format is validated against an
   independent parser, which is not the same as validation against hardware.
-- A CDJ-3000X reads this format only in its compatibility mode. Device Library
-  Plus has no public specification.
+- **A CDJ-3000X cannot read a drive this writes.** It does not fall back to the
+  legacy format; it needs OneLibrary, whose schema is not published. Having its
+  encryption key — which is public — does not change that. `rekordbox schema`
+  can describe one rekordbox wrote, which is where that work would start.
 - Stem colouring needs the kit rendered first, which is minutes a track.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with

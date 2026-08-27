@@ -265,6 +265,13 @@ pub struct Config {
     pub autotag_score: f64,
     /// How much of what the collection knows reaches the files themselves.
     pub write_tags: WriteTags,
+    /// The SQLCipher key rekordbox's own libraries are encrypted with.
+    ///
+    /// Empty means fall back to `REKORDBOX_KEY`, and then to whatever the
+    /// build was compiled with. Kept here rather than in the collection for
+    /// the same reason the library path is: it describes this machine.
+    #[serde(default)]
+    pub rekordbox_key: String,
 }
 
 /// When a name in the collection is also written into the file's tag block.
@@ -332,6 +339,7 @@ impl Default for Config {
             // renamed somebody's records. Anything less certain is a question.
             autotag_score: 0.9,
             write_tags: WriteTags::default(),
+            rekordbox_key: String::new(),
         }
     }
 }
@@ -380,6 +388,12 @@ impl Config {
     }
 
     /// Whether a file is already inside the library folder.
+    /// The rekordbox key from the settings, if one was put there.
+    pub fn rekordbox_key(&self) -> Option<&str> {
+        let key = self.rekordbox_key.trim();
+        (!key.is_empty()).then_some(key)
+    }
+
     /// Where stems go and where to look for ones already rendered.
     pub fn stems_location(&self) -> StemsLocation {
         StemsLocation { in_: self.stems_in, folder: self.stems_path.clone() }

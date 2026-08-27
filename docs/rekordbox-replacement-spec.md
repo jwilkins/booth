@@ -168,8 +168,25 @@ waveforms. There are three generations of that database:
 | **Device Library Plus** | `exportLibrary.db` | **Encrypted** SQLite | No | OPUS-QUAD and later |
 | **OneLibrary** | Device Library Plus, rebranded and opened to partners | Encrypted SQLite | **No** — spec not public | CDJ-3000X, CDJ-1500X, XDJ-AZ, XDJ-AN, OPUS-QUAD, OMNIS-DUO; djay Pro and rekordbox write it, Traktor announced |
 
-Two things about that table are worth stating flatly, because both are easy to
-assume the other way round.
+Three things about that table are worth stating flatly, because all three are
+easy to assume the other way round.
+
+**For the newer formats, encryption is not the blocker — the schema is.** Both
+`master.db` and `exportLibrary.db` are SQLCipher, and for both the key is fixed
+rather than machine- or licence-dependent, which means neither is a
+cryptographic obstacle at all: `pyrekordbox` reads `master.db` routinely, and
+the `exportLibrary.db` key has been recovered and published as well (it is
+stored obfuscated rather than derived — Base85 over an XOR blob). What is
+missing for OneLibrary is the **schema**: which tables, which columns, which
+of them a player actually requires, and in what state a drive has to be left.
+None of that is published, and as of this writing nobody has demonstrated an
+`exportLibrary.db` written from scratch that a CDJ-3000X will read.
+
+That distinction decides the roadmap. Being able to *open* an
+`exportLibrary.db` that rekordbox wrote is the first step of the reverse
+engineering, not the end of it — the same position `export.pdb` was in before
+someone did the work. Support for a player is demonstrated by a player playing
+a drive, and until that has happened, having the key is a beginning.
 
 **The CDJ-3000X does not fall back to a legacy drive.** AlphaTheta's own
 compatibility notice lists Device Library as "–" for the CDJ-3000X, and the
@@ -475,7 +492,8 @@ acceptance criterion is not a requirement, it is an aspiration, and belongs in �
 
 | # | Requirement | Done when |
 |---|---|---|
-| INTEROP-1 | Import an existing rekordbox 6/7 library directly. | Reads `master.db` (SQLCipher, key publicly known — `pyrekordbox` demonstrates it) and the XML export; brings across playlists, cues, grids, My Tags, colours, ratings and play counts. |
+| INTEROP-1 | Import an existing rekordbox 6/7 library directly. | Reads `master.db` (SQLCipher, key fixed and publicly known — `pyrekordbox` demonstrates it) and the XML export; brings across playlists, cues, grids, My Tags, colours, ratings and play counts. The key is **never bundled here**: it is somebody else's, it is read from the settings or the environment, and the tool says where to get it. `pyrekordbox` made the same choice and it is the right one. |
+| INTEROP-5 | Read a `exportLibrary.db` that rekordbox wrote, and dump its schema. | Opens a OneLibrary drive and reports its tables, columns and row counts. This is a **research** requirement, not player support: it is how the schema gets learned. Writing one a CDJ-3000X will read is EXP-4, and is done when a player plays the drive. |
 | INTEROP-2 | Import Serato, Traktor and Engine DJ libraries. | Same fidelity bar as INTEROP-1, with a pre-import report of what will not survive. |
 | INTEROP-3 | Everything the GUI does, the CLI does. | Single binary, `--json` output on every command, exit codes that mean something. This is how the tool gets scripted into other people's workflows — and it is the extension point rekordbox has never had. |
 | INTEROP-4 | A documented plug-in interface for analysers. | A third-party beatgrid or key detector can be dropped in and selected per track, because ours will not always be the best one. |
@@ -913,7 +931,9 @@ Complaints, format details and hardware facts referenced above:
   [DJ Link Ecosystem Analysis — analysis files](https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html),
   [crate-digger](https://github.com/Deep-Symmetry/crate-digger),
   [rekordcrate](https://github.com/Holzhaus/rekordcrate),
-  [pyrekordbox](https://pypi.org/project/pyrekordbox/).
+  [pyrekordbox](https://pypi.org/project/pyrekordbox/),
+  [pyrekordbox key handling and the `download-key` command](https://pyrekordbox.readthedocs.io/en/latest/formats/db6.html),
+  [notes on OneLibrary / Device Library Plus `exportLibrary.db` encryption and key obfuscation](https://gist.github.com/0xdevalias/b803476793b56f7c45e6361799168eb0).
 - Cloud, pricing and paywalls:
   [Should DJs use rekordbox Cloud Library Sync? (Digital DJ Tips)](https://www.digitaldjtips.com/rekordbox-cloud-library-sync-advice/),
   [rekordbox plans and pricing](https://rekordbox.com/en/plan/),

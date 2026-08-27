@@ -35,6 +35,8 @@ pub enum Job {
     Retag(Vec<Retag>),
     /// Re-encode files a player will not open into ones it will.
     Convert(Vec<Convertible>),
+    /// Read a rekordbox library and bring it across.
+    Rekordbox { path: PathBuf, key: String },
     /// Render stem kits.
     Separate {
         tracks: Vec<(u32, PathBuf)>,
@@ -65,6 +67,7 @@ impl Job {
             Job::Import { .. } => "reading",
             Job::Adopt { .. } => "copying",
             Job::Convert(_) => "converting",
+            Job::Rekordbox { .. } => "reading rekordbox",
             Job::Retag(_) => "tagging",
             Job::Decode { .. } => "loading",
             Job::StemEnvelopes { .. } => "measuring stems",
@@ -104,6 +107,8 @@ pub struct Retag {
 
 /// Something the worker found out.
 pub enum Update {
+    /// A rekordbox library, read and ready to be merged in.
+    Rekordbox(Box<musicai::rekordbox::master::Collection>),
     /// A file was re-encoded, and the collection should follow it.
     Converted { id: u32, to: PathBuf },
     /// A file the import walked to, and the record read out of it.
@@ -328,7 +333,7 @@ fn beat_time(beats: &[u32], beat_number: u16) -> u32 {
     beats.get(index).copied().unwrap_or_else(|| beats.last().copied().unwrap_or(0))
 }
 
-fn cue_color(letter: u8) -> [u8; 3] {
+pub fn cue_color(letter: u8) -> [u8; 3] {
     let color = CUE_COLORS[(letter.saturating_sub(1) as usize) % CUE_COLORS.len()];
     [color.r(), color.g(), color.b()]
 }
@@ -598,6 +603,18 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Analyze(tracks) => analyze_all(&tracks, reporter),
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
         Job::Convert(tracks) => convert(&tracks, reporter),
+        Job::Rekordbox { path, key } => {
+            let connection = musicai::rekordbox::open(&path, &key)?;
+            let collection = musicai::rekordbox::master::read(&connection)?;
+            crate::info!(
+                "rekordbox: {} tracks, {} playlists",
+                collection.tracks.len(),
+                collection.playlists.len()
+            );
+            let _ = reporter.tx.send(Update::Rekordbox(Box::new(collection)));
+            (reporter.wake)();
+            Ok(())
+        }
         Job::Retag(tracks) => retag(&tracks, reporter),
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
         Job::StemEnvelopes { id, kit } => {
