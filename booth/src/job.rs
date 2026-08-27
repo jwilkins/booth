@@ -110,7 +110,10 @@ pub enum Update {
     /// A rekordbox library, read and ready to be merged in.
     Rekordbox(Box<musicai::rekordbox::master::Collection>),
     /// A file was re-encoded, and the collection should follow it.
-    Converted { id: u32, to: PathBuf },
+    Converted {
+        id: u32,
+        to: PathBuf,
+    },
     /// A file the import walked to, and the record read out of it.
     Imported(Box<Track>),
     /// One track, listened to.
@@ -144,6 +147,10 @@ pub enum Update {
     Progress {
         done: usize,
         total: usize,
+    },
+    /// How far into the file in hand the running job has got.
+    Step {
+        percent: u8,
     },
     /// A line for the log, from a command that reports its own.
     Line(String),
@@ -302,10 +309,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
     // five bars are a calibration of it, and a calibration is only as good as
     // the numbers somebody looked at.
     let intensity = analysis.intensity;
-    crate::debug!(
-        "#{id} peak onset density {intensity:.4} -> energy {}",
-        energy_from(intensity)
-    );
+    crate::debug!("#{id} peak onset density {intensity:.4} -> energy {}", energy_from(intensity));
 
     Ok(Analyzed {
         id,
@@ -529,6 +533,7 @@ impl Reporter for Channel {
         let update = match event {
             Event::Progress { done, total } => Update::Progress { done, total },
             Event::Started { total } => Update::Progress { done: 0, total },
+            Event::Step { percent } => Update::Step { percent },
             Event::Line(text) | Event::Heading(text) | Event::Summary(text) => Update::Line(text),
             Event::Failed { path, message } => Update::Failed { path, message },
             // The window keeps its own count of what finished; a command's
@@ -769,12 +774,8 @@ fn convert(tracks: &[Convertible], reporter: &Channel) -> anyhow::Result<()> {
             // The names come with it. A converted file that arrives untitled
             // would look like a different record sitting next to the original.
             let metadata = musicai::tag::read_metadata(&track.path).unwrap_or_default();
-            let _ = musicai::tag::write_tags(
-                &to,
-                &metadata,
-                musicai::tag::OnExisting::Overwrite,
-                None,
-            );
+            let _ =
+                musicai::tag::write_tags(&to, &metadata, musicai::tag::OnExisting::Overwrite, None);
             Ok(to)
         })();
 
@@ -801,7 +802,8 @@ fn unused_path(wanted: &Path) -> PathBuf {
         return wanted.to_path_buf();
     }
     let stem = wanted.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let extension = wanted.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let extension =
+        wanted.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
     let parent = wanted.parent().unwrap_or(Path::new("."));
     for n in 2..1_000 {
         let candidate = parent.join(format!("{stem} ({n}).{extension}"));
@@ -860,6 +862,49 @@ fn non_empty(text: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// A reporter that counts the batch itself, over a command that only knows
+/// about the one file it was given.
+///
+/// Stem separation runs a track at a time so that a finished kit is usable
+/// immediately, which means the command underneath is started once per track
+/// and reports `1/1` every time. That is worse than no count at all: it looks
+/// like the work restarts. So its own batch events are dropped and the count
+/// comes from out here, where the length of the run is known.
+struct Batch<'a> {
+    inner: &'a Channel,
+    done: std::sync::atomic::AtomicUsize,
+    total: usize,
+}
+
+impl Batch<'_> {
+    /// Show the count before the track begins, rather than after it ends: on a
+    /// job of minutes a track, a counter that only moves on completion spends
+    /// most of its life a track behind.
+    fn starting(&self) {
+        let done = self.done.load(Ordering::Relaxed);
+        let _ = self.inner.tx.send(Update::Progress { done, total: self.total });
+        (self.inner.wake)();
+    }
+
+    fn finished_one(&self) {
+        self.done.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Reporter for Batch<'_> {
+    fn event(&self, event: Event) {
+        match event {
+            // The command's own idea of the batch, which is one file long.
+            Event::Started { .. } | Event::Progress { .. } | Event::Finished { .. } => {}
+            other => self.inner.event(other),
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.inner.cancelled()
+    }
+}
+
 fn separate(
     tracks: &[(u32, PathBuf)],
     stems_in: &crate::config::StemsLocation,
@@ -884,10 +929,21 @@ fn separate(
     // One file at a time, so that a kit becomes available as soon as it is
     // rendered rather than at the end of the batch: a DJ waiting on stems for
     // one record should get that record back, not a progress bar.
+    //
+    // The count is kept here rather than left to the command, which is handed
+    // one file at a time and would report 1/1 over and over. `Batch` hides the
+    // command's own counting for the same reason, and lets its per-file
+    // percentage through, which is the part worth seeing on a job this long.
+    let batch = Batch {
+        inner: reporter,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        total: tracks.len(),
+    };
     for (id, path) in tracks {
         if reporter.cancelled() {
             break;
         }
+        batch.starting();
         args.input = InputArgs { inputs: vec![path.clone()], recursive: false };
         args.out_dir = stems_in.for_source(path);
         crate::info!(
@@ -902,7 +958,7 @@ fn separate(
             });
             continue;
         }
-        match musicai::commands::stems_files(&args, std::slice::from_ref(path), reporter) {
+        match musicai::commands::stems_files(&args, std::slice::from_ref(path), &batch) {
             Ok(()) => {
                 let kit = find_stems(stems_in, path);
                 crate::debug!(
@@ -919,6 +975,7 @@ fn separate(
                     .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
             }
         }
+        batch.finished_one();
         (reporter.wake)();
     }
     Ok(())

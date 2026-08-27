@@ -13,14 +13,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 /// What a row is: a track, or one of the stem renders that hangs under it.
+///
+/// One role per part the separator writes, rather than per combination a DJ
+/// might want. A row here is a file on the drive, and offering an
+/// `(instrumental)` that is two files summed at load time meant the browser
+/// promised something no single file backed — fine in the deck, wrong on a
+/// player, which has only what was written for it.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     #[default]
     Track,
     /// The vocal stem on its own.
-    Acapella,
-    /// Everything but the vocal.
-    Instrumental,
+    Vocals,
+    /// The drums on their own.
+    Drums,
+    /// Everything that is neither: bass, chords, leads, the rest of the record.
+    Melody,
 }
 
 impl Role {
@@ -28,19 +36,28 @@ impl Role {
     pub fn suffix(self) -> &'static str {
         match self {
             Role::Track => "",
-            Role::Acapella => " (acapella)",
-            Role::Instrumental => " (instrumental)",
+            Role::Vocals => " (vocals)",
+            Role::Drums => " (drums)",
+            Role::Melody => " (melody)",
         }
     }
 
-    /// Which of the separator's outputs this row is made of.
-    pub fn stems(self) -> &'static str {
+    /// What the stem pill on the row says.
+    ///
+    /// The parent says `original` rather than `kit`: the pill names what the
+    /// row is, and every row in a kit is part of the kit, so `kit` on the
+    /// parent read as a label for the group rather than for that line.
+    pub fn label(self) -> &'static str {
         match self {
-            Role::Track => "kit",
-            Role::Acapella => "vocals",
-            Role::Instrumental => "melody+drums",
+            Role::Track => "original",
+            Role::Vocals => "vocals",
+            Role::Drums => "drums",
+            Role::Melody => "melody",
         }
     }
+
+    /// The three parts, in the order they hang under their parent.
+    pub const PARTS: [Role; 3] = [Role::Vocals, Role::Drums, Role::Melody];
 }
 
 /// Which stem files exist for a track.
@@ -309,17 +326,15 @@ impl Track {
 
     /// The file or files this row is actually made of.
     ///
-    /// A track is its own file. An acapella is one stem. An instrumental is two
-    /// of them, summed — the separator writes four parts and never a mix of
-    /// three, so there is no single file to point at and pretending otherwise
-    /// would mean playing the vocal under the instrumental.
+    /// One file each, now that a row is one of the separator's own parts. It
+    /// stays a list because the deck sums whatever it is given, and a row that
+    /// could not name its own audio is a row that silently does nothing.
     pub fn sources(&self) -> Vec<PathBuf> {
         match self.role {
             Role::Track => vec![self.path.clone()],
-            Role::Acapella => self.stems.vocals.iter().cloned().collect(),
-            Role::Instrumental => {
-                [&self.stems.melody, &self.stems.drums].iter().filter_map(|s| (*s).clone()).collect()
-            }
+            Role::Vocals => self.stems.vocals.iter().cloned().collect(),
+            Role::Drums => self.stems.drums.iter().cloned().collect(),
+            Role::Melody => self.stems.melody.iter().cloned().collect(),
         }
     }
 
@@ -534,7 +549,7 @@ impl Library {
         if track.role != Role::Track || !track.stems.is_complete() {
             return Vec::new();
         }
-        [Role::Acapella, Role::Instrumental]
+        Role::PARTS
             .into_iter()
             .map(|role| Track {
                 id: companion_id(track.id, role),
@@ -641,8 +656,9 @@ pub fn companion_id(parent: u32, role: Role) -> u32 {
 fn role_tag(role: Role) -> u32 {
     match role {
         Role::Track => 0,
-        Role::Acapella => 1,
-        Role::Instrumental => 2,
+        Role::Vocals => 1,
+        Role::Drums => 2,
+        Role::Melody => 3,
     }
 }
 
@@ -652,8 +668,9 @@ pub fn companion_of(id: u32) -> Option<(u32, Role)> {
         return None;
     }
     let role = match id & 0b11 {
-        1 => Role::Acapella,
-        2 => Role::Instrumental,
+        1 => Role::Vocals,
+        2 => Role::Drums,
+        3 => Role::Melody,
         _ => return None,
     };
     Some(((id & 0x7FFF_FFFF) >> 2, role))
@@ -810,15 +827,16 @@ mod tests {
 
         let mut track = track;
         track.stems.vocals = Some("/stems/a-vocals.wav".into());
-        assert!(library.companions(&track).is_empty(), "a partial kit is not an acapella");
+        assert!(library.companions(&track).is_empty(), "a partial kit is not a kit");
 
         track.stems.melody = Some("/stems/a-melody.wav".into());
         track.stems.drums = Some("/stems/a-drums.wav".into());
         let companions = library.companions(&track);
-        assert_eq!(companions.len(), 2);
-        assert_eq!(companions[0].role, Role::Acapella);
-        assert_eq!(companions[1].role, Role::Instrumental);
-        assert!(companions[0].display_title().ends_with("(acapella)"));
+        assert_eq!(companions.len(), 3, "one row per part the separator writes");
+        assert_eq!(companions[0].role, Role::Vocals);
+        assert_eq!(companions[1].role, Role::Drums);
+        assert_eq!(companions[2].role, Role::Melody);
+        assert!(companions[0].display_title().ends_with("(vocals)"));
         // A companion carries the parent's grid, because it is the same audio.
         assert_eq!(companions[0].bpm, track.bpm);
         assert_eq!(companions[0].parent, Some(id));
@@ -884,12 +902,8 @@ mod tests {
         track.analyzed = true;
         track.has_grid = true;
         track.bpm = 174.0;
-        track.cues = vec![CueMark {
-            letter: 1,
-            time_ms: 1_234,
-            label: "mine".into(),
-            color: [1, 2, 3],
-        }];
+        track.cues =
+            vec![CueMark { letter: 1, time_ms: 1_234, label: "mine".into(), color: [1, 2, 3] }];
 
         track.fill_from(&rekordbox_track());
 
@@ -946,30 +960,26 @@ mod tests {
             track.stems.drums = Some("/music/Sirens-drums.mp3".into());
         }
 
-        let acapella = library.row(companion_id(id, Role::Acapella)).unwrap();
         // Not the parent's file: playing that would be playing the mix under
-        // a row that says acapella.
-        assert_eq!(acapella.sources(), vec![PathBuf::from("/music/Sirens-vocals.mp3")]);
-
-        let instrumental = library.row(companion_id(id, Role::Instrumental)).unwrap();
-        assert_eq!(
-            instrumental.sources(),
-            vec![
-                PathBuf::from("/music/Sirens-melody.mp3"),
-                PathBuf::from("/music/Sirens-drums.mp3")
-            ],
-            "an instrumental is two files summed; there is no single one to point at"
-        );
+        // a row that names one part of it.
+        for (role, file) in [
+            (Role::Vocals, "/music/Sirens-vocals.mp3"),
+            (Role::Drums, "/music/Sirens-drums.mp3"),
+            (Role::Melody, "/music/Sirens-melody.mp3"),
+        ] {
+            let companion = library.row(companion_id(id, role)).unwrap();
+            assert_eq!(companion.sources(), vec![PathBuf::from(file)], "{role:?}");
+        }
 
         // A real id still comes back as itself.
         assert_eq!(library.row(id).unwrap().sources(), vec![PathBuf::from("/music/Sirens.flac")]);
-        assert!(library.row(companion_id(9_999, Role::Acapella)).is_none());
+        assert!(library.row(companion_id(9_999, Role::Vocals)).is_none());
     }
 
     #[test]
     fn a_companion_id_can_be_taken_apart_again() {
         // What lets a row that is not in the collection be acted on at all.
-        for role in [Role::Acapella, Role::Instrumental] {
+        for role in Role::PARTS {
             for parent in [1u32, 2, 7, 1_000, 100_000] {
                 let id = companion_id(parent, role);
                 assert_eq!(companion_of(id), Some((parent, role)), "{id:#x}");
@@ -984,12 +994,8 @@ mod tests {
         let mut library = Library::new();
         let ids: Vec<u32> =
             (0..200).map(|i| library.add(Path::new(&format!("/m/{i}.flac")))).collect();
-        let companions: Vec<u32> = ids
-            .iter()
-            .flat_map(|id| {
-                [companion_id(*id, Role::Acapella), companion_id(*id, Role::Instrumental)]
-            })
-            .collect();
+        let companions: Vec<u32> =
+            ids.iter().flat_map(|id| Role::PARTS.map(|role| companion_id(*id, role))).collect();
 
         for companion in &companions {
             assert!(!ids.contains(companion), "{companion} is also a track id");

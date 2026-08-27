@@ -73,8 +73,9 @@ pub fn read(connection: &rusqlite::Connection) -> Result<Collection> {
 
     let mut cues = cues_by_track(connection).unwrap_or_default();
     let mut my_tags = my_tags_by_track(connection).unwrap_or_default();
-    let tracks = read_tracks(connection, &artists, &albums, &genres, &keys, &mut cues, &mut my_tags)
-        .context("reading djmdContent")?;
+    let tracks =
+        read_tracks(connection, &artists, &albums, &genres, &keys, &mut cues, &mut my_tags)
+            .context("reading djmdContent")?;
     let playlists = read_playlists(connection).unwrap_or_default();
 
     Ok(Collection { tracks, playlists })
@@ -173,11 +174,8 @@ fn read_tracks(
     my_tags: &mut HashMap<String, Vec<String>>,
 ) -> Result<Vec<Track>> {
     let present = Present::of(connection, "djmdContent");
-    let query = format!(
-        "SELECT {} FROM djmdContent{}",
-        present.select(&TRACK_COLUMNS),
-        present.alive()
-    );
+    let query =
+        format!("SELECT {} FROM djmdContent{}", present.select(&TRACK_COLUMNS), present.alive());
     let mut statement = connection.prepare(&query)?;
     let rows = statement.query_map([], |row| {
         let text = |at: usize| row.get::<_, Option<String>>(at).unwrap_or_default();
@@ -203,8 +201,23 @@ fn read_tracks(
 
     let mut tracks = Vec::new();
     for row in rows.flatten() {
-        let (id, folder, filename, title, artist, album, genre, key, bpm, length, rating, year, comment, plays, _stock) =
-            row;
+        let (
+            id,
+            folder,
+            filename,
+            title,
+            artist,
+            album,
+            genre,
+            key,
+            bpm,
+            length,
+            rating,
+            year,
+            comment,
+            plays,
+            _stock,
+        ) = row;
         let Some(id) = id else { continue };
         let path = join_path(folder.as_deref(), filename.as_deref());
         if path.as_os_str().is_empty() {
@@ -250,9 +263,8 @@ fn join_path(folder: Option<&str>, filename: Option<&str>) -> PathBuf {
     if filename.is_empty() {
         return PathBuf::from(folder);
     }
-    let already_whole = Path::new(folder)
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy() == filename);
+    let already_whole =
+        Path::new(folder).file_name().is_some_and(|name| name.to_string_lossy() == filename);
     match already_whole {
         true => PathBuf::from(folder),
         false => Path::new(folder).join(filename),
@@ -266,8 +278,7 @@ fn cues_by_track(connection: &rusqlite::Connection) -> Result<HashMap<String, Ve
     if !present.has("ContentID") {
         return Ok(HashMap::new());
     }
-    let query =
-        format!("SELECT {} FROM djmdCue{}", present.select(&CUE_COLUMNS), present.alive());
+    let query = format!("SELECT {} FROM djmdCue{}", present.select(&CUE_COLUMNS), present.alive());
     let mut statement = connection.prepare(&query)?;
     let rows = statement.query_map([], |row| {
         Ok((
@@ -316,10 +327,8 @@ fn my_tags_by_track(connection: &rusqlite::Connection) -> Result<HashMap<String,
     if !present.has("ContentID") || !present.has("MyTagID") {
         return Ok(HashMap::new());
     }
-    let mut statement = connection.prepare(&format!(
-        "SELECT ContentID, MyTagID FROM djmdSongMyTag{}",
-        present.alive()
-    ))?;
+    let mut statement = connection
+        .prepare(&format!("SELECT ContentID, MyTagID FROM djmdSongMyTag{}", present.alive()))?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, Option<String>>(0).unwrap_or_default(),

@@ -26,11 +26,8 @@ use anyhow::Result;
 
 /// Where rekordbox puts the OneLibrary database on a drive, in the order worth
 /// looking.
-const PLACES: [&str; 3] = [
-    "PIONEER/rekordbox/exportLibrary.db",
-    "PIONEER/exportLibrary.db",
-    "exportLibrary.db",
-];
+const PLACES: [&str; 3] =
+    ["PIONEER/rekordbox/exportLibrary.db", "PIONEER/exportLibrary.db", "exportLibrary.db"];
 
 /// Find the OneLibrary database on a mounted drive, if it has one.
 pub fn find(drive: &Path) -> Option<PathBuf> {

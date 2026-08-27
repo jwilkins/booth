@@ -323,7 +323,7 @@ pub fn row(
             &painter,
             rect,
             x,
-            track.role.stems(),
+            track.role.label(),
             if indented { theme::DIM } else { theme::AMBER },
         );
     }
@@ -776,8 +776,9 @@ mod tests {
         let mut track = Track::placeholder(1);
         track.title = "Marius".into();
         assert_eq!(track.display_title(), "Marius");
-        track.role = Role::Acapella;
-        assert_eq!(track.display_title(), "Marius (acapella)");
-        assert_eq!(track.role.stems(), "vocals");
+        assert_eq!(track.role.label(), "original");
+        track.role = Role::Vocals;
+        assert_eq!(track.display_title(), "Marius (vocals)");
+        assert_eq!(track.role.label(), "vocals");
     }
 }

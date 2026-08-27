@@ -54,10 +54,8 @@ pub fn sniff(path: &Path) -> Container {
 /// `.m4a` is still protected, and a file named `.m4p` is worth refusing to
 /// spend a decode on either way.
 pub fn is_protected(path: &Path) -> bool {
-    let named_protected = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("m4p"));
+    let named_protected =
+        path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("m4p"));
     named_protected || matches!(sniff(path), Container::Mp4 { protected: true, .. })
 }
 

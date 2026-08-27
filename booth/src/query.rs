@@ -640,7 +640,7 @@ mod tests {
         assert!(matches("missing:stems", &parent));
 
         let mut stem = track(2);
-        stem.role = Role::Acapella;
+        stem.role = Role::Vocals;
         stem.parent = Some(1);
         assert!(!matches("missing:stems", &stem), "a stem would always match, and drown the list");
     }

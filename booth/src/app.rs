@@ -138,6 +138,9 @@ pub struct App {
     /// honest way to say so.
     queued: VecDeque<Job>,
     progress: Option<(usize, usize)>,
+    /// How far into the file in hand, for work slow enough that finishing it
+    /// is not soon enough to report.
+    step: Option<u8>,
 
     /// The drive the dock is showing, as an index into the library's drives.
     drive: usize,
@@ -364,6 +367,7 @@ impl App {
             runner: None,
             queued: VecDeque::new(),
             progress: None,
+            step: None,
             drive: 0,
             plan: Plan::default(),
             sheet: false,
@@ -673,10 +677,7 @@ impl App {
             let Some(track) = self.library.get(*id) else { continue };
             match track.path.exists() {
                 true => found.push((track.id, track.path.clone())),
-                false => crate::warn!(
-                    "#{id} is not where it was: {}",
-                    track.path.display()
-                ),
+                false => crate::warn!("#{id} is not where it was: {}", track.path.display()),
             }
         }
         found
@@ -821,9 +822,11 @@ impl App {
             }
             // A playlist of the same name in the same folder is the same
             // playlist, and re-importing must not leave two of it.
-            let existing = self.library.playlists.iter_mut().find(|p| {
-                p.name == playlist.name && p.folder == playlist.folder
-            });
+            let existing = self
+                .library
+                .playlists
+                .iter_mut()
+                .find(|p| p.name == playlist.name && p.folder == playlist.folder);
             match existing {
                 Some(found) => {
                     for id in tracks {
@@ -1043,7 +1046,13 @@ impl App {
                     }
                     changed = true;
                 }
-                Update::Progress { done, total } => self.progress = Some((done, total)),
+                Update::Progress { done, total } => {
+                    self.progress = Some((done, total));
+                    // A new file: whatever the last one had got to is not
+                    // this one's position.
+                    self.step = None;
+                }
+                Update::Step { percent } => self.step = Some(percent),
                 Update::Line(text) => self.note(text, theme::TEXT),
                 Update::Failed { path, message } => {
                     // Whatever failed, nothing is arriving for the deck now.
@@ -1087,6 +1096,7 @@ impl App {
             }
             self.runner = None;
             self.progress = None;
+            self.step = None;
             self.save();
         }
         if !imported.is_empty() {
@@ -1235,15 +1245,25 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("bar").frame(bar_frame()).show(ctx, |ui| self.command_bar(ui));
         egui::TopBottomPanel::bottom("dock").frame(bar_frame()).show(ctx, |ui| self.dock(ui));
 
+        // Both side panels drag. The inspector especially: it carries the
+        // cue list, the stem rows and the notes field, and how much room those
+        // want is a matter of the track and the person. egui remembers the
+        // width against the panel id, so a drag survives a restart.
+        //
+        // The minimum is what the widest fixed thing in each still fits in,
+        // not zero: a panel that can be dragged shut leaves no handle to drag
+        // it back with.
         egui::SidePanel::left("collection")
-            .exact_width(178.0)
+            .default_width(178.0)
+            .width_range(150.0..=380.0)
             .frame(pane_frame())
-            .resizable(false)
+            .resizable(true)
             .show(ctx, |ui| self.sidebar(ui));
         egui::SidePanel::right("inspector")
-            .exact_width(210.0)
+            .default_width(210.0)
+            .width_range(180.0..=560.0)
             .frame(pane_frame())
-            .resizable(false)
+            .resizable(true)
             .show(ctx, |ui| self.inspector(ui));
 
         egui::CentralPanel::default().frame(pane_frame()).show(ctx, |ui| self.browser(ui));
@@ -1391,11 +1411,16 @@ impl App {
                 match &self.runner {
                     Some(runner) => {
                         let (done, total) = self.progress.unwrap_or((0, 0));
-                        let text = if total > 0 {
-                            format!("{} {} {done}/{total}", theme::SPINNER, runner.name)
-                        } else {
-                            format!("{} {}", theme::SPINNER, runner.name)
+                        let mut text = match total > 0 {
+                            true => format!("{} {} {done}/{total}", theme::SPINNER, runner.name),
+                            false => format!("{} {}", theme::SPINNER, runner.name),
                         };
+                        // Minutes a track means the count alone sits still long
+                        // enough to look stuck, so how far into the one in hand
+                        // goes beside it.
+                        if let Some(percent) = self.step {
+                            text.push_str(&format!(" · {percent}%"));
+                        }
                         if ui
                             .add(egui::Button::new(
                                 RichText::new("stop").font(theme::mono(10.5)).color(theme::DIM),
@@ -1954,10 +1979,7 @@ impl App {
         let Some(track) = self.library.row(id) else { return };
         let sources = track.sources();
         if sources.is_empty() {
-            self.note(
-                format!("no {} rendered for that track", track.role.stems()),
-                theme::ALERT,
-            );
+            self.note(format!("no {} rendered for that track", track.role.label()), theme::ALERT);
             return;
         }
         if let Some(missing) = sources.iter().find(|path| !path.exists()) {
@@ -2606,9 +2628,7 @@ impl App {
                 }
                 Pending::CancelEdit => self.editing = None,
                 Pending::Resort => relist = true,
-                Pending::WriteTags(id) => {
-                    self.write_tags(id, musicai::tag::OnExisting::Overwrite)
-                }
+                Pending::WriteTags(id) => self.write_tags(id, musicai::tag::OnExisting::Overwrite),
                 Pending::PlaceCue { id, letter, time_ms } => {
                     self.place_cue(id, letter, time_ms);
                     touched = true;
@@ -2841,9 +2861,24 @@ impl App {
     /// nobody asked it to have an opinion about a value they typed.
     fn write_tags(&mut self, id: u32, on_existing: musicai::tag::OnExisting) {
         let Some(track) = self.library.get(id) else { return };
-        if !matches!(track.format.as_str(), "flac" | "mp3") {
-            self.note(format!("a .{} carries no standard tag block", track.format), theme::AMBER);
-            return;
+        // Asked of the writer rather than answered again here. This was a
+        // second list of formats, and it had already fallen behind the first:
+        // it still said FLAC and MP3 after the writer learned MP4, so an
+        // identified `.m4a` was told it had nowhere to put a name that the
+        // code underneath would have written.
+        match musicai::tag::tag_kind(&track.path) {
+            Some(musicai::tag::TagKind::None) => {
+                self.note(format!("a .{} has nowhere to keep tags", track.format), theme::AMBER);
+                return;
+            }
+            None => {
+                self.note(
+                    format!("a .{} is not a file whose tags can be written", track.format),
+                    theme::AMBER,
+                );
+                return;
+            }
+            Some(_) => {}
         }
         crate::debug!(
             "tagging {} ({on_existing:?})",
@@ -3552,9 +3587,9 @@ impl App {
             .iter()
             .filter_map(|id| self.library.get(*id))
             .filter_map(|track| {
-                track.incompatibility().map(|problem| {
-                    (track.id, track.display_title(), track.path.clone(), problem)
-                })
+                track
+                    .incompatibility()
+                    .map(|problem| (track.id, track.display_title(), track.path.clone(), problem))
             })
             .collect();
         if waiting.is_empty() {

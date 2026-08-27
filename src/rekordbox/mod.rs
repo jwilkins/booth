@@ -148,9 +148,11 @@ pub fn tables(connection: &rusqlite::Connection) -> Result<Vec<(String, i64)>> {
         // be anything but a real table name here; quoted anyway, because a
         // table called `Order` is a perfectly legal thing to be handed.
         let count = connection
-            .query_row(&format!("SELECT count(*) FROM \"{}\"", name.replace('"', "\"\"")), [], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row(
+                &format!("SELECT count(*) FROM \"{}\"", name.replace('"', "\"\"")),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
             .unwrap_or(-1);
         found.push((name, count));
     }
@@ -162,7 +164,8 @@ pub fn tables(connection: &rusqlite::Connection) -> Result<Vec<(String, i64)>> {
 pub fn columns(connection: &rusqlite::Connection, table: &str) -> Result<Vec<String>> {
     let mut statement =
         connection.prepare(&format!("PRAGMA table_info(\"{}\")", table.replace('"', "\"\"")))?;
-    let names = statement.query_map([], |row| row.get::<_, String>(1))?.collect::<Result<_, _>>()?;
+    let names =
+        statement.query_map([], |row| row.get::<_, String>(1))?.collect::<Result<_, _>>()?;
     Ok(names)
 }
 

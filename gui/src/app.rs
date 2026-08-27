@@ -23,6 +23,8 @@ pub struct App {
     log: Vec<LogLine>,
     /// Files done and files expected, while a job runs.
     progress: Option<(usize, usize)>,
+    /// How far into the file in hand, for a step too long to wait out.
+    step: Option<u8>,
     /// Which step of a batch is running, as (name, index, total).
     stage: Option<(String, usize, usize)>,
     status: Status,
@@ -60,6 +62,7 @@ impl Default for App {
             runner: None,
             log: Vec::new(),
             progress: None,
+            step: None,
             stage: None,
             status: Status::Idle,
             picking: false,
@@ -119,10 +122,16 @@ impl App {
                     self.progress = None;
                     self.push(format!("{index}/{of} {name}"), Kind::Heading);
                 }
-                Update::Event(Event::Started { total }) => self.progress = Some((0, total)),
-                Update::Event(Event::Progress { done, total }) => {
-                    self.progress = Some((done, total))
+                Update::Event(Event::Started { total }) => {
+                    self.progress = Some((0, total));
+                    self.step = None;
                 }
+                Update::Event(Event::Progress { done, total }) => {
+                    self.progress = Some((done, total));
+                    // A new file; the last one's position is not this one's.
+                    self.step = None;
+                }
+                Update::Event(Event::Step { percent }) => self.step = Some(percent),
                 Update::Event(Event::Heading(text)) => self.push(text, Kind::Heading),
                 Update::Event(Event::Line(text)) => self.push(text, Kind::Normal),
                 Update::Event(Event::Summary(text)) => self.push(text, Kind::Note),
@@ -141,6 +150,7 @@ impl App {
                 }
                 Update::Done(Ok(())) => {
                     self.progress = None;
+                    self.step = None;
                     self.stage = None;
                     if self.running() {
                         // A command that reported nothing still ended.
@@ -375,12 +385,19 @@ impl App {
                         ui.label(RichText::new(format!("{index}/{of} {name}")).strong());
                     }
                     if let Some((done, total)) = self.progress {
-                        let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-                        ui.add(
-                            egui::ProgressBar::new(fraction)
-                                .desired_width(220.0)
-                                .text(format!("{done}/{total}")),
-                        );
+                        // The bar counts files; separation is minutes each, so
+                        // the one in hand contributes its own share rather than
+                        // leaving the bar still for the whole of it.
+                        let within = self.step.unwrap_or(0) as f32 / 100.0;
+                        let fraction = match total {
+                            0 => 0.0,
+                            total => (done as f32 + within) / total as f32,
+                        };
+                        let text = match self.step {
+                            Some(percent) => format!("{done}/{total} · {percent}%"),
+                            None => format!("{done}/{total}"),
+                        };
+                        ui.add(egui::ProgressBar::new(fraction).desired_width(220.0).text(text));
                     }
                 }
                 Status::Done(text) => {

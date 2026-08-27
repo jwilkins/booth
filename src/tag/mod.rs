@@ -21,7 +21,6 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-
 /// The metadata fields this tool knows how to write.
 ///
 /// Keeping them as one enum means the "keep or overwrite" policy is applied

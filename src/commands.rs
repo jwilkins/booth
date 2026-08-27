@@ -918,7 +918,7 @@ pub fn stems_files(args: &StemsArgs, files: &[PathBuf], reporter: &dyn Reporter)
         if progress.cancelled() {
             break;
         }
-        match separate_one(path, args, &config, &encode, demucs_bin.as_deref()) {
+        match separate_one(path, args, &config, &encode, demucs_bin.as_deref(), reporter) {
             Ok(written) => {
                 for line in written {
                     reporter.event(Event::Line(line));
@@ -940,6 +940,7 @@ fn separate_one(
     config: &dsp::Config,
     encode: &EncodeOptions,
     demucs_bin: Option<&std::ffi::OsStr>,
+    reporter: &dyn Reporter,
 ) -> Result<Vec<String>> {
     let track = path
         .file_stem()
@@ -977,7 +978,11 @@ fn separate_one(
             demucs_config.shifts = args.shifts();
             demucs_config.overlap = args.demucs.demucs_overlap;
 
-            let result = demucs::separate(path, &demucs_config);
+            // Separating one track is minutes of work, so it reports from
+            // inside rather than only when it finishes.
+            let result = demucs::separate(path, &demucs_config, &|percent| {
+                reporter.event(Event::Step { percent })
+            });
             // Demucs' own output is an intermediate; the stems we write are the
             // deliverable. Clean up whether or not it succeeded.
             let _ = std::fs::remove_dir_all(&work_dir);

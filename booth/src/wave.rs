@@ -85,10 +85,7 @@ impl StemEnvelopes {
         if vocals + melody + drums < 1.0 {
             return theme::RULE;
         }
-        mix(
-            [theme::STEM_VOCALS, theme::STEM_MELODY, theme::STEM_DRUMS],
-            [vocals, melody, drums],
-        )
+        mix([theme::STEM_VOCALS, theme::STEM_MELODY, theme::STEM_DRUMS], [vocals, melody, drums])
     }
 }
 
