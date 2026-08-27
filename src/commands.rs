@@ -1,7 +1,7 @@
 //! Implementations of the subcommands, and the pipeline that runs several of
 //! them over one set of files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -192,6 +192,53 @@ const MAX_DRIVE_PATH: usize = 255;
 /// megabytes here rather than the whole library's worth.
 const BATCH: usize = 16;
 
+/// Turn the playlists a caller asked for into the rows the database holds.
+///
+/// A folder is a playlist row with `is_folder` set, and the lists inside it
+/// point at it by id, which is how the players draw a tree. Folders are made
+/// in the order they are first mentioned so that the drive's order matches the
+/// one the caller sees.
+///
+/// Tracks that did not make it onto the drive are dropped from the lists that
+/// named them: the database refuses a playlist entry for a track it has no row
+/// for, and one unreadable file should cost that file rather than the export.
+/// An empty playlist is still written — a set that lost its only track is worth
+/// seeing on the player as empty rather than silently not being there.
+fn playlist_tree(
+    specs: &[crate::cli::PlaylistSpec],
+    ids_by_path: &HashMap<PathBuf, u32>,
+) -> Vec<pdb::Playlist> {
+    let mut rows: Vec<pdb::Playlist> = Vec::new();
+    let mut folder_ids: BTreeMap<&str, u32> = BTreeMap::new();
+    // Ids are handed out as rows are made, so a folder and the list inside it
+    // never collide.
+    let mut next_id = 1u32;
+
+    for spec in specs {
+        let parent = match spec.folder.is_empty() {
+            true => 0,
+            false => match folder_ids.get(spec.folder.as_str()) {
+                Some(id) => *id,
+                None => {
+                    let id = next_id;
+                    next_id += 1;
+                    folder_ids.insert(spec.folder.as_str(), id);
+                    rows.push(pdb::Playlist::folder(id, &spec.folder));
+                    id
+                }
+            },
+        };
+
+        let track_ids: Vec<u32> =
+            spec.tracks.iter().filter_map(|path| ids_by_path.get(path).copied()).collect();
+        let mut playlist = pdb::Playlist::new(next_id, &spec.name, track_ids);
+        playlist.parent_id = parent;
+        rows.push(playlist);
+        next_id += 1;
+    }
+    rows
+}
+
 /// Build a drive: the audio, the analysis files, and the database that indexes
 /// them.
 pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
@@ -202,6 +249,7 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
     let mut tracks = Vec::new();
     let mut failures = Vec::new();
     let mut lines = Vec::new();
+    let mut ids_by_path: HashMap<PathBuf, u32> = HashMap::new();
     let analyses = Analyses::default();
 
     for (batch, chunk) in files.chunks(BATCH).enumerate() {
@@ -237,16 +285,25 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
                         prepared.phrases,
                         prepared.cues
                     ));
-                    if let Some(destination) = &destination {
-                        match prepared.commit(destination, path) {
-                            Ok(()) => tracks.push(prepared.track.unwrap()),
+                    let landed = match &destination {
+                        Some(destination) => match prepared.commit(destination, path) {
+                            Ok(()) => Some(prepared.track.unwrap()),
                             Err(e) => {
                                 lines.pop();
                                 failures.push((path.clone(), e));
+                                None
                             }
-                        }
-                    } else {
-                        tracks.push(prepared.track.unwrap());
+                        },
+                        None => Some(prepared.track.unwrap()),
+                    };
+                    if let Some(track) = landed {
+                        // Which file became which drive id, so a playlist
+                        // given in paths can be written in ids. A file that
+                        // failed is absent here and drops out of every
+                        // playlist that named it, rather than leaving a row
+                        // pointing at a track the drive does not have.
+                        ids_by_path.insert(path.clone(), track.id);
+                        tracks.push(track);
                     }
                 }
                 Err(e) => failures.push((path.clone(), e)),
@@ -255,8 +312,13 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
     }
 
     if !tracks.is_empty() {
-        let playlist = pdb::Playlist::new(1, &args.playlist, tracks.iter().map(|t| t.id).collect());
-        let database = pdb::Database { tracks, playlists: vec![playlist] };
+        let playlists = match args.playlists.is_empty() {
+            true => {
+                vec![pdb::Playlist::new(1, &args.playlist, tracks.iter().map(|t| t.id).collect())]
+            }
+            false => playlist_tree(&args.playlists, &ids_by_path),
+        };
+        let database = pdb::Database { tracks, playlists };
         let bytes = database.to_bytes()?;
 
         match &destination {
@@ -1523,6 +1585,86 @@ pub fn rekordbox(args: &crate::cli::RekordboxCommand, reporter: &dyn Reporter) -
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn playlists_become_a_tree_of_folders_and_lists() {
+        use crate::cli::PlaylistSpec;
+
+        let ids: HashMap<PathBuf, u32> = [("/a.flac", 1u32), ("/b.flac", 2), ("/c.flac", 3)]
+            .into_iter()
+            .map(|(p, id)| (PathBuf::from(p), id))
+            .collect();
+        let specs = vec![
+            PlaylistSpec {
+                name: "warm".into(),
+                folder: "Sat 14/9".into(),
+                tracks: vec!["/a.flac".into(), "/b.flac".into()],
+            },
+            PlaylistSpec {
+                name: "peak".into(),
+                folder: "Sat 14/9".into(),
+                tracks: vec!["/c.flac".into()],
+            },
+            PlaylistSpec {
+                name: "promos".into(),
+                folder: String::new(),
+                tracks: vec!["/a.flac".into()],
+            },
+        ];
+
+        let rows = playlist_tree(&specs, &ids);
+        let folders: Vec<&pdb::Playlist> = rows.iter().filter(|r| r.is_folder).collect();
+        assert_eq!(folders.len(), 1, "one folder, named twice");
+        assert_eq!(folders[0].name, "Sat 14/9");
+
+        let by_name = |name: &str| rows.iter().find(|r| r.name == name).expect(name);
+        assert_eq!(by_name("warm").parent_id, folders[0].id);
+        assert_eq!(by_name("peak").parent_id, folders[0].id, "the second list joins the folder");
+        assert_eq!(by_name("promos").parent_id, 0, "the top level is not a folder");
+        assert_eq!(by_name("warm").track_ids, vec![1, 2]);
+
+        let mut ids: Vec<u32> = rows.iter().map(|r| r.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), rows.len(), "a folder and a list shared an id");
+    }
+
+    #[test]
+    fn a_track_that_did_not_reach_the_drive_leaves_the_playlist_that_named_it() {
+        use crate::cli::PlaylistSpec;
+
+        // The database refuses an entry for a track it has no row for, so one
+        // unreadable file has to cost that file rather than the whole export.
+        let ids: HashMap<PathBuf, u32> =
+            [(PathBuf::from("/good.flac"), 1u32)].into_iter().collect();
+        let specs = vec![PlaylistSpec {
+            name: "set".into(),
+            folder: String::new(),
+            tracks: vec!["/good.flac".into(), "/broken.wav".into()],
+        }];
+
+        let rows = playlist_tree(&specs, &ids);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].track_ids, vec![1], "the missing one is dropped, the list survives");
+    }
+
+    #[test]
+    fn a_playlist_whose_tracks_all_failed_is_still_written() {
+        use crate::cli::PlaylistSpec;
+
+        // Empty on the player is a truthful answer. Absent looks like the sync
+        // forgot it.
+        let rows = playlist_tree(
+            &[PlaylistSpec {
+                name: "set".into(),
+                folder: String::new(),
+                tracks: vec!["/x.wav".into()],
+            }],
+            &HashMap::new(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].track_ids.is_empty());
+    }
     use super::*;
 
     #[test]

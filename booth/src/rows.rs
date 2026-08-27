@@ -207,6 +207,8 @@ pub enum Action {
     Separate,
     CopyIn,
     Reveal,
+    /// Take it out of the playlist being shown, leaving it in the collection.
+    RemoveFromPlaylist,
     Forget,
 }
 
@@ -228,6 +230,7 @@ impl Action {
             Action::Separate => "Render stems",
             Action::CopyIn => "Copy into the library",
             Action::Reveal => "Copy the file path",
+            Action::RemoveFromPlaylist => "Remove from this playlist",
             Action::Forget => "Remove from the collection",
         }
     }
@@ -252,6 +255,9 @@ pub struct Menu {
     pub in_library: bool,
     /// Whether anything is playing this track now.
     pub playing: bool,
+    /// Whether a playlist is what is being shown, which is the only place
+    /// taking a track out of one means anything.
+    pub in_playlist: bool,
 }
 
 /// Draw one line. Returns what the pointer did, if anything.
@@ -352,6 +358,9 @@ pub fn row(
             items.push(Action::CopyIn);
         }
         items.push(Action::Reveal);
+        if menu.in_playlist {
+            items.push(Action::RemoveFromPlaylist);
+        }
         items.push(Action::Forget);
         context_menu(&response, track, menu, &items)
     };
@@ -385,9 +394,12 @@ fn context_menu(
         ui.label(egui::RichText::new(track.display_title()).color(theme::DIM).size(11.0));
         ui.separator();
         for &item in items {
-            if matches!(item, Action::CopyIn | Action::Forget) {
+            if matches!(item, Action::CopyIn | Action::RemoveFromPlaylist) {
                 ui.separator();
             }
+            // Only the one that reaches past the playlist is coloured as a
+            // warning: taking a track out of a list is a click away from being
+            // undone, and losing it from the collection is not.
             let label = egui::RichText::new(item.label(track, menu))
                 .color(if item == Action::Forget { theme::ALERT } else { theme::TEXT });
             if ui.button(label).clicked() {

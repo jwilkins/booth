@@ -82,11 +82,13 @@ impl StemKit {
         self.vocals.is_some() && self.melody.is_some() && self.drums.is_some()
     }
 
+    /// The parts, in the order their rows hang under the parent, so that the
+    /// browser and the drive's browse list agree about what comes second.
     pub fn each(&self) -> [(&'static str, Option<&PathBuf>); 3] {
         [
             ("vocals", self.vocals.as_ref()),
-            ("melody", self.melody.as_ref()),
             ("drums", self.drums.as_ref()),
+            ("melody", self.melody.as_ref()),
         ]
     }
 }
@@ -456,8 +458,18 @@ pub struct Drive {
     pub path: PathBuf,
     /// Whether `path` names an image file rather than a mounted volume.
     pub is_image: bool,
-    /// The playlist that was written to it.
+    /// The playlist that was written to it, from before a drive could carry
+    /// more than one. Read when loading an older collection and then left
+    /// alone; `playlists` is what everything asks.
+    #[serde(default)]
     pub playlist: String,
+    /// The playlists written to it, by name, in the order they go on.
+    ///
+    /// A player shows a tree, so a drive that could hold only one list was
+    /// making the DJ choose between taking the night's sets and taking one of
+    /// them. The folder each sits in comes from the playlist itself.
+    #[serde(default)]
+    pub playlists: Vec<String>,
     /// What was on it after the last sync.
     pub written: Vec<Written>,
     /// Whether the stem companions went on too.
@@ -470,6 +482,23 @@ impl Drive {
     pub fn track_ids(&self) -> Vec<u32> {
         self.written.iter().map(|w| w.id).collect()
     }
+
+    /// The playlists this drive carries.
+    ///
+    /// Collections written before a drive could hold more than one have the
+    /// single `playlist` field and an empty list; reading it here rather than
+    /// rewriting the file on load means an older collection opens in an older
+    /// build afterwards, which matters while both exist.
+    pub fn playlist_names(&self) -> Vec<String> {
+        match self.playlists.is_empty() {
+            true => self
+                .playlist
+                .is_empty()
+                .then(Vec::new)
+                .unwrap_or_else(|| vec![self.playlist.clone()]),
+            false => self.playlists.clone(),
+        }
+    }
 }
 
 /// The whole collection.
@@ -477,6 +506,15 @@ impl Drive {
 pub struct Library {
     pub tracks: Vec<Track>,
     pub playlists: Vec<Playlist>,
+    /// The folders of the playlist tree, in the order they were made.
+    ///
+    /// Kept rather than derived from the playlists inside them, so that a
+    /// folder can exist before it has anything in it. Making the folder and
+    /// then filling it is the order people work in, and a folder that vanished
+    /// the moment its last playlist moved out would be a folder you could not
+    /// rearrange.
+    #[serde(default)]
+    pub folders: Vec<String>,
     pub saved: Vec<SavedQuery>,
     pub drives: Vec<Drive>,
     next_id: u32,
@@ -592,14 +630,128 @@ impl Library {
     /// The folders of the playlist tree, in the order they were first seen,
     /// each with its playlists.
     pub fn playlist_tree(&self) -> Vec<(String, Vec<&Playlist>)> {
-        let mut tree: Vec<(String, Vec<&Playlist>)> = Vec::new();
+        // The root first when anything is in it, then the folders in the order
+        // they were made, then any folder a playlist names that is not on the
+        // list — which is what an imported library arrives as.
+        let mut tree: Vec<(String, Vec<&Playlist>)> = vec![(String::new(), Vec::new())];
+        for folder in &self.folders {
+            tree.push((folder.clone(), Vec::new()));
+        }
         for playlist in &self.playlists {
             match tree.iter_mut().find(|(folder, _)| *folder == playlist.folder) {
                 Some((_, list)) => list.push(playlist),
                 None => tree.push((playlist.folder.clone(), vec![playlist])),
             }
         }
+        tree.retain(|(folder, lists)| !folder.is_empty() || !lists.is_empty());
         tree
+    }
+
+    /// Make a folder, or say why not. The name is what identifies it, so two
+    /// of the same name would be one folder drawn twice.
+    pub fn add_folder(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a folder needs a name".into());
+        }
+        if self.folders.iter().any(|f| f == name) {
+            return Err(format!("there is already a folder called \u{201c}{name}\u{201d}"));
+        }
+        self.folders.push(name.to_string());
+        Ok(())
+    }
+
+    /// Make a playlist, or say why not.
+    pub fn add_playlist(&mut self, name: &str, folder: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a playlist needs a name".into());
+        }
+        if self.playlists.iter().any(|p| p.name == name) {
+            return Err(format!("there is already a playlist called \u{201c}{name}\u{201d}"));
+        }
+        self.playlists.push(Playlist {
+            name: name.to_string(),
+            folder: folder.to_string(),
+            tracks: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Rename a playlist, bringing the drives that carry it along.
+    ///
+    /// A drive names its playlists by name, so a rename that did not follow
+    /// through would leave the drive pointing at nothing and the next sync
+    /// proposing to delete everything on it.
+    pub fn rename_playlist(&mut self, from: &str, to: &str) -> Result<(), String> {
+        let to = to.trim();
+        if to.is_empty() {
+            return Err("a playlist needs a name".into());
+        }
+        if to == from {
+            return Ok(());
+        }
+        if self.playlists.iter().any(|p| p.name == to) {
+            return Err(format!("there is already a playlist called \u{201c}{to}\u{201d}"));
+        }
+        let Some(playlist) = self.playlists.iter_mut().find(|p| p.name == from) else {
+            return Err(format!("no playlist called \u{201c}{from}\u{201d}"));
+        };
+        playlist.name = to.to_string();
+        for drive in &mut self.drives {
+            for name in drive.playlists.iter_mut().filter(|n| *n == from) {
+                *name = to.to_string();
+            }
+            if drive.playlist == from {
+                drive.playlist = to.to_string();
+            }
+        }
+        Ok(())
+    }
+
+    /// Rename a folder, moving what is in it with it.
+    pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<(), String> {
+        let to = to.trim();
+        if to.is_empty() {
+            return Err("a folder needs a name".into());
+        }
+        if to == from {
+            return Ok(());
+        }
+        if self.folders.iter().any(|f| f == to) {
+            return Err(format!("there is already a folder called \u{201c}{to}\u{201d}"));
+        }
+        for folder in self.folders.iter_mut().filter(|f| *f == from) {
+            *folder = to.to_string();
+        }
+        for playlist in self.playlists.iter_mut().filter(|p| p.folder == from) {
+            playlist.folder = to.to_string();
+        }
+        Ok(())
+    }
+
+    /// Delete a playlist, and stop any drive from asking for it.
+    ///
+    /// The tracks are untouched: a playlist is a list of what to write, not a
+    /// place the music is kept, and deleting one has never meant losing a file.
+    pub fn remove_playlist(&mut self, name: &str) {
+        self.playlists.retain(|p| p.name != name);
+        for drive in &mut self.drives {
+            drive.playlists.retain(|n| n != name);
+            if drive.playlist == name {
+                drive.playlist.clear();
+            }
+        }
+    }
+
+    /// Delete a folder. What was inside comes back to the top level rather
+    /// than going with it — the playlists are the work, the folder is where
+    /// they were filed.
+    pub fn remove_folder(&mut self, name: &str) {
+        self.folders.retain(|f| f != name);
+        for playlist in self.playlists.iter_mut().filter(|p| p.folder == name) {
+            playlist.folder.clear();
+        }
     }
 
     pub fn unprepared_count(&self) -> usize {
@@ -1004,6 +1156,82 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), companions.len(), "two companions share an id");
+    }
+
+    #[test]
+    fn a_folder_can_exist_before_anything_is_in_it() {
+        // Making the folder and then filling it is the order people work in.
+        let mut library = Library::new();
+        library.add_folder("Sat 14/9").unwrap();
+        let tree = library.playlist_tree();
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].0, "Sat 14/9");
+        assert!(tree[0].1.is_empty());
+
+        assert!(library.add_folder("Sat 14/9").is_err(), "one folder, not two of a name");
+        assert!(library.add_folder("   ").is_err(), "a folder needs a name");
+    }
+
+    #[test]
+    fn renaming_a_playlist_takes_the_drives_that_carry_it_along() {
+        // A drive names its playlists by name, so a rename that did not follow
+        // through would leave it pointing at nothing — and the next sync would
+        // read that as "everything on this stick should go".
+        let mut library = Library::new();
+        library.add_playlist("peak", "").unwrap();
+        library.drives.push(Drive {
+            label: "SANDISK".into(),
+            playlists: vec!["peak".into()],
+            ..Drive::default()
+        });
+
+        library.rename_playlist("peak", "peak time").unwrap();
+        assert_eq!(library.playlists[0].name, "peak time");
+        assert_eq!(library.drives[0].playlists, vec!["peak time".to_string()]);
+
+        library.add_playlist("warm", "").unwrap();
+        assert!(library.rename_playlist("warm", "peak time").is_err(), "two of a name");
+    }
+
+    #[test]
+    fn deleting_a_folder_keeps_what_was_filed_in_it() {
+        // The playlists are the work; the folder is only where they were put.
+        let mut library = Library::new();
+        library.add_folder("Sat 14/9").unwrap();
+        library.add_playlist("warm", "Sat 14/9").unwrap();
+
+        library.remove_folder("Sat 14/9");
+        assert_eq!(library.playlists.len(), 1, "the playlist survives its folder");
+        assert_eq!(library.playlists[0].folder, "", "and comes back to the top level");
+        assert!(library.folders.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_playlist_takes_it_off_the_drives_but_not_out_of_the_collection() {
+        let mut library = Library::new();
+        let id = library.add(Path::new("/music/a.flac"));
+        library.add_playlist("peak", "").unwrap();
+        library.playlists[0].tracks.push(id);
+        library.drives.push(Drive { playlists: vec!["peak".into()], ..Drive::default() });
+
+        library.remove_playlist("peak");
+        assert!(library.playlists.is_empty());
+        assert!(library.drives[0].playlists.is_empty(), "the drive stops asking for it");
+        assert!(library.get(id).is_some(), "a playlist is not where the music is kept");
+    }
+
+    #[test]
+    fn a_drive_written_before_playlists_were_plural_still_names_its_own() {
+        // Older collections carry the single `playlist` field. Reading it here
+        // rather than rewriting the file on load means such a collection still
+        // opens in the build that wrote it.
+        let old = Drive { playlist: "Sat 14/9".into(), ..Drive::default() };
+        assert_eq!(old.playlist_names(), vec!["Sat 14/9".to_string()]);
+
+        let new = Drive { playlists: vec!["warm".into(), "peak".into()], ..Drive::default() };
+        assert_eq!(new.playlist_names(), vec!["warm".to_string(), "peak".to_string()]);
+
+        assert!(Drive::default().playlist_names().is_empty());
     }
 
     #[test]

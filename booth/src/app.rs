@@ -163,6 +163,13 @@ pub struct App {
     focus_bar: bool,
     /// The playlist name being typed on the actions strip.
     playlist_entry: String,
+    /// A playlist or folder name being typed in the sidebar, if one is.
+    naming: Option<Naming>,
+    /// Set by the sidebar, acted on after every panel has drawn. The tree is
+    /// walked while the library is borrowed, so it cannot save or rebuild from
+    /// inside the walk.
+    pending_save: bool,
+    pending_rebuild: bool,
     /// The tag being typed in the inspector.
     tag_entry: String,
     /// When the running job started, for saying how long it took.
@@ -209,6 +216,15 @@ pub struct App {
 enum Pending {
     Select(u32),
     Forget(u32),
+    /// Take a track out of one playlist, by name. The name is carried rather
+    /// than read at the time so that the list the menu was opened on is the
+    /// one it acts on.
+    RemoveFromPlaylist(u32, String),
+    /// Put a playlist on the selected drive, or take it off.
+    DrivePlaylist {
+        name: String,
+        on: bool,
+    },
     Adopt(u32),
     AddTag(u32, String),
     RemoveTag(u32, String),
@@ -378,6 +394,9 @@ impl App {
             pick: None,
             focus_bar: false,
             playlist_entry: String::new(),
+            naming: None,
+            pending_save: false,
+            pending_rebuild: false,
             tag_entry: String::new(),
             started: None,
             incompatible: Vec::new(),
@@ -1125,6 +1144,39 @@ impl App {
 
     // -- the sync ----------------------------------------------------------
 
+    /// The drive's playlists, as the exporter wants them: paths in play order.
+    ///
+    /// A stem companion follows its parent rather than going to the end, so
+    /// the browse list on the player reads track, vocals, drums, melody and a
+    /// companion is a turn of the encoder from the record it came from.
+    /// Companions go in only when the drive carries them, and only the parts
+    /// that were actually rendered.
+    fn drive_playlists(&self, drive: &Drive) -> Vec<musicai::cli::PlaylistSpec> {
+        drive
+            .playlist_names()
+            .iter()
+            .filter_map(|name| self.library.playlists.iter().find(|p| p.name == *name))
+            .map(|playlist| musicai::cli::PlaylistSpec {
+                name: playlist.name.clone(),
+                folder: playlist.folder.clone(),
+                tracks: playlist
+                    .tracks
+                    .iter()
+                    .filter_map(|id| self.library.get(*id))
+                    .flat_map(|track| {
+                        let mut paths = vec![track.path.clone()];
+                        if drive.with_stems {
+                            paths.extend(
+                                track.stems.each().into_iter().filter_map(|(_, s)| s.cloned()),
+                            );
+                        }
+                        paths
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     fn write_drive(&mut self) {
         let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
         let files: Vec<PathBuf> = self
@@ -1165,7 +1217,7 @@ impl App {
         } else {
             args.drive = Some(drive.path.clone());
         }
-        args.playlist = drive.playlist.clone();
+        args.playlists = self.drive_playlists(&drive);
         args.companions = companions;
 
         // The drive's record is updated before the write rather than after,
@@ -1194,17 +1246,17 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "DRIVE".to_string());
-        let playlist = self
-            .library
-            .playlists
-            .first()
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "musicai".to_string());
+        // A new drive starts with the first playlist rather than all of them:
+        // what goes on a stick is a decision, and guessing "everything" would
+        // be a large one made on the user's behalf.
+        let playlists =
+            self.library.playlists.first().map(|p| p.name.clone()).into_iter().collect();
         self.library.drives.push(Drive {
             label,
             path,
             is_image,
-            playlist,
+            playlist: String::new(),
+            playlists,
             written: Vec::new(),
             with_stems: false,
             bytes: 0,
@@ -1213,6 +1265,55 @@ impl App {
         self.drive = self.library.drives.len() - 1;
         self.replan();
         self.save();
+    }
+}
+
+/// A name being typed in the sidebar, and what it is for.
+///
+/// One state for four jobs, because they are the same job: collect a name and
+/// do one thing with it. Keeping it out of the collection is what makes a
+/// half-typed name not a name.
+struct Naming {
+    what: What,
+    /// The playlist or folder being renamed. Empty when making a new one.
+    subject: String,
+    text: String,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum What {
+    NewPlaylist,
+    NewFolder,
+    RenamePlaylist,
+    RenameFolder,
+}
+
+impl What {
+    fn hint(self) -> &'static str {
+        match self {
+            What::NewPlaylist | What::RenamePlaylist => "playlist name",
+            What::NewFolder | What::RenameFolder => "folder name",
+        }
+    }
+}
+
+impl Naming {
+    fn new_playlist() -> Self {
+        Self { what: What::NewPlaylist, subject: String::new(), text: String::new() }
+    }
+
+    fn new_folder() -> Self {
+        Self { what: What::NewFolder, subject: String::new(), text: String::new() }
+    }
+
+    /// Renaming starts from the current name rather than from nothing: most
+    /// renames are an edit to what is there.
+    fn rename_playlist(name: &str) -> Self {
+        Self { what: What::RenamePlaylist, subject: name.to_string(), text: name.to_string() }
+    }
+
+    fn rename_folder(name: &str) -> Self {
+        Self { what: What::RenameFolder, subject: name.to_string(), text: name.to_string() }
     }
 }
 
@@ -1482,49 +1583,18 @@ impl App {
         self.view_row(ui, View::Attention, "Needs attention", attention, theme::ALERT);
 
         ui.add_space(16.0);
-        pane_label(ui, "Playlists");
-        let tree: Vec<(String, Vec<(String, usize)>)> = self
-            .library
-            .playlist_tree()
-            .into_iter()
-            .map(|(folder, lists)| {
-                (folder, lists.into_iter().map(|p| (p.name.clone(), p.tracks.len())).collect())
-            })
-            .collect();
-        if tree.is_empty() {
-            ui.label(RichText::new("none yet").color(theme::DIM).size(theme::SMALL));
-        }
-        for (folder, lists) in tree {
-            if !folder.is_empty() {
-                ui.label(RichText::new(format!("▾ {folder}")).color(theme::TEXT));
-            }
-            for (name, count) in lists {
-                let on = self.view == View::Playlist && self.playlist == name;
-                let color = if on { theme::AMBER } else { theme::DIM };
-                let indent = if folder.is_empty() { 0.0 } else { 12.0 };
-                ui.horizontal(|ui| {
-                    ui.add_space(indent);
-                    if ui
-                        .add(
-                            egui::Label::new(RichText::new(&name).color(color))
-                                .sense(egui::Sense::click()),
-                        )
-                        .clicked()
-                    {
-                        self.view = View::Playlist;
-                        self.playlist = name.clone();
-                        self.rebuild();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(count.to_string())
-                                .font(theme::mono(theme::SMALL))
-                                .color(theme::DIM),
-                        );
-                    });
-                });
-            }
-        }
+        ui.horizontal(|ui| {
+            pane_label(ui, "Playlists");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("+▾").on_hover_text("New folder").clicked() {
+                    self.naming = Some(Naming::new_folder());
+                }
+                if ui.small_button("+").on_hover_text("New playlist").clicked() {
+                    self.naming = Some(Naming::new_playlist());
+                }
+            });
+        });
+        self.playlist_tree(ui);
 
         ui.add_space(16.0);
         pane_label(ui, "Saved queries");
@@ -1552,6 +1622,179 @@ impl App {
             let name = self.text.clone();
             self.library.saved.push(SavedQuery { name, text: self.text.clone() });
             self.save();
+        }
+    }
+
+    /// The playlist tree, and everything that can be done to it from here.
+    ///
+    /// Renaming happens in place rather than in a dialog: a name is one field,
+    /// and a sheet over the window to collect one field is a sheet in the way.
+    fn playlist_tree(&mut self, ui: &mut Ui) {
+        let tree: Vec<(String, Vec<(String, usize)>)> = self
+            .library
+            .playlist_tree()
+            .into_iter()
+            .map(|(folder, lists)| {
+                (folder, lists.into_iter().map(|p| (p.name.clone(), p.tracks.len())).collect())
+            })
+            .collect();
+
+        // The field for a new name, wherever it is being typed. Drawn before
+        // the tree when it is a new top-level thing, and in place of a row when
+        // it is a rename.
+        if matches!(self.naming, Some(Naming { what: What::NewPlaylist | What::NewFolder, .. })) {
+            self.name_field(ui);
+        }
+
+        if tree.is_empty() && self.naming.is_none() {
+            ui.label(RichText::new("none yet").color(theme::DIM).size(theme::SMALL));
+        }
+
+        let folders: Vec<String> =
+            tree.iter().map(|(f, _)| f.clone()).filter(|f| !f.is_empty()).collect();
+
+        for (folder, lists) in tree {
+            if !folder.is_empty() {
+                if self.renaming_folder(&folder) {
+                    self.name_field(ui);
+                } else {
+                    let response = ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("\u{25be} {folder}")).color(theme::TEXT),
+                        )
+                        .sense(egui::Sense::click()),
+                    );
+                    response.context_menu(|ui| {
+                        if ui.button("Rename\u{2026}").clicked() {
+                            self.naming = Some(Naming::rename_folder(&folder));
+                            ui.close();
+                        }
+                        // The playlists come back to the top level rather than
+                        // going with it, so this loses the filing and not the
+                        // work — which is why it needs no confirmation.
+                        if ui.button("Delete folder").clicked() {
+                            self.library.remove_folder(&folder);
+                            self.pending_save = true;
+                            ui.close();
+                        }
+                    });
+                }
+            }
+            for (name, count) in lists {
+                if self.renaming_playlist(&name) {
+                    self.name_field(ui);
+                    continue;
+                }
+                let on = self.view == View::Playlist && self.playlist == name;
+                let color = if on { theme::AMBER } else { theme::DIM };
+                let indent = if folder.is_empty() { 0.0 } else { 12.0 };
+                ui.horizontal(|ui| {
+                    ui.add_space(indent);
+                    let response = ui.add(
+                        egui::Label::new(RichText::new(&name).color(color))
+                            .sense(egui::Sense::click()),
+                    );
+                    if response.clicked() {
+                        self.view = View::Playlist;
+                        self.playlist = name.clone();
+                        self.rebuild();
+                    }
+                    response.context_menu(|ui| {
+                        ui.label(RichText::new(&name).color(theme::DIM).size(theme::SMALL));
+                        ui.separator();
+                        if ui.button("Rename\u{2026}").clicked() {
+                            self.naming = Some(Naming::rename_playlist(&name));
+                            ui.close();
+                        }
+                        ui.menu_button("Move to", |ui| {
+                            if !folder.is_empty() && ui.button("Top level").clicked() {
+                                self.move_playlist(&name, "");
+                                ui.close();
+                            }
+                            for other in folders.iter().filter(|f| **f != folder) {
+                                if ui.button(other).clicked() {
+                                    self.move_playlist(&name, other);
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if ui
+                            .button("Delete playlist")
+                            .on_hover_text("The tracks stay in the collection")
+                            .clicked()
+                        {
+                            self.library.remove_playlist(&name);
+                            if self.playlist == name {
+                                self.view = View::All;
+                                self.playlist.clear();
+                                self.pending_rebuild = true;
+                            }
+                            self.pending_save = true;
+                            ui.close();
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(count.to_string())
+                                .font(theme::mono(theme::SMALL))
+                                .color(theme::DIM),
+                        );
+                    });
+                });
+            }
+        }
+    }
+
+    fn renaming_playlist(&self, name: &str) -> bool {
+        matches!(&self.naming, Some(n) if n.what == What::RenamePlaylist && n.subject == name)
+    }
+
+    fn renaming_folder(&self, name: &str) -> bool {
+        matches!(&self.naming, Some(n) if n.what == What::RenameFolder && n.subject == name)
+    }
+
+    fn move_playlist(&mut self, name: &str, folder: &str) {
+        if let Some(playlist) = self.library.playlists.iter_mut().find(|p| p.name == name) {
+            playlist.folder = folder.to_string();
+            self.pending_save = true;
+        }
+    }
+
+    /// The one field a name is typed into, wherever it has been opened.
+    ///
+    /// Enter commits, Escape abandons, and losing focus abandons too: a
+    /// half-typed name left behind by a click elsewhere is not an instruction.
+    fn name_field(&mut self, ui: &mut Ui) {
+        let Some(naming) = &mut self.naming else { return };
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut naming.text)
+                .desired_width(f32::INFINITY)
+                .hint_text(RichText::new(naming.what.hint()).color(theme::DIM)),
+        );
+        response.request_focus();
+
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let naming = self.naming.take().expect("just checked");
+            let outcome = match naming.what {
+                What::NewPlaylist => self.library.add_playlist(&naming.text, ""),
+                What::NewFolder => self.library.add_folder(&naming.text),
+                What::RenamePlaylist => self.library.rename_playlist(&naming.subject, &naming.text),
+                What::RenameFolder => self.library.rename_folder(&naming.subject, &naming.text),
+            };
+            match outcome {
+                Ok(()) => {
+                    // Follow a rename, so the view does not silently empty out
+                    // when the list it was showing changes its name.
+                    if naming.what == What::RenamePlaylist && self.playlist == naming.subject {
+                        self.playlist = naming.text.trim().to_string();
+                    }
+                    self.pending_save = true;
+                    self.pending_rebuild = true;
+                }
+                Err(message) => self.note(message, theme::ALERT),
+            }
+        } else if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.naming = None;
         }
     }
 
@@ -1722,6 +1965,7 @@ impl App {
             let menu = rows::Menu {
                 in_library: self.config.holds(&line.track.path),
                 playing: playing == Some(line.track.id),
+                in_playlist: self.view == View::Playlist,
             };
             if let Some(what) = rows::row(ui, &line.track, line.indented, selected, &widths, menu) {
                 hit = Some((line.track.id, what));
@@ -1750,6 +1994,9 @@ impl App {
                     rows::Action::Separate => Pending::Separate(id),
                     rows::Action::CopyIn => Pending::Adopt(id),
                     rows::Action::Reveal => Pending::CopyPath(id),
+                    rows::Action::RemoveFromPlaylist => {
+                        Pending::RemoveFromPlaylist(id, self.playlist.clone())
+                    }
                     rows::Action::Forget => Pending::Forget(id),
                 }),
                 rows::Hit::Clicked => {}
@@ -2548,6 +2795,17 @@ impl App {
     /// under a half-drawn row would be worse than one that catches up next
     /// frame.
     fn apply_pending(&mut self, ctx: &egui::Context) {
+        // The sidebar's own changes first: it walks the collection to draw the
+        // tree, so it cannot save or rebuild while it is doing so.
+        if std::mem::take(&mut self.pending_rebuild) {
+            self.rebuild();
+            self.replan();
+        }
+        if std::mem::take(&mut self.pending_save) {
+            self.save();
+            self.replan();
+        }
+
         let pending = std::mem::take(&mut self.pending);
         if pending.is_empty() {
             return;
@@ -2578,6 +2836,34 @@ impl App {
                 Pending::Forget(id) => {
                     self.library.remove(id);
                     touched = true;
+                }
+                Pending::RemoveFromPlaylist(id, name) => {
+                    if let Some(playlist) =
+                        self.library.playlists.iter_mut().find(|p| p.name == name)
+                    {
+                        let before = playlist.tracks.len();
+                        playlist.tracks.retain(|t| *t != id);
+                        if playlist.tracks.len() != before {
+                            self.note(format!("removed from \u{201c}{name}\u{201d}"), theme::TEXT);
+                            touched = true;
+                        }
+                    }
+                }
+                Pending::DrivePlaylist { name, on } => {
+                    let Some(drive) = self.library.drives.get_mut(self.drive) else { continue };
+                    // Migrate off the single-playlist field the first time a
+                    // drive is edited, so the two cannot disagree afterwards.
+                    if drive.playlists.is_empty() && !drive.playlist.is_empty() {
+                        drive.playlists = vec![std::mem::take(&mut drive.playlist)];
+                    }
+                    drive.playlist.clear();
+                    match on {
+                        true if !drive.playlists.contains(&name) => drive.playlists.push(name),
+                        true => {}
+                        false => drive.playlists.retain(|n| *n != name),
+                    }
+                    touched = true;
+                    self.replan();
                 }
                 Pending::Adopt(id) => self.adopt(&[id]),
                 Pending::FitWave => self.zoom = wave::Zoom::default(),
@@ -2946,12 +3232,46 @@ impl App {
                 }
                 Some(drive) => {
                     let mark = if drive.is_image { "▢" } else { "▣" };
+                    let carries = drive.playlist_names();
+                    let what = match carries.len() {
+                        0 => "no playlists".to_string(),
+                        1 => carries[0].clone(),
+                        n => format!("{n} playlists"),
+                    };
                     ui.label(format!(
-                        "{mark} {} — {} · {}",
+                        "{mark} {} — {what} · {}",
                         drive.label,
-                        drive.playlist,
                         plural(drive.written.len(), "track")
                     ));
+                    // Which playlists go on the stick is the decision the dock
+                    // exists for, so it is a menu here rather than a setting
+                    // somewhere else.
+                    ui.menu_button("playlists\u{2026}", |ui| {
+                        ui.set_min_width(190.0);
+                        if self.library.playlists.is_empty() {
+                            ui.label(RichText::new("no playlists yet").color(theme::DIM));
+                        }
+                        for (folder, lists) in self.library.playlist_tree() {
+                            if !folder.is_empty() {
+                                ui.label(
+                                    RichText::new(&folder).color(theme::DIM).size(theme::SMALL),
+                                );
+                            }
+                            for playlist in lists {
+                                let name = playlist.name.clone();
+                                let mut on = carries.contains(&name);
+                                if ui
+                                    .checkbox(
+                                        &mut on,
+                                        format!("{name}  ({})", playlist.tracks.len()),
+                                    )
+                                    .changed()
+                                {
+                                    self.pending.push(Pending::DrivePlaylist { name, on });
+                                }
+                            }
+                        }
+                    });
                     if self.library.drives.len() > 1 && ui.button("next").clicked() {
                         self.drive = (self.drive + 1) % self.library.drives.len();
                         self.replan();
@@ -3814,12 +4134,32 @@ impl App {
                 );
                 ui.label(
                     RichText::new(format!(
-                        "{} A CDJ-3000X reads this format only in its compatibility mode; \
-                         Device Library Plus has no public specification.",
+                        "{} A CDJ-3000X will not read this drive: it needs OneLibrary, \
+                         whose schema is not published.",
                         theme::WARN
                     ))
                     .font(theme::mono(10.5))
                     .color(theme::ALERT),
+                );
+
+                // What the browse tree on the player will look like, because
+                // that is the thing being written and the easiest to get wrong.
+                let specs = self.drive_playlists(&drive);
+                let line = match specs.is_empty() {
+                    true => "no playlists — nothing will be written".to_string(),
+                    false => specs
+                        .iter()
+                        .map(|p| match p.folder.is_empty() {
+                            true => format!("{} ({})", p.name, p.tracks.len()),
+                            false => format!("{}/{} ({})", p.folder, p.name, p.tracks.len()),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ·  "),
+                };
+                ui.label(
+                    RichText::new(format!("Playlists: {line}"))
+                        .font(theme::mono(10.5))
+                        .color(if specs.is_empty() { theme::ALERT } else { theme::DIM }),
                 );
                 ui.add_space(10.0);
 

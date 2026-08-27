@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use binrw::BinRead;
 use musicai::audio::encode::{write_file, Codec, EncodeOptions};
 use musicai::audio::Audio;
-use musicai::cli::{ExportArgs, InputArgs};
+use musicai::cli::{ExportArgs, InputArgs, PlaylistSpec};
 use musicai::commands;
 use musicai::export::image::DriveImage;
 use musicai::report::Collected;
@@ -93,6 +93,7 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         label: "REKORDBOX".to_string(),
         bpm: None,
         playlist: "Sat 14/9".to_string(),
+        playlists: Vec::new(),
         dry_run: false,
         companions: Vec::new(),
     }
@@ -230,6 +231,104 @@ fn the_playlist_holds_every_exported_track() {
     assert_eq!(rows("Tracks"), 3);
     assert_eq!(rows("PlaylistTree"), 1);
     assert_eq!(rows("PlaylistEntries"), 3);
+}
+
+/// The playlist tree as an independent parser reads it back: each row's name,
+/// whether it is a folder, and which folder it sits in.
+fn playlists_on(drive: &Path) -> Vec<(String, bool, u32, u32)> {
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let mut cursor = Cursor::new(&bytes);
+    let header = Header::read(&mut cursor).expect("rekordcrate could not read the database");
+
+    let table = header.tables.iter().find(|t| t.page_type == PageType::PlaylistTree).unwrap();
+    let pages = header
+        .read_pages(&mut cursor, binrw::Endian::Little, (&table.first_page, &table.last_page))
+        .unwrap();
+
+    let mut out = Vec::new();
+    for row in pages
+        .iter()
+        .filter(|p| p.has_data())
+        .flat_map(|p| p.row_groups.iter().flat_map(|g| g.present_rows()))
+    {
+        let Row::PlaylistTreeNode(node) = row else { continue };
+        // The parser keeps its fields private, so they are read back out of
+        // its own description of what it found. The markers carry their
+        // wrapper type: plain `id: ` also matches the tail of `parent_id: `,
+        // which is how the first version of this read every node as a child of
+        // the root and still passed three of its four assertions.
+        let described = format!("{node:?}");
+        let id_after = |marker: &str| -> u32 {
+            let at = described.find(marker).unwrap_or_else(|| panic!("no {marker} in {described}"))
+                + marker.len();
+            let rest = &described[at..];
+            rest[..rest.find(')').unwrap()].parse().unwrap()
+        };
+        let marker = "name: DeviceSQLString(\"";
+        let at = described.find(marker).unwrap() + marker.len();
+        let name = described[at..][..described[at..].find('"').unwrap()].to_string();
+        // Stored as a count rather than a flag: non-zero is a folder.
+        let is_folder = !described.contains("node_is_folder: 0");
+        out.push((
+            name,
+            is_folder,
+            id_after(", id: PlaylistTreeNodeId("),
+            id_after("parent_id: PlaylistTreeNodeId("),
+        ));
+    }
+    out
+}
+
+#[test]
+fn a_drive_carries_a_tree_of_playlists_and_folders() {
+    // What a player draws in its browse list. One list per set, filed under
+    // the night — which is the shape a DJ prepares in, and what a drive that
+    // could hold only one playlist made impossible.
+    let scratch = Scratch::new("tree");
+    let drive = scratch.path("USB");
+    let files: Vec<PathBuf> =
+        (1..=3).map(|i| write_song(&scratch, &format!("track{i}.flac"))).collect();
+
+    let mut args = args_for(files.clone());
+    args.drive = Some(drive.clone());
+    args.playlists = vec![
+        PlaylistSpec {
+            name: "warm".into(),
+            folder: "Sat 14/9".into(),
+            tracks: vec![files[0].clone(), files[1].clone()],
+        },
+        PlaylistSpec {
+            name: "peak".into(),
+            folder: "Sat 14/9".into(),
+            // Shared with "warm": one track can be in two sets.
+            tracks: vec![files[1].clone(), files[2].clone()],
+        },
+        PlaylistSpec {
+            name: "promos".into(),
+            folder: String::new(),
+            tracks: vec![files[0].clone()],
+        },
+    ];
+    musicai::commands::export(&args, &musicai::report::Collected::new()).unwrap();
+
+    let rows = playlists_on(&drive);
+    assert_eq!(rows.len(), 4, "a folder and three lists: {rows:?}");
+
+    let find = |name: &str| rows.iter().find(|r| r.0 == name).unwrap_or_else(|| panic!("{name}"));
+    let folder = find("Sat 14/9");
+    assert!(folder.1, "the folder is marked as one");
+    assert_eq!(find("warm").3, folder.2, "warm sits in the folder");
+    assert_eq!(find("peak").3, folder.2);
+    assert_eq!(find("promos").3, 0, "the top level is not a folder");
+    assert!(!find("warm").1, "a playlist is not a folder");
+
+    // Four entries, not three: the shared track appears in both lists, and is
+    // one track on the drive.
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let tables = musicai::export::pdb::inspect(&bytes).unwrap();
+    let rows_in = |name: &str| tables.iter().find(|t| t.table == name).unwrap().rows;
+    assert_eq!(rows_in("Tracks"), 3);
+    assert_eq!(rows_in("PlaylistEntries"), 5);
 }
 
 #[test]

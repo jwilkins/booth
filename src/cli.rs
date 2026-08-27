@@ -405,8 +405,20 @@ pub struct ExportArgs {
     pub bpm: Option<f64>,
 
     /// Name of the playlist the exported tracks go into.
+    ///
+    /// Used when `playlists` is empty, which is the command line's case: one
+    /// list of everything named, because there is nothing on a command line
+    /// that says which file belongs to which playlist.
     #[arg(long, value_name = "NAME", default_value = "musicai")]
     pub playlist: String,
+
+    /// The playlist tree to write, when the caller has one.
+    ///
+    /// Not a command-line option, for the same reason `companions` is not: it
+    /// comes from a library that knows which track is in which list, and there
+    /// is no way to say it on one line.
+    #[arg(skip)]
+    pub playlists: Vec<PlaylistSpec>,
 
     /// Report what would be written without touching the drive.
     #[arg(long)]
@@ -426,6 +438,20 @@ pub struct ExportArgs {
     /// came from which, and there is no way to say it on one line.
     #[arg(skip)]
     pub companions: Vec<(PathBuf, PathBuf)>,
+}
+
+/// One playlist to write onto a drive, named by the files that belong to it.
+///
+/// Paths rather than ids: the ids a drive uses are handed out during the
+/// export, as each file is prepared, so a caller has none to give. It does
+/// know which files it asked for, and that is enough to match on afterwards.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaylistSpec {
+    pub name: String,
+    /// The folder it sits in on the player, or empty for the top level.
+    pub folder: String,
+    /// The tracks, in play order.
+    pub tracks: Vec<PathBuf>,
 }
 
 /// How much work a separation is worth.
