@@ -17,14 +17,15 @@ Load an acapella onto deck 2 with no laptop in the booth. Rekordbox's Track Sepa
 runs in Performance mode with a computer plugged in, so a CDJ-3000 standing on its own
 has no stems — the flagship player cannot do the flagship trick.
 
-Booth separates tracks at home with demucs and writes the results onto the drive as
-ordinary tracks, each one inheriting its parent's beatgrid, phrases and hot cues
-unmodified. Hit the same cue letter on both decks and they are phase-locked, because
+Booth separates tracks at home with demucs and writes all three parts — vocals, drums
+and everything else — onto the drive as ordinary tracks, sitting directly under the
+record they came from in the browse list. Each inherits its parent's beatgrid, phrases
+and hot cues unmodified, so hitting the same cue letter on both decks is phase-locked:
 both players are reading the same grid from the same analysis.
 
-That gets you acapellas, instrumentals, drum tools and long ambient blends on club
-hardware, prepared in advance. Engine DJ shipped exactly this and DJs took to it; it
-cannot touch a Pioneer player.
+That gets you acapellas, drum tools and long ambient blends on club hardware, prepared in
+advance. Engine DJ shipped exactly this and DJs took to it; it cannot touch a Pioneer
+player.
 
 ### A drive that was checked before you left the house
 
@@ -75,13 +76,12 @@ run, and so does importing a rekordbox library. Drives are verified against an
 independent parser on every write. They have **not yet been played on a CDJ**, which is
 the one thing standing between this and a first release.
 
-Known gaps, so that nothing above reads as more finished than it is: a drive carries one
-playlist rather than a folder tree; the compatibility target is fixed at the CDJ-3000
-rather than chosen; the preflight does not yet check the filesystem or the folder limits;
-stem companions reach the drive but do not sort under their parents in the browse list;
-the beatgrid and key detectors have no measured accuracy figures against a labelled set;
-there is no play history and nothing reads a drive back after a gig; and the preview deck
-is one deck, not two. §14 is the detailed status and does not round up.
+Known gaps, so that nothing above reads as more finished than it is: the compatibility
+target is fixed at the CDJ-3000 rather than chosen; the preflight does not yet check the
+filesystem or the folder limits; the beatgrid and key detectors have no measured accuracy
+figures against a labelled set; there is no play history and nothing reads a drive back
+after a gig; and the preview deck is one deck, not two. §14 is the detailed status and
+does not round up.
 
 ### Why the lock-in exists at all
 
@@ -603,29 +603,33 @@ exported together as an atomic unit.
 
 | Companion | Content | Typical use |
 |---|---|---|
-| `acapella` | vocals | Layering over another instrumental; mashups |
-| `instrumental` | melody + drums (+ bass) | Playing under someone else's vocal; radio-unfriendly edits |
-| `drums` | drums | Beat tools, drop transitions, filling a break |
-| `bass` | bass, when the 4-stem model is used | Bass swaps between decks |
-| `no-drums` | everything but drums | Long ambient blends |
-| `no-vocals` | melody + drums (+ bass) | Same as instrumental; kept distinct for clarity |
+| `vocals` | the vocal alone | Layering over another instrumental; mashups |
+| `drums` | the drums alone | Beat tools, drop transitions, filling a break |
+| `melody` | everything else — bass, chords, leads | Playing under someone else's vocal; long ambient blends |
+
+Three, because three is what the separator writes. A combination — an
+`instrumental` of melody and drums together — would be two files added as they
+load, which the deck can do and a player cannot: a CDJ has only what was
+written for it, so a row that no single file backs is a row that works at the
+desk and not at the gig. Writing the sum as a fourth file is a real option and
+costs a third more disk per kit; it is not done yet.
 
 Kits are defined per playlist, not per library: rendering every companion for 30,000
-tracks is neither useful nor affordable in disk. The default is "acapella + instrumental
-for anything in a playlist marked for a gig".
+tracks is neither useful nor affordable in disk. The default is "all three parts for
+anything in a playlist marked for a gig".
 
 ### 8.4 Requirements (STEM)
 
 | # | Requirement | Done when |
 |---|---|---|
 | STEM-1 | Stems render offline, locally, in a background queue that survives quitting. | Queue state is in the library database; relaunching resumes; the UI never blocks. Reuses `src/stems/demucs.rs`. |
-| STEM-2 | 4-stem separation (vocals / drums / bass / other), with the 3-stem sum kept as a preset. | `Stem` gains a `Bass` variant; the existing melody = bass + other summing becomes one of several documented recipes rather than the only one. |
+| STEM-2 | 4-stem separation (vocals / drums / bass / other), with the 3-stem sum kept as a preset. | `Stem` gains a `Bass` variant; the existing melody = bass + other summing becomes one of several documented recipes rather than the only one. **Not done**: demucs is asked for four and three are written, so a bass swap is not yet possible. |
 | STEM-3 | **Stems inherit the parent's grid, phrases, cues, loops, key and colour, unmodified.** | A rendered acapella exports with byte-identical `PQTZ` and `PCO2` sections to its parent; verified in a test. |
 | STEM-4 | **Stems are loudness-corrected by re-encoding, not by tagging.** | Players ignore ReplayGain, and a separated stem is both quieter than the mix on average and liable to peak above it. Each rendered stem gets EBU R128 gain applied to the samples with a −1.0 dBTP ceiling using `src/normalize/limiter.rs`, and the drive copy carries no ReplayGain tag at all. |
 | STEM-5 | Clipping is impossible on the drive, not merely reported. | The existing "N samples clipped; the stem peaks above full scale" warning becomes an automatic attenuate-or-limit decision on the export copy, chosen by the same `--on-peak` policy the CLI already has. |
 | STEM-6 | Every rendered stem is quality-scored, and bad ones are flagged rather than shipped silently. | `tests/stem_isolation.rs`'s method — transcribe the mix and the stems, check the sung words come back from the vocal stem and not the others — runs as a per-track score. Below threshold, the kit lands in **Needs attention** with the reason. |
-| STEM-7 | Companions are named and tagged so a CDJ browse list stays usable. | Title becomes `Roll With The Punches (acapella)`; a `STEM` tag records the kind (already implemented in `src/tag/copy.rs`); companions carry the parent's colour and a distinct rating/colour convention; they are excluded from the main browser view by default and from any query unless `stem:` is named. |
-| STEM-8 | On the drive, a kit is one playlist entry with its companions adjacent. | Companions sort immediately under their parent in the exported playlist, so the browse list on the player reads `track / (acapella) / (instrumental)` and a companion is two turns of the jog-adjacent encoder away, not a search. |
+| STEM-7 | Companions are named and tagged so a CDJ browse list stays usable. | Title becomes `Roll With The Punches (vocals)`; a `STEM` tag records the kind (already implemented in `src/tag/copy.rs`); companions carry the parent's colour and a distinct rating/colour convention; they are excluded from the main browser view by default and from any query unless `stem:` is named. |
+| STEM-8 | On the drive, a kit is one playlist entry with its companions adjacent. | Companions sort immediately under their parent in the exported playlist, so the browse list on the player reads `track / (vocals) / (drums) / (melody)` and a companion is a turn of the encoder away, not a search. |
 | STEM-9 | Kits appear in the players' **Related Tracks**, where the format supports it. | Needs verification against the exported database schema (§13); if Related Tracks cannot be populated by a third-party writer, STEM-8's adjacency is the fallback and the feature ships without it. |
 | STEM-10 | Disk cost is shown before it is spent. | The sync sheet quotes stem bytes separately (see §6.5); the app recommends a companion format — FLAC for headroom, 320 kbps MP3 when the drive is tight — and separated stems compress substantially better than the mix they came from. |
 | STEM-11 | Rendering uses the GPU when there is one. | `--demucs-device cuda`/`mps` is selected automatically with a CPU fallback; the queue reports realistic time-to-finish (minutes per track on CPU, seconds on a GPU). |
@@ -634,11 +638,12 @@ for anything in a playlist marked for a gig".
 ### 8.5 What this feels like in the booth
 
 Two CDJ-3000s, no laptop. Deck 1 plays the track. You want the vocal over the next
-record: load `(acapella)` on deck 2 from the same playlist — it is the next line down —
+record: load `(vocals)` on deck 2 from the same playlist — it is the next line down —
 hit the same hot cue letter, and it is phase-locked because both decks are reading the
 same grid from the same analysis. A break that is too short becomes a long one by looping
-the `(no-drums)` companion underneath. A track with a vocal you cannot play at this gig
-has an `(instrumental)` sitting next to it, prepared weeks ago.
+the `(melody)` companion underneath. A track with a vocal you cannot play at this gig has
+its `(melody)` sitting next to it, prepared weeks ago — and the drums separately, for
+running under something else.
 
 None of that needs new firmware, a licence, or a computer. It needs the drive to be
 written correctly and the stems to be rendered before you left the house — which is
@@ -788,7 +793,7 @@ played by a CDJ.
 | Analysis — tempo, grid, downbeat, key, structure, cues (ANA-1..5) | Runs on real audio, seconds a track. No accuracy figures against a labelled set yet. |
 | Waveforms, all five packings including the 3-band (ANA-6) | Written and read back. Not yet seen on a player. |
 | Loudness and true peak (ANA-7) | Done, from the existing `src/loudness.rs`. |
-| Drive writer — `export.pdb`, ANLZ, disk image (EXP-1) | Writes; verified by an independent parser; **unverified on hardware**. One playlist per drive — the folder tree of §6 is not exported yet. |
+| Drive writer — `export.pdb`, ANLZ, disk image (EXP-1) | Writes a track list and a playlist tree with folders; verified by an independent parser; **unverified on hardware**. |
 | Delta sync and preflight (EXP-2, SAFE-2) | Done, and the file checks run at import as well as at write. |
 | Medium checks (SAFE-3) | Free space and path length only. Filesystem type, folder depth and per-folder file counts are not checked. |
 | Compatibility target (EXP-3) | Not built. The rules are the CDJ-3000's, in `src/compat.rs`, and are not yet selectable. |
@@ -797,7 +802,7 @@ played by a CDJ.
 | The window (§6) | One window, query bar, browser, prep editor, dock. Built. |
 | Preparation — cues, tags, ratings, bulk and per-track (PREP-1..5) | Done, bar user-chosen cue colours. |
 | Preview deck (PREP-6) | One deck, not two. Enough to audition and set cues. |
-| Stems, rendered and playable (STEM-1..3, 7, 11, 12) | Done, in the window and on the drive, inheriting the parent's analysis. Browse-list adjacency (STEM-8), quality scoring (STEM-6) and the drive's loudness pass (STEM-4, STEM-5) are not. |
+| Stems, rendered and playable (STEM-1..3, 7, 8, 11, 12) | Done: three rows a track, in the window and on the drive, each inheriting the parent's analysis and sorted under it in the exported playlist. Quality scoring (STEM-6) and the drive's loudness pass (STEM-4, STEM-5) are not. |
 | rekordbox import (INTEROP-1) | Done, from the encrypted `master.db`. |
 | OneLibrary (INTEROP-5, EXP-3 for the 3000X) | Reads and dumps a schema. Writes nothing. |
 | Serato, Traktor, Engine DJ (INTEROP-2) | Not started. |
@@ -950,9 +955,10 @@ about the music and lying about the drive.
   else works.
 
 - **Stems, in the window.** `S` on a selection queues the separation; companion rows
-  appear beneath their parents in the browser and play — an acapella is the vocal stem, an
-  instrumental is the melody and drum stems summed as it loads, because the separator
-  writes parts and never a mix of some of them. Stems are written beside their track by
+  appear beneath their parents in the browser and on the drive, and play. One row per
+  part the separator writes, rather than per combination a DJ might want: a summed
+  `instrumental` works in the deck and cannot exist on a player, which has only the files
+  written for it. Stems are written beside their track by
   default (`Sirens.flac` yields `Sirens-vocals.mp3`) so that copying a folder takes the kit
   with it; the single-folder layout stays for a library on a small disk. Both places are
   searched whichever is set, because a kit is minutes of work and changing a preference
