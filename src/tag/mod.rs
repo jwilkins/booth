@@ -19,9 +19,8 @@ pub mod musicbrainz;
 use std::fmt;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
-use crate::audio::encode::Codec;
 
 /// The metadata fields this tool knows how to write.
 ///
@@ -279,22 +278,33 @@ fn plan<T: TagTarget>(
 pub fn read_metadata(path: &Path) -> Result<Metadata> {
     let mut metadata = Metadata::default();
 
-    match Codec::from_path(path) {
-        Some(Codec::Flac) => {
+    match tag_kind(path) {
+        Some(TagKind::Flac) => {
             let mut tag = metaflac::Tag::read_from_path(path)?;
             let target = VorbisTarget(&mut tag);
             for field in Field::ALL {
                 set_field(&mut metadata, field, target.get(field));
             }
         }
-        Some(Codec::Mp3) => {
+        Some(TagKind::Id3) => {
             let mut tag = id3::Tag::read_from_path(path).unwrap_or_default();
             let target = Id3Target(&mut tag);
             for field in Field::ALL {
                 set_field(&mut metadata, field, target.get(field));
             }
         }
-        Some(Codec::Wav) => {}
+        Some(TagKind::Mp4) => {
+            // A file that will not parse is left with nothing rather than
+            // failing the read: not knowing a track's name is a worse reason to
+            // refuse to import it than any name it might have had.
+            if let Ok(mut tag) = mp4ameta::Tag::read_from_path(path) {
+                let target = Mp4Target(&mut tag);
+                for field in Field::ALL {
+                    set_field(&mut metadata, field, target.get(field));
+                }
+            }
+        }
+        Some(TagKind::None) => {}
         None => bail!("cannot tell what kind of file {} is", path.display()),
     }
 
@@ -331,15 +341,46 @@ pub fn write_tags(
     policy: OnExisting,
     cover: Option<&coverart::CoverArt>,
 ) -> Result<TagOutcome> {
-    match Codec::from_path(path) {
-        Some(Codec::Flac) => write_flac(path, metadata, policy, cover),
-        Some(Codec::Mp3) => write_mp3(path, metadata, policy, cover),
-        Some(Codec::Wav) => {
+    match tag_kind(path) {
+        Some(TagKind::Flac) => write_flac(path, metadata, policy, cover),
+        Some(TagKind::Id3) => write_mp3(path, metadata, policy, cover),
+        Some(TagKind::Mp4) => write_mp4(path, metadata, policy, cover),
+        Some(TagKind::None) => {
             bail!("wav has no standard metadata tag; {} cannot be tagged", path.display())
         }
         None => bail!("cannot tell what kind of file {} is", path.display()),
     }
     .with_context(|| format!("writing tags to {}", path.display()))
+}
+
+/// Which kind of tag block a file carries.
+///
+/// Not the same question as which codec it holds: an `.m4a` may be AAC or ALAC
+/// and carries the same iTunes-style atoms either way, and an `.aiff` carries
+/// ID3 despite having nothing to do with MP3.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TagKind {
+    /// Vorbis comments.
+    Flac,
+    /// An ID3v2 block.
+    Id3,
+    /// iTunes-style `ilst` atoms in an MP4 container.
+    Mp4,
+    /// The format has nowhere to put them.
+    None,
+}
+
+/// What kind of tag block a path's extension implies, or `None` for a file
+/// this does not recognise at all.
+pub fn tag_kind(path: &Path) -> Option<TagKind> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "flac" => TagKind::Flac,
+        "mp3" | "aiff" | "aif" => TagKind::Id3,
+        "m4a" | "m4b" | "mp4" | "aac" => TagKind::Mp4,
+        "wav" | "wave" => TagKind::None,
+        _ => return None,
+    })
 }
 
 // -- FLAC ------------------------------------------------------------------
@@ -546,6 +587,147 @@ fn write_mp3(
 
     if outcome.changed_anything() {
         tag.write_to_path(path, id3::Version::Id3v24)?;
+    }
+    Ok(outcome)
+}
+
+// -- MP4 -------------------------------------------------------------------
+
+/// The iTunes-style atoms MusicBrainz Picard writes, for the fields that have
+/// no standard atom of their own.
+///
+/// A freeform atom is namespaced by a mean and a name, and Picard's names are
+/// the ones every other program looks for — inventing our own would write tags
+/// that only this program can read.
+fn freeform(field: Field) -> Option<mp4ameta::ident::FreeformIdentStatic> {
+    let name = match field {
+        Field::RecordingMbid => "MusicBrainz Track Id",
+        Field::ReleaseMbid => "MusicBrainz Album Id",
+        Field::ReleaseGroupMbid => "MusicBrainz Release Group Id",
+        Field::ArtistMbid => "MusicBrainz Artist Id",
+        Field::AcoustId => "Acoustid Id",
+        _ => return None,
+    };
+    Some(mp4ameta::FreeformIdent::new_static("com.apple.iTunes", name))
+}
+
+struct Mp4Target<'a>(&'a mut mp4ameta::Tag);
+
+impl TagTarget for Mp4Target<'_> {
+    fn get(&self, field: Field) -> Option<String> {
+        let text = match field {
+            Field::Title => self.0.title().map(str::to_string),
+            Field::Artist => self.0.artist().map(str::to_string),
+            Field::Album => self.0.album().map(str::to_string),
+            Field::AlbumArtist => self.0.album_artist().map(str::to_string),
+            Field::Date => self.0.year().map(str::to_string),
+            Field::TrackNumber => self.0.track_number().map(|n| n.to_string()),
+            Field::TotalTracks => self.0.total_tracks().map(|n| n.to_string()),
+            Field::DiscNumber => self.0.disc_number().map(|n| n.to_string()),
+            Field::TotalDiscs => self.0.total_discs().map(|n| n.to_string()),
+            other => freeform(other)
+                .and_then(|ident| self.0.strings_of(&ident).next().map(str::to_string)),
+        };
+        text.filter(|value: &String| !value.is_empty())
+    }
+
+    fn set(&mut self, field: Field, value: &str) {
+        // The numeric atoms are two bytes wide. A track number that does not
+        // fit one is a broken tag rather than a very long album, so it is
+        // dropped instead of being wrapped into a plausible wrong number.
+        let number = || value.parse::<u16>().ok();
+        match field {
+            Field::Title => self.0.set_title(value),
+            Field::Artist => self.0.set_artist(value),
+            Field::Album => self.0.set_album(value),
+            Field::AlbumArtist => self.0.set_album_artist(value),
+            Field::Date => self.0.set_year(value),
+            Field::TrackNumber => {
+                if let Some(n) = number() {
+                    self.0.set_track_number(n);
+                }
+            }
+            Field::TotalTracks => {
+                if let Some(n) = number() {
+                    self.0.set_total_tracks(n);
+                }
+            }
+            Field::DiscNumber => {
+                if let Some(n) = number() {
+                    self.0.set_disc_number(n);
+                }
+            }
+            Field::TotalDiscs => {
+                if let Some(n) = number() {
+                    self.0.set_total_discs(n);
+                }
+            }
+            other => {
+                if let Some(ident) = freeform(other) {
+                    self.0.set_data(ident, mp4ameta::Data::Utf8(value.to_string()));
+                }
+            }
+        }
+    }
+
+    fn set_cover_art(&mut self, art: &coverart::CoverArt) -> Result<()> {
+        // Replace rather than accumulate: re-tagging a file should not leave it
+        // carrying three front covers.
+        self.0.remove_artworks();
+        let image = match art.mime_type {
+            "image/png" => mp4ameta::Img::png(art.data.clone()),
+            "image/bmp" => mp4ameta::Img::bmp(art.data.clone()),
+            _ => mp4ameta::Img::jpeg(art.data.clone()),
+        };
+        self.0.set_artwork(image);
+        Ok(())
+    }
+}
+
+fn write_mp4(
+    path: &Path,
+    metadata: &Metadata,
+    policy: OnExisting,
+    cover: Option<&coverart::CoverArt>,
+) -> Result<TagOutcome> {
+    // A file with no tag yet is normal, not an error — but a file that will not
+    // parse as MP4 at all is worth saying so about, because the usual reason is
+    // that it is a purchase with DRM on it, and no amount of retrying will
+    // write a tag into that.
+    // Checked here rather than left to the parser, which reports a renamed
+    // download as an atom size out of bounds — true, and no use to anybody
+    // trying to work out what is wrong with their file.
+    match crate::audio::mp4::sniff(path) {
+        crate::audio::mp4::Container::Mp4 { protected: true, .. } => {
+            bail!("{} is a protected purchase and cannot be tagged", path.display())
+        }
+        crate::audio::mp4::Container::NotMp4 => {
+            bail!("{} is not an MP4 file, whatever it is named", path.display())
+        }
+        crate::audio::mp4::Container::Unreadable => {
+            bail!("{} is too short to be an MP4 file", path.display())
+        }
+        crate::audio::mp4::Container::Mp4 { .. } => {}
+    }
+    let mut tag = mp4ameta::Tag::read_from_path(path)
+        .map_err(|e| anyhow!("{} would not parse as MP4: {e}", path.display()))?;
+
+    let (writes, mut outcome) = {
+        let target = Mp4Target(&mut tag);
+        plan(&target, metadata, policy)
+    };
+
+    let mut target = Mp4Target(&mut tag);
+    for (field, value) in &writes {
+        target.set(*field, value);
+    }
+    if let Some(art) = cover {
+        target.set_cover_art(art)?;
+        outcome.cover_art = true;
+    }
+
+    if outcome.changed_anything() {
+        tag.write_to_path(path)?;
     }
     Ok(outcome)
 }

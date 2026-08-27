@@ -43,6 +43,10 @@ pub struct Cli {
 pub enum Command {
     /// Report loudness and peak levels without changing anything.
     Analyze(AnalyzeArgs),
+    /// Write the per-track analysis files a Pioneer/AlphaTheta player reads.
+    Anlz(AnlzArgs),
+    /// Build a whole USB drive a Pioneer/AlphaTheta player can browse.
+    Export(ExportArgs),
     /// Bring files to a consistent loudness.
     Normalize(NormalizeArgs),
     /// Normalize, tag and separate, in one pass. This is what running
@@ -52,6 +56,34 @@ pub enum Command {
     Stems(StemsArgs),
     /// Identify files by sound and write metadata tags from MusicBrainz.
     Tag(TagArgs),
+    /// Read rekordbox's own encrypted libraries.
+    #[command(subcommand)]
+    Rekordbox(RekordboxCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RekordboxCommand {
+    /// List what is in a rekordbox library, without changing anything.
+    ///
+    /// Point it at `master.db` from a rekordbox installation, or at a mounted
+    /// OneLibrary drive.
+    Read(RekordboxArgs),
+    /// Describe the tables of a database, for a format nobody has published.
+    ///
+    /// This is how the OneLibrary schema gets learned. It reads; it does not
+    /// write a drive, and having the key does not make it able to.
+    Schema(RekordboxArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct RekordboxArgs {
+    /// The `master.db`, the `exportLibrary.db`, or the drive holding one.
+    pub path: PathBuf,
+
+    /// The SQLCipher key. Defaults to `REKORDBOX_KEY`, then to whatever this
+    /// build was compiled with.
+    #[arg(long, value_name = "HEX")]
+    pub key: Option<String>,
 }
 
 /// One step of the pipeline.
@@ -203,6 +235,42 @@ defaults_from_clap!(RunArgs, "run", Run);
 defaults_from_clap!(StemsArgs, "stems", Stems);
 defaults_from_clap!(TagArgs, "tag", Tag);
 
+impl StemsArgs {
+    /// The VBR quality to write mp3 stems at, or `None` for a constant bitrate.
+    pub fn vbr(&self) -> Option<u8> {
+        (!self.stem_cbr).then_some(self.stem_vbr)
+    }
+
+    /// The model to separate with: whatever was named, else what the chosen
+    /// quality implies.
+    pub fn model(&self) -> String {
+        self.demucs.demucs_model.clone().unwrap_or_else(|| self.quality.model().to_string())
+    }
+
+    /// Likewise for the number of test-time shifts.
+    pub fn shifts(&self) -> u32 {
+        self.demucs.demucs_shifts.unwrap_or_else(|| self.quality.shifts())
+    }
+}
+
+impl ExportArgs {
+    /// The same trick as the macro, with one extra step.
+    ///
+    /// An export has to be told where it is going, and clap enforces that by
+    /// requiring one of `--drive` and `--image`. So the defaults are parsed with
+    /// a placeholder drive, which is then cleared again: there is no default
+    /// destination, and a caller that has not chosen one has not chosen one.
+    pub fn defaults() -> Self {
+        match Cli::parse_from(["musicai", "export", "--drive", "<none>", "<none>"]).command {
+            Some(Command::Export(mut args)) => {
+                args.drive = None;
+                args
+            }
+            other => unreachable!("clap parsed {other:?} for export"),
+        }
+    }
+}
+
 /// What to do with a file whose best match is below the confidence threshold.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum OnAmbiguous {
@@ -278,6 +346,167 @@ pub struct AnalyzeArgs {
     pub json: bool,
 }
 
+#[derive(Args, Clone, Debug)]
+pub struct AnlzArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
+    /// Where the files go. Defaults to alongside each input.
+    #[arg(long, short = 'o', value_name = "DIR")]
+    pub output: Option<PathBuf>,
+
+    /// Override the detected tempo, in BPM.
+    ///
+    /// The beats are still tracked against the audio; this only says how far
+    /// apart they are, which is what a detector gets wrong when it hears a
+    /// track at half or double speed.
+    #[arg(long, value_name = "BPM")]
+    pub bpm: Option<f64>,
+
+    /// The path at which the player will find the audio, if it is not going to
+    /// be `/Contents/<filename>`.
+    #[arg(long, value_name = "PATH")]
+    pub on_drive_path: Option<String>,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct ExportArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
+    /// The drive to write, e.g. `/Volumes/USB`. Created if it does not exist.
+    #[arg(
+        long,
+        short = 'o',
+        value_name = "DIR",
+        conflicts_with = "image",
+        required_unless_present = "image"
+    )]
+    pub drive: Option<PathBuf>,
+
+    /// Write a disk image instead of a folder.
+    ///
+    /// A partitioned, FAT32-formatted `.img` — the thing a player actually
+    /// reads. It can go straight onto a stick with `dd`, or into the USB slot
+    /// of a CDJ-3000 emulator, which is the closest thing to a player that
+    /// does not involve a player.
+    #[arg(long, value_name = "FILE", conflicts_with = "drive", required_unless_present = "drive")]
+    pub image: Option<PathBuf>,
+
+    /// The volume label an image is formatted with.
+    #[arg(long, value_name = "NAME", default_value = "REKORDBOX")]
+    pub label: String,
+
+    /// Override the detected tempo, in BPM, for every file named.
+    ///
+    /// The beats are still tracked against the audio; this only says how far
+    /// apart they are.
+    #[arg(long, value_name = "BPM")]
+    pub bpm: Option<f64>,
+
+    /// Name of the playlist the exported tracks go into.
+    #[arg(long, value_name = "NAME", default_value = "musicai")]
+    pub playlist: String,
+
+    /// Report what would be written without touching the drive.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Files that are stems of another track, as (stem, parent) pairs.
+    ///
+    /// A stem is the same audio with parts removed, so it has the same tempo,
+    /// the same downbeats and the same structure — and a hot cue set on the
+    /// track has to land in the same place on its acapella, or the two cannot
+    /// be played against each other. So a companion takes the parent's grid,
+    /// cues, key and phrases rather than being analysed on its own, where a
+    /// vocal with no drums in it would produce a grid of its own and a
+    /// different one.
+    ///
+    /// Not a command-line option: it comes from a library that knows which file
+    /// came from which, and there is no way to say it on one line.
+    #[arg(skip)]
+    pub companions: Vec<(PathBuf, PathBuf)>,
+}
+
+/// How much work a separation is worth.
+///
+/// The two ends of a real trade: the fine-tuned model with test-time shifts is
+/// roughly eight times the work of demucs' own defaults and separates
+/// noticeably better. A stem is rendered once and then played for years, so the
+/// default is the slow one — but a first pass over a whole library, or a laptop
+/// with somewhere else to be, wants the other.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum StemQuality {
+    /// `htdemucs_ft` with two shifts. Cleaner, and about eight times slower.
+    High,
+    /// `htdemucs` with no shifts — demucs' own defaults.
+    Standard,
+}
+
+impl StemQuality {
+    pub const ALL: [StemQuality; 2] = [StemQuality::High, StemQuality::Standard];
+
+    pub fn model(self) -> &'static str {
+        match self {
+            StemQuality::High => "htdemucs_ft",
+            StemQuality::Standard => "htdemucs",
+        }
+    }
+
+    pub fn shifts(self) -> u32 {
+        match self {
+            StemQuality::High => 2,
+            StemQuality::Standard => 0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StemQuality::High => "high",
+            StemQuality::Standard => "standard",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            StemQuality::High => {
+                "htdemucs_ft with two shifts — cleaner, and roughly eight times slower"
+            }
+            StemQuality::Standard => "htdemucs, no shifts — demucs' own defaults",
+        }
+    }
+}
+
+/// What a stem kit is written as.
+///
+/// Deliberately narrower than [`Codec`]: a wav stem is enormous for no benefit,
+/// and "the same as the input" would give a wav track wav stems.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum StemFormat {
+    /// Variable-bitrate by default. Roughly a fifth of the size of flac.
+    Mp3,
+    /// Lossless, for a kit that will be worked on further.
+    Flac,
+}
+
+impl StemFormat {
+    pub const ALL: [StemFormat; 2] = [StemFormat::Mp3, StemFormat::Flac];
+
+    pub fn codec(self) -> Codec {
+        match self {
+            StemFormat::Mp3 => Codec::Mp3,
+            StemFormat::Flac => Codec::Flac,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StemFormat::Mp3 => "mp3",
+            StemFormat::Flac => "flac",
+        }
+    }
+}
+
 /// Whether normalization rewrites the audio or only tags it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum NormalizeMode {
@@ -326,8 +555,10 @@ pub struct NormalizeArgs {
     #[arg(long, default_value = "-normalized")]
     pub suffix: String,
 
-    /// Bit depth for wav and flac output.
-    #[arg(long, value_name = "BITS", default_value_t = 16)]
+    /// Bit depth for wav and flac output. Stems default to 24-bit: they are
+    /// already-processed audio, and quantising them to 16-bit throws away
+    /// headroom for no benefit at their file sizes.
+    #[arg(long, value_name = "BITS", default_value_t = 24)]
     pub bit_depth: u16,
 
     /// Bitrate in kbps for mp3 output.
@@ -371,14 +602,33 @@ pub struct StemsArgs {
     #[arg(long, value_enum, default_value_t = Backend::Demucs)]
     pub backend: Backend,
 
+    /// How much work to spend separating. See [`StemQuality`].
+    #[arg(long, value_enum, default_value_t = StemQuality::High)]
+    pub quality: StemQuality,
+
     /// Directory to write stems into, as <dir>/<track>-<stem>.<ext>.
     #[arg(long, short = 'o', value_name = "DIR", default_value = "stems")]
     pub out_dir: PathBuf,
 
-    /// Output format for the stems. Defaults to matching each input, so an
-    /// mp3 yields mp3 stems and a flac yields flac.
-    #[arg(long, value_enum, value_name = "FORMAT")]
-    pub format: Option<Codec>,
+    /// Output format for the stems.
+    ///
+    /// mp3 or flac, and mp3 by default: a stem kit is three more files per
+    /// track, and a library of lossless ones is four times the disk for audio
+    /// that is played under something else.
+    #[arg(long, value_enum, value_name = "FORMAT", default_value_t = StemFormat::Mp3)]
+    pub format: StemFormat,
+
+    /// Variable-bitrate quality for mp3 stems, on LAME's `-V` scale: 0 is
+    /// biggest and best, 9 smallest and worst. 2 is the usual "high quality"
+    /// setting, averaging around 190 kbps.
+    ///
+    /// Pass `--stem-cbr` for a constant bitrate instead.
+    #[arg(long, value_name = "0-9", default_value_t = 2)]
+    pub stem_vbr: u8,
+
+    /// Write stems at a constant bitrate — `--bitrate` — rather than VBR.
+    #[arg(long)]
+    pub stem_cbr: bool,
 
     /// Do not copy the source file's tags onto its stems.
     #[arg(long)]
@@ -388,8 +638,10 @@ pub struct StemsArgs {
     #[arg(long, value_enum, value_delimiter = ',', default_values_t = Stem::ALL)]
     pub only: Vec<Stem>,
 
-    /// Bit depth for wav and flac output.
-    #[arg(long, value_name = "BITS", default_value_t = 16)]
+    /// Bit depth for wav and flac output. Stems default to 24-bit: they are
+    /// already-processed audio, and quantising them to 16-bit throws away
+    /// headroom for no benefit at their file sizes.
+    #[arg(long, value_name = "BITS", default_value_t = 24)]
     pub bit_depth: u16,
 
     /// Bitrate in kbps for mp3 output.
@@ -475,12 +727,28 @@ pub struct DemucsArgs {
     pub demucs_bin: PathBuf,
 
     /// Pretrained model name to pass to demucs.
-    #[arg(long, value_name = "NAME", default_value = "htdemucs")]
-    pub demucs_model: String,
+    ///
+    /// Overrides whatever `--quality` would have chosen. Left unset, `high`
+    /// gives `htdemucs_ft` and `standard` gives `htdemucs`.
+    #[arg(long, value_name = "NAME")]
+    pub demucs_model: Option<String>,
 
     /// Torch device for demucs, e.g. cpu or cuda.
     #[arg(long, value_name = "DEVICE")]
     pub demucs_device: Option<String>,
+
+    /// Test-time shifts: demucs separates the track this many extra times at
+    /// small random offsets and averages the results, smoothing artefacts at a
+    /// roughly linear cost in time.
+    ///
+    /// Overrides `--quality`. Left unset, `high` gives 2 and `standard` gives 0.
+    #[arg(long, value_name = "N")]
+    pub demucs_shifts: Option<u32>,
+
+    /// Window overlap for demucs, 0.0 to just under 1.0. More overlap means
+    /// fewer seams between windows and more compute. Demucs' default is 0.25.
+    #[arg(long, value_name = "FRACTION", default_value_t = 0.25)]
+    pub demucs_overlap: f32,
 
     /// What to do when demucs is not installed. `ask` offers to install it,
     /// but only on macOS and only when there is a terminal to answer on.

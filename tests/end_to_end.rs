@@ -416,8 +416,8 @@ fn cli_stems_writes_three_files() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
     for stem in Stem::ALL {
-        // Stems inherit the source's format, so a flac input yields flac.
-        let path = out_dir.join(format!("song-{stem}.flac"));
+        // mp3 whatever the source was: a kit is three more files per track.
+        let path = out_dir.join(format!("song-{stem}.mp3"));
         assert!(path.exists(), "missing {}", path.display());
         let audio = decode_file(&path).unwrap();
         assert_eq!(audio.channels(), 2);
@@ -427,9 +427,12 @@ fn cli_stems_writes_three_files() {
 }
 
 #[test]
-fn cli_stems_match_the_source_format() {
+fn cli_stems_are_mp3_whatever_the_source_is() {
     let dir = Scratch::new("cli-stems-format");
 
+    // Whatever the source is, the stems come out mp3: a kit is three more
+    // files per track, and a library of lossless ones is four times the disk
+    // for audio that gets played under something else.
     for codec in [Codec::Flac, Codec::Mp3, Codec::Wav] {
         let input = write_song(&dir, &format!("song-{}", codec.extension()), codec, 0.4);
         let out_dir = dir.path(&format!("out-{}", codec.extension()));
@@ -445,23 +448,28 @@ fn cli_stems_match_the_source_format() {
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
         let track = input.file_stem().unwrap().to_string_lossy().into_owned();
-        let expected = out_dir.join(format!("{track}-vocals.{}", codec.extension()));
+        let expected = out_dir.join(format!("{track}-vocals.mp3"));
         assert!(expected.exists(), "expected {}", expected.display());
+        // And never the source's own format — except where that happens to be
+        // mp3 too, which is the same file rather than a second one.
+        if codec != Codec::Mp3 {
+            assert!(!out_dir.join(format!("{track}-vocals.{}", codec.extension())).exists());
+        }
     }
 
-    // And an explicit --format still overrides the source.
-    let input = write_song(&dir, "override", Codec::Flac, 0.4);
+    // flac is the other choice, for a kit that will be worked on further.
+    let input = write_song(&dir, "override", Codec::Mp3, 0.4);
     let out_dir = dir.path("out-override");
     let output = musicai()
         .arg("stems")
         .arg(&input)
-        .args(["--backend", "dsp", "--only", "vocals", "--format", "mp3"])
+        .args(["--backend", "dsp", "--only", "vocals", "--format", "flac"])
         .arg("--out-dir")
         .arg(&out_dir)
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(out_dir.join("override-vocals.mp3").exists());
+    assert!(out_dir.join("override-vocals.flac").exists());
 }
 
 #[test]
@@ -632,7 +640,7 @@ fn no_subcommand_runs_the_whole_pipeline() {
     assert!(err.contains("1 file through normalize -> tag -> stems"), "{err}");
 
     for stem in Stem::ALL {
-        let path = stems.join(format!("song-{stem}.flac"));
+        let path = stems.join(format!("song-{stem}.mp3"));
         assert!(path.exists(), "missing {}", path.display());
     }
 }
@@ -695,7 +703,7 @@ fn wav_files_survive_a_replaygain_pipeline() {
 
     assert!(ok, "{err}");
     assert!(err.contains("cannot carry ReplayGain"), "{err}");
-    assert!(stems.join("song-vocals.wav").exists(), "the wav was dropped instead of separated");
+    assert!(stems.join("song-vocals.mp3").exists(), "the wav was dropped instead of separated");
 }
 
 #[test]
@@ -721,10 +729,10 @@ fn re_encoding_hands_the_new_files_to_the_next_step() {
     // silent and very confusing bug, so the stems must be named for the copy.
     assert!(dir.path("song-normalized.wav").exists());
     assert!(
-        stems.join("song-normalized-vocals.wav").exists(),
+        stems.join("song-normalized-vocals.mp3").exists(),
         "stems were taken from the original, not the normalized file"
     );
-    assert!(!stems.join("song-vocals.wav").exists());
+    assert!(!stems.join("song-vocals.mp3").exists());
 }
 
 #[test]

@@ -613,7 +613,36 @@ fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
         }
     });
 
-    output_format(ui, &mut args.format, &mut args.bit_depth, &mut args.bitrate);
+    // Stems get their own two-format choice rather than the general one: a wav
+    // stem is enormous for audio that plays under something else.
+    ui.horizontal(|ui| {
+        ui.label("Format");
+        for format in musicai::cli::StemFormat::ALL {
+            ui.selectable_value(&mut args.format, format, format.name());
+        }
+    });
+    match args.format {
+        musicai::cli::StemFormat::Mp3 => {
+            let mut vbr = !args.stem_cbr;
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut vbr, "Variable bitrate");
+                args.stem_cbr = !vbr;
+                if vbr {
+                    ui.add(
+                        egui::Slider::new(&mut args.stem_vbr, 0..=9).text("quality (0 is best)"),
+                    );
+                } else {
+                    ui.add(egui::Slider::new(&mut args.bitrate, 96..=320).suffix(" kbps"));
+                }
+            });
+        }
+        musicai::cli::StemFormat::Flac => {
+            ui.horizontal(|ui| {
+                ui.label("Bit depth");
+                ui.add(egui::Slider::new(&mut args.bit_depth, 16..=24));
+            });
+        }
+    }
 
     let mut tags = !args.no_tags;
     if ui.checkbox(&mut tags, "Copy tags from the original file").changed() {

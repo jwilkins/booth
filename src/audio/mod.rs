@@ -2,6 +2,8 @@
 
 pub mod decode;
 pub mod encode;
+pub mod mp3;
+pub mod mp4;
 
 use anyhow::{bail, Result};
 

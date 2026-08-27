@@ -207,8 +207,11 @@ impl Settings {
                 flag(&mut out, "recursive", self.recursive);
                 out.push(format!("--backend {}", value_name(a.backend)));
                 out.push(format!("-o {}", quote(&a.out_dir.display().to_string())));
-                if let Some(codec) = a.format {
-                    out.push(format!("--format {}", value_name(codec)));
+                out.push(format!("--format {}", value_name(a.format)));
+                if let Some(quality) = a.vbr() {
+                    out.push(format!("--stem-vbr {quality}"));
+                } else {
+                    out.push("--stem-cbr".to_string());
                 }
                 if a.only.len() != musicai::stems::Stem::ALL.len() {
                     let names: Vec<&str> = a.only.iter().map(|s| s.name()).collect();
@@ -549,7 +552,8 @@ mod tests {
 
         // The separation really ran: the stems are on disk.
         for stem in musicai::stems::Stem::ALL {
-            let path = dir.0.join("stems").join(format!("track-{}.wav", stem.name()));
+            // mp3 whatever went in: a stem kit is three more files per track.
+            let path = dir.0.join("stems").join(format!("track-{}.mp3", stem.name()));
             assert!(path.exists(), "missing {}", path.display());
         }
     }

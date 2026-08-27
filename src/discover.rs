@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use walkdir::WalkDir;
 
 /// Extensions we can decode.
-pub const SUPPORTED: [&str; 3] = ["mp3", "flac", "wav"];
+pub const SUPPORTED: [&str; 7] = ["mp3", "flac", "wav", "m4a", "aac", "aiff", "aif"];
 
 pub fn is_supported(path: &Path) -> bool {
     path.extension()

@@ -7,12 +7,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 
+use crate::analysis;
 use crate::audio::decode::decode_file;
 use crate::audio::encode::{write_file, Codec, EncodeOptions};
+use crate::audio::mp3::SeekIndex;
 use crate::cli::{
-    AnalyzeArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, RunArgs, StemsArgs, Step, TagArgs,
+    AnalyzeArgs, AnlzArgs, ExportArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, RunArgs,
+    StemsArgs, Step, TagArgs,
 };
 use crate::discover;
+use crate::export::image::{capacity_for, Destination, DriveImage};
+use crate::export::{anlz, pdb, waveform};
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
@@ -60,6 +65,456 @@ fn partition(paths: &[PathBuf], results: Vec<Result<Vec<String>>>) -> (Vec<Strin
         }
     }
     (lines, Outcome::new(paths.len(), failures))
+}
+
+// -- anlz ------------------------------------------------------------------
+
+/// Write the `.DAT`, `.EXT` and `.2EX` analysis files for each input.
+///
+/// This is half of what a playable drive needs: the players find these through
+/// a database (`export.pdb`) that this does not write yet, so the files are
+/// correct but nothing indexes them. It exists now because the analysis files
+/// are the part that can be checked — against the format documentation, and
+/// against a player once the other half lands.
+pub fn anlz(args: &AnlzArgs, reporter: &dyn Reporter) -> Result<()> {
+    let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    let progress = Progress::new(reporter, files.len());
+
+    let results: Vec<Result<Vec<String>>> = files
+        .par_iter()
+        .map(|path| {
+            if progress.cancelled() {
+                return Ok(Vec::new());
+            }
+            let outcome = write_analysis(args, path);
+            progress.tick();
+            outcome
+        })
+        .collect();
+
+    let (lines, mut outcome) = partition(&files, results);
+    outcome.cancelled = reporter.cancelled();
+    for line in lines {
+        reporter.event(Event::Line(line));
+    }
+    outcome.report(reporter)
+}
+
+fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
+    let audio = decode_file(path)?;
+    let waveforms = waveform::analyze(&audio);
+    let listened = analysis::analyze_at(&audio, args.bpm);
+    if !listened.found_beats() {
+        bail!("no beat could be found; pass --bpm to say what the tempo is");
+    }
+
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("{} has no usable file name", path.display()))?;
+    let on_drive = args.on_drive_path.clone().unwrap_or_else(|| format!("/Contents/{name}"));
+
+    let structure = listened.song_structure();
+    let seek = seek_index(path);
+    let analysis = anlz::Analysis {
+        on_drive_path: &on_drive,
+        grid: &listened.grid,
+        cues: &listened.cues,
+        waveforms: &waveforms,
+        structure: structure.as_ref(),
+        vbr: seek.as_ref(),
+    };
+
+    let dir = args
+        .output
+        .clone()
+        .unwrap_or_else(|| path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+
+    let mut written = Vec::new();
+    for (extension, bytes) in
+        [("DAT", analysis.dat()), ("EXT", analysis.ext()), ("2EX", analysis.two_ex())]
+    {
+        let out = dir.join(format!("{stem}.{extension}"));
+        std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
+        // Read it back from disk rather than trusting what we just built. This
+        // is the smallest version of the check every export will get: the file
+        // is only written if something else can parse it.
+        let read_back = std::fs::read(&out)?;
+        let sections = anlz::inspect(&read_back)
+            .with_context(|| format!("{} did not read back as an analysis file", out.display()))?;
+        written.push(format!("{}: {} sections", out.display(), sections.len()));
+    }
+
+    let key = listened.camelot();
+    Ok(vec![format!(
+        "{}: {:.2} BPM{}, {} beats, {} phrases, {} cues\n  {}",
+        path.display(),
+        listened.bpm,
+        if key.is_empty() { String::new() } else { format!(" {key}") },
+        listened.grid.beats.len(),
+        listened.structure.sections.len(),
+        listened.cues.iter().filter(|c| c.is_hot()).count(),
+        written.join("\n  ")
+    )])
+}
+
+/// The variable-bitrate seek index for a file, when it needs one.
+///
+/// Only MP3 does: every other format the players read carries its own seek
+/// information. A read failure is not fatal — a drive without a seek index
+/// still plays, it just seeks a VBR file less precisely — so this reports the
+/// problem by returning `None` rather than by stopping the export.
+fn seek_index(path: &Path) -> Option<[u32; 401]> {
+    if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("mp3"))
+        != Some(true)
+    {
+        return None;
+    }
+    SeekIndex::of_mp3(path).ok().flatten().map(|index| index.pvbr_offsets())
+}
+
+// -- export ----------------------------------------------------------------
+
+/// The file formats a CDJ-3000 will play. Anything else is copied nowhere: a
+/// file the player cannot open is worse on the drive than off it, because it
+/// looks fine until the moment it is loaded.
+const PLAYABLE: [&str; 7] = ["mp3", "flac", "wav", "aiff", "aif", "m4a", "aac"];
+/// The longest path a player will follow, counting every folder name.
+const MAX_DRIVE_PATH: usize = 255;
+
+/// How many tracks are analysed before what they produced is written out.
+///
+/// Analysis is parallel and writing is not — a filesystem is one thing with one
+/// position in it — so the work goes through in batches. The batch size bounds
+/// how much prepared analysis is held in memory at once, which is a few
+/// megabytes here rather than the whole library's worth.
+const BATCH: usize = 16;
+
+/// Build a drive: the audio, the analysis files, and the database that indexes
+/// them.
+pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
+    let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    let destination = if args.dry_run { None } else { Some(open_destination(args, &files)?) };
+    let progress = Progress::new(reporter, files.len());
+
+    let mut tracks = Vec::new();
+    let mut failures = Vec::new();
+    let mut lines = Vec::new();
+    let analyses = Analyses::default();
+
+    for (batch, chunk) in files.chunks(BATCH).enumerate() {
+        let first_id = (batch * BATCH) as u32 + 1;
+        let prepared: Vec<Result<Prepared>> = chunk
+            .par_iter()
+            .enumerate()
+            .map(|(i, path)| {
+                if progress.cancelled() {
+                    return Ok(Prepared::skipped());
+                }
+                let outcome = prepare(args, path, first_id + i as u32, &analyses);
+                progress.tick();
+                outcome
+            })
+            .collect();
+
+        for (path, result) in chunk.iter().zip(prepared) {
+            match result {
+                Ok(prepared) => {
+                    let Some(track) = &prepared.track else { continue };
+                    lines.push(format!(
+                        "{} -> {} ({:.2} BPM{}, {} beats, {} phrases, {} cues)",
+                        path.display(),
+                        track.file_path,
+                        prepared.bpm,
+                        if prepared.key.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", prepared.key)
+                        },
+                        prepared.beats,
+                        prepared.phrases,
+                        prepared.cues
+                    ));
+                    if let Some(destination) = &destination {
+                        match prepared.commit(destination, path) {
+                            Ok(()) => tracks.push(prepared.track.unwrap()),
+                            Err(e) => {
+                                lines.pop();
+                                failures.push((path.clone(), e));
+                            }
+                        }
+                    } else {
+                        tracks.push(prepared.track.unwrap());
+                    }
+                }
+                Err(e) => failures.push((path.clone(), e)),
+            }
+        }
+    }
+
+    if !tracks.is_empty() {
+        let playlist = pdb::Playlist::new(1, &args.playlist, tracks.iter().map(|t| t.id).collect());
+        let database = pdb::Database { tracks, playlists: vec![playlist] };
+        let bytes = database.to_bytes()?;
+
+        match &destination {
+            None => lines.push(format!(
+                "would write PIONEER/rekordbox/export.pdb: {} tracks, {} bytes",
+                database.tracks.len(),
+                bytes.len()
+            )),
+            Some(destination) => {
+                const DATABASE: &str = "/PIONEER/rekordbox/export.pdb";
+                destination.write(DATABASE, &bytes)?;
+                // Read the database back off the drive and walk it the way a
+                // player would. The export is not finished until that works.
+                let tables = pdb::inspect(&destination.read(DATABASE)?)
+                    .context("the database did not read back off the drive")?;
+                let rows: usize = tables.iter().map(|t| t.rows).sum();
+                lines.push(format!(
+                    "wrote {DATABASE} to {}: {} tables, {} rows, verified",
+                    destination.describe(),
+                    tables.len(),
+                    rows
+                ));
+            }
+        }
+    }
+
+    if let Some(destination) = destination {
+        destination.finish()?;
+    }
+
+    for line in lines {
+        reporter.event(Event::Line(line));
+    }
+    let mut outcome = Outcome::new(files.len(), failures);
+    outcome.cancelled = reporter.cancelled();
+    outcome.report(reporter)
+}
+
+/// One track's worth of drive: the row that describes it, and the files that
+/// have to land on the drive for that row to mean anything.
+struct Prepared {
+    track: Option<pdb::Track>,
+    /// Where the audio goes, as the player will see it.
+    on_drive: String,
+    /// The analysis files, by their paths on the drive.
+    analysis: Vec<(String, Vec<u8>)>,
+    beats: usize,
+    bpm: f64,
+    /// The key as it reads on the player, or empty when none was found.
+    key: String,
+    phrases: usize,
+    cues: usize,
+}
+
+impl Prepared {
+    fn skipped() -> Self {
+        Self {
+            track: None,
+            on_drive: String::new(),
+            analysis: Vec::new(),
+            beats: 0,
+            bpm: 0.0,
+            key: String::new(),
+            phrases: 0,
+            cues: 0,
+        }
+    }
+
+    /// Put it on the drive, and read every analysis file back before calling it
+    /// written.
+    fn commit(&self, destination: &Destination, source: &Path) -> Result<()> {
+        destination.copy_in(&self.on_drive, source)?;
+        for (at, bytes) in &self.analysis {
+            destination.write(at, bytes)?;
+            anlz::inspect(&destination.read(at)?)
+                .with_context(|| format!("{at} did not read back off the drive"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Where this export is going, and — for an image — how big it needs to be.
+///
+/// The size has to be settled before a byte is written, so it is estimated from
+/// the audio plus a couple of megabytes a track for the analysis. That is
+/// generous for anything under about half an hour long.
+fn open_destination(args: &ExportArgs, files: &[PathBuf]) -> Result<Destination> {
+    if let Some(root) = &args.drive {
+        return Ok(Destination::Directory(root.clone()));
+    }
+    let image = args.image.as_ref().expect("clap requires one of --drive and --image");
+
+    let audio: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+    let analysis = files.len() as u64 * 2 * 1024 * 1024;
+    let capacity = capacity_for(audio + analysis);
+    Ok(Destination::Image(std::sync::Mutex::new(DriveImage::create(image, capacity, &args.label)?)))
+}
+
+/// The analysis of a track, kept so that its stems can share it.
+type Shared = std::sync::Arc<analysis::TrackAnalysis>;
+
+/// Analyses already done, by the file they were done on.
+///
+/// A track with two stems would otherwise be listened to three times, and the
+/// three would not necessarily agree — which is the whole thing this is here to
+/// prevent.
+#[derive(Default)]
+struct Analyses(std::sync::Mutex<BTreeMap<PathBuf, Shared>>);
+
+impl Analyses {
+    /// The analysis of one file, doing the work only if nobody else has.
+    fn of(&self, path: &Path, bpm: Option<f64>) -> Result<Shared> {
+        if let Some(done) = self.0.lock().ok().and_then(|cache| cache.get(path).cloned()) {
+            return Ok(done);
+        }
+        let audio = decode_file(path)?;
+        let listened: Shared = std::sync::Arc::new(analysis::analyze_at(&audio, bpm));
+        if let Ok(mut cache) = self.0.lock() {
+            cache.insert(path.to_path_buf(), Shared::clone(&listened));
+        }
+        Ok(listened)
+    }
+}
+
+fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Result<Prepared> {
+    let extension =
+        path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    if !PLAYABLE.contains(&extension.as_str()) {
+        bail!("a player cannot open a .{extension} file");
+    }
+
+    let audio = decode_file(path)?;
+    if audio.sample_rate > 96_000 {
+        bail!("{} Hz is above the 96 kHz a player will accept", audio.sample_rate);
+    }
+    let metadata = crate::tag::read_metadata(path).unwrap_or_default();
+
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("{} has no usable file name", path.display()))?;
+    let artist = metadata.artist.clone().unwrap_or_else(|| "Unknown Artist".to_string());
+    let on_drive = on_drive_path(&artist, filename);
+    if on_drive.len() > MAX_DRIVE_PATH {
+        bail!("{} characters is longer than a player will follow", on_drive.len());
+    }
+
+    // rekordbox's own scheme for these two directory names is not understood;
+    // ours is derived from the track id, which keeps them unique and lets the
+    // path be reconstructed from the database that points at it.
+    let analyze_dir = format!("/PIONEER/USBANLZ/P{:03}/{id:08X}", id % 1000);
+    let analyze_path = format!("{analyze_dir}/ANLZ0000.DAT");
+
+    // A stem takes its parent's grid, cues, key and phrases. Its own would be
+    // measured from audio with most of the track removed — a vocal with no
+    // drums under it — and a cue that does not line up with the one on the
+    // parent is worse than no cue at all.
+    let listened = match args.companions.iter().find(|(stem, _)| stem == path) {
+        Some((_, parent)) => analyses.of(parent, args.bpm).with_context(|| {
+            format!("analysing {} for its stem {}", parent.display(), path.display())
+        })?,
+        None => analyses.of(path, args.bpm)?,
+    };
+    if !listened.found_beats() {
+        bail!("no beat could be found; pass --bpm to say what the tempo is");
+    }
+    // The picture, though, is of this file: an acapella that drew the whole
+    // track's waveform would be showing something that is not playing.
+    let waveforms = waveform::analyze(&audio);
+    let structure = listened.song_structure();
+    let seek = seek_index(path);
+    let files = anlz::Analysis {
+        on_drive_path: &on_drive,
+        grid: &listened.grid,
+        cues: &listened.cues,
+        waveforms: &waveforms,
+        structure: structure.as_ref(),
+        vbr: seek.as_ref(),
+    };
+
+    let file_size = std::fs::metadata(path).map(|m| m.len() as u32).unwrap_or(0);
+    let track = pdb::Track {
+        id,
+        title: metadata.title.clone().unwrap_or_else(|| stem_of(filename)),
+        artist,
+        album: metadata.album.clone().unwrap_or_default(),
+        key: listened.camelot(),
+        file_path: on_drive.clone(),
+        analyze_path,
+        tempo_x100: (listened.bpm * 100.0).round() as u32,
+        duration_secs: audio.duration_secs().round() as u16,
+        sample_rate: audio.sample_rate,
+        sample_depth: 16,
+        file_size,
+        track_number: metadata.track_number.unwrap_or(0),
+        disc_number: metadata.disc_number.unwrap_or(0) as u16,
+        year: metadata
+            .date
+            .as_deref()
+            .and_then(|d| d.get(..4))
+            .and_then(|y| y.parse().ok())
+            .unwrap_or(0),
+        ..pdb::Track::default()
+    };
+
+    let analysis = vec![
+        (format!("{analyze_dir}/ANLZ0000.DAT"), files.dat()),
+        (format!("{analyze_dir}/ANLZ0000.EXT"), files.ext()),
+        (format!("{analyze_dir}/ANLZ0000.2EX"), files.two_ex()),
+    ];
+
+    Ok(Prepared {
+        track: Some(track),
+        on_drive,
+        analysis,
+        beats: listened.grid.beats.len(),
+        bpm: listened.bpm,
+        key: listened.camelot(),
+        phrases: listened.structure.sections.len(),
+        cues: listened.cues.iter().filter(|c| c.is_hot()).count(),
+    })
+}
+
+/// Where a track's audio lands on the drive.
+///
+/// Public because anything that wants to warn about a path before it is written
+/// has to be able to work out the same path the writer will use. A preflight
+/// that reimplements this rule is a preflight that will eventually disagree
+/// with it, and pass a drive the writer then refuses.
+pub fn on_drive_path(artist: &str, filename: &str) -> String {
+    format!("/Contents/{}/{}", safe_component(artist), filename)
+}
+
+/// The longest on-drive path a player will follow, for callers checking one
+/// before it is written.
+pub const MAX_ON_DRIVE_PATH: usize = MAX_DRIVE_PATH;
+
+/// Whether a player can open a file with this extension.
+pub fn is_playable(extension: &str) -> bool {
+    PLAYABLE.contains(&extension.to_ascii_lowercase().as_str())
+}
+
+/// A folder name a FAT filesystem and a player will both accept.
+fn safe_component(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    let trimmed = cleaned.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        "Unknown".to_string()
+    } else {
+        trimmed.chars().take(60).collect()
+    }
+}
+
+fn stem_of(filename: &str) -> String {
+    filename.rsplit_once('.').map_or(filename, |(stem, _)| stem).to_string()
 }
 
 // -- analyze ---------------------------------------------------------------
@@ -175,6 +630,7 @@ fn normalize_reencode(
     let encode = EncodeOptions {
         bit_depth: args.bit_depth,
         mp3_bitrate: args.bitrate,
+        mp3_vbr: None,
         dither: !args.no_dither,
     };
 
@@ -442,8 +898,15 @@ pub fn stems_files(args: &StemsArgs, files: &[PathBuf], reporter: &dyn Reporter)
         Backend::Dsp => None,
     };
 
-    let encode =
-        EncodeOptions { bit_depth: args.bit_depth, mp3_bitrate: args.bitrate, dither: true };
+    let encode = EncodeOptions {
+        bit_depth: args.bit_depth,
+        mp3_bitrate: args.bitrate,
+        // Stems are written VBR by default: they are long stretches of near
+        // silence between phrases, which is exactly what a constant bitrate
+        // spends the most on for the least.
+        mp3_vbr: args.vbr(),
+        dither: true,
+    };
 
     let mut failures = Vec::new();
     let progress = Progress::new(reporter, files.len());
@@ -484,17 +947,10 @@ fn separate_one(
         .to_string_lossy()
         .into_owned();
 
-    // Stems inherit the source's format unless told otherwise, so an mp3
-    // yields mp3 stems and a flac yields flac.
-    let codec = match args.format {
-        Some(codec) => codec,
-        None => Codec::from_path(path).with_context(|| {
-            format!(
-                "cannot tell what format {} is, so cannot match it for the stems; pass --format",
-                path.display()
-            )
-        })?,
-    };
+    // Never the source's format: a wav track would otherwise yield three wav
+    // stems, which is a gigabyte a record for audio that gets played under
+    // something else.
+    let codec = args.format.codec();
 
     // Check the destinations before doing the expensive part.
     for stem in &args.only {
@@ -504,7 +960,7 @@ fn separate_one(
         }
     }
 
-    let separated = match args.backend {
+    let mut separated = match args.backend {
         Backend::Dsp => {
             let audio = decode_file(path)?;
             dsp::separate(&audio, config)?
@@ -516,8 +972,10 @@ fn separate_one(
             demucs_config.program = demucs_bin
                 .map(|p| p.to_os_string())
                 .unwrap_or_else(|| args.demucs.demucs_bin.clone().into_os_string());
-            demucs_config.model = args.demucs.demucs_model.clone();
+            demucs_config.model = args.model();
             demucs_config.device = args.demucs.demucs_device.clone();
+            demucs_config.shifts = args.shifts();
+            demucs_config.overlap = args.demucs.demucs_overlap;
 
             let result = demucs::separate(path, &demucs_config);
             // Demucs' own output is an intermediate; the stems we write are the
@@ -527,7 +985,13 @@ fn separate_one(
         }
     };
 
-    write_stems(&track, &separated, args, encode, codec, path)
+    // Bring the stems under full scale before writing, by one shared gain, so
+    // an integer format does not clip a stem that peaks above the mix. A hair
+    // under 0 dBFS, since the true peak between samples can sit a touch above
+    // the highest sample.
+    let attenuation = separated.fit_under(0.98);
+
+    write_stems(&track, &separated, args, encode, codec, path, attenuation)
 }
 
 /// Where a stem goes: beside its siblings, named after the track it came from,
@@ -536,6 +1000,7 @@ fn stem_path(out_dir: &Path, track: &str, stem: Stem, codec: Codec) -> PathBuf {
     out_dir.join(format!("{}-{}.{}", track, stem.name(), codec.extension()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_stems(
     track: &str,
     separated: &StemSet,
@@ -543,6 +1008,7 @@ fn write_stems(
     encode: &EncodeOptions,
     codec: Codec,
     source: &Path,
+    attenuation: Option<f32>,
 ) -> Result<Vec<String>> {
     let mut written = Vec::new();
     for stem in &args.only {
@@ -556,13 +1022,20 @@ fn write_stems(
         }
 
         let mut line = format!("wrote {}", out.display());
-        if report.clipped_anything() {
-            // A stem can peak higher than the mix it came from, so this
-            // happens on loud masters even though the input never clipped.
-            line.push_str(&format!(
-                " — warning: {} samples clipped; the stem peaks above full scale",
-                report.clipped
-            ));
+        if let Some(gain_db) = attenuation {
+            // The stems were pulled down together to fit under full scale. Said
+            // once, on the first line, rather than as a warning per stem: it is
+            // expected, not a fault, and the shared gain keeps them in balance.
+            if *stem == args.only[0] {
+                line.push_str(&format!(
+                    " (stems attenuated {gain_db:.1} dB to stay under full scale)"
+                ));
+            }
+        } else if report.clipped_anything() {
+            // With the shared attenuation this should not happen, but if a
+            // format's own rounding pushes a sample over, say so rather than
+            // hide it.
+            line.push_str(&format!(" — warning: {} samples clipped", report.clipped));
         }
         written.push(line);
     }
@@ -953,6 +1426,94 @@ fn elide(text: &str, width: usize) -> String {
         let tail: String = chars[chars.len() - (width - 3)..].iter().collect();
         format!("...{tail}")
     }
+}
+
+// -- rekordbox's own libraries ---------------------------------------------
+
+/// Find the database somebody meant, given a path that may be either the file
+/// or the drive it sits on.
+fn rekordbox_database(path: &Path) -> Result<PathBuf> {
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(found) = crate::rekordbox::onelibrary::find(path) {
+        return Ok(found);
+    }
+    for candidate in ["master.db", "rekordbox/master.db"] {
+        let joined = path.join(candidate);
+        if joined.is_file() {
+            return Ok(joined);
+        }
+    }
+    bail!("no rekordbox database under {}", path.display())
+}
+
+pub fn rekordbox(args: &crate::cli::RekordboxCommand, reporter: &dyn Reporter) -> Result<()> {
+    use crate::cli::RekordboxCommand;
+    use crate::report::Event;
+
+    let (args, schema_only) = match args {
+        RekordboxCommand::Read(args) => (args, false),
+        RekordboxCommand::Schema(args) => (args, true),
+    };
+    let path = rekordbox_database(&args.path)?;
+    let key = crate::rekordbox::resolve(args.key.as_deref())?;
+    let connection = crate::rekordbox::open(&path, &key)?;
+    reporter.event(Event::Heading(format!("{}", path.display())));
+
+    if schema_only {
+        let shapes = crate::rekordbox::onelibrary::describe(&connection)?;
+        for line in crate::rekordbox::onelibrary::report(&shapes).lines() {
+            reporter.event(Event::Line(line.to_string()));
+        }
+        return Ok(());
+    }
+
+    // A OneLibrary drive is a different schema, and reading it as a master.db
+    // would report an empty library rather than the wrong one — which is worse,
+    // because an empty answer looks like an answer.
+    let tables = crate::rekordbox::tables(&connection)?;
+    if !tables.iter().any(|(name, _)| name == "djmdContent") {
+        reporter.event(Event::Summary(
+            "this is not a rekordbox master.db. If it is a OneLibrary drive, its schema is \
+             not published and nothing here can read it as a library yet — `rekordbox schema` \
+             will describe it."
+                .into(),
+        ));
+        return Ok(());
+    }
+
+    let collection = crate::rekordbox::master::read(&connection)?;
+    reporter.event(Event::Line(format!(
+        "{} tracks, {} playlists",
+        collection.tracks.len(),
+        collection.playlists.len()
+    )));
+    for track in &collection.tracks {
+        let mut line = format!("{} — {}", track.artist, track.title);
+        if track.bpm > 0.0 {
+            line.push_str(&format!("  {:.2}", track.bpm));
+        }
+        if !track.key.is_empty() {
+            line.push_str(&format!("  {}", track.key));
+        }
+        if !track.cues.is_empty() {
+            line.push_str(&format!("  {} cues", track.cues.len()));
+        }
+        reporter.event(Event::Line(line));
+    }
+    for playlist in &collection.playlists {
+        let where_ = match playlist.folder.is_empty() {
+            true => playlist.name.clone(),
+            false => format!("{}/{}", playlist.folder, playlist.name),
+        };
+        reporter.event(Event::Line(format!(
+            "playlist {where_} ({} tracks){}",
+            playlist.track_ids.len(),
+            if playlist.was_smart { " — was smart" } else { "" }
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

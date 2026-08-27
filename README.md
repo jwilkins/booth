@@ -2,13 +2,18 @@
 
 An audio tool in Rust, as a command-line program and as a macOS app. It does three things:
 
-- **Normalize** mp3, flac and wav files to a consistent loudness (EBU R128 / LUFS), either by
+- **Normalize** mp3, flac, wav, m4a and aiff files to a consistent loudness (EBU R128 / LUFS), either by
   re-encoding or by writing ReplayGain tags and leaving the audio untouched.
 - **Separate** a mix into three stems — vocals, melody and drums, using demucs.
 - **Tag** files by identifying them from their sound, via acoustic fingerprinting and
   MusicBrainz.
 
-By default it does all three, over everything you point it at:
+Two more commands are the start of something larger: writing a USB drive a Pioneer /
+AlphaTheta DJ player can browse and play. `export` builds a whole drive; `anlz` writes
+just the per-track analysis files. See [Export](#export) for what works and what does
+not yet.
+
+By default it does the first three, over everything you point it at:
 
 ```sh
 musicai ~/Music/album
@@ -270,18 +275,37 @@ and are not the obvious values. Two in particular:
 Memory scales with track length: a five-minute stereo track peaks around 1.1 GB, or 0.8 GB with
 `--overlap 2`, which also roughly halves the runtime.
 
-### Stems can clip
+### Stems stay under full scale
 
 Separated stems peak **above** the mix they came from — the split redistributes energy, so a stem
-may exceed full scale even when the original never did. On a loud master that means clipping on
-the way into an integer format, and `musicai` says so per file:
+may exceed full scale even when the original never did. Two things happen so that this does not turn
+into clipping:
+
+- Demucs is asked for `--float32` output. Left to itself it writes 16-bit wav and clips the stem at
+  the source, before `musicai` ever sees it — audible on loud masters. Float carries the peaks
+  through intact.
+- Before writing, the stems are pulled down together by a single gain so the loudest sample across
+  all of them sits just under full scale. One shared gain rather than one per stem, so they stay in
+  balance and still add back up to the track — which is what lets an acapella and an instrumental be
+  played together in time. The attenuation is reported once:
 
 ```
-wrote stems/track-melody.flac — warning: 52 samples clipped; the stem peaks above full scale
+wrote stems/track-vocals.flac (stems attenuated -2.4 dB to stay under full scale)
 ```
 
-Raising `--bit-depth` does not help, since the limit is range rather than precision. Normalize the
-stems afterwards, or separate a quieter copy of the track.
+Stems default to **24-bit** wav/flac for the same reason — they are already-processed audio, and
+there is no reason to quantise them to 16.
+
+### Getting cleaner separation from demucs
+
+The default model, `htdemucs`, is a good all-rounder. Two levers trade time for fewer artefacts:
+
+- `--demucs-model htdemucs_ft` — the fine-tuned model. Noticeably cleaner, about four times slower.
+- `--demucs-shifts 1` (or `2`) — separates the track again at small offsets and averages, smoothing
+  artefacts, at a roughly linear cost in time.
+- `--demucs-overlap 0.5` — more overlap between analysis windows, fewer seams, more compute.
+
+On a GPU (`--demucs-device cuda` or `mps`) the time cost of these is much easier to absorb.
 
 ## Tag
 
@@ -368,6 +392,200 @@ requests and materially bigger files. Re-tagging replaces the existing front cov
 adding a second one.
 
 Only the tag blocks are rewritten; the audio is left byte-for-byte alone.
+
+## Export
+
+Build a drive: the audio, the analysis, and the database that indexes them.
+
+```sh
+musicai export ~/Music/set -r --playlist "Sat 14/9" -o /Volumes/USB
+```
+
+```
+set/01 - opener.flac -> /Contents/Peverelist/01 - opener.flac (128.02 BPM 8A, 1536 beats, 6 phrases, 5 cues)
+set/02 - marius.flac -> /Contents/Batu/02 - marius.flac (130.00 BPM 4A, 1478 beats, 4 phrases, 4 cues)
+wrote /Volumes/USB/PIONEER/rekordbox/export.pdb: 20 tables, 41 rows, verified
+```
+
+The drive comes out shaped the way a player expects:
+
+```
+/Contents/<artist>/<file>              the audio, copied, not re-encoded
+/PIONEER/USBANLZ/P001/00000001/…       ANLZ0000.DAT, .EXT and .2EX per track
+/PIONEER/rekordbox/export.pdb          the database that points at both
+```
+
+`--image drive.img` writes a disk image instead of a folder: a raw file with a
+partition table and a FAT32 filesystem, which is what a player actually reads. It goes
+onto a stick with `dd if=drive.img of=/dev/disk4 bs=4m`, or into the USB slot of an
+emulator — see [Trying it on a player](#trying-it-on-a-player).
+
+Each track is listened to on the way past: the beats are found, the track is divided into
+phrases, and cue points are set at the phrase boundaries and where a voice comes in — see
+[What it hears](#what-it-hears). `--bpm` overrides the tempo when the detector gets it
+wrong; the beats are still tracked against the audio, so the grid stays where the music
+is.
+
+Title, artist, album, year and track number come from the file's own tags where it has
+them. Everything named goes into one playlist, `--playlist` names it, and `--dry-run`
+reports what would be written without touching the drive.
+
+Files a player cannot open are refused rather than copied — a file that fails at the gig
+is worse on the drive than off it — which today means checking the container and the
+sample rate.
+
+Variable-bitrate MP3s get a seek index (`PVBR`) so their hot cues land in the right place
+on the player — see [What it hears](#what-it-hears). Every other format seeks without one.
+
+Once the database is written it is read back off the drive and walked the way a player
+walks it, and the command fails rather than reporting success if that does not work.
+
+**What is missing before this plays in a club:** none of it has been tried on real
+hardware. It has been checked against an independent parser, which is not the same thing.
+
+## Trying it on a player
+
+The nearest thing to a CDJ that is not a CDJ is
+[cdj3k-emu](https://github.com/nsaintot/cdj3k-emu), which boots real CDJ-3000 firmware
+under QEMU and gives it a virtual USB slot. A drive written here can be handed straight
+to it:
+
+```sh
+musicai export ~/Music/set -r --image ~/rekordbox.img
+```
+
+then in the emulator, **USB → Attach virtual image** and pick `rekordbox.img`. The guest
+mounts it the same way the firmware mounts a real stick: partition 1, FAT32, at
+`/media/usb/sdb1`. What to look at, in the order that things break:
+
+1. **Does the drive appear at all?** That is the database being readable —
+   `export.pdb` parsed, the table list understood.
+2. **Do the playlists and tracks list?** The playlist tree, the playlist entries, and the
+   track rows, with their titles and artists off the interned tables.
+3. **Does a track load?** The `file_path` in the row resolving to real audio.
+4. **Is there a waveform, in three colours?** The `.EXT` and `.2EX` files being found
+   through `analyze_path`, and the three-band data being what the CDJ-3000 expects.
+5. **Are the cues on the beat, and named?** The beat grid, `PCO2`, and the analysis.
+6. **Are the phrases drawn under the waveform?** `PSSI`, including the mask.
+
+Two things are worth knowing before setting time aside for this. The emulator is **Apple
+Silicon macOS only** — it uses HVF, vmnet and CoreAudio, so there is no Linux or Windows
+build and it cannot run in CI. And it **ships no Pioneer firmware**: it needs a CDJ-3000
+firmware update file and its decryption key, which you have to supply yourself and which
+this project cannot help with either.
+
+Failing that, the checks that can be run anywhere are the ones in [Tests](#tests):
+everything written is parsed back by
+[rekordcrate](https://github.com/Holzhaus/rekordcrate), and a disk image is additionally
+read with [mtools](https://www.gnu.org/software/mtools/), so the filesystem is one that
+something other than us agrees is a filesystem.
+
+## What it hears
+
+Analysis is signal processing rather than a model: it runs offline in a couple of seconds
+a track, it explains itself, and everything it decides is visible and correctable.
+
+**The beats.** Spectral flux gives an onset envelope; its autocorrelation, weighted
+towards the tempo a listener would pick, gives the period; and a dynamic program then
+chooses the sequence of beat times that best balances landing on the onsets against
+keeping time. That last step is Ellis's, from 2007, and it is hard to beat without a
+neural network. The bar lines go where the kicks are.
+
+A tempo read off the autocorrelation can only be a whole number of frames, which is a
+step of more than a beat per minute — too coarse to hold a mix together. So the tempo is
+read back off the tracked beats instead, and if a straight line fits them, the grid
+becomes that line. A track made to a click comes out at one exact tempo; one that drifts
+keeps its drift, and each beat carries the tempo measured around it.
+
+**The phrases.** Each bar is described by where its energy sits, every bar is compared
+with every other, and the moments where the music stops resembling what came before are
+the boundaries — Foote's method. Boundaries snap to four bars, because arrangements are
+built in fours. Sections are then named from how much is happening in them: intro, build,
+drop, break, outro, which are the phrase types the format calls a "high mood" track and
+the words a DJ uses about a record. Those names are heuristic and the positions are not;
+a breakdown that leads into a drop can honestly be called either.
+
+**The key.** A chromagram folds the spectrum down to how much of each of the twelve pitch
+classes is present, averaged over the track; a profile-matching method then correlates
+that against a template of what each of the twenty-four keys sounds like, and the closest
+match wins. Two details are for real music rather than tidiness: the chromagram is read
+*at* each note's frequency and interpolated, not by dropping FFT bins into the nearest
+class — in the bass, where dance music carries its key, a semitone is a few hertz wide and
+the nearest-class approach lands wrong as often as right — and the key templates are
+[Sha'ath's](https://www.ibrahimshaath.co.uk/keyfinder/), the ones KeyFinder uses, which
+were tuned on popular and electronic music and tell major from minor on a bass-heavy track
+where the classical templates flip them. The output is the Camelot code a DJ mixes by (`8A`) and the
+classical name under it (`Am`), with a confidence, and a runner-up when the two best were
+a hair apart — usually the relative major/minor, which shares every note. A track with no
+tonal centre — a drum tool — is left without a key rather than assigned a wrong one.
+
+**The cues.** A memory cue at the first downbeat, where a player parks when the track
+loads, and up to eight hot cues: one at each phrase boundary, and one where a voice comes
+in. When there are more than eight candidates the drops and the first vocal survive and
+the builds are dropped. Everything lands on a beat, and on a downbeat where there is one
+close by.
+
+Finding the voice without separating the stems means measuring energy that is both
+centred in the stereo image and in the range a voice occupies. That finds a sung line
+entering over a backing; it will also fire on a centred lead synth. Separating the stems
+properly would answer it better and costs minutes a track rather than milliseconds —
+which is the trade [the spec](docs/rekordbox-replacement-spec.md) proposes making later,
+in the background, for the tracks that are going to a gig.
+
+**Seeking a VBR MP3.** A variable-bitrate MP3 has no fixed relationship between a moment in
+the music and a byte in the file — each frame holds the same audio but takes a different
+number of bytes — so a player cannot jump to a hot cue by arithmetic. rekordbox writes a
+table of byte offsets, and so does this: it walks the MP3's frame headers (without decoding
+anything) and builds the 401-entry seek index the CDJ reads. A constant-bitrate file, which
+seeks fine by arithmetic, gets the same empty stub rekordbox writes. This only concerns MP3;
+FLAC, WAV and AIFF carry their own seek information.
+
+**Measuring it.** The tests above use synthetic audio, which proves the code does what it
+was written to do but not that it agrees with a human. `cargo run --release --example eval
+-- rekordbox.xml` reads a rekordbox collection export, runs the analysis over the tracks
+it references, and reports how often the detected key and tempo match the ones already in
+the library — exact, and within a Camelot neighbour or a half/double. `--dry-run` first
+shows how much of the library is reachable before committing to the decode. Against a real
+8,300-track v7.2.17 export, every one of the 8,209 stored key labels parsed; the audio
+side runs on the machine the library lives on.
+
+## Anlz
+
+Write the per-track analysis files a Pioneer / AlphaTheta player reads: the beat grid,
+the cues, and the waveforms it draws.
+
+```sh
+musicai anlz track.flac
+# -> track.DAT   track.EXT   track.2EX
+```
+
+```
+track.flac: 128.02 BPM 8A, 1536 beats, 6 phrases, 5 cues
+  track.DAT: 6 sections
+  track.EXT: 10 sections
+  track.2EX: 3 sections
+```
+
+Between them the three files carry a beat grid with per-beat tempo, memory cues and hot
+cues with colours and comments, saved loops, phrase analysis, and seven waveforms — the
+monochrome preview a 2009 player draws, the colour ones the nexus 2 line introduced, and
+the three-band low/mid/high pair the CDJ-3000 shows. Each file is read back off disk
+after it is written, by a parser that shares no code with the writer, and the command
+fails rather than reporting success if that read-back does not work.
+
+This writes the analysis files and nothing else, which is useful for looking at one
+track. For a drive a player can browse, use [`export`](#export).
+
+The file format is not published by its vendor. It has been reverse-engineered in public
+and in detail by [Deep Symmetry's DJ Link Ecosystem
+Analysis](https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html),
+which is what this is written against, and the tests check the output by parsing it back
+with [rekordcrate](https://github.com/Holzhaus/rekordcrate) — a separate implementation
+by different people, so that a misunderstanding of the format cannot be symmetrical and
+invisible. The database format is documented in the same place and checked the same way.
+
+[`docs/rekordbox-replacement-spec.md`](docs/rekordbox-replacement-spec.md) is the wider
+plan this belongs to.
 
 ## The macOS app
 

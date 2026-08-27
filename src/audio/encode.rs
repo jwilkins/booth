@@ -56,15 +56,22 @@ impl FromStr for Codec {
 pub struct EncodeOptions {
     /// Bit depth for wav/flac output. Ignored for mp3.
     pub bit_depth: u16,
-    /// Constant bitrate in kbps for mp3 output. Ignored otherwise.
+    /// Constant bitrate in kbps for mp3 output. Ignored otherwise, and ignored
+    /// when [`mp3_vbr`] is set.
     pub mp3_bitrate: u32,
+    /// Variable-bitrate quality for mp3 output, 0 (best) to 9, LAME's own `-V`
+    /// scale. `None` writes a constant bitrate instead.
+    ///
+    /// VBR spends bits where the music needs them, which for a stem — long
+    /// stretches of near-silence between phrases — is most of the file.
+    pub mp3_vbr: Option<u8>,
     /// Apply TPDF dither when truncating to a 16-bit integer output.
     pub dither: bool,
 }
 
 impl Default for EncodeOptions {
     fn default() -> Self {
-        Self { bit_depth: 16, mp3_bitrate: 192, dither: true }
+        Self { bit_depth: 16, mp3_bitrate: 192, mp3_vbr: None, dither: true }
     }
 }
 
@@ -206,9 +213,25 @@ fn write_mp3(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<WriteRe
     builder
         .set_sample_rate(audio.sample_rate)
         .map_err(|e| anyhow!("LAME rejected sample rate {}: {e}", audio.sample_rate))?;
-    builder
-        .set_brate(mp3_bitrate(opts.mp3_bitrate)?)
-        .map_err(|e| anyhow!("LAME rejected bitrate: {e}"))?;
+    match opts.mp3_vbr {
+        Some(quality) => {
+            builder
+                .set_vbr_mode(mp3lame_encoder::VbrMode::Mtrh)
+                .map_err(|e| anyhow!("LAME rejected VBR mode: {e}"))?;
+            builder
+                .set_vbr_quality(vbr_quality(quality)?)
+                .map_err(|e| anyhow!("LAME rejected VBR quality: {e}"))?;
+            // The Xing/LAME header, which carries the seek table. Without it a
+            // player scrubbing a VBR file guesses, and a hot cue lands
+            // somewhere other than where it was set.
+            builder
+                .set_to_write_vbr_tag(true)
+                .map_err(|e| anyhow!("LAME rejected the VBR tag setting: {e}"))?;
+        }
+        None => builder
+            .set_brate(mp3_bitrate(opts.mp3_bitrate)?)
+            .map_err(|e| anyhow!("LAME rejected bitrate: {e}"))?,
+    }
     builder
         .set_quality(mp3lame_encoder::Quality::Best)
         .map_err(|e| anyhow!("LAME rejected quality setting: {e}"))?;
@@ -227,8 +250,48 @@ fn write_mp3(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<WriteRe
         .flush_to_vec::<FlushNoGap>(&mut out)
         .map_err(|e| anyhow!("flushing mp3 encoder: {e}"))?;
 
+    // The Xing/LAME frame, which carries the seek table a VBR file needs. LAME
+    // can only fill it in once it knows the whole file, so it hands it over at
+    // the end and it is spliced in — after any ID3v2 block and before the audio,
+    // which is where a decoder looks for it.
+    //
+    // Without this a player scrubbing a VBR file interpolates from the file
+    // size, and a hot cue lands somewhere other than where it was set.
+    let tag_size = encoder.lame_tag_size();
+    if tag_size > 0 {
+        let mut tag = Vec::with_capacity(tag_size);
+        if encoder.lame_tag_encode_to_vec(&mut tag).is_some() {
+            let boundary = encoder.id3v2_tag_size().min(out.len());
+            let mut spliced = Vec::with_capacity(out.len() + tag.len());
+            spliced.extend_from_slice(&out[..boundary]);
+            spliced.extend_from_slice(&tag);
+            spliced.extend_from_slice(&out[boundary..]);
+            out = spliced;
+        }
+    }
+
     std::fs::write(path, &out)?;
     Ok(report)
+}
+
+/// LAME's `-V` scale, 0 being the best.
+fn vbr_quality(level: u8) -> Result<mp3lame_encoder::Quality> {
+    // Not a glob import: LAME's seventh-best quality is spelled `Ok`, which
+    // would shadow `Result::Ok` for the rest of the function.
+    use mp3lame_encoder::Quality;
+    Ok(match level {
+        0 => Quality::Best,
+        1 => Quality::SecondBest,
+        2 => Quality::NearBest,
+        3 => Quality::VeryNice,
+        4 => Quality::Nice,
+        5 => Quality::Good,
+        6 => Quality::Decent,
+        7 => Quality::Ok,
+        8 => Quality::SecondWorst,
+        9 => Quality::Worst,
+        other => bail!("mp3 VBR quality is 0 to 9, not {other}"),
+    })
 }
 
 fn mp3_bitrate(kbps: u32) -> Result<mp3lame_encoder::Bitrate> {
@@ -304,6 +367,114 @@ impl Rng {
         self.0 ^= self.0 >> 27;
         let bits = self.0.wrapping_mul(0x2545_F491_4F6C_DD1D);
         (bits >> 40) as f32 / (1u32 << 24) as f32
+    }
+}
+
+#[cfg(test)]
+mod vbr_tests {
+    use super::*;
+    use crate::audio::Audio;
+
+    /// Music-like rather than a steady tone: a constant signal encodes to a
+    /// nearly constant bitrate whatever mode it is in, so a tone would not tell
+    /// VBR from CBR.
+    fn varied(secs: f32) -> Audio {
+        let rate = 44_100;
+        let frames = (rate as f32 * secs) as usize;
+        let plane: Vec<f32> = (0..frames)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                // Loud and busy for the first half, near silence for the rest.
+                match t < secs / 2.0 {
+                    true => {
+                        0.4 * (std::f32::consts::TAU * 220.0 * t).sin()
+                            + 0.3 * (std::f32::consts::TAU * 3_000.0 * t).sin()
+                            + 0.2 * ((i % 97) as f32 / 97.0 - 0.5)
+                    }
+                    false => 0.001 * (std::f32::consts::TAU * 220.0 * t).sin(),
+                }
+            })
+            .collect();
+        Audio::new(rate, vec![plane.clone(), plane]).unwrap()
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("musicai-vbr-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn vbr_writes_a_smaller_file_than_a_constant_bitrate_of_the_same_quality() {
+        let dir = scratch("smaller");
+        let audio = varied(6.0);
+
+        let cbr = dir.join("cbr.mp3");
+        write_file(
+            &cbr,
+            &audio,
+            Codec::Mp3,
+            &EncodeOptions { mp3_bitrate: 192, mp3_vbr: None, ..EncodeOptions::default() },
+        )
+        .unwrap();
+
+        let vbr = dir.join("vbr.mp3");
+        write_file(
+            &vbr,
+            &audio,
+            Codec::Mp3,
+            &EncodeOptions { mp3_vbr: Some(2), ..EncodeOptions::default() },
+        )
+        .unwrap();
+
+        let (small, big) =
+            (std::fs::metadata(&vbr).unwrap().len(), std::fs::metadata(&cbr).unwrap().len());
+        // Half of this track is near silence, which is what VBR is for and
+        // what a stem is mostly made of.
+        assert!(small < big, "VBR {small} was not smaller than CBR {big}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_vbr_file_carries_the_seek_table_a_hot_cue_needs() {
+        let dir = scratch("xing");
+        let path = dir.join("vbr.mp3");
+        write_file(
+            &path,
+            &varied(4.0),
+            Codec::Mp3,
+            &EncodeOptions { mp3_vbr: Some(2), ..EncodeOptions::default() },
+        )
+        .unwrap();
+
+        // Without the Xing/Info header a player scrubbing a VBR file guesses,
+        // and a cue lands somewhere other than where it was set.
+        let bytes = std::fs::read(&path).unwrap();
+        let head = &bytes[..bytes.len().min(2_048)];
+        let has_tag = head.windows(4).any(|w| w == b"Xing" || w == b"Info");
+        assert!(has_tag, "no VBR seek header was written");
+
+        // And our own MP3 walker reads it back as variable.
+        let index = crate::audio::mp3::SeekIndex::of_mp3(&path).unwrap();
+        assert!(index.is_some(), "the file did not parse as mp3");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_vbr_quality_outside_the_scale_is_refused() {
+        let dir = scratch("range");
+        let path = dir.join("bad.mp3");
+        let result = write_file(
+            &path,
+            &varied(1.0),
+            Codec::Mp3,
+            &EncodeOptions { mp3_vbr: Some(11), ..EncodeOptions::default() },
+        );
+        assert!(result.is_err(), "11 is not on LAME's 0-9 scale");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 

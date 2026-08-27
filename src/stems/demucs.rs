@@ -7,6 +7,13 @@
 //!
 //! Demucs emits four stems — vocals, drums, bass, other — so its `bass` and
 //! `other` are summed to make our `melody`.
+//!
+//! Demucs is asked for `--float32` output. Left to itself it writes 16-bit wav,
+//! and a separated stem routinely peaks above full scale — the split
+//! redistributes energy, so a stem can be louder than the mix it came from — so
+//! demucs' own int16 writer clips it before we ever see it. Float carries the
+//! peaks through intact; keeping the audio under full scale is then done once,
+//! on the way out, where it can be measured rather than clamped.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -28,6 +35,18 @@ pub struct Config {
     pub model: String,
     /// Optional torch device (`cpu`, `cuda`, `mps`). `None` lets demucs pick.
     pub device: Option<String>,
+    /// Test-time shifts: demucs separates the track several times at small
+    /// random offsets and averages them, which smooths artefacts at a roughly
+    /// linear cost in time. Demucs' own default is 0; more is cleaner.
+    ///
+    /// Ours is 2, which is a deliberate trade: a stem is rendered once and then
+    /// played for years, so minutes spent here are cheap against a vocal that
+    /// warbles every time it is used.
+    pub shifts: u32,
+    /// How much neighbouring windows overlap, 0.0 to just under 1.0. More
+    /// overlap means fewer seams between windows, and more compute. Demucs'
+    /// default is 0.25.
+    pub overlap: f32,
     /// Directory demucs writes into. Callers pass a temporary directory.
     pub work_dir: PathBuf,
 }
@@ -36,8 +55,14 @@ impl Config {
     pub fn new(work_dir: PathBuf) -> Self {
         Self {
             program: OsString::from("demucs"),
-            model: "htdemucs".to_string(),
+            // The fine-tuned model rather than the base one. It is four
+            // specialist models rather than one, so it costs about four times
+            // as long and separates noticeably better — which is the right way
+            // round for a render that happens once.
+            model: "htdemucs_ft".to_string(),
             device: None,
+            shifts: 2,
+            overlap: 0.25,
             work_dir,
         }
     }
@@ -53,10 +78,23 @@ pub fn separate(input: &Path, config: &Config) -> Result<StemSet> {
         .with_context(|| format!("creating {}", config.work_dir.display()))?;
 
     let mut command = Command::new(&config.program);
-    command.arg("-n").arg(&config.model).arg("--out").arg(&config.work_dir).arg(&input);
+    command
+        .arg("-n")
+        .arg(&config.model)
+        .arg("--out")
+        .arg(&config.work_dir)
+        // Float output, so a stem that peaks above full scale reaches us
+        // intact rather than clipped by demucs' default int16 writer.
+        .arg("--float32")
+        .arg("--overlap")
+        .arg(format!("{}", config.overlap));
+    if config.shifts > 0 {
+        command.arg("--shifts").arg(config.shifts.to_string());
+    }
     if let Some(device) = &config.device {
         command.arg("-d").arg(device);
     }
+    command.arg(&input);
 
     let output = command.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
