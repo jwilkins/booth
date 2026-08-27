@@ -431,6 +431,10 @@ impl App {
         // the check captures the first frame and would otherwise photograph
         // every fade half-finished. Compiled out of any ordinary build.
         #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_SELECT_FIRST").is_some() {
+            app.selected = app.library.tracks.first().map(|t| t.id);
+        }
+        #[cfg(feature = "screenshot")]
         if let Some(which) = std::env::var_os("BOOTH_OPEN_SHEET") {
             match which.to_string_lossy().as_ref() {
                 "settings" => app.settings = true,
@@ -1317,6 +1321,25 @@ impl Naming {
     }
 }
 
+/// Draw a side panel's contents at exactly the width the panel was given.
+///
+/// egui stores a side panel's width from the rectangle its *contents* ended up
+/// occupying and reads that back as the width on the next frame. So a panel
+/// whose content comes out narrower shrinks to it, and one whose content comes
+/// out wider grows — up to the end of its range — and either way the width
+/// stops being the one that was dragged to. The inspector did both: empty, it
+/// collapsed to its narrowest column; with a long title or path in it, it
+/// climbed until it was eating the browser.
+///
+/// Pinning the content to the width we were handed makes the stored width the
+/// panel's own, so it only ever changes when someone drags it.
+fn pinned<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let width = ui.available_width();
+    ui.set_min_width(width);
+    ui.set_max_width(width);
+    contents(ui)
+}
+
 /// Bits per second, from what is on disk and how long it plays for.
 ///
 /// Every format this reads has a bitrate that can be worked out this way, which
@@ -1356,16 +1379,16 @@ impl eframe::App for App {
         // it back with.
         egui::SidePanel::left("collection")
             .default_width(178.0)
-            .width_range(150.0..=380.0)
+            .width_range(150.0..=300.0)
             .frame(pane_frame())
             .resizable(true)
-            .show(ctx, |ui| self.sidebar(ui));
+            .show(ctx, |ui| pinned(ui, |ui| self.sidebar(ui)));
         egui::SidePanel::right("inspector")
             .default_width(210.0)
-            .width_range(180.0..=560.0)
+            .width_range(180.0..=420.0)
             .frame(pane_frame())
             .resizable(true)
-            .show(ctx, |ui| self.inspector(ui));
+            .show(ctx, |ui| pinned(ui, |ui| self.inspector(ui)));
 
         egui::CentralPanel::default().frame(pane_frame()).show(ctx, |ui| self.browser(ui));
 
@@ -4489,6 +4512,67 @@ fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
 mod tests {
     use super::*;
     use crate::library::CueMark;
+
+    /// The width a side panel would keep, given contents of a chosen width.
+    ///
+    /// egui reports back what the contents occupied, which is what it stores as
+    /// the panel's width for the next frame — so this is the width the panel
+    /// would come back as.
+    fn kept_width(available: f32, draw: impl Fn(&mut Ui)) -> f32 {
+        // A cell because the harness takes a `Fn`, and the width has to come
+        // back out of it.
+        let kept = std::cell::Cell::new(0.0);
+        egui::__run_test_ui(|ui| {
+            // The same shape a side panel makes: a child ui given the panel's
+            // rectangle, whose own rectangle afterwards is what egui stores as
+            // the width for the next frame.
+            let rect = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(available, 600.0));
+            let mut panel = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            pinned(&mut panel, |ui| draw(ui));
+            kept.set(panel.min_rect().width());
+        });
+        kept.get()
+    }
+
+    #[test]
+    fn a_panel_keeps_its_width_whatever_is_in_it() {
+        // The bug this is here for: egui takes a side panel's width from the
+        // rectangle its contents came out as, so the panel followed its own
+        // contents instead of the drag. Empty, the inspector collapsed to its
+        // narrowest column; with a long title in it, it grew until it was
+        // eating the browser.
+        let empty = kept_width(210.0, |_| {});
+        assert_eq!(empty, 210.0, "an empty panel collapsed to nothing");
+
+        let short = kept_width(210.0, |ui| {
+            ui.label("Tension");
+        });
+        assert_eq!(short, 210.0, "a narrow label pulled the panel in");
+
+        let long = kept_width(210.0, |ui| {
+            ui.label(
+                "All Your Sisters — Tension (Modern Failures) \u{2014} \
+                 /home/user/Music/All Your Sisters/Modern Failures/02 Tension.m4a",
+            );
+        });
+        assert_eq!(long, 210.0, "a long label pushed the panel out");
+    }
+
+    #[test]
+    fn a_panel_is_as_wide_as_it_was_given() {
+        // Different widths, because the point is that the panel takes the one
+        // it was handed rather than settling on a width of its own.
+        for width in [150.0, 210.0, 300.0, 420.0] {
+            let kept = kept_width(width, |ui| {
+                ui.label("Peverelist \u{2014} Roll With The Punches (Extended Club Mix)");
+            });
+            assert_eq!(kept, width, "asked for {width}");
+        }
+    }
 
     #[test]
     fn a_bitrate_is_worked_out_from_the_file_rather_than_a_header() {
