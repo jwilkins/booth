@@ -275,6 +275,26 @@ enum Pending {
     Convert(Vec<u32>),
 }
 
+/// The four names the inspector lets you edit.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Names {
+    artist: String,
+    title: String,
+    album: String,
+    year: String,
+}
+
+impl Names {
+    fn of(track: &Track) -> Self {
+        Self {
+            artist: track.artist.clone(),
+            title: track.title.clone(),
+            album: track.album.clone(),
+            year: track.year.map(|y| y.to_string()).unwrap_or_default(),
+        }
+    }
+}
+
 /// A track's names, while they are being edited.
 ///
 /// Held separately from the record so that what is typed is not the collection
@@ -283,29 +303,35 @@ enum Pending {
 /// the cursor.
 struct Edit {
     id: u32,
-    artist: String,
-    title: String,
-    album: String,
-    year: String,
+    names: Names,
+    /// What the record said when the fields were filled in.
+    ///
+    /// The difference between the two is what somebody typed. Without it there
+    /// was no telling that apart from the record having changed underneath —
+    /// so a fingerprint lookup would write a name into the collection and the
+    /// panel would go on showing the old one, because it had a copy and no
+    /// reason to think the copy was stale.
+    taken: Names,
 }
 
 impl Edit {
     fn of(track: &Track) -> Self {
-        Self {
-            id: track.id,
-            artist: track.artist.clone(),
-            title: track.title.clone(),
-            album: track.album.clone(),
-            year: track.year.map(|y| y.to_string()).unwrap_or_default(),
-        }
+        let names = Names::of(track);
+        Self { id: track.id, taken: names.clone(), names }
     }
 
     /// Whether anything was actually changed.
     fn differs_from(&self, track: &Track) -> bool {
-        self.artist.trim() != track.artist
-            || self.title.trim() != track.title
-            || self.album.trim() != track.album
-            || self.year.trim() != track.year.map(|y| y.to_string()).unwrap_or_default()
+        let names = &self.names;
+        names.artist.trim() != track.artist
+            || names.title.trim() != track.title
+            || names.album.trim() != track.album
+            || names.year.trim() != track.year.map(|y| y.to_string()).unwrap_or_default()
+    }
+
+    /// Whether these are still the record's own names rather than somebody's.
+    fn untouched(&self) -> bool {
+        self.names == self.taken
     }
 }
 
@@ -332,7 +358,6 @@ impl App {
 
         let config_path = Config::path();
         let config = Config::load(&config_path);
-        let config_sort = config.sort;
         let library_path = Library::default_path();
         let (library, status) = match Library::load(&library_path) {
             Ok(library) => {
@@ -357,6 +382,37 @@ impl App {
             config.on_external.label().to_lowercase()
         );
 
+        let mut app = Self::assemble(library, library_path, config, config_path, status);
+
+        // The device is opened once, at startup, and kept: opening one per
+        // track costs a noticeable gap and, on some hosts, a click.
+        match Player::open() {
+            Ok(player) => {
+                crate::info!("audio out at {} Hz", player.out_rate());
+                app.player = Some(player);
+            }
+            Err(e) => {
+                crate::warn!("no audio out: {e:#}");
+                app.player_problem = Some(format!("{e:#}"));
+            }
+        }
+        Self::finish(app, cc, files)
+    }
+
+    /// The window around a collection already in hand, with nothing opened for
+    /// it — no audio device, no files read.
+    ///
+    /// Split out from [`App::new`] so that the interface can be driven in a
+    /// test: what a button does is worth checking, and reading somebody's real
+    /// collection and claiming their sound card is not part of it.
+    fn assemble(
+        library: Library,
+        library_path: PathBuf,
+        config: Config,
+        config_path: PathBuf,
+        status: String,
+    ) -> Self {
+        let config_sort = config.sort;
         let mut app = Self {
             library,
             library_path,
@@ -412,20 +468,13 @@ impl App {
             wake_installed: false,
         };
         app.rebuild();
+        app
+    }
 
-        // The device is opened once, at startup, and kept: opening one per
-        // track costs a noticeable gap and, on some hosts, a click.
-        match Player::open() {
-            Ok(player) => {
-                crate::info!("audio out at {} Hz", player.out_rate());
-                app.player = Some(player);
-            }
-            Err(e) => {
-                crate::warn!("no audio out: {e:#}");
-                app.player_problem = Some(format!("{e:#}"));
-            }
-        }
-
+    /// The last of startup that needs the window: the layout check's hooks and
+    /// anything named on the command line.
+    #[allow(unused_variables, unused_mut)]
+    fn finish(mut app: Self, cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
         // Lets the layout check open the window on the sync sheet, which is
         // otherwise two clicks in. Animations are switched off with it, because
         // the check captures the first frame and would otherwise photograph
@@ -1282,6 +1331,9 @@ struct Naming {
     /// The playlist or folder being renamed. Empty when making a new one.
     subject: String,
     text: String,
+    /// Whether the field has been given the keyboard yet. Asked for once, on
+    /// the frame it appears — see [`App::name_field`] for why not every frame.
+    focused: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1303,21 +1355,36 @@ impl What {
 
 impl Naming {
     fn new_playlist() -> Self {
-        Self { what: What::NewPlaylist, subject: String::new(), text: String::new() }
+        Self {
+            what: What::NewPlaylist,
+            subject: String::new(),
+            text: String::new(),
+            focused: false,
+        }
     }
 
     fn new_folder() -> Self {
-        Self { what: What::NewFolder, subject: String::new(), text: String::new() }
+        Self { what: What::NewFolder, subject: String::new(), text: String::new(), focused: false }
     }
 
     /// Renaming starts from the current name rather than from nothing: most
     /// renames are an edit to what is there.
     fn rename_playlist(name: &str) -> Self {
-        Self { what: What::RenamePlaylist, subject: name.to_string(), text: name.to_string() }
+        Self {
+            what: What::RenamePlaylist,
+            subject: name.to_string(),
+            text: name.to_string(),
+            focused: false,
+        }
     }
 
     fn rename_folder(name: &str) -> Self {
-        Self { what: What::RenameFolder, subject: name.to_string(), text: name.to_string() }
+        Self {
+            what: What::RenameFolder,
+            subject: name.to_string(),
+            text: name.to_string(),
+            focused: false,
+        }
     }
 }
 
@@ -1794,7 +1861,20 @@ impl App {
                 .desired_width(f32::INFINITY)
                 .hint_text(RichText::new(naming.what.hint()).color(theme::DIM)),
         );
-        response.request_focus();
+
+        // Asked for once, on the frame the field appears — never again.
+        //
+        // egui reports a committed edit as the field *losing* focus, and
+        // `lost_focus` means "had it last frame and does not have it now". So
+        // asking for focus every frame, as this did, took it straight back on
+        // the same frame the field gave it up: `lost_focus` was false forever,
+        // Enter did nothing, Escape did nothing, and a typed name could not be
+        // turned into a playlist at all.
+        let first_frame = !naming.focused;
+        naming.focused = true;
+        if first_frame {
+            response.request_focus();
+        }
 
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             let naming = self.naming.take().expect("just checked");
@@ -2574,6 +2654,11 @@ impl App {
         // out of the window's state for the duration, so that the panel can
         // read the collection while it is being typed into.
         let mut edit = match self.editing.take() {
+            // Still this track, and still the record's own names: take them
+            // again, so that a lookup or an import that has since written to
+            // the record shows up here rather than being hidden behind a copy
+            // made before it. Anything typed is the person's and is kept.
+            Some(edit) if edit.id == track.id && edit.untouched() => Edit::of(&track),
             Some(edit) if edit.id == track.id => edit,
             Some(stale) => {
                 self.apply_edit(stale);
@@ -2586,17 +2671,22 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let width = ui.available_width();
             fn field(ui: &mut Ui, width: f32, label: &str, value: &mut String) {
-                ui.label(RichText::new(label).color(theme::DIM).size(theme::SMALL));
-                ui.add(
+                let caption = ui.label(RichText::new(label).color(theme::DIM).size(theme::SMALL));
+                let field = ui.add(
                     egui::TextEdit::singleline(value)
                         .desired_width(width)
                         .font(theme::sans(theme::BODY)),
                 );
+                // The caption sits above the box rather than beside it, so
+                // nothing but this says which is which: without it a screen
+                // reader announces four unnamed text boxes, and so does
+                // anything else reading the window through the same tree.
+                field.labelled_by(caption.id);
             }
-            field(ui, width, "Title", &mut editing.title);
-            field(ui, width, "Artist", &mut editing.artist);
-            field(ui, width, "Album", &mut editing.album);
-            field(ui, width, "Year", &mut editing.year);
+            field(ui, width, "Title", &mut editing.names.title);
+            field(ui, width, "Artist", &mut editing.names.artist);
+            field(ui, width, "Album", &mut editing.names.album);
+            field(ui, width, "Year", &mut editing.names.year);
 
             let changed = editing.differs_from(&track);
             ui.add_space(4.0);
@@ -3122,10 +3212,10 @@ impl App {
         if !edit.differs_from(track) {
             return;
         }
-        track.artist = edit.artist.trim().to_string();
-        track.title = edit.title.trim().to_string();
-        track.album = edit.album.trim().to_string();
-        track.year = edit.year.trim().parse().ok();
+        track.artist = edit.names.artist.trim().to_string();
+        track.title = edit.names.title.trim().to_string();
+        track.album = edit.names.album.trim().to_string();
+        track.year = edit.names.year.trim().parse().ok();
 
         if let Some(on_existing) = self.config.write_tags.on_existing() {
             self.write_tags(edit.id, on_existing);
@@ -4512,6 +4602,150 @@ fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
 mod tests {
     use super::*;
     use crate::library::CueMark;
+
+    /// Driving the sidebar the way a person does: click, type, press a key,
+    /// and see what the collection holds afterwards.
+    ///
+    /// Through `egui_kittest`, which runs real frames and finds controls by the
+    /// name they announce. That is what it takes: the bug these were written
+    /// for left every function involved correct on its own, and only showed up
+    /// as the field never reporting that Enter had been pressed. Nothing short
+    /// of two frames with a keystroke between them sees it.
+    mod window {
+        use super::*;
+        use egui_kittest::kittest::Queryable;
+        use egui_kittest::Harness;
+
+        /// A window on an empty collection, writing to a scratch directory so a
+        /// save cannot land on the collection of whoever runs the tests.
+        fn app(name: &str) -> App {
+            let dir = std::env::temp_dir().join(format!("booth-ui-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            App::assemble(
+                Library::new(),
+                dir.join("library.json"),
+                Config::default(),
+                dir.join("config.json"),
+                String::new(),
+            )
+        }
+
+        /// Click the named button, type into the field it opens, press a key,
+        /// and hand what the collection became to `check`. Each step gets its
+        /// own frame, because that is how a person does it and the difference
+        /// between one frame and three is the whole point.
+        fn name_something(
+            name: &str,
+            button: &str,
+            text: &str,
+            key: egui::Key,
+            check: impl FnOnce(&Library),
+        ) {
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.sidebar(ui), app(name));
+            harness.get_by_label(button).click();
+            harness.run();
+            harness.get_by_role(accesskit::Role::TextInput).type_text(text);
+            harness.run();
+            harness.key_press(key);
+            harness.run();
+            check(&harness.state().library);
+        }
+
+        #[test]
+        fn typing_a_name_and_pressing_enter_makes_a_playlist() {
+            name_something("playlist", "+", "Saturday peak", egui::Key::Enter, |library| {
+                let names: Vec<&str> = library.playlists.iter().map(|p| p.name.as_str()).collect();
+                assert_eq!(names, vec!["Saturday peak"], "Enter did not make the playlist");
+            });
+        }
+
+        #[test]
+        fn typing_a_name_and_pressing_enter_makes_a_folder() {
+            name_something("folder", "+\u{25be}", "September", egui::Key::Enter, |library| {
+                assert_eq!(library.folders, vec!["September".to_string()]);
+            });
+        }
+
+        /// A window showing one track, with the inspector open on it.
+        fn inspecting(name: &str, path: &str) -> App {
+            let mut app = app(name);
+            let id = app.library.add(std::path::Path::new(path));
+            let track = app.library.get_mut(id).unwrap();
+            track.artist = "Unknown".into();
+            track.title = "02 Tension".into();
+            app.rebuild();
+            app.selected = Some(id);
+            app
+        }
+
+        #[test]
+        fn a_lookup_reaches_the_panel_that_is_showing_the_track() {
+            // The panel keeps its own copy of the names so that typing is not
+            // the collection until it is committed. The copy has to notice
+            // when the record changes underneath it — a fingerprint lookup
+            // writes one while the panel is open, and showing the old name
+            // afterwards reads as the lookup having done nothing.
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| app.inspector(ui),
+                inspecting("lookup", "/music/02 Tension.m4a"),
+            );
+            harness.run();
+
+            // What arriving at a fingerprint match does: write the names into
+            // the collection and rebuild the list.
+            let id = harness.state().selected.unwrap();
+            let app = harness.state_mut();
+            let track = app.library.get_mut(id).unwrap();
+            track.artist = "All Your Sisters".into();
+            track.title = "Tension".into();
+            app.rebuild();
+            harness.run();
+
+            let edit = harness.state().editing.as_ref().expect("the panel kept no names");
+            assert_eq!(edit.names.artist, "All Your Sisters", "the panel still shows the old name");
+            assert_eq!(edit.names.title, "Tension");
+        }
+
+        #[test]
+        fn a_lookup_does_not_overwrite_what_somebody_is_typing() {
+            // The other half of the same rule: a field being typed into is
+            // theirs, and a lookup landing mid-edit must not take it back.
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| app.inspector(ui),
+                inspecting("typing", "/music/02 Tension.m4a"),
+            );
+            harness.run();
+            // Focused first: typing goes wherever the keyboard is, and a frame
+            // has to pass for the field to have it.
+            harness.get_by_role_and_label(accesskit::Role::TextInput, "Artist").focus();
+            harness.run();
+            harness
+                .get_by_role_and_label(accesskit::Role::TextInput, "Artist")
+                .type_text("My own answer");
+            harness.run();
+
+            let id = harness.state().selected.unwrap();
+            let app = harness.state_mut();
+            app.library.get_mut(id).unwrap().artist = "All Your Sisters".into();
+            app.rebuild();
+            harness.run();
+
+            let edit = harness.state().editing.as_ref().expect("the panel kept no names");
+            assert!(
+                edit.names.artist.contains("My own answer"),
+                "a lookup took back what was being typed: {:?}",
+                edit.names.artist
+            );
+        }
+
+        #[test]
+        fn escape_abandons_the_name_rather_than_making_it() {
+            name_something("escape", "+", "half a thought", egui::Key::Escape, |library| {
+                assert!(library.playlists.is_empty(), "escape made one anyway");
+            });
+        }
+    }
 
     /// The width a side panel would keep, given contents of a chosen width.
     ///
