@@ -193,6 +193,14 @@ pub fn header_row(ui: &mut Ui, widths: &Widths, sort: Sort) -> Option<Column> {
     clicked
 }
 
+/// A row being dragged, by id.
+///
+/// The id rather than the track, because what is dropped has to be looked up
+/// in the collection as it is when it lands, not as it was when the drag
+/// started.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Dragged(pub u32);
+
 /// Something asked of one track from its own line.
 ///
 /// Each of these already exists as a batch over everything showing. They are
@@ -202,6 +210,10 @@ pub fn header_row(ui: &mut Ui, widths: &Widths, sort: Sort) -> Option<Column> {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Play,
+    /// Put it in the playlist at this index of [`Menu::playlists`].
+    AddTo(usize),
+    /// Put it in a playlist that does not exist yet.
+    AddToNew,
     Analyze,
     Identify,
     Separate,
@@ -218,7 +230,7 @@ impl Action {
     /// Re-doing something is named as re-doing it. An item that reads
     /// "Analyse" on a track that has already been analysed invites the reading
     /// that nothing will happen.
-    pub fn label(self, track: &Track, menu: Menu) -> &'static str {
+    pub fn label(self, track: &Track, menu: Menu<'_>) -> &'static str {
         match self {
             Action::Play if menu.playing => "Pause",
             Action::Play => "Play",
@@ -228,6 +240,7 @@ impl Action {
             Action::Identify => "Look up tags",
             Action::Separate if !track.stems.is_empty() => "Render stems again",
             Action::Separate => "Render stems",
+            Action::AddTo(_) | Action::AddToNew => "Add to playlist",
             Action::CopyIn => "Copy into the library",
             Action::Reveal => "Copy the file path",
             Action::RemoveFromPlaylist => "Remove from this playlist",
@@ -249,7 +262,7 @@ pub enum Hit {
 
 /// What the menu needs to know that the row itself cannot see.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Menu {
+pub struct Menu<'a> {
     /// Whether the file already sits under the library folder, which decides
     /// whether copying it in is offered at all.
     pub in_library: bool,
@@ -258,6 +271,8 @@ pub struct Menu {
     /// Whether a playlist is what is being shown, which is the only place
     /// taking a track out of one means anything.
     pub in_playlist: bool,
+    /// The playlists this track could be added to, in sidebar order.
+    pub playlists: &'a [String],
 }
 
 /// Draw one line. Returns what the pointer did, if anything.
@@ -267,16 +282,53 @@ pub fn row(
     indented: bool,
     selected: bool,
     widths: &Widths,
-    menu: Menu,
+    menu: Menu<'_>,
 ) -> Option<Hit> {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
+    let (rect, response) = ui
+        .allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click_and_drag());
     let response = response.on_hover_text(match track.path.parent() {
-        Some(_) => {
-            format!("{}\ndouble-click to hear it, right-click for the rest", track.path.display())
+        Some(_) => format!(
+            "{}\ndouble-click to hear it, drag it onto a playlist, right-click for the rest",
+            track.path.display()
+        ),
+        None => {
+            "double-click to hear it, drag it onto a playlist, right-click for the rest".to_string()
         }
-        None => "double-click to hear it, right-click for the rest".to_string(),
     });
+
+    // The row is painted rather than built out of widgets, so this is the only
+    // thing that says what it is. Without it the browser — the main thing in
+    // the window — announces nothing at all, and nothing reading the window
+    // through that tree can find a track by name.
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            format!("{} — {}", track.artist, track.display_title()),
+        )
+    });
+
+    // Picking a row up.
+    response.dnd_set_drag_payload(Dragged(track.id));
+    if response.dragged() {
+        // What is being carried, at the pointer. Without it the drag is
+        // invisible: the row stays where it is, and the only way to find out
+        // whether anything was picked up is to let go somewhere and see.
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        egui::Tooltip::always_open(
+            ui.ctx().clone(),
+            ui.layer_id(),
+            egui::Id::new("dragging-a-row"),
+            egui::PopupAnchor::Pointer,
+        )
+        .show(|ui| {
+            ui.label(
+                egui::RichText::new(format!("↳ {}", track.display_title()))
+                    .color(theme::AMBER)
+                    .size(11.0),
+            );
+        });
+    }
     let painter = ui.painter_at(rect);
 
     if selected {
@@ -353,7 +405,13 @@ pub fn row(
     let chosen = if indented {
         context_menu(&response, track, menu, &[Action::Play, Action::Reveal])
     } else {
-        let mut items = vec![Action::Play, Action::Analyze, Action::Identify, Action::Separate];
+        let mut items = vec![
+            Action::Play,
+            Action::AddToNew,
+            Action::Analyze,
+            Action::Identify,
+            Action::Separate,
+        ];
         if !menu.in_library {
             items.push(Action::CopyIn);
         }
@@ -383,7 +441,7 @@ pub fn row(
 fn context_menu(
     response: &egui::Response,
     track: &Track,
-    menu: Menu,
+    menu: Menu<'_>,
     items: &[Action],
 ) -> Option<Action> {
     let mut chosen = None;
@@ -396,6 +454,25 @@ fn context_menu(
         for &item in items {
             if matches!(item, Action::CopyIn | Action::RemoveFromPlaylist) {
                 ui.separator();
+            }
+            // The one item that opens onto a list rather than doing something.
+            if item == Action::AddToNew {
+                ui.menu_button(egui::RichText::new("Add to playlist").color(theme::TEXT), |ui| {
+                    for (at, name) in menu.playlists.iter().enumerate() {
+                        if ui.button(name).clicked() {
+                            chosen = Some(Action::AddTo(at));
+                            ui.close();
+                        }
+                    }
+                    if !menu.playlists.is_empty() {
+                        ui.separator();
+                    }
+                    if ui.button("New playlist\u{2026}").clicked() {
+                        chosen = Some(Action::AddToNew);
+                        ui.close();
+                    }
+                });
+                continue;
             }
             // Only the one that reaches past the playlist is coloured as a
             // warning: taking a track out of a list is a click away from being

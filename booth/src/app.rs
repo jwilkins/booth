@@ -234,6 +234,10 @@ enum Pending {
         name: String,
         on: bool,
     },
+    /// Put these tracks in the playlist of that name, making it if it is new.
+    AddToPlaylist(Vec<u32>, String),
+    /// Open the sidebar's naming field, and put these in whatever it is called.
+    NamePlaylistFor(Vec<u32>),
     Adopt(u32),
     AddTag(u32, String),
     RemoveTag(u32, String),
@@ -1352,6 +1356,9 @@ struct Naming {
     /// Whether the field has been given the keyboard yet. Asked for once, on
     /// the frame it appears — see [`App::name_field`] for why not every frame.
     focused: bool,
+    /// Tracks waiting on the name: "add these to a new playlist" is one act,
+    /// and asking for the name should not turn it into two.
+    holding: Vec<u32>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1378,11 +1385,18 @@ impl Naming {
             subject: String::new(),
             text: String::new(),
             focused: false,
+            holding: Vec::new(),
         }
     }
 
     fn new_folder() -> Self {
-        Self { what: What::NewFolder, subject: String::new(), text: String::new(), focused: false }
+        Self {
+            what: What::NewFolder,
+            subject: String::new(),
+            text: String::new(),
+            focused: false,
+            holding: Vec::new(),
+        }
     }
 
     /// Renaming starts from the current name rather than from nothing: most
@@ -1393,6 +1407,7 @@ impl Naming {
             subject: name.to_string(),
             text: name.to_string(),
             focused: false,
+            holding: Vec::new(),
         }
     }
 
@@ -1402,6 +1417,7 @@ impl Naming {
             subject: name.to_string(),
             text: name.to_string(),
             focused: false,
+            holding: Vec::new(),
         }
     }
 }
@@ -1848,6 +1864,21 @@ impl App {
                         egui::Label::new(RichText::new(&name).color(color))
                             .sense(egui::Sense::click()),
                     );
+
+                    // A row dragged from the browser. Lit while it is over the
+                    // name, because a drop target that looks the same as
+                    // everything else is one you have to guess at.
+                    if response.dnd_hover_payload::<rows::Dragged>().is_some() {
+                        ui.painter().rect_filled(
+                            response.rect.expand2(egui::vec2(4.0, 2.0)),
+                            2.0,
+                            theme::AMBER.gamma_multiply(0.22),
+                        );
+                    }
+                    if let Some(dragged) = response.dnd_release_payload::<rows::Dragged>() {
+                        self.pending.push(Pending::AddToPlaylist(vec![dragged.0], name.clone()));
+                    }
+
                     if response.clicked() {
                         self.view = View::Playlist;
                         self.playlist = name.clone();
@@ -1954,6 +1985,11 @@ impl App {
                     // when the list it was showing changes its name.
                     if naming.what == What::RenamePlaylist && self.playlist == naming.subject {
                         self.playlist = naming.text.trim().to_string();
+                    }
+                    // Whatever the name was asked for on behalf of.
+                    if !naming.holding.is_empty() {
+                        let name = naming.text.trim().to_string();
+                        self.pending.push(Pending::AddToPlaylist(naming.holding, name));
                     }
                     self.pending_save = true;
                     self.pending_rebuild = true;
@@ -2082,6 +2118,23 @@ impl App {
     fn add_to_playlist(&mut self, name: &str) {
         let ids: Vec<u32> =
             self.rows.iter().filter(|row| !row.indented).map(|row| row.track.id).collect();
+        self.add_tracks_to_playlist(&ids, name);
+    }
+
+    /// Put named tracks in a playlist, making it if it is new.
+    ///
+    /// A track already in it is not added twice: a playlist is an order to
+    /// play things in, and the same record twice over is a mistake rather than
+    /// an instruction. Companions are refused — a stem goes on a drive with
+    /// its parent, and a playlist holding one without the other would write
+    /// the acapella and not the record.
+    fn add_tracks_to_playlist(&mut self, ids: &[u32], name: &str) {
+        let ids: Vec<u32> =
+            ids.iter().copied().filter(|id| self.library.get(*id).is_some()).collect();
+        if ids.is_empty() {
+            self.note("nothing to add", theme::DIM);
+            return;
+        }
         let playlist = match self.library.playlists.iter_mut().find(|p| p.name == name) {
             Some(existing) => existing,
             None => {
@@ -2105,6 +2158,11 @@ impl App {
     }
 
     fn rows_table(&mut self, ui: &mut Ui) {
+        // Gathered once rather than per row: the menu names the same playlists
+        // whichever line it was opened on, and the index it reports back is
+        // into this.
+        let playlist_names: Vec<String> =
+            self.library.playlists.iter().map(|p| p.name.clone()).collect();
         let widths = rows::columns(ui.available_width());
         if let Some(column) = rows::header_row(ui, &widths, self.sort) {
             let was = self.sort;
@@ -2133,6 +2191,7 @@ impl App {
                 in_library: self.config.holds(&line.track.path),
                 playing: playing == Some(line.track.id),
                 in_playlist: self.view == View::Playlist,
+                playlists: &playlist_names,
             };
             if let Some(what) = rows::row(ui, &line.track, line.indented, selected, &widths, menu) {
                 hit = Some((line.track.id, what));
@@ -2164,6 +2223,14 @@ impl App {
                     rows::Action::RemoveFromPlaylist => {
                         Pending::RemoveFromPlaylist(id, self.playlist.clone())
                     }
+                    // A menu drawn from this same list, so the index is in
+                    // it; an empty name falls through to naming a new one
+                    // rather than silently doing nothing.
+                    rows::Action::AddTo(at) => match playlist_names.get(at) {
+                        Some(name) => Pending::AddToPlaylist(vec![id], name.clone()),
+                        None => Pending::NamePlaylistFor(vec![id]),
+                    },
+                    rows::Action::AddToNew => Pending::NamePlaylistFor(vec![id]),
                     rows::Action::Forget => Pending::Forget(id),
                 }),
                 rows::Hit::Clicked => {}
@@ -3041,6 +3108,12 @@ impl App {
                     }
                     touched = true;
                     self.replan();
+                }
+                Pending::AddToPlaylist(ids, name) => self.add_tracks_to_playlist(&ids, &name),
+                Pending::NamePlaylistFor(ids) => {
+                    let mut naming = Naming::new_playlist();
+                    naming.holding = ids;
+                    self.naming = Some(naming);
                 }
                 Pending::Adopt(id) => self.adopt(&[id]),
                 Pending::FitWave => self.zoom = wave::Zoom::default(),
@@ -4905,6 +4978,113 @@ mod tests {
                 harness.state().query.terms.iter().all(|t| t.test != crate::query::Test::Invalid),
                 "and it has to be a query, not just text"
             );
+        }
+
+        /// A window with one track and one playlist, showing browser and
+        /// sidebar side by side — which is what a drag crosses.
+        fn with_a_track_and_a_playlist(name: &str) -> App {
+            let mut app = app(name);
+            let id = app.library.add(std::path::Path::new("/music/Sirens.flac"));
+            let track = app.library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+            app.library.add_playlist("Saturday peak", "").unwrap();
+            app.rebuild();
+            app
+        }
+
+        #[test]
+        fn a_row_can_be_dragged_onto_a_playlist() {
+            // The thing this was all for. Drag-and-drop is a chain — the row
+            // has to be draggable, the payload has to be set, the sidebar has
+            // to accept it — and any link being missing looks identical from
+            // the outside: nothing happens.
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| app.sidebar(ui));
+                        ui.vertical(|ui| app.rows_table(ui));
+                    });
+                    // As the window does: the panels ask, and what they asked
+                    // for happens once they have all drawn.
+                    let ctx = ui.ctx().clone();
+                    app.apply_pending(&ctx);
+                },
+                with_a_track_and_a_playlist("dragging"),
+            );
+            harness.run();
+
+            let from = harness.get_by_label_contains("Sirens").rect().center();
+            let onto = harness.get_by_label("Saturday peak").rect().center();
+
+            // Pressed, moved, released — a drag is not one event, and egui only
+            // starts one once the pointer has actually travelled.
+            harness.event(egui::Event::PointerMoved(from));
+            harness.run();
+            harness.event(egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+            for step in 1..=4 {
+                let at = from + (onto - from) * (step as f32 / 4.0);
+                harness.event(egui::Event::PointerMoved(at));
+                harness.run();
+            }
+            harness.event(egui::Event::PointerButton {
+                pos: onto,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+            harness.run();
+
+            let playlist = &harness.state().library.playlists[0];
+            assert_eq!(playlist.tracks.len(), 1, "the drop did not add the track");
+        }
+
+        #[test]
+        fn adding_the_same_track_twice_does_not_put_it_in_twice() {
+            // A playlist is an order to play things in, so the same record
+            // appearing twice is a mistake rather than an instruction.
+            let mut app = with_a_track_and_a_playlist("twice");
+            let id = app.library.tracks[0].id;
+
+            app.add_tracks_to_playlist(&[id], "Saturday peak");
+            app.add_tracks_to_playlist(&[id], "Saturday peak");
+            assert_eq!(app.library.playlists[0].tracks, vec![id]);
+        }
+
+        #[test]
+        fn adding_to_a_name_that_is_new_makes_the_playlist() {
+            let mut app = with_a_track_and_a_playlist("newname");
+            let id = app.library.tracks[0].id;
+
+            app.add_tracks_to_playlist(&[id], "Sunday warmup");
+            let made = app
+                .library
+                .playlists
+                .iter()
+                .find(|p| p.name == "Sunday warmup")
+                .expect("no playlist was made");
+            assert_eq!(made.tracks, vec![id]);
+        }
+
+        #[test]
+        fn a_row_that_is_not_a_track_is_not_added() {
+            // Companion rows have ids of their own so they can be selected,
+            // but they are not in the collection. Putting one in a playlist
+            // would write an acapella onto a drive without the record it came
+            // from.
+            let mut app = with_a_track_and_a_playlist("companion");
+            let id = app.library.tracks[0].id;
+            let companion = crate::library::companion_id(id, crate::library::Role::Vocals);
+
+            app.add_tracks_to_playlist(&[companion], "Saturday peak");
+            assert!(app.library.playlists[0].tracks.is_empty(), "a companion went in");
         }
 
         #[test]
