@@ -430,16 +430,24 @@ is queryable:
 bpm:124-128            key:8A              key:~8A          (compatible keys)
 tag:peak -tag:vocal    energy:>=4          added:<14d
 played:never           played:>30d         plays:>3
-missing:grid           missing:stems       missing:artwork
+missing:grid           has:stems           !missing:cues
 loudness:<-12          bitrate:<256        format:flac
-path:~/Music/promos    playlist:"Sat 14/9" rating:>=4
+path:~/Music/promos    in:"Sat 14/9"       rating:>=4
 in:drive:SANDISK-64    dupes:title+artist
 ```
 
 Bare words are a fuzzy match over artist, title, album, label, comment and filename.
-Terms are AND by default, `|` is OR, `-` negates, quotes group. **A saved query is a
-smart playlist** — there is no second concept and no separate editor, and it has no
-1,000-track ceiling.
+Terms are AND by default, `|` is OR, `-` and `!` both negate, quotes group. Every
+question that can be asked one way round can be asked the other: `has:` is `missing:`
+inverted, and `no:` and `with:` read the same as their partners, because which way a
+question comes to mind is not something a grammar should have an opinion about.
+
+**A saved query is a smart playlist** — there is no second concept and no separate
+editor, and it has no 1,000-track ceiling.
+
+The grammar is documented in the window itself, under the `?` beside the query bar, and
+that help is a table in `booth/src/query.rs` that a test parses every example of. Help
+that has drifted from the parser is worse than none, because it is believed.
 
 ### 6.4 Batch prep
 

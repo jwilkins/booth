@@ -172,6 +172,8 @@ pub struct App {
     playlist_entry: String,
     /// A playlist or folder name being typed in the sidebar, if one is.
     naming: Option<Naming>,
+    /// Whether the query language's help is showing.
+    help: bool,
     /// Set by the sidebar, acted on after every panel has drawn. The tree is
     /// walked while the library is borrowed, so it cannot save or rebuild from
     /// inside the walk.
@@ -458,6 +460,7 @@ impl App {
             focus_bar: false,
             playlist_entry: String::new(),
             naming: None,
+            help: false,
             pending_save: false,
             pending_rebuild: false,
             tag_entry: String::new(),
@@ -486,6 +489,14 @@ impl App {
         // otherwise two clicks in. Animations are switched off with it, because
         // the check captures the first frame and would otherwise photograph
         // every fade half-finished. Compiled out of any ordinary build.
+        // Animations off for every one of these, not just the sheets: the
+        // check captures the first frame, and a window caught halfway through
+        // its fade-in photographs as a half-transparent one.
+        #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_OPEN_HELP").is_some() {
+            app.help = true;
+            cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
+        }
         #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_SELECT_FIRST").is_some() {
             app.selected = app.library.tracks.first().map(|t| t.id);
@@ -1512,6 +1523,9 @@ impl eframe::App for App {
             self.compatibility_sheet(ctx);
         }
         self.questions_sheet(ctx);
+        if self.help {
+            self.help_sheet(ctx);
+        }
         self.log_window(ctx);
 
         // Everything the panels asked for happens here, after they have all
@@ -1634,6 +1648,16 @@ impl App {
             }
 
             ui.label(RichText::new("⌘K").font(theme::mono(10.5)).color(theme::DIM));
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("?").font(theme::mono(10.5)).color(theme::DIM))
+                        .fill(theme::BOOTH),
+                )
+                .on_hover_text("What can be typed here")
+                .clicked()
+            {
+                self.help = !self.help;
+            }
 
             // The queue indicator, right-aligned, which is the only place a
             // running job is reported. A modal progress dialog over a library
@@ -3632,6 +3656,81 @@ impl App {
     /// is a real OS window, so it can be put on a second screen, left open
     /// beside the browser, and resized without taking anything from the
     /// collection.
+    /// What can be typed in the query bar.
+    ///
+    /// Straight from [`crate::query::HELP`], which is the same table a test
+    /// parses every example in — so this cannot describe a grammar the parser
+    /// does not have.
+    ///
+    /// Clicking a line puts it in the bar rather than only describing it: the
+    /// distance between reading an example and trying it is most of what makes
+    /// a query language worth having.
+    fn help_sheet(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut chosen: Option<String> = None;
+
+        egui::Window::new("The query bar")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(460.0)
+            .default_height(520.0)
+            .anchor(egui::Align2::LEFT_TOP, [24.0, 56.0])
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::BOOTH)
+                    .stroke(egui::Stroke::new(1.0, theme::RULE))
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Terms narrow the list together. Put a - or ! in front of one to \
+                         exclude it, and quotes around anything with a space in it.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+                ui.add_space(10.0);
+
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for (heading, lines) in crate::query::HELP {
+                        pane_label(ui, heading);
+                        for help in *lines {
+                            ui.horizontal(|ui| {
+                                let example = ui.add(
+                                    egui::Label::new(
+                                        RichText::new(help.example)
+                                            .font(theme::mono(11.0))
+                                            .color(theme::AMBER),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                );
+                                if example.clicked() {
+                                    chosen = Some(help.example.to_string());
+                                }
+                                if example.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                ui.label(
+                                    RichText::new(help.means).color(theme::DIM).size(theme::SMALL),
+                                );
+                            });
+                        }
+                        ui.add_space(10.0);
+                    }
+                });
+            });
+
+        if let Some(text) = chosen {
+            self.text = text;
+            self.rebuild();
+        }
+        if !open {
+            self.help = false;
+        }
+    }
+
     fn log_window(&mut self, ctx: &egui::Context) {
         if !self.log.is_open() {
             return;
@@ -4786,6 +4885,25 @@ mod tests {
                 edit.names.artist.contains("My own answer"),
                 "a lookup took back what was being typed: {:?}",
                 edit.names.artist
+            );
+        }
+
+        #[test]
+        fn an_example_from_the_help_can_be_clicked_into_the_bar() {
+            // The distance between reading an example and trying it is most of
+            // what makes a query language worth having.
+            let mut app = app("help");
+            app.help = true;
+            let mut harness = Harness::new_state(|ctx, app: &mut App| app.help_sheet(ctx), app);
+            harness.run();
+
+            harness.get_by_label("key:~8A").click();
+            harness.run();
+
+            assert_eq!(harness.state().text, "key:~8A", "the example did not reach the bar");
+            assert!(
+                harness.state().query.terms.iter().all(|t| t.test != crate::query::Test::Invalid),
+                "and it has to be a query, not just text"
             );
         }
 
