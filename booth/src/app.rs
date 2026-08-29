@@ -81,6 +81,13 @@ const PREP_HEIGHT: f32 = wave::HEIGHT
     // the separator and the spacing between all of them
     + 40.0;
 
+/// How tall the dock is before anyone drags it: its row of buttons, and one
+/// line of log under them.
+///
+/// Also its minimum, because that row is the dock's job and a panel dragged
+/// shorter than its own contents just clips them.
+const DOCK_HEIGHT: f32 = 24.0 + 4.0 + 16.0;
+
 /// Which of the fixed collection views is showing.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum View {
@@ -1388,23 +1395,47 @@ impl Naming {
     }
 }
 
-/// Draw a side panel's contents at exactly the width the panel was given.
+/// Draw a panel's contents at exactly the size the panel was given.
 ///
-/// egui stores a side panel's width from the rectangle its *contents* ended up
-/// occupying and reads that back as the width on the next frame. So a panel
-/// whose content comes out narrower shrinks to it, and one whose content comes
-/// out wider grows — up to the end of its range — and either way the width
-/// stops being the one that was dragged to. The inspector did both: empty, it
-/// collapsed to its narrowest column; with a long title or path in it, it
-/// climbed until it was eating the browser.
+/// egui stores a panel's size along its resizable axis from the rectangle its
+/// *contents* ended up occupying, and reads that back as the size on the next
+/// frame. So a panel whose content comes out smaller shrinks to it, and one
+/// whose content comes out larger grows — up to the end of its range — and
+/// either way the size stops being the one that was dragged to. The inspector
+/// did both: empty, it collapsed to its narrowest column; with a long title or
+/// path in it, it climbed until it was eating the browser.
 ///
-/// Pinning the content to the width we were handed makes the stored width the
-/// panel's own, so it only ever changes when someone drags it.
-fn pinned<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+/// Pinning the content to what we were handed makes the stored size the panel's
+/// own, so it only ever changes when someone drags it. The cross axis is left
+/// alone — egui already makes a panel fill it.
+fn pinned_width<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
     let width = ui.available_width();
     ui.set_min_width(width);
     ui.set_max_width(width);
     contents(ui)
+}
+
+/// [`pinned_width`], for a panel that resizes up and down instead.
+///
+/// This holds the floor on its own: a panel with little in it keeps its height
+/// rather than collapsing to its contents. It cannot hold the ceiling by
+/// itself, because a column of labels grows past a maximum where a line of text
+/// would wrap inside one — so contents that can run long belong in a
+/// `ScrollArea`, which is what stops them pushing the panel open.
+fn pinned_height<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let height = ui.available_height();
+    ui.set_min_height(height);
+    ui.set_max_height(height);
+    contents(ui)
+}
+
+/// What colour a log line is drawn in, by how much it matters.
+fn log_color(level: crate::log::Level) -> egui::Color32 {
+    match level {
+        crate::log::Level::Error => theme::ALERT,
+        crate::log::Level::Warn => theme::AMBER,
+        _ => theme::DIM,
+    }
 }
 
 /// Bits per second, from what is on disk and how long it plays for.
@@ -1434,7 +1465,16 @@ impl eframe::App for App {
         self.follow_playback(ctx);
 
         egui::TopBottomPanel::top("bar").frame(bar_frame()).show(ctx, |ui| self.command_bar(ui));
-        egui::TopBottomPanel::bottom("dock").frame(bar_frame()).show(ctx, |ui| self.dock(ui));
+        // The dock drags up, and the log fills whatever it is given. At its
+        // shortest that is the one line that answers "did that work"; pulled
+        // up, it is as much of the run as there is room for, without leaving
+        // the window for the log's own.
+        egui::TopBottomPanel::bottom("dock")
+            .frame(bar_frame())
+            .resizable(true)
+            .default_height(DOCK_HEIGHT)
+            .height_range(DOCK_HEIGHT..=460.0)
+            .show(ctx, |ui| pinned_height(ui, |ui| self.dock(ui)));
 
         // Both side panels drag. The inspector especially: it carries the
         // cue list, the stem rows and the notes field, and how much room those
@@ -1449,13 +1489,13 @@ impl eframe::App for App {
             .width_range(150.0..=300.0)
             .frame(pane_frame())
             .resizable(true)
-            .show(ctx, |ui| pinned(ui, |ui| self.sidebar(ui)));
+            .show(ctx, |ui| pinned_width(ui, |ui| self.sidebar(ui)));
         egui::SidePanel::right("inspector")
             .default_width(210.0)
             .width_range(180.0..=420.0)
             .frame(pane_frame())
             .resizable(true)
-            .show(ctx, |ui| pinned(ui, |ui| self.inspector(ui)));
+            .show(ctx, |ui| pinned_width(ui, |ui| self.inspector(ui)));
 
         egui::CentralPanel::default().frame(pane_frame()).show(ctx, |ui| self.browser(ui));
 
@@ -3325,6 +3365,7 @@ impl App {
             {
                 self.settings = true;
             }
+            self.log_button(ui);
             ui.separator();
             ui.label(
                 RichText::new(theme::label_text("Drives"))
@@ -3420,47 +3461,56 @@ impl App {
         self.log_panel(ui);
     }
 
-    /// The last couple of lines, and the way to the rest.
+    /// The button that opens the log's own window, on the dock's top row.
+    fn log_button(&mut self, ui: &mut Ui) {
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new(theme::label_text("Log"))
+                        .size(theme::LABEL)
+                        .color(theme::DIM)
+                        .strong(),
+                )
+                .fill(theme::BOOTH),
+            )
+            .on_hover_text("Open the log in its own window")
+            .clicked()
+        {
+            self.log.set_open(true);
+        }
+    }
+
+    /// As much of the log as the dock has been given room for.
     ///
-    /// Two lines is what "did that work" needs. Everything else — reading a
-    /// run, comparing two moments, following along while something long
-    /// happens — wants a window that does not fight the browser for space, so
-    /// that is what it gets.
+    /// At the height it opens at that is the last line, which is what "did that
+    /// work" needs. Dragging the dock up shows more of the run without leaving
+    /// the window; the log's own window is still there for reading a whole run
+    /// beside it, or on another screen.
+    ///
+    /// Newest last and stuck to the bottom, so the line that just appeared is
+    /// in the same place whether there is one line showing or twenty.
     fn log_panel(&mut self, ui: &mut Ui) {
         let entries = crate::log::entries(crate::log::Level::Info);
         ui.add_space(4.0);
 
-        ui.horizontal(|ui| {
-            if ui
-                .add(
-                    egui::Button::new(
-                        RichText::new(theme::label_text("Log"))
-                            .size(theme::LABEL)
-                            .color(theme::DIM)
-                            .strong(),
-                    )
-                    .fill(theme::BOOTH),
-                )
-                .on_hover_text("Open the log in its own window")
-                .clicked()
-            {
-                self.log.set_open(true);
-            }
+        if entries.is_empty() {
+            ui.label(RichText::new("nothing yet").font(theme::mono(10.5)).color(theme::DIM));
+            return;
+        }
 
-            let last = entries.last();
-            let (text, color) = match last {
-                Some(entry) => (
-                    entry.text.clone(),
-                    match entry.level {
-                        crate::log::Level::Error => theme::ALERT,
-                        crate::log::Level::Warn => theme::AMBER,
-                        _ => theme::DIM,
-                    },
-                ),
-                None => ("nothing yet".to_string(), theme::DIM),
-            };
-            ui.label(RichText::new(text).font(theme::mono(10.5)).color(color));
-        });
+        egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(
+            ui,
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                for entry in &entries {
+                    ui.label(
+                        RichText::new(&entry.text)
+                            .font(theme::mono(10.5))
+                            .color(log_color(entry.level)),
+                    );
+                }
+            },
+        );
     }
 
     /// What the fingerprints found that a person has to decide.
@@ -4747,6 +4797,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_dock_keeps_its_height_whatever_the_log_says() {
+        // The same trap the side panels were in, the other way up: egui takes
+        // the panel's height from what its contents came out as, so a dock
+        // holding one line would shrink to it and one holding a long run would
+        // climb until it had the window.
+        let kept = |lines: usize| {
+            let kept = std::cell::Cell::new(0.0);
+            egui::__run_test_ui(|ui| {
+                let rect =
+                    egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(900.0, DOCK_HEIGHT));
+                let mut dock = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                pinned_height(&mut dock, |ui| {
+                    // As the dock draws it: a scrolling list, which is what
+                    // keeps a long run inside the height rather than pushing
+                    // it open.
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        for i in 0..lines {
+                            ui.label(format!("line {i}"));
+                        }
+                    });
+                });
+                kept.set(dock.min_rect().height());
+            });
+            kept.get()
+        };
+
+        // The number itself is the harness's business; that it does not move
+        // with the contents is the dock's.
+        let empty = kept(0);
+        assert_eq!(kept(1), empty, "one line changed the dock's height");
+        assert_eq!(kept(200), empty, "a long run pushed the dock open");
+        assert!(empty >= DOCK_HEIGHT, "the dock collapsed below its own row: {empty}");
+    }
+
     /// The width a side panel would keep, given contents of a chosen width.
     ///
     /// egui reports back what the contents occupied, which is what it stores as
@@ -4766,7 +4855,7 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
-            pinned(&mut panel, |ui| draw(ui));
+            pinned_width(&mut panel, |ui| draw(ui));
             kept.set(panel.min_rect().width());
         });
         kept.get()
