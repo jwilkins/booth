@@ -272,6 +272,39 @@ pub struct Config {
     /// the same reason the library path is: it describes this machine.
     #[serde(default)]
     pub rekordbox_key: String,
+    /// How wide or tall each panel was left.
+    #[serde(default)]
+    pub panels: Panels,
+}
+
+/// The panel sizes, in points, as the window was last left.
+///
+/// A preference about this person's screen and how they like to work, which is
+/// what this file is for — and the one thing about a window that is genuinely
+/// annoying to set twice.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Panels {
+    pub collection: f32,
+    pub inspector: f32,
+    pub dock: f32,
+}
+
+impl Default for Panels {
+    fn default() -> Self {
+        Self { collection: 178.0, inspector: 210.0, dock: 44.0 }
+    }
+}
+
+impl Panels {
+    /// Whether `size` is far enough from what is stored to be worth writing.
+    ///
+    /// A drag arrives as a stream of sub-point changes, and a panel that
+    /// rewrote the settings file on each of them would write a hundred times
+    /// across one drag.
+    pub fn differs(before: f32, after: f32) -> bool {
+        (before - after).abs() >= 1.0
+    }
 }
 
 /// When a name in the collection is also written into the file's tag block.
@@ -330,6 +363,7 @@ impl Default for Config {
             stems_in: StemsIn::default(),
             on_external: OnExternal::default(),
             sort: crate::rows::Sort::default(),
+            panels: Panels::default(),
             paint: crate::wave::Paint::default(),
             length: Length::default(),
             stem_quality: Quality::default(),

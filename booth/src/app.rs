@@ -174,6 +174,9 @@ pub struct App {
     naming: Option<Naming>,
     /// Whether the query language's help is showing.
     help: bool,
+    /// Set when a panel has been dragged and the new size is not written out
+    /// yet. See [`App::save_panels`].
+    panels_moved: bool,
     /// Set by the sidebar, acted on after every panel has drawn. The tree is
     /// walked while the library is borrowed, so it cannot save or rebuild from
     /// inside the walk.
@@ -465,6 +468,7 @@ impl App {
             playlist_entry: String::new(),
             naming: None,
             help: false,
+            panels_moved: false,
             pending_save: false,
             pending_rebuild: false,
             tag_entry: String::new(),
@@ -550,6 +554,34 @@ impl App {
     /// Everything the browser shows comes through here, so a fixed view and a
     /// typed query are the same mechanism — there is no second filtering path
     /// that could disagree with the one the bar describes.
+    /// Note the size a panel came out at, and write it to the settings once
+    /// the drag that changed it has finished.
+    ///
+    /// Not on every frame it differs: a drag arrives as a stream of sub-point
+    /// changes, and saving on each would rewrite the settings file a hundred
+    /// times across one pull. So the number is kept as it moves and committed
+    /// when the pointer comes up.
+    fn remember_panel(&mut self, which: fn(&mut crate::config::Panels) -> &mut f32, size: f32) {
+        let stored = which(&mut self.config.panels);
+        if !crate::config::Panels::differs(*stored, size) {
+            return;
+        }
+        *stored = size;
+        self.panels_moved = true;
+    }
+
+    /// Write the panel sizes out, if a drag has just finished moving one.
+    fn save_panels(&mut self, ctx: &egui::Context) {
+        if !self.panels_moved || ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        self.panels_moved = false;
+        match self.config.save(&self.config_path) {
+            Ok(()) => crate::debug!("panel sizes saved: {:?}", self.config.panels),
+            Err(e) => crate::warn!("could not save the panel sizes: {e:#}"),
+        }
+    }
+
     fn rebuild(&mut self) {
         let started = std::time::Instant::now();
         self.query = Query::parse(&self.text);
@@ -1496,12 +1528,20 @@ impl eframe::App for App {
         // shortest that is the one line that answers "did that work"; pulled
         // up, it is as much of the run as there is room for, without leaving
         // the window for the log's own.
-        egui::TopBottomPanel::bottom("dock")
+        //
+        // The size each panel opens at is the one it was left at. egui keeps
+        // its own note of a panel's size for the life of a run, and consults
+        // the default only when it has none — which is exactly the first frame
+        // after starting up, so handing it the remembered size there is all it
+        // takes for a drag to outlive the window.
+        let sizes = self.config.panels;
+        let dock = egui::TopBottomPanel::bottom("dock")
             .frame(bar_frame())
             .resizable(true)
-            .default_height(DOCK_HEIGHT)
+            .default_height(sizes.dock.max(DOCK_HEIGHT))
             .height_range(DOCK_HEIGHT..=460.0)
             .show(ctx, |ui| pinned_height(ui, |ui| self.dock(ui)));
+        self.remember_panel(|panels| &mut panels.dock, dock.response.rect.height());
 
         // Both side panels drag. The inspector especially: it carries the
         // cue list, the stem rows and the notes field, and how much room those
@@ -1511,18 +1551,21 @@ impl eframe::App for App {
         // The minimum is what the widest fixed thing in each still fits in,
         // not zero: a panel that can be dragged shut leaves no handle to drag
         // it back with.
-        egui::SidePanel::left("collection")
-            .default_width(178.0)
+        let collection = egui::SidePanel::left("collection")
+            .default_width(sizes.collection)
             .width_range(150.0..=300.0)
             .frame(pane_frame())
             .resizable(true)
             .show(ctx, |ui| pinned_width(ui, |ui| self.sidebar(ui)));
-        egui::SidePanel::right("inspector")
-            .default_width(210.0)
+        self.remember_panel(|panels| &mut panels.collection, collection.response.rect.width());
+
+        let inspector = egui::SidePanel::right("inspector")
+            .default_width(sizes.inspector)
             .width_range(180.0..=420.0)
             .frame(pane_frame())
             .resizable(true)
             .show(ctx, |ui| pinned_width(ui, |ui| self.inspector(ui)));
+        self.remember_panel(|panels| &mut panels.inspector, inspector.response.rect.width());
 
         egui::CentralPanel::default().frame(pane_frame()).show(ctx, |ui| self.browser(ui));
 
@@ -1546,6 +1589,7 @@ impl eframe::App for App {
 
         // Everything the panels asked for happens here, after they have all
         // drawn, so no panel ever reads a collection halfway through a change.
+        self.save_panels(ctx);
         self.apply_pending(ctx);
         self.flush_retags();
     }
@@ -2155,6 +2199,11 @@ impl App {
         self.note(format!("{added} added to \u{201c}{name}\u{201d}"), theme::TEXT);
         self.save();
         self.replan();
+        // The list is a built thing and has to follow. Without this a drop
+        // onto the playlist being looked at changed the sidebar's count — read
+        // straight from the collection — and not the rows under it, so the two
+        // disagreed until something else happened to rebuild them.
+        self.pending_rebuild = true;
     }
 
     fn rows_table(&mut self, ui: &mut Ui) {
@@ -3039,16 +3088,9 @@ impl App {
     /// under a half-drawn row would be worse than one that catches up next
     /// frame.
     fn apply_pending(&mut self, ctx: &egui::Context) {
-        // The sidebar's own changes first: it walks the collection to draw the
-        // tree, so it cannot save or rebuild while it is doing so.
-        if std::mem::take(&mut self.pending_rebuild) {
-            self.rebuild();
-            self.replan();
-        }
-        if std::mem::take(&mut self.pending_save) {
-            self.save();
-            self.replan();
-        }
+        // The panels' own changes first: the sidebar walks the collection to
+        // draw its tree, so it cannot save or rebuild while it is doing so.
+        self.flush_requests();
 
         let pending = std::mem::take(&mut self.pending);
         if pending.is_empty() {
@@ -3222,6 +3264,27 @@ impl App {
         }
         if touched || relist {
             self.rebuild();
+        }
+        // And again for anything the queue itself asked for, in this pass
+        // rather than the next one. Only flushing beforehand meant a request
+        // made while the queue ran waited for another frame — and egui does
+        // not paint frames nobody asked for, so "another frame" could be
+        // whenever the pointer next moved. A track dropped on the playlist
+        // being looked at went into the collection, was counted in the
+        // sidebar, and did not appear in the list until something else
+        // happened: the count said three and the list showed two.
+        self.flush_requests();
+    }
+
+    /// Do what the panels asked for while they were drawing.
+    fn flush_requests(&mut self) {
+        if std::mem::take(&mut self.pending_rebuild) {
+            self.rebuild();
+            self.replan();
+        }
+        if std::mem::take(&mut self.pending_save) {
+            self.save();
+            self.replan();
         }
     }
 
@@ -5047,6 +5110,68 @@ mod tests {
         }
 
         #[test]
+        fn every_track_dropped_on_a_playlist_shows_up_in_it() {
+            // Reported: three dragged in, the sidebar counted three, and the
+            // list showed two.
+            let mut app = app("three");
+            let ids: Vec<u32> = (1..=3)
+                .map(|i| {
+                    let id = app.library.add(std::path::Path::new(&format!("/music/{i}.flac")));
+                    let track = app.library.get_mut(id).unwrap();
+                    track.artist = format!("Artist {i}");
+                    track.title = format!("Track {i}");
+                    id
+                })
+                .collect();
+            app.library.add_playlist("peak", "").unwrap();
+            app.rebuild();
+
+            // One at a time, as three drags are.
+            for id in &ids {
+                app.add_tracks_to_playlist(&[*id], "peak");
+            }
+            assert_eq!(app.library.playlists[0].tracks, ids, "the collection lost one");
+
+            // Now look at the playlist, as a person would.
+            app.view = View::Playlist;
+            app.playlist = "peak".into();
+            app.rebuild();
+
+            let showing: Vec<u32> =
+                app.rows.iter().filter(|row| !row.indented).map(|row| row.track.id).collect();
+            assert_eq!(showing, ids, "the list showed fewer than the count did");
+        }
+
+        #[test]
+        fn a_drop_shows_up_while_the_playlist_is_the_thing_being_looked_at() {
+            // The reported shape of it: dropping onto the playlist you are
+            // already looking at. The sidebar counts from the collection and
+            // is right immediately; the list is a built thing and was not
+            // being rebuilt, so it lagged the count by however many drops had
+            // happened since something else happened to rebuild it.
+            let mut app = app("watching");
+            let ids: Vec<u32> = (1..=3)
+                .map(|i| app.library.add(std::path::Path::new(&format!("/music/{i}.flac"))))
+                .collect();
+            app.library.add_playlist("peak", "").unwrap();
+            app.view = View::Playlist;
+            app.playlist = "peak".into();
+            app.rebuild();
+            assert!(app.rows.is_empty(), "nothing in it yet");
+
+            let ctx = egui::Context::default();
+            for id in &ids {
+                app.pending.push(Pending::AddToPlaylist(vec![*id], "peak".into()));
+                app.apply_pending(&ctx);
+            }
+
+            let showing: Vec<u32> =
+                app.rows.iter().filter(|row| !row.indented).map(|row| row.track.id).collect();
+            assert_eq!(showing.len(), 3, "the list did not follow the drops: {showing:?}");
+            assert_eq!(showing, ids);
+        }
+
+        #[test]
         fn adding_the_same_track_twice_does_not_put_it_in_twice() {
             // A playlist is an order to play things in, so the same record
             // appearing twice is a mistake rather than an instruction.
@@ -5092,6 +5217,38 @@ mod tests {
             name_something("escape", "+", "half a thought", egui::Key::Escape, |library| {
                 assert!(library.playlists.is_empty(), "escape made one anyway");
             });
+        }
+    }
+
+    #[test]
+    fn a_panel_opens_at_the_size_it_was_left_at() {
+        // The round trip has to be exact. The size that comes back is the
+        // panel's outside and the one handed to the contents is its inside, so
+        // a version of this that saved the wrong one of the two would shrink
+        // every panel by its margins on each run — slowly, and only for people
+        // who had used it for a while.
+        for asked in [150.0f32, 178.0, 240.0, 300.0] {
+            let got = std::cell::Cell::new(0.0);
+            // One context across the frames, because the whole question is
+            // what the panel does on the frames after the first — that is
+            // where egui's own note of the size takes over from the default.
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                let _ = ctx.run(Default::default(), |ctx| {
+                    let panel = egui::SidePanel::left("t")
+                        .default_width(asked)
+                        .width_range(150.0..=300.0)
+                        .frame(pane_frame())
+                        .resizable(true)
+                        .show(ctx, |ui| {
+                            pinned_width(ui, |ui| {
+                                ui.label("something narrower than the panel");
+                            })
+                        });
+                    got.set(panel.response.rect.width());
+                });
+            }
+            assert_eq!(got.get(), asked, "asked for {asked}, got {}", got.get());
         }
     }
 
