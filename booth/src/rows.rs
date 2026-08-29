@@ -193,13 +193,16 @@ pub fn header_row(ui: &mut Ui, widths: &Widths, sort: Sort) -> Option<Column> {
     clicked
 }
 
-/// A row being dragged, by id.
+/// The rows being dragged, by id.
 ///
-/// The id rather than the track, because what is dropped has to be looked up
-/// in the collection as it is when it lands, not as it was when the drag
-/// started.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Dragged(pub u32);
+/// Ids rather than tracks, because what is dropped has to be looked up in the
+/// collection as it is when it lands, not as it was when the drag started.
+///
+/// More than one when the row picked up was part of a selection: grabbing one
+/// of thirty chosen rows and having it arrive alone would be a quiet way of
+/// losing twenty-nine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dragged(pub Vec<u32>);
 
 /// Something asked of one track from its own line.
 ///
@@ -273,6 +276,9 @@ pub struct Menu<'a> {
     pub in_playlist: bool,
     /// The playlists this track could be added to, in sidebar order.
     pub playlists: &'a [String],
+    /// Everything a drag from this row should carry — this track alone, or the
+    /// selection it is part of.
+    pub dragging: &'a [u32],
 }
 
 /// Draw one line. Returns what the pointer did, if anything.
@@ -309,7 +315,7 @@ pub fn row(
     });
 
     // Picking a row up.
-    response.dnd_set_drag_payload(Dragged(track.id));
+    response.dnd_set_drag_payload(Dragged(menu.dragging.to_vec()));
     if response.dragged() {
         // What is being carried, at the pointer. Without it the drag is
         // invisible: the row stays where it is, and the only way to find out
@@ -322,11 +328,11 @@ pub fn row(
             egui::PopupAnchor::Pointer,
         )
         .show(|ui| {
-            ui.label(
-                egui::RichText::new(format!("↳ {}", track.display_title()))
-                    .color(theme::AMBER)
-                    .size(11.0),
-            );
+            let carrying = match menu.dragging.len() {
+                0 | 1 => format!("↳ {}", track.display_title()),
+                n => format!("↳ {n} tracks"),
+            };
+            ui.label(egui::RichText::new(carrying).color(theme::AMBER).size(11.0));
         });
     }
     let painter = ui.painter_at(rect);

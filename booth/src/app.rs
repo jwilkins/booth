@@ -116,6 +116,15 @@ pub struct App {
     /// Which column the browser is ordered by.
     sort: rows::Sort,
     selected: Option<u32>,
+    /// Every row in the selection, the focused one included.
+    ///
+    /// Kept beside `selected` rather than replacing it: one row is still the
+    /// one the inspector shows and the deck plays, and a selection of thirty
+    /// does not have thirty waveforms. This is what an action applies to.
+    marked: std::collections::HashSet<u32>,
+    /// Where a shift-range is measured from — the last row picked without
+    /// shift, which is what shift extends away from.
+    anchor: Option<u32>,
     /// The three-band waveform of the selected track, once it has been read.
     waveform: Option<(u32, Vec<u8>)>,
     /// Which part of the selected track's waveform is showing. Reset with the
@@ -441,6 +450,8 @@ impl App {
             rows: Vec::new(),
             sort: config_sort,
             selected: None,
+            marked: std::collections::HashSet::new(),
+            anchor: None,
             waveform: None,
             zoom: wave::Zoom::default(),
             envelopes: None,
@@ -673,7 +684,12 @@ impl App {
     }
 
     /// Move the selection by `delta` rows, which is how a crate is dug through.
-    fn step(&mut self, delta: isize) {
+    ///
+    /// With `extend`, the row moved to joins the selection instead of
+    /// replacing it, measured from the anchor — so holding shift and pressing
+    /// down four times takes five rows, and letting go and pressing down once
+    /// takes one.
+    fn step(&mut self, delta: isize, extend: bool) {
         if self.rows.is_empty() {
             return;
         }
@@ -683,11 +699,72 @@ impl App {
             .unwrap_or(0);
         let next = (at as isize + delta).clamp(0, self.rows.len() as isize - 1) as usize;
         let id = self.rows[next].track.id;
+
         if Some(id) != self.selected {
             self.selected = Some(id);
             self.waveform = None;
             self.zoom = wave::Zoom::default();
             self.envelopes = None;
+        }
+        match extend {
+            true => self.mark_range_to(id),
+            false => self.mark_only(id),
+        }
+    }
+
+    /// Make one row the whole selection, and the point a range grows from.
+    fn mark_only(&mut self, id: u32) {
+        self.marked.clear();
+        self.marked.insert(id);
+        self.anchor = Some(id);
+    }
+
+    /// Select every row between the anchor and `id`, in the order they are
+    /// listed — which is what the eye means by "these ones", whichever
+    /// direction they were picked in.
+    fn mark_range_to(&mut self, id: u32) {
+        let anchor = self.anchor.unwrap_or(id);
+        let at = |wanted: u32| self.rows.iter().position(|row| row.track.id == wanted);
+        let (Some(from), Some(to)) = (at(anchor), at(id)) else {
+            self.mark_only(id);
+            return;
+        };
+        let (low, high) = (from.min(to), from.max(to));
+        self.marked = self.rows[low..=high]
+            .iter()
+            // Companions come along with their parents rather than on their
+            // own: a range drawn down the list sweeps over them, and a stem
+            // is not a thing to analyse or put on a drive by itself.
+            .filter(|row| !row.indented)
+            .map(|row| row.track.id)
+            .collect();
+    }
+
+    /// Add a row to the selection, or take it out again.
+    fn mark_toggle(&mut self, id: u32) {
+        if !self.marked.remove(&id) {
+            self.marked.insert(id);
+        }
+        self.anchor = Some(id);
+    }
+
+    /// What an action applies to: the selection when there is one worth the
+    /// name, and otherwise everything the query has left showing.
+    ///
+    /// One selected row is not a selection — it is where the cursor happens to
+    /// be, which is not the same as having chosen anything, and treating it as
+    /// one would turn "analyse what I am looking at" into "analyse this one"
+    /// for anybody who had clicked a row to see its waveform.
+    fn acting_on(&self, wanted: impl Fn(&Track) -> bool) -> Vec<u32> {
+        match self.marked.len() > 1 {
+            true => self
+                .rows
+                .iter()
+                .filter(|row| !row.indented && self.marked.contains(&row.track.id))
+                .filter(|row| wanted(&row.track))
+                .map(|row| row.track.id)
+                .collect(),
+            false => self.showing(wanted),
         }
     }
 
@@ -990,7 +1067,7 @@ impl App {
 
     /// Everything showing that has never been listened to.
     fn analyze_unprepared(&mut self) {
-        let waiting = self.showing(|track| !track.analyzed);
+        let waiting = self.acting_on(|track| !track.analyzed);
         if waiting.is_empty() {
             self.note("nothing showing needs analysing", theme::DIM);
             return;
@@ -1019,7 +1096,7 @@ impl App {
     }
 
     fn render_stems(&mut self) {
-        let waiting = self.showing(|track| track.stems.is_empty());
+        let waiting = self.acting_on(|track| track.stems.is_empty());
         if waiting.is_empty() {
             self.note("everything showing already has a stem kit", theme::DIM);
             return;
@@ -1648,11 +1725,12 @@ impl App {
             if typing {
                 return;
             }
+            let extend = i.modifiers.shift;
             if i.key_pressed(egui::Key::ArrowDown) {
-                self.step(1);
+                self.step(1, extend);
             }
             if i.key_pressed(egui::Key::ArrowUp) {
-                self.step(-1);
+                self.step(-1, extend);
             }
             if i.key_pressed(egui::Key::Space) {
                 if let Some(id) = self.selected {
@@ -1920,7 +1998,7 @@ impl App {
                         );
                     }
                     if let Some(dragged) = response.dnd_release_payload::<rows::Dragged>() {
-                        self.pending.push(Pending::AddToPlaylist(vec![dragged.0], name.clone()));
+                        self.pending.push(Pending::AddToPlaylist(dragged.0.clone(), name.clone()));
                     }
 
                     if response.clicked() {
@@ -2095,11 +2173,13 @@ impl App {
     /// no separate selection to keep in step with the filter.
     fn actions(&mut self, ui: &mut Ui) {
         let idle = !self.running();
-        let showing = self.rows.iter().filter(|row| !row.indented).count();
-        let unanalysed =
-            self.rows.iter().filter(|row| !row.indented && !row.track.analyzed).count();
-        let unstemmed =
-            self.rows.iter().filter(|row| !row.indented && row.track.stems.is_empty()).count();
+        // Counted the same way the buttons act, so the number on a button is
+        // what pressing it will do. Two ways of working that out is how they
+        // come to disagree.
+        let chosen = self.marked.len() > 1;
+        let showing = self.acting_on(|_| true).len();
+        let unanalysed = self.acting_on(|track| !track.analyzed).len();
+        let unstemmed = self.acting_on(|track| track.stems.is_empty()).len();
 
         ui.horizontal(|ui| {
             if ui.add_enabled(idle, egui::Button::new("Add music…")).clicked() {
@@ -2110,13 +2190,15 @@ impl App {
                     idle && unanalysed > 0,
                     egui::Button::new(format!("Analyse {unanalysed}")),
                 )
-                .on_hover_text("Grid, key, phrases and cues for everything showing that has none")
+                .on_hover_text(match chosen {
+                    true => "Grid, key, phrases and cues for the selected tracks that have none",
+                    false => "Grid, key, phrases and cues for everything showing that has none",
+                })
                 .clicked()
             {
                 self.analyze_unprepared();
             }
-            let unnamed =
-                self.rows.iter().filter(|row| !row.indented && !row.track.identified).count();
+            let unnamed = self.acting_on(|track| !track.identified).len();
             if ui
                 .add_enabled(idle && unnamed > 0, egui::Button::new(format!("Identify {unnamed}")))
                 .on_hover_text(
@@ -2138,7 +2220,14 @@ impl App {
 
             // Adding to a playlist is what turns a query into a set that can go
             // on a drive, so it sits with the prep actions rather than in a menu.
-            ui.label(RichText::new("to playlist").color(theme::DIM).size(theme::SMALL));
+            ui.label(
+                RichText::new(match chosen {
+                    true => "selected to playlist",
+                    false => "to playlist",
+                })
+                .color(if chosen { theme::AMBER } else { theme::DIM })
+                .size(theme::SMALL),
+            );
             let width = 110.0;
             ui.add(
                 egui::TextEdit::singleline(&mut self.playlist_entry)
@@ -2158,10 +2247,9 @@ impl App {
         });
     }
 
-    /// Put everything showing into a playlist, making it if it is new.
+    /// Put the selection, or everything showing, into a playlist.
     fn add_to_playlist(&mut self, name: &str) {
-        let ids: Vec<u32> =
-            self.rows.iter().filter(|row| !row.indented).map(|row| row.track.id).collect();
+        let ids = self.acting_on(|_| true);
         self.add_tracks_to_playlist(&ids, name);
     }
 
@@ -2212,6 +2300,17 @@ impl App {
         // into this.
         let playlist_names: Vec<String> =
             self.library.playlists.iter().map(|p| p.name.clone()).collect();
+        // The selection in list order, gathered once: a drag from any of these
+        // rows carries all of them.
+        let chosen: Vec<u32> = match self.marked.len() > 1 {
+            true => self
+                .rows
+                .iter()
+                .filter(|row| !row.indented && self.marked.contains(&row.track.id))
+                .map(|row| row.track.id)
+                .collect(),
+            false => Vec::new(),
+        };
         let widths = rows::columns(ui.available_width());
         if let Some(column) = rows::header_row(ui, &widths, self.sort) {
             let was = self.sort;
@@ -2235,12 +2334,23 @@ impl App {
             .and_then(|player| player.loaded());
         let mut hit = None;
         for line in &self.rows {
-            let selected = Some(line.track.id) == self.selected;
+            // Marked rows read as chosen; the focused one is what the
+            // inspector is showing, and is marked too.
+            let selected =
+                self.marked.contains(&line.track.id) || Some(line.track.id) == self.selected;
+            // Grabbing a row that is part of the selection carries all of it;
+            // grabbing one outside carries only that one, which is what a
+            // drag starting somewhere else means.
+            let carrying: Vec<u32> = match self.marked.contains(&line.track.id) {
+                true => chosen.clone(),
+                false => vec![line.track.id],
+            };
             let menu = rows::Menu {
                 in_library: self.config.holds(&line.track.path),
                 playing: playing == Some(line.track.id),
                 in_playlist: self.view == View::Playlist,
                 playlists: &playlist_names,
+                dragging: &carrying,
             };
             if let Some(what) = rows::row(ui, &line.track, line.indented, selected, &widths, menu) {
                 hit = Some((line.track.id, what));
@@ -2259,6 +2369,17 @@ impl App {
                 // A different track: start it from the top rather than from
                 // wherever the last one's playhead happened to be.
                 self.playhead_ms = None;
+            }
+            if selects {
+                // Shift takes everything between; the command key takes this
+                // one as well as what is already picked; a plain click starts
+                // again from here.
+                let keys = ui.input(|i| i.modifiers);
+                match (keys.shift, keys.command) {
+                    (true, _) => self.mark_range_to(id),
+                    (_, true) => self.mark_toggle(id),
+                    _ => self.mark_only(id),
+                }
             }
             match what {
                 rows::Hit::Opened => self.pending.push(Pending::TogglePlayback(id)),
@@ -2535,6 +2656,14 @@ impl App {
             "loading #{id} from {}",
             sources.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" + ")
         );
+        // Silence first. A track is decoded whole before it can be played, and
+        // that is seconds on a long file — during which the deck was still
+        // playing the last one, so asking for a new track left the old one
+        // going and then cut to the new one whenever the decode happened to
+        // land. Stopping now makes the deck do what was asked at the moment it
+        // was asked, and the wait is silence rather than the wrong record.
+        player.pause();
+
         if track.role == crate::library::Role::Track {
             self.ensure_local(&[id]);
         }
@@ -3330,7 +3459,7 @@ impl App {
 
     /// Fingerprint whatever showing is still unidentified.
     fn identify_showing(&mut self) {
-        let waiting = self.showing(|track| !track.identified);
+        let waiting = self.acting_on(|track| !track.identified);
         if waiting.is_empty() {
             self.note("nothing showing needs identifying", theme::DIM);
             return;
@@ -5107,6 +5236,82 @@ mod tests {
 
             let playlist = &harness.state().library.playlists[0];
             assert_eq!(playlist.tracks.len(), 1, "the drop did not add the track");
+        }
+
+        /// A window on `n` tracks, listed and ready to be selected in.
+        fn listing(name: &str, n: u32) -> App {
+            let mut app = app(name);
+            for i in 1..=n {
+                let id = app.library.add(std::path::Path::new(&format!("/music/{i}.flac")));
+                let track = app.library.get_mut(id).unwrap();
+                track.artist = format!("Artist {i:02}");
+                track.title = format!("Track {i:02}");
+            }
+            app.library.add_playlist("peak", "").unwrap();
+            app.rebuild();
+            app
+        }
+
+        /// The selection, in the order the list has them.
+        fn chosen(app: &App) -> Vec<u32> {
+            app.rows
+                .iter()
+                .filter(|row| !row.indented && app.marked.contains(&row.track.id))
+                .map(|row| row.track.id)
+                .collect()
+        }
+
+        #[test]
+        fn shift_and_an_arrow_takes_a_run_of_rows() {
+            let mut app = listing("arrows", 5);
+            let ids: Vec<u32> = app.rows.iter().map(|row| row.track.id).collect();
+
+            // A rebuilt list already has its first row under the cursor, so
+            // one press down is the second row.
+            app.step(1, false);
+            assert_eq!(chosen(&app), vec![ids[1]], "a plain arrow takes one");
+
+            app.step(1, true);
+            app.step(1, true);
+            assert_eq!(chosen(&app), ids[1..=3], "shift extended from where it started");
+
+            // Back up again, still holding shift: the range shrinks rather
+            // than the rows behind it staying picked.
+            app.step(-1, true);
+            assert_eq!(chosen(&app), ids[1..=2]);
+
+            // And letting go starts again from wherever the cursor is.
+            app.step(1, false);
+            assert_eq!(chosen(&app), vec![ids[3]]);
+        }
+
+        #[test]
+        fn a_range_reads_the_same_drawn_upwards() {
+            let mut app = listing("upwards", 5);
+            let ids: Vec<u32> = app.rows.iter().map(|row| row.track.id).collect();
+
+            app.selected = Some(ids[3]);
+            app.mark_only(ids[3]);
+            app.mark_range_to(ids[1]);
+            assert_eq!(chosen(&app), ids[1..=3], "picked upwards, listed downwards");
+        }
+
+        #[test]
+        fn an_action_takes_the_selection_when_there_is_one() {
+            let mut app = listing("acting", 5);
+            let ids: Vec<u32> = app.rows.iter().map(|row| row.track.id).collect();
+
+            // Nothing chosen: everything showing.
+            assert_eq!(app.acting_on(|_| true).len(), 5);
+
+            // One row is where the cursor is, not a selection — otherwise
+            // clicking a track to look at its waveform would quietly narrow
+            // every button in the window to that one track.
+            app.mark_only(ids[0]);
+            assert_eq!(app.acting_on(|_| true).len(), 5, "one row narrowed everything");
+
+            app.mark_range_to(ids[2]);
+            assert_eq!(app.acting_on(|_| true), ids[..3], "the selection is what acts");
         }
 
         #[test]
