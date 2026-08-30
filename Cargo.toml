@@ -59,6 +59,7 @@ symphonia = { version = "0.6", default-features = false, features = [
 ] }
 ureq = "3.2.1"
 walkdir = "2"
+sha2 = "0.10.9"
 
 [dev-dependencies]
 binrw = "0.14"

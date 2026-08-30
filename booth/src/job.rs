@@ -226,6 +226,18 @@ pub fn read_record(id: u32, path: &Path) -> Track {
         .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_default();
     track.year = metadata.date.as_deref().and_then(|d| d.get(..4)?.parse().ok());
+
+    // Both hashes at import, because both are a read of the file and the file
+    // is open anyway. A failure is not one: an unreadable file has bigger
+    // problems, and an empty hash simply never matches another.
+    match musicai::hash::file_sha256(path) {
+        Ok(hash) => track.file_hash = hash,
+        Err(e) => crate::debug!("no file hash for {}: {e:#}", path.display()),
+    }
+    match musicai::hash::audio_sha256(path) {
+        Ok(hash) => track.audio_hash = hash,
+        Err(e) => crate::debug!("no audio hash for {}: {e:#}", path.display()),
+    }
     track
 }
 

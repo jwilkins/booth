@@ -183,6 +183,10 @@ pub struct App {
     naming: Option<Naming>,
     /// Whether the query language's help is showing.
     help: bool,
+    /// Whether the duplicates sheet is open, and which copies are ticked for
+    /// deletion. Nothing is ticked to begin with: a list of files to delete
+    /// that arrives already agreed to is not an offer.
+    duplicates: Option<std::collections::HashSet<u32>>,
     /// Set when a panel has been dragged and the new size is not written out
     /// yet. See [`App::save_panels`].
     panels_moved: bool,
@@ -248,6 +252,8 @@ enum Pending {
     },
     /// Put these tracks in the playlist of that name, making it if it is new.
     AddToPlaylist(Vec<u32>, String),
+    /// Send these files to the trash and forget the tracks.
+    TrashDuplicates(Vec<u32>),
     /// Open the sidebar's naming field, and put these in whatever it is called.
     NamePlaylistFor(Vec<u32>),
     Adopt(u32),
@@ -479,6 +485,7 @@ impl App {
             playlist_entry: String::new(),
             naming: None,
             help: false,
+            duplicates: None,
             panels_moved: false,
             pending_save: false,
             pending_rebuild: false,
@@ -511,6 +518,11 @@ impl App {
         // Animations off for every one of these, not just the sheets: the
         // check captures the first frame, and a window caught halfway through
         // its fade-in photographs as a half-transparent one.
+        #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_OPEN_DUPES").is_some() {
+            app.duplicates = Some(std::collections::HashSet::new());
+            cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
+        }
         #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_OPEN_HELP").is_some() {
             app.help = true;
@@ -1662,6 +1674,9 @@ impl eframe::App for App {
         if self.help {
             self.help_sheet(ctx);
         }
+        if self.duplicates.is_some() {
+            self.duplicates_sheet(ctx);
+        }
         self.log_window(ctx);
 
         // Everything the panels asked for happens here, after they have all
@@ -1873,6 +1888,36 @@ impl App {
         self.view_row(ui, View::All, "All tracks", all, theme::DIM);
         self.view_row(ui, View::Unprepared, "Unprepared", unprepared, theme::DIM);
         self.view_row(ui, View::Attention, "Needs attention", attention, theme::ALERT);
+
+        // Only offered when there is something to offer. A row reading zero is
+        // a thing to check rather than a thing to know.
+        let copies: usize = self
+            .library
+            .duplicate_groups(&self.config.library_path)
+            .iter()
+            .map(|group| group.rest.len())
+            .sum();
+        if copies > 0 {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Label::new(RichText::new("In here twice").color(theme::AMBER))
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("The same recording in more than one file")
+                    .clicked()
+                {
+                    self.duplicates = Some(std::collections::HashSet::new());
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(copies.to_string())
+                            .font(theme::mono(theme::SMALL))
+                            .color(theme::DIM),
+                    );
+                });
+            });
+        }
 
         ui.add_space(16.0);
         ui.horizontal(|ui| {
@@ -2245,6 +2290,47 @@ impl App {
                 self.add_to_playlist(&name);
             }
         });
+    }
+
+    /// Send duplicate files to the trash, and forget the tracks that named
+    /// them.
+    ///
+    /// To the trash rather than unlinked, so that a wrong answer here is one
+    /// the operating system can undo — this is the only thing in the program
+    /// that touches somebody's music, and the difference between recoverable
+    /// and not is the whole of how careful it has to be.
+    ///
+    /// A file that will not go stays in the collection. Forgetting a track
+    /// whose file is still there would leave the file behind with nothing
+    /// pointing at it, which is a worse state than the duplicate was.
+    fn trash_duplicates(&mut self, ids: &[u32]) {
+        let mut gone = 0usize;
+        let mut freed = 0u64;
+        for id in ids {
+            let Some(track) = self.library.get(*id) else { continue };
+            let (path, bytes) = (track.path.clone(), track.bytes);
+            match trash::delete(&path) {
+                Ok(()) => {
+                    crate::info!("trashed {}", path.display());
+                    self.library.remove(*id);
+                    gone += 1;
+                    freed += bytes;
+                }
+                Err(e) => {
+                    crate::warn!("could not trash {}: {e}", path.display());
+                    self.note(
+                        format!("{} would not go to the trash", path.display()),
+                        theme::ALERT,
+                    );
+                }
+            }
+        }
+        if gone > 0 {
+            self.note(
+                format!("{} to the trash, {} freed", plural(gone, "file"), sync::bytes(freed)),
+                theme::TEXT,
+            );
+        }
     }
 
     /// Put the selection, or everything showing, into a playlist.
@@ -3281,6 +3367,10 @@ impl App {
                     self.replan();
                 }
                 Pending::AddToPlaylist(ids, name) => self.add_tracks_to_playlist(&ids, &name),
+                Pending::TrashDuplicates(ids) => {
+                    self.trash_duplicates(&ids);
+                    touched = true;
+                }
                 Pending::NamePlaylistFor(ids) => {
                     let mut naming = Naming::new_playlist();
                     naming.holding = ids;
@@ -3930,6 +4020,159 @@ impl App {
     /// Clicking a line puts it in the bar rather than only describing it: the
     /// distance between reading an example and trying it is most of what makes
     /// a query language worth having.
+    /// The same recordings, more than once, and the offer to be rid of them.
+    ///
+    /// Nothing is ticked when this opens and nothing happens until the button
+    /// at the bottom is pressed. This is the only thing in the program that
+    /// deletes somebody's music, and it says how many files and how many
+    /// megabytes before it does.
+    fn duplicates_sheet(&mut self, ctx: &egui::Context) {
+        let groups = self.library.duplicate_groups(&self.config.library_path);
+        let mut open = true;
+        let mut ticked = self.duplicates.clone().unwrap_or_default();
+        let mut delete = false;
+        let mut tick_all_identical = false;
+
+        egui::Window::new("The same record, more than once")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(720.0)
+            .default_height(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::BOOTH)
+                    .stroke(egui::Stroke::new(1.0, theme::RULE))
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(ctx, |ui| {
+                if groups.is_empty() {
+                    ui.label(RichText::new("Nothing is in here twice.").color(theme::DIM));
+                    return;
+                }
+                ui.label(
+                    RichText::new(
+                        "Grouped by the sound in the file rather than by its name, so the \
+                         same rip tagged twice is one record here. The copy this would keep \
+                         is on top.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+                ui.add_space(4.0);
+                if ui
+                    .button(RichText::new("Tick every identical file").size(theme::SMALL))
+                    .on_hover_text("The ones that are byte-for-byte the copy above them")
+                    .clicked()
+                {
+                    tick_all_identical = true;
+                }
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for group in &groups {
+                        let Some(kept) = self.library.get(group.keep) else { continue };
+                        ui.label(
+                            RichText::new(kept.display_title())
+                                .color(theme::TEXT)
+                                .size(theme::BODY),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.add_space(14.0);
+                            ui.label(
+                                RichText::new(format!("keep  {}", kept.path.display()))
+                                    .font(theme::mono(10.0))
+                                    .color(theme::GO),
+                            );
+                        });
+                        for copy in &group.rest {
+                            let Some(track) = self.library.get(copy.id) else { continue };
+                            ui.horizontal(|ui| {
+                                ui.add_space(14.0);
+                                let mut on = ticked.contains(&copy.id);
+                                if ui.checkbox(&mut on, "").changed() {
+                                    match on {
+                                        true => ticked.insert(copy.id),
+                                        false => ticked.remove(&copy.id),
+                                    };
+                                }
+                                let (note, color) = match copy.identical {
+                                    true => ("identical", theme::DIM),
+                                    // Said plainly, because it is the one case
+                                    // where deleting costs something.
+                                    false => ("same sound, different tags", theme::AMBER),
+                                };
+                                ui.label(
+                                    RichText::new(format!("{}", track.path.display()))
+                                        .font(theme::mono(10.0))
+                                        .color(theme::DIM),
+                                );
+                                ui.label(RichText::new(note).size(theme::SMALL).color(color));
+                            });
+                        }
+                        ui.add_space(8.0);
+                    }
+                });
+            });
+
+        if tick_all_identical {
+            for group in &groups {
+                for copy in group.rest.iter().filter(|copy| copy.identical) {
+                    ticked.insert(copy.id);
+                }
+            }
+        }
+
+        // The button lives outside the scrolling list so it cannot be scrolled
+        // away from, and says what it is about to do rather than "OK".
+        if !groups.is_empty() && open {
+            let bytes: u64 =
+                ticked.iter().filter_map(|id| self.library.get(*id)).map(|t| t.bytes).sum();
+            egui::Area::new(egui::Id::new("duplicates-action"))
+                .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
+                .show(ctx, |ui| {
+                    egui::Frame::NONE
+                        .fill(theme::BOOTH_2)
+                        .stroke(egui::Stroke::new(1.0, theme::RULE))
+                        .inner_margin(egui::Margin::same(10))
+                        .show(ui, |ui| {
+                            if ui
+                                .add_enabled(
+                                    !ticked.is_empty(),
+                                    egui::Button::new(
+                                        RichText::new(format!(
+                                            "Move {} to the trash  ({})",
+                                            plural(ticked.len(), "file"),
+                                            crate::sync::bytes(bytes)
+                                        ))
+                                        .color(theme::BOOTH)
+                                        .strong(),
+                                    )
+                                    .fill(theme::ALERT),
+                                )
+                                .on_hover_text(
+                                    "To the trash, not gone: this is the one thing here that \
+                                     touches your music",
+                                )
+                                .clicked()
+                            {
+                                delete = true;
+                            }
+                        });
+                });
+        }
+
+        match open {
+            true => self.duplicates = Some(ticked.clone()),
+            false => self.duplicates = None,
+        }
+        if delete {
+            self.pending.push(Pending::TrashDuplicates(ticked.into_iter().collect()));
+            self.duplicates = None;
+        }
+    }
+
     fn help_sheet(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut chosen: Option<String> = None;
@@ -5312,6 +5555,58 @@ mod tests {
 
             app.mark_range_to(ids[2]);
             assert_eq!(app.acting_on(|_| true), ids[..3], "the selection is what acts");
+        }
+
+        #[test]
+        fn trashing_a_duplicate_removes_the_file_and_the_track() {
+            // Against real files, because this is the one thing in the program
+            // that touches somebody's music and the only way to know it took
+            // the right one is to look on disk afterwards.
+            let dir = std::env::temp_dir().join(format!(
+                "booth-trash-{}-{}",
+                "dupes",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let keep = dir.join("keep.flac");
+            let copy = dir.join("copy.flac");
+            std::fs::write(&keep, b"the same bytes").unwrap();
+            std::fs::write(&copy, b"the same bytes").unwrap();
+
+            let mut app = app("trash");
+            let kept = app.library.add(&keep);
+            let doomed = app.library.add(&copy);
+            for id in [kept, doomed] {
+                let track = app.library.get_mut(id).unwrap();
+                track.file_hash = "SAME".into();
+                track.audio_hash = "SAME".into();
+            }
+
+            app.trash_duplicates(&[doomed]);
+
+            assert!(keep.exists(), "the wrong file went");
+            assert!(!copy.exists(), "the duplicate is still on disk");
+            assert!(app.library.get(kept).is_some(), "the kept track left the collection");
+            assert!(app.library.get(doomed).is_none(), "the trashed track is still listed");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_file_that_will_not_go_stays_in_the_collection() {
+            // Forgetting a track whose file is still there would leave the
+            // file behind with nothing pointing at it — a worse state than the
+            // duplicate it was.
+            let mut app = app("stubborn");
+            let id = app.library.add(std::path::Path::new("/nowhere/at/all/missing.flac"));
+
+            app.trash_duplicates(&[id]);
+            assert!(
+                app.library.get(id).is_some(),
+                "the track was forgotten though its file could not be trashed"
+            );
         }
 
         #[test]

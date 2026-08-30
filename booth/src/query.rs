@@ -142,6 +142,10 @@ pub enum DupeKey {
     Title,
     Artist,
     Duration,
+    /// Byte-identical files.
+    File,
+    /// The same encoded audio, whatever the tags say.
+    Audio,
 }
 
 impl DupeKey {
@@ -150,6 +154,8 @@ impl DupeKey {
             "title" => DupeKey::Title,
             "artist" => DupeKey::Artist,
             "length" | "duration" => DupeKey::Duration,
+            "file" | "bytes" => DupeKey::File,
+            "audio" | "sound" => DupeKey::Audio,
             _ => return None,
         })
     }
@@ -313,7 +319,19 @@ pub fn duplicate_ids(tracks: &[Track], keys: &[DupeKey]) -> Vec<u32> {
                 // To the second: two rips of the same track rarely differ by
                 // less, and two different tracks rarely agree that closely.
                 DupeKey::Duration => key.push_str(&format!("{}", track.duration_secs.round())),
+                DupeKey::File => key.push_str(&track.file_hash),
+                DupeKey::Audio => key.push_str(&track.audio_hash),
             }
+        }
+        // A track whose hash could not be read is not a duplicate of every
+        // other one that could not be read either.
+        let unhashed = keys.iter().any(|part| match part {
+            DupeKey::File => track.file_hash.is_empty(),
+            DupeKey::Audio => track.audio_hash.is_empty(),
+            _ => false,
+        });
+        if unhashed {
+            continue;
         }
         groups.entry(key).or_default().push(track.id);
     }
@@ -368,6 +386,8 @@ pub const HELP: &[(&str, &[Help])] = &[
             Help { example: "in:\"Sat 14/9\"", means: "in that playlist" },
             Help { example: "in:drive:SANDISK", means: "written to that drive" },
             Help { example: "tag:peak", means: "carries that tag" },
+            Help { example: "dupes:file", means: "byte-for-byte the same file" },
+            Help { example: "dupes:audio", means: "the same recording, whatever the tags say" },
             Help { example: "dupes:title+artist", means: "shares both with another track" },
         ],
     ),

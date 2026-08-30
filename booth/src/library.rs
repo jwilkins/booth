@@ -139,6 +139,14 @@ pub struct Track {
     pub channels: u16,
     /// Set for the float WAVs that look fine on a laptop and fail in a booth.
     pub float_samples: bool,
+    /// The file as it is on disk. Two agreeing means the bytes are the same,
+    /// which is the only case where deleting one of them is plainly safe.
+    #[serde(default)]
+    pub file_hash: String,
+    /// The encoded audio inside it, with the tag blocks skipped — so the same
+    /// rip tagged twice still agrees with itself.
+    #[serde(default)]
+    pub audio_hash: String,
     pub bytes: u64,
 
     pub bpm: f64,
@@ -211,6 +219,8 @@ impl Track {
             sample_rate: 0,
             channels: 0,
             float_samples: false,
+            file_hash: String::new(),
+            audio_hash: String::new(),
             bytes: 0,
             bpm: 0.0,
             grid_confidence: 0.0,
@@ -420,6 +430,30 @@ pub fn energy_from(intensity: f32) -> u8 {
         return 0;
     }
     1 + STEPS.iter().filter(|&&step| intensity >= step).count() as u8
+}
+
+/// A set of tracks that are the same recording.
+pub struct Copies {
+    /// The one to keep, chosen by [`Library::duplicate_groups`].
+    pub keep: u32,
+    /// The others, in the order they were found.
+    pub rest: Vec<Duplicate>,
+}
+
+/// One copy that is not the one being kept.
+pub struct Duplicate {
+    pub id: u32,
+    /// Whether this file is byte-for-byte the kept one.
+    ///
+    /// Per copy rather than per group, because a group can be mixed: two
+    /// identical files and a third that is the same recording carrying
+    /// different tags is one recording in three places, and saying so twice in
+    /// overlapping halves would be a worse description of it.
+    ///
+    /// It decides how safe deleting is. An identical file loses nothing at
+    /// all; one that only matches by audio loses whatever its tags say that
+    /// the kept copy's do not.
+    pub identical: bool,
 }
 
 /// A playlist, and the folder it sits in.
@@ -752,6 +786,78 @@ impl Library {
         for playlist in self.playlists.iter_mut().filter(|p| p.folder == name) {
             playlist.folder.clear();
         }
+    }
+
+    /// Tracks that are the same recording, grouped, worst offenders first.
+    ///
+    /// Grouped by the audio's hash alone, because that is the broader of the
+    /// two relations and contains the other: identical bytes mean identical
+    /// audio, so anything the file hash would pair is already together here.
+    /// Grouping by both in turn instead made a byte-identical pair use up its
+    /// members, and a third copy of the same recording carrying different tags
+    /// was then left on its own and reported as nothing at all.
+    ///
+    /// The one to keep is the copy inside the library folder when there is
+    /// one, because that is the copy this program is responsible for and the
+    /// rest are somebody's download folder; failing that, the one with the
+    /// most filled in, since that is the work that would be lost. Never the
+    /// shortest path or the newest file: both are accidents.
+    pub fn duplicate_groups(&self, library_path: &Path) -> Vec<Copies> {
+        let mut by_audio: Vec<(&str, Vec<u32>)> = Vec::new();
+        for track in self.tracks.iter().filter(|t| t.role == Role::Track) {
+            // An unreadable file has bigger problems than being a copy, and
+            // one empty hash matching another would put every one of them in a
+            // group together and offer to delete them.
+            if track.audio_hash.is_empty() {
+                continue;
+            }
+            match by_audio.iter_mut().find(|(seen, _)| *seen == track.audio_hash) {
+                Some((_, ids)) => ids.push(track.id),
+                None => by_audio.push((&track.audio_hash, vec![track.id])),
+            }
+        }
+
+        let mut groups: Vec<Copies> = by_audio
+            .into_iter()
+            .filter(|(_, ids)| ids.len() > 1)
+            .map(|(_, ids)| {
+                let keep = self.pick_keeper(&ids, library_path);
+                let kept_file = self.get(keep).map(|t| t.file_hash.clone()).unwrap_or_default();
+                let rest = ids
+                    .into_iter()
+                    .filter(|id| *id != keep)
+                    .map(|id| Duplicate {
+                        id,
+                        identical: self
+                            .get(id)
+                            .is_some_and(|t| !t.file_hash.is_empty() && t.file_hash == kept_file),
+                    })
+                    .collect();
+                Copies { keep, rest }
+            })
+            .collect();
+        groups.sort_by_key(|group| std::cmp::Reverse(group.rest.len()));
+        groups
+    }
+
+    /// Which of a set of copies to keep. See [`Library::duplicate_groups`].
+    fn pick_keeper(&self, ids: &[u32], library_path: &Path) -> u32 {
+        // The last of the three settles a tie: without it, two copies that
+        // score the same left the answer to whichever `max_by_key` happened to
+        // reach last, which is neither a decision nor the same one twice. The
+        // earliest known copy is the one that playlists and drives already
+        // point at, so it is the one to keep.
+        let score = |id: &u32| -> (bool, usize, std::cmp::Reverse<u32>) {
+            let Some(track) = self.get(*id) else { return (false, 0, std::cmp::Reverse(*id)) };
+            let inside = track.path.starts_with(library_path);
+            let named = [&track.artist, &track.title, &track.album]
+                .iter()
+                .filter(|field| !field.trim().is_empty())
+                .count()
+                + track.tags.len();
+            (inside, named, std::cmp::Reverse(*id))
+        };
+        ids.iter().max_by_key(|id| score(id)).copied().unwrap_or(ids[0])
     }
 
     pub fn unprepared_count(&self) -> usize {
@@ -1156,6 +1262,81 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), companions.len(), "two companions share an id");
+    }
+
+    /// A track with the hashes set, so grouping has something to group on.
+    fn copy_of(library: &mut Library, path: &str, file: &str, audio: &str) -> u32 {
+        let id = library.add(Path::new(path));
+        let track = library.get_mut(id).unwrap();
+        track.file_hash = file.into();
+        track.audio_hash = audio.into();
+        id
+    }
+
+    #[test]
+    fn identical_files_and_matching_audio_are_told_apart() {
+        let mut library = Library::new();
+        let a = copy_of(&mut library, "/music/a.flac", "FILE1", "AUDIO1");
+        let b = copy_of(&mut library, "/downloads/a.flac", "FILE1", "AUDIO1");
+        let c = copy_of(&mut library, "/music/a-retagged.flac", "FILE2", "AUDIO1");
+        let alone = copy_of(&mut library, "/music/other.flac", "FILE3", "AUDIO2");
+
+        let groups = library.duplicate_groups(Path::new("/music"));
+        assert_eq!(groups.len(), 1, "the three copies are one group, not two overlapping ones");
+        let group = &groups[0];
+        assert_eq!(group.keep, a, "the copy inside the library folder is the one kept");
+        assert_eq!(group.rest.len(), 2);
+
+        let of = |wanted: u32| group.rest.iter().find(|copy| copy.id == wanted).expect("missing");
+        assert!(of(b).identical, "b is byte-for-byte a, and deleting it loses nothing");
+        assert!(!of(c).identical, "c is the same recording with different tags");
+        assert!(!group.rest.iter().any(|copy| copy.id == alone), "a track with no twin");
+    }
+
+    #[test]
+    fn audio_that_matches_without_the_files_matching_is_its_own_group() {
+        // The case the file hash cannot see: one rip, tagged twice.
+        let mut library = Library::new();
+        let a = copy_of(&mut library, "/music/a.flac", "FILE1", "AUDIO1");
+        let b = copy_of(&mut library, "/music/a-copy.flac", "FILE2", "AUDIO1");
+
+        let groups = library.duplicate_groups(Path::new("/music"));
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].keep, a);
+        assert_eq!(groups[0].rest.len(), 1);
+        assert_eq!(groups[0].rest[0].id, b);
+        assert!(!groups[0].rest[0].identical, "the files differ, so deleting loses its tags");
+    }
+
+    #[test]
+    fn the_copy_worth_keeping_is_the_one_with_the_work_in_it() {
+        let mut library = Library::new();
+        let bare = copy_of(&mut library, "/elsewhere/a.flac", "F", "A");
+        let named = copy_of(&mut library, "/elsewhere/b.flac", "F", "A");
+        {
+            let track = library.get_mut(named).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+            track.tags = vec!["peak".into()];
+        }
+
+        // Neither is in the library folder, so what decides is which one would
+        // cost something to lose.
+        let groups = library.duplicate_groups(Path::new("/music"));
+        assert_eq!(groups[0].keep, named);
+        assert_eq!(groups[0].rest.len(), 1);
+        assert_eq!(groups[0].rest[0].id, bare);
+    }
+
+    #[test]
+    fn a_track_with_no_hash_is_nobodys_duplicate() {
+        // An unreadable file has bigger problems than being a copy, and an
+        // empty hash matching another empty one would group every one of them
+        // together and offer to delete them.
+        let mut library = Library::new();
+        copy_of(&mut library, "/music/a.flac", "", "");
+        copy_of(&mut library, "/music/b.flac", "", "");
+        assert!(library.duplicate_groups(Path::new("/music")).is_empty());
     }
 
     #[test]

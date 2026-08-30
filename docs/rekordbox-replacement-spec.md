@@ -496,7 +496,7 @@ acceptance criterion is not a requirement, it is an aspiration, and belongs in �
 | LIB-3 | Import a folder tree without analysing it. | 50,000 files land in the library in under 60 s on an SSD, marked `missing:grid`, and are browsable immediately. |
 | LIB-4 | Arbitrary user tags with a flat namespace and autocomplete. | A track can carry any number of tags; `tag:` queries them; tags survive export to the players' My Tag equivalent where one exists. |
 | LIB-5 | Smart playlists are saved queries (§6.3), with no track-count ceiling. | A saved query over 100,000 tracks returns in under 200 ms and exports in full. |
-| LIB-6 | Duplicate detection by fingerprint, by tags, and by file. | `dupes:` surfaces groups; merging keeps the best-quality file and unions the cue sets. |
+| LIB-6 | Duplicate detection by fingerprint, by tags, and by file. | `dupes:` surfaces groups; merging keeps the best-quality file and unions the cue sets. **Done for files**: every track carries a SHA-256 of the file and a second of the encoded audio with the tag blocks skipped, so the same rip tagged twice is recognised as one recording. `dupes:file` and `dupes:audio` query them, and the window offers to send the copies to the trash. Merging cue sets is not done. |
 | LIB-7 | Metadata enrichment from AcoustID/MusicBrainz, opt-in and offline-capable. | Reuses `src/tag/` unchanged; `--on-existing keep` semantics are the default so hand-curated fields are never overwritten. |
 | LIB-8 | The library is portable and syncable by ordinary means. | Closing the app leaves a consistent database file; copying the database plus the audio to another machine reproduces the library exactly, with no service involved. |
 | LIB-9 | Every destructive operation is undoable for the session and journalled beyond it. | Deleting a playlist, merging duplicates or clearing cues can be reverted from a visible history. |
@@ -806,6 +806,7 @@ played by a CDJ.
 | Medium checks (SAFE-3) | Free space and path length only. Filesystem type, folder depth and per-folder file counts are not checked. |
 | Compatibility target (EXP-3) | Not built. The rules are the CDJ-3000's, in `src/compat.rs`, and are not yet selectable. |
 | Read-back verification (SAFE-1) | Done, by readers that share no code with the writers. |
+| Duplicate detection (LIB-6) | Done by hash — the file's, and the audio's with tags skipped — with an offer to trash the copies. Merging two records into one is not. |
 | The library and query language (LIB-1..5) | Done, and saved queries are smart playlists with no cap — but the store is a JSON document, where LIB-1 asks for SQLite under a published schema. It is readable without this program either way; the swap is still owed. |
 | The window (§6) | One window, query bar, browser, prep editor, dock. Built. |
 | Preparation — cues, tags, ratings, bulk and per-track (PREP-1..5) | Done, bar user-chosen cue colours. |

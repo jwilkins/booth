@@ -12,6 +12,7 @@ pub mod compat;
 pub mod discover;
 pub mod dsp;
 pub mod export;
+pub mod hash;
 pub mod loudness;
 pub mod normalize;
 pub mod rekordbox;
