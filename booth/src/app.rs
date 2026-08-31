@@ -74,6 +74,10 @@ impl LogWindow {
 /// Added up from its parts rather than guessed, because the failure is silent:
 /// a budget a few points short does not overflow, it quietly clips the last row
 /// off the bottom of the window, and the measurements line is the row it takes.
+/// The room the duplicates sheet keeps for its footer, so the button that does
+/// the deleting is never scrolled away from.
+const FOOTER_HEIGHT: f32 = 46.0;
+
 const PREP_HEIGHT: f32 = wave::HEIGHT
     + wave::STRIP_HEIGHT
     // the actions strip, the cue strip, and the measurements line
@@ -183,10 +187,9 @@ pub struct App {
     naming: Option<Naming>,
     /// Whether the query language's help is showing.
     help: bool,
-    /// Whether the duplicates sheet is open, and which copies are ticked for
-    /// deletion. Nothing is ticked to begin with: a list of files to delete
-    /// that arrives already agreed to is not an offer.
-    duplicates: Option<std::collections::HashSet<u32>>,
+    /// Whether the duplicates sheet is open, and what has been decided in it
+    /// so far.
+    duplicates: Option<Dupes>,
     /// Set when a panel has been dragged and the new size is not written out
     /// yet. See [`App::save_panels`].
     panels_moved: bool,
@@ -252,8 +255,13 @@ enum Pending {
     },
     /// Put these tracks in the playlist of that name, making it if it is new.
     AddToPlaylist(Vec<u32>, String),
-    /// Send these files to the trash and forget the tracks.
-    TrashDuplicates(Vec<u32>),
+    /// Fold these copies into the tracks being kept, then send their files to
+    /// the trash and forget them. The picks say how each disagreement between a
+    /// copy and its keeper was settled.
+    TrashDuplicates {
+        ticked: Vec<u32>,
+        picked: Vec<(u32, crate::library::Field, crate::library::Side)>,
+    },
     /// Open the sidebar's naming field, and put these in whatever it is called.
     NamePlaylistFor(Vec<u32>),
     Adopt(u32),
@@ -525,7 +533,7 @@ impl App {
         }
         #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_OPEN_DUPES").is_some() {
-            app.duplicates = Some(std::collections::HashSet::new());
+            app.duplicates = Some(Dupes::default());
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
         }
         #[cfg(feature = "screenshot")]
@@ -1711,6 +1719,24 @@ fn bar_frame() -> egui::Frame {
 }
 
 /// The chrome every sheet shares.
+/// What the duplicates sheet is holding while it is open.
+///
+/// Kept across frames rather than worked out afresh each one: the ticks and the
+/// answers to disagreements are decisions somebody made, and the groups behind
+/// them are rebuilt every frame as tracks are hashed.
+#[derive(Default)]
+struct Dupes {
+    /// The copies to be rid of.
+    ticked: std::collections::HashSet<u32>,
+    /// How a disagreement between one copy and the track being kept was
+    /// settled, by copy and by field.
+    picked: std::collections::HashMap<(u32, crate::library::Field), crate::library::Side>,
+    /// Copies that have already been given their opening answer, so that
+    /// unticking one is not undone on the next frame — and so that a copy that
+    /// turns up later, as hashing goes on, still gets one.
+    seen: std::collections::HashSet<u32>,
+}
+
 /// The most a sheet may be, so that it always fits on the screen.
 ///
 /// A window taller than the viewport is still centred on it, which puts the
@@ -1971,7 +1997,7 @@ impl App {
                     })
                     .clicked()
                 {
-                    self.duplicates = Some(std::collections::HashSet::new());
+                    self.duplicates = Some(Dupes::default());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // A question mark rather than a count while there is
@@ -2384,12 +2410,38 @@ impl App {
     /// A file that will not go stays in the collection. Forgetting a track
     /// whose file is still there would leave the file behind with nothing
     /// pointing at it, which is a worse state than the duplicate was.
-    fn trash_duplicates(&mut self, ids: &[u32]) {
+    fn trash_duplicates(
+        &mut self,
+        ids: &[u32],
+        picked: &[(u32, crate::library::Field, crate::library::Side)],
+    ) {
         let mut gone = 0usize;
         let mut freed = 0u64;
+        // Which group each copy belongs to, so the merge knows what it is being
+        // folded into. Worked out before anything is deleted, because removing
+        // a track changes the groups.
+        let keepers: std::collections::HashMap<u32, u32> = self
+            .library
+            .duplicate_groups(&self.config.library_path)
+            .iter()
+            .flat_map(|group| group.rest.iter().map(|copy| (copy.id, group.keep)))
+            .collect();
+
         for id in ids {
             let Some(track) = self.library.get(*id) else { continue };
             let (path, bytes) = (track.path.clone(), track.bytes);
+            // Folded in first, and only then deleted: doing it the other way
+            // round would be reading a record that is already gone. A file that
+            // then will not go leaves the copy in the collection with its own
+            // answers still on it, which is untidy but loses nothing.
+            if let Some(keep) = keepers.get(id) {
+                let answers: std::collections::HashMap<_, _> = picked
+                    .iter()
+                    .filter(|(copy, _, _)| copy == id)
+                    .map(|(_, field, side)| (*field, *side))
+                    .collect();
+                self.library.merge_copy(*keep, *id, &answers);
+            }
             match trash::delete(&path) {
                 Ok(()) => {
                     crate::info!("trashed {}", path.display());
@@ -2412,6 +2464,14 @@ impl App {
                 theme::TEXT,
             );
         }
+        // The copy kept is the one that knows the most about the record, which
+        // is not always the one in the library folder — so de-duplicating can
+        // leave the collection pointing at somebody's download folder. That is
+        // the same situation as importing from outside, and gets the same
+        // answer: whatever the setting says, which is to take a copy unless
+        // told otherwise.
+        let survivors: Vec<u32> = keepers.values().copied().collect();
+        self.ensure_local(&survivors);
     }
 
     /// Put the selection, or everything showing, into a playlist.
@@ -3449,8 +3509,8 @@ impl App {
                     self.replan();
                 }
                 Pending::AddToPlaylist(ids, name) => self.add_tracks_to_playlist(&ids, &name),
-                Pending::TrashDuplicates(ids) => {
-                    self.trash_duplicates(&ids);
+                Pending::TrashDuplicates { ticked, picked } => {
+                    self.trash_duplicates(&ticked, &picked);
                     touched = true;
                 }
                 Pending::NamePlaylistFor(ids) => {
@@ -4088,41 +4148,62 @@ impl App {
         }
     }
 
-    /// The log, in a window of its own.
-    ///
-    /// A deferred viewport rather than an egui window inside the main one: it
-    /// is a real OS window, so it can be put on a second screen, left open
-    /// beside the browser, and resized without taking anything from the
-    /// collection.
-    /// What can be typed in the query bar.
-    ///
-    /// Straight from [`crate::query::HELP`], which is the same table a test
-    /// parses every example in — so this cannot describe a grammar the parser
-    /// does not have.
-    ///
-    /// Clicking a line puts it in the bar rather than only describing it: the
-    /// distance between reading an example and trying it is most of what makes
-    /// a query language worth having.
     /// The same recordings, more than once, and the offer to be rid of them.
     ///
-    /// Nothing is ticked when this opens and nothing happens until the button
-    /// at the bottom is pressed. This is the only thing in the program that
-    /// deletes somebody's music, and it says how many files and how many
-    /// megabytes before it does.
+    /// What only one copy knows is folded into the one being kept before the
+    /// rest go, so that being rid of a copy costs nothing: the album name that
+    /// was only on the download, the cues placed on it, the playlist it was in.
+    /// A copy that is byte-for-byte the kept one, or that merges without
+    /// contradicting it, is ticked when the sheet opens — there is nothing to
+    /// decide about either. A copy that disagrees is not, and says what about,
+    /// until somebody says which answer is right.
+    ///
+    /// Nothing happens until the button at the bottom is pressed. This is the
+    /// only thing in the program that deletes somebody's music, and it says how
+    /// many files and how many megabytes before it does.
     fn duplicates_sheet(&mut self, ctx: &egui::Context) {
+        use crate::library::{Field, Side};
+
         let groups = self.library.duplicate_groups(&self.config.library_path);
         let unchecked = self.library.unhashed().len();
+        // What each copy would do to the track being kept, worked out once for
+        // the frame: the rows read it, the opening ticks read it, and the
+        // button at the bottom counts it.
+        let plans: std::collections::HashMap<u32, crate::library::Merge> = groups
+            .iter()
+            .flat_map(|group| {
+                group
+                    .rest
+                    .iter()
+                    .map(|copy| (copy.id, self.library.plan_merge(group.keep, copy.id)))
+            })
+            .collect();
+
+        let mut state = self.duplicates.take().unwrap_or_default();
+        // A copy nobody has seen yet gets its opening answer: ticked when there
+        // is nothing to decide, left alone when there is. Once seen it is the
+        // user's, so unticking sticks.
+        for group in &groups {
+            for copy in &group.rest {
+                if !state.seen.insert(copy.id) {
+                    continue;
+                }
+                let clean = plans.get(&copy.id).is_none_or(|plan| plan.is_clean());
+                if copy.identical || clean {
+                    state.ticked.insert(copy.id);
+                }
+            }
+        }
+
         let mut open = true;
-        let mut ticked = self.duplicates.clone().unwrap_or_default();
         let mut delete = false;
-        let mut tick_all_identical = false;
         let mut look = false;
 
         egui::Window::new("The same record, more than once")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(720.0)
+            .default_width(760.0)
             .default_height(560.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .max_height(sheet_height(ctx))
@@ -4173,27 +4254,25 @@ impl App {
                     );
                     return;
                 }
+
                 ui.label(
                     RichText::new(
                         "Grouped by the sound in the file rather than by its name, so the \
-                         same rip tagged twice is one record here. The copy this would keep \
-                         is on top.",
+                         same rip tagged twice is one record here. What only a copy knows \
+                         is folded into the one kept, on top, before the rest go.",
                     )
                     .color(theme::DIM)
                     .size(theme::SMALL),
                 );
-                ui.add_space(4.0);
-                if ui
-                    .button(RichText::new("Tick every identical file").size(theme::SMALL))
-                    .on_hover_text("The ones that are byte-for-byte the copy above them")
-                    .clicked()
-                {
-                    tick_all_identical = true;
-                }
                 ui.add_space(8.0);
 
+                // The list scrolls; the footer does not. Its height is taken
+                // out of the list's before the list is drawn, so the button
+                // that does the deleting cannot be pushed off the bottom of the
+                // sheet by a long enough collection.
+                let list_height = (ui.available_height() - FOOTER_HEIGHT).max(120.0);
                 egui::ScrollArea::vertical()
-                    .max_height(sheet_height(ctx) - 150.0)
+                    .max_height(list_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for group in &groups {
@@ -4213,88 +4292,181 @@ impl App {
                             });
                             for copy in &group.rest {
                                 let Some(track) = self.library.get(copy.id) else { continue };
+                                let path = track.path.display().to_string();
+                                let plan = plans.get(&copy.id).cloned().unwrap_or_default();
+                                // Every disagreement answered is a copy that is
+                                // no longer waiting on anybody.
+                                let answered = plan
+                                    .conflicts
+                                    .iter()
+                                    .all(|c| state.picked.contains_key(&(copy.id, c.field)));
+
                                 ui.horizontal(|ui| {
                                     ui.add_space(14.0);
-                                    let mut on = ticked.contains(&copy.id);
-                                    if ui.checkbox(&mut on, "").changed() {
+                                    let mut on = state.ticked.contains(&copy.id);
+                                    if ui
+                                        .add_enabled(
+                                            answered,
+                                            egui::Checkbox::without_text(&mut on),
+                                        )
+                                        .on_disabled_hover_text("Say which answer is right first")
+                                        .changed()
+                                    {
                                         match on {
-                                            true => ticked.insert(copy.id),
-                                            false => ticked.remove(&copy.id),
+                                            true => state.ticked.insert(copy.id),
+                                            false => state.ticked.remove(&copy.id),
                                         };
                                     }
-                                    let (note, color) = match copy.identical {
-                                        true => ("identical", theme::DIM),
-                                        // Said plainly, because it is the one case
-                                        // where deleting costs something.
-                                        false => ("same sound, different tags", theme::AMBER),
-                                    };
                                     ui.label(
-                                        RichText::new(format!("{}", track.path.display()))
+                                        RichText::new(path)
                                             .font(theme::mono(10.0))
                                             .color(theme::DIM),
                                     );
+                                    let (note, color) = match (copy.identical, answered) {
+                                        (true, _) => ("identical".to_string(), theme::DIM),
+                                        (false, false) => (
+                                            format!(
+                                                "disagrees about {}",
+                                                plan.conflicts
+                                                    .iter()
+                                                    .map(|c| c.field.name())
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            ),
+                                            theme::ALERT,
+                                        ),
+                                        (false, true) => (plan.summary(), theme::AMBER),
+                                    };
                                     ui.label(RichText::new(note).size(theme::SMALL).color(color));
                                 });
+
+                                // One line per disagreement, with both answers
+                                // to choose between. Answering the last one
+                                // ticks the copy, because that is what having
+                                // answered it means.
+                                for conflict in &plan.conflicts {
+                                    let key = (copy.id, conflict.field);
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(38.0);
+                                        ui.label(
+                                            RichText::new(format!("{}:", conflict.field.name()))
+                                                .size(theme::SMALL)
+                                                .color(theme::DIM),
+                                        );
+                                        for (side, value) in [
+                                            (Side::Kept, &conflict.kept),
+                                            (Side::Other, &conflict.other),
+                                        ] {
+                                            let chosen = state.picked.get(&key) == Some(&side);
+                                            // A radio rather than a label that
+                                            // happens to be clickable: this is
+                                            // the one place in the sheet that
+                                            // is waiting on a person, and it
+                                            // has to look like it.
+                                            if ui
+                                                .radio(
+                                                    chosen,
+                                                    RichText::new(value).size(theme::SMALL),
+                                                )
+                                                .on_hover_text(match side {
+                                                    Side::Kept => "what the kept copy says",
+                                                    Side::Other => "what this copy says",
+                                                })
+                                                .clicked()
+                                            {
+                                                state.picked.insert(key, side);
+                                                if plan.conflicts.iter().all(|c| {
+                                                    c.field == conflict.field
+                                                        || state
+                                                            .picked
+                                                            .contains_key(&(copy.id, c.field))
+                                                }) {
+                                                    state.ticked.insert(copy.id);
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
                             }
                             ui.add_space(8.0);
                         }
                     });
+
+                // The footer, in the space kept for it above.
+                ui.separator();
+                let bytes: u64 = state
+                    .ticked
+                    .iter()
+                    .filter_map(|id| self.library.get(*id))
+                    .map(|track| track.bytes)
+                    .sum();
+                let waiting = plans
+                    .iter()
+                    .filter(|(id, plan)| {
+                        !plan.is_clean()
+                            && !plan
+                                .conflicts
+                                .iter()
+                                .all(|c| state.picked.contains_key(&(**id, c.field)))
+                    })
+                    .count();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !state.ticked.is_empty(),
+                            egui::Button::new(
+                                RichText::new(format!(
+                                    "Move {} to the trash  ({})",
+                                    plural(state.ticked.len(), "file"),
+                                    crate::sync::bytes(bytes)
+                                ))
+                                .color(theme::BOOTH)
+                                .strong(),
+                            )
+                            .fill(theme::ALERT),
+                        )
+                        .on_hover_text(
+                            "To the trash, not gone: this is the one thing here that touches \
+                             your music",
+                        )
+                        .clicked()
+                    {
+                        delete = true;
+                    }
+                    if ui
+                        .button(RichText::new("Untick all").size(theme::SMALL))
+                        .on_hover_text("Start again from nothing chosen")
+                        .clicked()
+                    {
+                        state.ticked.clear();
+                    }
+                    if waiting > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} still waiting on an answer",
+                                plural(waiting, "copy")
+                            ))
+                            .size(theme::SMALL)
+                            .color(theme::ALERT),
+                        );
+                    }
+                });
             });
 
-        if tick_all_identical {
-            for group in &groups {
-                for copy in group.rest.iter().filter(|copy| copy.identical) {
-                    ticked.insert(copy.id);
-                }
-            }
-        }
-
-        // The button lives outside the scrolling list so it cannot be scrolled
-        // away from, and says what it is about to do rather than "OK".
-        if !groups.is_empty() && open {
-            let bytes: u64 =
-                ticked.iter().filter_map(|id| self.library.get(*id)).map(|t| t.bytes).sum();
-            egui::Area::new(egui::Id::new("duplicates-action"))
-                .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
-                .show(ctx, |ui| {
-                    egui::Frame::NONE
-                        .fill(theme::BOOTH_2)
-                        .stroke(egui::Stroke::new(1.0, theme::RULE))
-                        .inner_margin(egui::Margin::same(10))
-                        .show(ui, |ui| {
-                            if ui
-                                .add_enabled(
-                                    !ticked.is_empty(),
-                                    egui::Button::new(
-                                        RichText::new(format!(
-                                            "Move {} to the trash  ({})",
-                                            plural(ticked.len(), "file"),
-                                            crate::sync::bytes(bytes)
-                                        ))
-                                        .color(theme::BOOTH)
-                                        .strong(),
-                                    )
-                                    .fill(theme::ALERT),
-                                )
-                                .on_hover_text(
-                                    "To the trash, not gone: this is the one thing here that \
-                                     touches your music",
-                                )
-                                .clicked()
-                            {
-                                delete = true;
-                            }
-                        });
-                });
-        }
-
-        match open {
-            true => self.duplicates = Some(ticked.clone()),
-            false => self.duplicates = None,
-        }
         if delete {
-            self.pending.push(Pending::TrashDuplicates(ticked.into_iter().collect()));
+            // The picks travel with the ids: by the time this runs the sheet is
+            // shut, and the merge still has to know how each disagreement was
+            // settled.
+            let ticked: Vec<u32> = state.ticked.iter().copied().collect();
+            let picked: Vec<(u32, Field, Side)> =
+                state.picked.iter().map(|((id, field), side)| (*id, *field, *side)).collect();
+            self.pending.push(Pending::TrashDuplicates { ticked, picked });
             self.duplicates = None;
+        } else {
+            match open {
+                true => self.duplicates = Some(state),
+                false => self.duplicates = None,
+            }
         }
         if look {
             self.hash_unchecked();
@@ -5800,7 +5972,7 @@ mod tests {
             // brace — and it is what a person tries first.
             let mut app = app("escape");
             app.settings = true;
-            app.duplicates = Some(std::collections::HashSet::new());
+            app.duplicates = Some(Dupes::default());
 
             assert!(app.close_top_sheet(), "nothing was closed");
             assert!(app.duplicates.is_none(), "the front sheet stayed open");
@@ -5853,6 +6025,168 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
+        /// Two real files holding the same "audio", so a group forms and the
+        /// trashing has something to delete.
+        ///
+        /// One inside the library folder and one outside it, because that is
+        /// the first rule for which copy is kept — and the only one that does
+        /// not move when a test gives a copy more metadata than the other.
+        fn two_copies(name: &str) -> (App, std::path::PathBuf, u32, u32) {
+            let dir = std::env::temp_dir().join(format!("booth-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let inside = dir.join("library");
+            let outside = dir.join("downloads");
+            std::fs::create_dir_all(&inside).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            let keep_at = inside.join("keep.flac");
+            let copy_at = outside.join("copy.flac");
+            std::fs::write(&keep_at, b"same bytes").unwrap();
+            std::fs::write(&copy_at, b"same bytes").unwrap();
+
+            let mut app = app(name);
+            app.config.library_path = inside;
+            let keep = app.library.add(&keep_at);
+            let other = app.library.add(&copy_at);
+            for id in [keep, other] {
+                let track = app.library.get_mut(id).unwrap();
+                track.audio_hash = "SAME".into();
+                track.file_hash = format!("FILE{id}");
+                track.artist = "Peverelist".into();
+                track.title = "Sirens".into();
+            }
+            // The one to keep knows more than the copy, which is what makes it
+            // the one to keep — so a test can add something to the copy without
+            // quietly turning it into the keeper.
+            {
+                let track = app.library.get_mut(keep).unwrap();
+                track.album = "Livity Sound".into();
+                track.year = Some(2019);
+                track.analyzed = true;
+            }
+            assert_eq!(
+                app.library.duplicate_groups(&app.config.library_path)[0].keep,
+                keep,
+                "the copy that knows the most is the one kept"
+            );
+            (app, dir, keep, other)
+        }
+
+        #[test]
+        fn what_only_the_copy_knows_survives_being_rid_of_it() {
+            // The point of merging: throwing away a duplicate should cost
+            // nothing at all, so the album name that was only on the download
+            // has to be on the kept track before the file goes.
+            let (mut app, dir, keep, other) = two_copies("merge-trash");
+            {
+                let track = app.library.get_mut(other).unwrap();
+                track.tags = vec!["peak".into()];
+                track.cues = vec![crate::library::CueMark {
+                    letter: 1,
+                    time_ms: 32_000,
+                    label: "in".into(),
+                    color: [1, 2, 3],
+                }];
+            }
+            app.library.add_playlist("Saturday", "").unwrap();
+            app.library.playlists[0].tracks.push(other);
+
+            app.trash_duplicates(&[other], &[]);
+
+            let kept = app.library.get(keep).expect("the kept track went");
+            assert_eq!(kept.tags, vec!["peak".to_string()], "the tag went with the file");
+            assert_eq!(kept.cues.len(), 1, "so did somebody's cue");
+            assert_eq!(
+                app.library.playlists[0].tracks,
+                vec![keep],
+                "the playlist was emptied instead of being pointed at the copy that stayed"
+            );
+            assert!(app.library.get(other).is_none(), "the copy is still listed");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_disagreement_is_settled_the_way_it_was_answered() {
+            let (mut app, dir, keep, other) = two_copies("merge-pick");
+            app.library.get_mut(other).unwrap().title = "Sirens (Original Mix)".into();
+
+            app.trash_duplicates(
+                &[other],
+                &[(other, crate::library::Field::Title, crate::library::Side::Other)],
+            );
+
+            assert_eq!(
+                app.library.get(keep).unwrap().title,
+                "Sirens (Original Mix)",
+                "the answer given in the sheet was not the one applied"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn the_copies_with_nothing_to_decide_are_ticked_and_the_rest_are_not() {
+            // What opening the sheet should do on its own: an identical file is
+            // a no-brainer and so is one that only fills blanks in, but a copy
+            // that contradicts the kept track has to wait for a person.
+            let (mut app, dir, _keep, clean) = two_copies("ticks");
+            let arguing = app.library.add(&dir.join("downloads").join("third.flac"));
+            {
+                let track = app.library.get_mut(arguing).unwrap();
+                track.audio_hash = "SAME".into();
+                track.file_hash = "FILE-THIRD".into();
+                track.artist = "Peverelist".into();
+                track.title = "Sirens (Original Mix)".into();
+            }
+            app.library.get_mut(clean).unwrap().tags = vec!["peak".into()];
+            app.duplicates = Some(Dupes::default());
+
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.duplicates_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+
+            let state = harness.state().duplicates.as_ref().expect("the sheet shut itself");
+            assert!(
+                state.ticked.contains(&clean),
+                "a copy that only fills blanks in was not ticked"
+            );
+            assert!(
+                !state.ticked.contains(&arguing),
+                "a copy that contradicts the kept track was ticked without being asked about"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn unticking_a_copy_is_not_undone_on_the_next_frame() {
+            let (mut app, dir, _keep, clean) = two_copies("sticky");
+            app.duplicates = Some(Dupes::default());
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.duplicates_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+            assert!(harness.state().duplicates.as_ref().unwrap().ticked.contains(&clean));
+
+            harness.state_mut().duplicates.as_mut().unwrap().ticked.remove(&clean);
+            harness.run();
+            harness.run();
+
+            assert!(
+                !harness.state().duplicates.as_ref().unwrap().ticked.contains(&clean),
+                "the opening ticks were applied again over what the user did"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
         #[test]
         fn trashing_a_duplicate_removes_the_file_and_the_track() {
             // Against real files, because this is the one thing in the program
@@ -5880,7 +6214,7 @@ mod tests {
                 track.audio_hash = "SAME".into();
             }
 
-            app.trash_duplicates(&[doomed]);
+            app.trash_duplicates(&[doomed], &[]);
 
             assert!(keep.exists(), "the wrong file went");
             assert!(!copy.exists(), "the duplicate is still on disk");
@@ -5898,7 +6232,7 @@ mod tests {
             let mut app = app("stubborn");
             let id = app.library.add(std::path::Path::new("/nowhere/at/all/missing.flac"));
 
-            app.trash_duplicates(&[id]);
+            app.trash_duplicates(&[id], &[]);
             assert!(
                 app.library.get(id).is_some(),
                 "the track was forgotten though its file could not be trashed"

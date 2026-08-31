@@ -82,6 +82,37 @@ impl StemKit {
         self.vocals.is_some() && self.melody.is_some() && self.drums.is_some()
     }
 
+    /// The parts `other` has rendered that this kit has not.
+    ///
+    /// A stem kit is rendered from the audio, and two copies of a recording
+    /// hold the same audio, so a part rendered from either one is the same
+    /// sound — which is what makes taking one from a copy sound rather than
+    /// merely convenient.
+    pub fn missing_from(&self, other: &StemKit) -> Vec<&'static str> {
+        [
+            ("vocals", &self.vocals, &other.vocals),
+            ("drums", &self.drums, &other.drums),
+            ("melody", &self.melody, &other.melody),
+        ]
+        .into_iter()
+        .filter(|(_, mine, theirs)| mine.is_none() && theirs.is_some())
+        .map(|(name, _, _)| name)
+        .collect()
+    }
+
+    /// Take the parts this kit lacks from `other`, leaving the rest alone.
+    pub fn fill_from(&mut self, other: &StemKit) {
+        for (mine, theirs) in [
+            (&mut self.vocals, &other.vocals),
+            (&mut self.drums, &other.drums),
+            (&mut self.melody, &other.melody),
+        ] {
+            if mine.is_none() {
+                mine.clone_from(theirs);
+            }
+        }
+    }
+
     /// The parts, in the order their rows hang under the parent, so that the
     /// browser and the drive's browse list agree about what comes second.
     pub fn each(&self) -> [(&'static str, Option<&PathBuf>); 3] {
@@ -203,6 +234,34 @@ pub struct Track {
 }
 
 impl Track {
+    /// How much is known about this track, for choosing between copies of the
+    /// same recording.
+    ///
+    /// Kinds of thing first, quantity second: a copy carrying eight tags and
+    /// nothing else does not know more about a record than one carrying an
+    /// album, a year and one tag, so counting tags alongside fields would let
+    /// the noisiest copy win. Only after the kinds tie does the amount decide.
+    ///
+    /// Everything here is something a person typed or a lookup filled in.
+    /// Length, format and bitrate are not: they describe the file, and the
+    /// copies of a recording hold the same audio by definition.
+    pub fn how_much_is_known(&self) -> (usize, usize) {
+        let kinds = [
+            !self.artist.trim().is_empty(),
+            !self.title.trim().is_empty(),
+            !self.album.trim().is_empty(),
+            self.year.is_some(),
+            !self.tags.is_empty(),
+            !self.cues.is_empty(),
+            self.analyzed,
+            !self.stems.is_empty(),
+        ]
+        .into_iter()
+        .filter(|known| *known)
+        .count();
+        (kinds, self.tags.len() + self.cues.len())
+    }
+
     /// A record with nothing known about it yet, which is what a freshly
     /// scanned file is.
     pub fn placeholder(id: u32) -> Self {
@@ -430,6 +489,90 @@ pub fn energy_from(intensity: f32) -> u8 {
         return 0;
     }
     1 + STEPS.iter().filter(|&&step| intensity >= step).count() as u8
+}
+
+/// One thing about a recording that two copies of it can differ on.
+///
+/// Only the things a person put there or a lookup filled in. Everything else a
+/// track carries — its size, its format, where it is — describes the file
+/// rather than the recording, and the whole point of a group is that the
+/// recording is the same.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub enum Field {
+    Artist,
+    Title,
+    Album,
+    Year,
+    Cues,
+    Tags,
+    Playlists,
+    Plays,
+    Stems,
+    /// The grid, key, energy and phrases — the hours of listening.
+    Analysis,
+}
+
+impl Field {
+    pub fn name(self) -> &'static str {
+        match self {
+            Field::Artist => "artist",
+            Field::Title => "title",
+            Field::Album => "album",
+            Field::Year => "year",
+            Field::Cues => "cues",
+            Field::Tags => "tags",
+            Field::Playlists => "playlists",
+            Field::Plays => "plays",
+            Field::Stems => "stems",
+            Field::Analysis => "analysis",
+        }
+    }
+}
+
+/// Whose answer to take where two copies disagree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Side {
+    Kept,
+    Other,
+}
+
+/// Something one copy says that the kept track disagrees with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Disagreement {
+    pub field: Field,
+    pub kept: String,
+    pub other: String,
+}
+
+/// What folding one copy into the kept track would do.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Merge {
+    /// What the kept track has nothing for, which this copy can fill in. Not a
+    /// decision anybody needs to be asked about: a blank has no other answer.
+    pub adds: Vec<(Field, String)>,
+    /// What they both say something about, and say differently. The only part
+    /// that needs a person.
+    pub conflicts: Vec<Disagreement>,
+}
+
+impl Merge {
+    /// Whether this copy can be folded in without asking anybody anything.
+    pub fn is_clean(&self) -> bool {
+        self.conflicts.is_empty()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.adds.is_empty() && self.conflicts.is_empty()
+    }
+
+    /// What it would add, for the one line the sheet has room for.
+    pub fn summary(&self) -> String {
+        let names: Vec<&str> = self.adds.iter().map(|(field, _)| field.name()).collect();
+        match names.is_empty() {
+            true => "nothing the kept copy lacks".to_string(),
+            false => format!("adds {}", names.join(", ")),
+        }
+    }
 }
 
 /// A set of tracks that are the same recording.
@@ -788,20 +931,6 @@ impl Library {
         }
     }
 
-    /// Tracks that are the same recording, grouped, worst offenders first.
-    ///
-    /// Grouped by the audio's hash alone, because that is the broader of the
-    /// two relations and contains the other: identical bytes mean identical
-    /// audio, so anything the file hash would pair is already together here.
-    /// Grouping by both in turn instead made a byte-identical pair use up its
-    /// members, and a third copy of the same recording carrying different tags
-    /// was then left on its own and reported as nothing at all.
-    ///
-    /// The one to keep is the copy inside the library folder when there is
-    /// one, because that is the copy this program is responsible for and the
-    /// rest are somebody's download folder; failing that, the one with the
-    /// most filled in, since that is the work that would be lost. Never the
-    /// shortest path or the newest file: both are accidents.
     /// The tracks whose audio has never been hashed, and where their files are.
     ///
     /// Import hashes as it goes, so these are the ones that were already in the
@@ -816,6 +945,217 @@ impl Library {
             .collect()
     }
 
+    /// What folding one copy into the one being kept would do.
+    ///
+    /// The two hold the same recording, so the file's own numbers — length,
+    /// format, bitrate — cannot differ in any way worth reporting. What can
+    /// differ is what somebody wrote down about it, and there the rule is that
+    /// a blank is not an opinion: where the kept track says nothing and the
+    /// copy says something, the copy is simply right, and nobody needs asking.
+    /// Only where both say something, and say it differently, is there a
+    /// question — and that is the only thing this reports as a conflict.
+    pub fn plan_merge(&self, keep: u32, other: u32) -> Merge {
+        let mut merge = Merge::default();
+        let (Some(kept), Some(copy)) = (self.get(keep), self.get(other)) else { return merge };
+
+        /// A blank on the kept side is filled; two different answers are asked
+        /// about; the same answer twice is nothing at all.
+        fn words(merge: &mut Merge, field: Field, kept: &str, other: &str) {
+            let (kept, other) = (kept.trim(), other.trim());
+            if other.is_empty() || kept == other {
+                return;
+            }
+            match kept.is_empty() {
+                true => merge.adds.push((field, other.to_string())),
+                false => merge.conflicts.push(Disagreement {
+                    field,
+                    kept: kept.to_string(),
+                    other: other.to_string(),
+                }),
+            }
+        }
+
+        words(&mut merge, Field::Artist, &kept.artist, &copy.artist);
+        words(&mut merge, Field::Title, &kept.title, &copy.title);
+        words(&mut merge, Field::Album, &kept.album, &copy.album);
+        words(
+            &mut merge,
+            Field::Year,
+            &kept.year.map(|y| y.to_string()).unwrap_or_default(),
+            &copy.year.map(|y| y.to_string()).unwrap_or_default(),
+        );
+
+        // Tags are a set, so two different sets are not a disagreement: having
+        // been called both "peak" and "warmup" by two different imports is
+        // something a person did twice, not something to choose between.
+        let new_tags: Vec<String> =
+            copy.tags.iter().filter(|tag| !kept.tags.contains(tag)).cloned().collect();
+        if !new_tags.is_empty() {
+            merge.adds.push((Field::Tags, new_tags.join(", ")));
+        }
+
+        // A playlist holding the copy should hold the kept one instead. Also
+        // not a disagreement: the answer is both.
+        let joins: Vec<&str> = self
+            .playlists
+            .iter()
+            .filter(|list| list.tracks.contains(&other) && !list.tracks.contains(&keep))
+            .map(|list| list.name.as_str())
+            .collect();
+        if !joins.is_empty() {
+            merge.adds.push((Field::Playlists, joins.join(", ")));
+        }
+
+        if copy.play_count > 0 {
+            merge.adds.push((Field::Plays, plural(copy.play_count as usize, "play")));
+        }
+
+        let stems = kept.stems.missing_from(&copy.stems).len();
+        if stems > 0 {
+            merge.adds.push((Field::Stems, plural(stems, "part")));
+        }
+
+        // Cues are placed by hand against the audio, and the audio is the same
+        // in both, so the copy's marks are as good as the kept one's. Two
+        // different sets is a real question — one of them is somebody's work.
+        if kept.cues != copy.cues && !copy.cues.is_empty() {
+            let describe = |cues: &[CueMark]| plural(cues.len(), "cue");
+            match kept.cues.is_empty() {
+                true => merge.adds.push((Field::Cues, describe(&copy.cues))),
+                false => merge.conflicts.push(Disagreement {
+                    field: Field::Cues,
+                    kept: describe(&kept.cues),
+                    other: describe(&copy.cues),
+                }),
+            }
+        }
+
+        // The listening is hours of work and is the same measurement of the
+        // same audio, so an unanalysed keeper takes it. Two analyses are never
+        // asked about: they measured identical bytes, so any difference between
+        // them is noise, and there is nothing to choose.
+        if !kept.analyzed && copy.analyzed {
+            let what = match copy.key.is_empty() {
+                true => format!("{:.1} bpm", copy.bpm),
+                false => format!("{:.1} bpm, {}", copy.bpm, copy.key),
+            };
+            merge.adds.push((Field::Analysis, what));
+        }
+
+        merge.adds.sort_by_key(|(field, _)| *field);
+        merge.conflicts.sort_by_key(|conflict| conflict.field);
+        merge
+    }
+
+    /// Fold one copy into the one being kept, taking `picks` where they differ.
+    ///
+    /// Everything the kept track had nothing for is filled in; anything they
+    /// disagree about stays as the kept track had it unless `picks` says
+    /// otherwise. Call this before removing the copy — playlists still holding
+    /// it are moved over here, and once it is gone there is nothing to move.
+    pub fn merge_copy(&mut self, keep: u32, other: u32, picks: &HashMap<Field, Side>) {
+        let plan = self.plan_merge(keep, other);
+        let Some(copy) = self.get(other).cloned() else { return };
+
+        // Whether the kept track ends up with the copy's answer for a field:
+        // either it had none, or it had one and the copy's was chosen.
+        let take = |field: Field| {
+            plan.adds.iter().any(|(seen, _)| *seen == field)
+                || (plan.conflicts.iter().any(|c| c.field == field)
+                    && picks.get(&field) == Some(&Side::Other))
+        };
+
+        // Playlists first, while there are still two tracks for them to point
+        // at. In place, so the order somebody built the list in survives.
+        if take(Field::Playlists) {
+            for list in &mut self.playlists {
+                if !list.tracks.contains(&keep) {
+                    for slot in list.tracks.iter_mut().filter(|t| **t == other) {
+                        *slot = keep;
+                    }
+                }
+            }
+        }
+
+        let analysis = take(Field::Analysis);
+        let Some(kept) = self.get_mut(keep) else { return };
+
+        if take(Field::Artist) {
+            kept.artist = copy.artist.clone();
+        }
+        if take(Field::Title) {
+            kept.title = copy.title.clone();
+        }
+        if take(Field::Album) {
+            kept.album = copy.album.clone();
+        }
+        if take(Field::Year) {
+            kept.year = copy.year;
+        }
+        if take(Field::Tags) {
+            for tag in &copy.tags {
+                if !kept.tags.contains(tag) {
+                    kept.tags.push(tag.clone());
+                }
+            }
+        }
+        if take(Field::Cues) {
+            kept.cues = copy.cues.clone();
+        }
+        if take(Field::Plays) {
+            kept.play_count += copy.play_count;
+        }
+        // Outside its field: the later of two dates is the answer whichever
+        // copy it came from, and it is not something to be asked about.
+        kept.last_played = kept.last_played.max(copy.last_played);
+        if take(Field::Stems) {
+            kept.stems.fill_from(&copy.stems);
+        }
+        if analysis {
+            kept.bpm = copy.bpm;
+            kept.grid_confidence = copy.grid_confidence;
+            kept.has_grid = copy.has_grid;
+            kept.key = copy.key.clone();
+            kept.key_confidence = copy.key_confidence;
+            kept.energy = copy.energy;
+            kept.intensity = copy.intensity;
+            kept.beats = copy.beats;
+            kept.phrases = copy.phrases.clone();
+            kept.loudness_lufs = copy.loudness_lufs;
+            kept.peak_dbtp = copy.peak_dbtp;
+            kept.analyzed = true;
+            if kept.cues.is_empty() {
+                kept.cues = copy.cues.clone();
+            }
+        }
+        // The picture and the stem envelopes are cached under the track's id,
+        // so taking the listening without them would leave a track that says
+        // it is analysed and draws nothing until it is analysed again.
+        if analysis {
+            if let Some(bands) = cached_waveform(other) {
+                let _ = cache_waveform(keep, &bands);
+            }
+            if let Some(envelopes) = cached_envelopes(other) {
+                let _ = cache_envelopes(keep, &envelopes);
+            }
+        }
+    }
+
+    /// Tracks that are the same recording, grouped, worst offenders first.
+    ///
+    /// Grouped by the audio's hash alone, because that is the broader of the
+    /// two relations and contains the other: identical bytes mean identical
+    /// audio, so anything the file hash would pair is already together here.
+    /// Grouping by both in turn instead made a byte-identical pair use up its
+    /// members, and a third copy of the same recording carrying different tags
+    /// was then left on its own and reported as nothing at all.
+    ///
+    /// The one to keep is the copy that knows the most about the record — the
+    /// one with the album, the year, the tags, the cues, the listening — since
+    /// that is the work that would be lost, and since a disagreement between
+    /// two copies is settled in the keeper's favour unless somebody says
+    /// otherwise. Being inside the library folder only breaks a tie. Never the
+    /// shortest path or the newest file: both are accidents.
     pub fn duplicate_groups(&self, library_path: &Path) -> Vec<Copies> {
         let mut by_audio: Vec<(&str, Vec<u32>)> = Vec::new();
         for track in self.tracks.iter().filter(|t| t.role == Role::Track) {
@@ -856,20 +1196,24 @@ impl Library {
 
     /// Which of a set of copies to keep. See [`Library::duplicate_groups`].
     fn pick_keeper(&self, ids: &[u32], library_path: &Path) -> u32 {
-        // The last of the three settles a tie: without it, two copies that
-        // score the same left the answer to whichever `max_by_key` happened to
-        // reach last, which is neither a decision nor the same one twice. The
-        // earliest known copy is the one that playlists and drives already
-        // point at, so it is the one to keep.
-        let score = |id: &u32| -> (bool, usize, std::cmp::Reverse<u32>) {
-            let Some(track) = self.get(*id) else { return (false, 0, std::cmp::Reverse(*id)) };
-            let inside = track.path.starts_with(library_path);
-            let named = [&track.artist, &track.title, &track.album]
-                .iter()
-                .filter(|field| !field.trim().is_empty())
-                .count()
-                + track.tags.len();
-            (inside, named, std::cmp::Reverse(*id))
+        // Most known first, because the copy that knows the most is the one
+        // whose answer should stand where two of them disagree — and a
+        // disagreement is decided in the keeper's favour unless somebody says
+        // otherwise. Being inside the library folder only settles a tie: it
+        // says which copy this program is responsible for, not which one is
+        // right about the record.
+        //
+        // The last term settles the rest. Without it two copies that score the
+        // same left the answer to whichever `max_by_key` happened to reach
+        // last, which is neither a decision nor the same one twice; the
+        // earliest known copy is the one playlists and drives already point at.
+        let score = |id: &u32| -> ((usize, usize), bool, std::cmp::Reverse<u32>) {
+            let Some(track) = self.get(*id) else { return ((0, 0), false, std::cmp::Reverse(*id)) };
+            (
+                track.how_much_is_known(),
+                track.path.starts_with(library_path),
+                std::cmp::Reverse(*id),
+            )
         };
         ids.iter().max_by_key(|id| score(id)).copied().unwrap_or(ids[0])
     }
@@ -1021,14 +1365,21 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
-/// "1 track", "2 tracks".
+/// "1 track", "2 tracks", "3 copies".
 ///
 /// Here rather than in the window because the log needs it too, and a run whose
 /// log says "1 tracks" reads like nobody checked.
 pub fn plural(count: usize, noun: &str) -> String {
-    match count {
-        1 => format!("1 {noun}"),
-        n => format!("{n} {noun}s"),
+    if count == 1 {
+        return format!("1 {noun}");
+    }
+    // A noun ending in a consonant and a y takes -ies, which is the difference
+    // between "3 copies" and "3 copys". Everything else here takes -s.
+    let vowel = |c: char| "aeiou".contains(c);
+    match noun.strip_suffix('y').filter(|stem| stem.chars().next_back().is_some_and(|c| !vowel(c)))
+    {
+        Some(stem) => format!("{count} {stem}ies"),
+        None => format!("{count} {noun}s"),
     }
 }
 
@@ -1285,6 +1636,213 @@ mod tests {
         track.file_hash = file.into();
         track.audio_hash = audio.into();
         id
+    }
+
+    #[test]
+    fn counting_things_reads_like_somebody_checked() {
+        assert_eq!(plural(1, "track"), "1 track");
+        assert_eq!(plural(2, "track"), "2 tracks");
+        assert_eq!(plural(3, "copy"), "3 copies", "not \"copys\"");
+        assert_eq!(plural(1, "copy"), "1 copy");
+        // A vowel before the y keeps the plain -s: days, not daies.
+        assert_eq!(plural(2, "day"), "2 days");
+    }
+
+    #[test]
+    fn a_blank_is_filled_in_without_being_asked_about() {
+        let mut library = Library::new();
+        let keep = copy_of(&mut library, "/music/a.flac", "F1", "A1");
+        let other = copy_of(&mut library, "/downloads/a.flac", "F2", "A1");
+        {
+            let track = library.get_mut(keep).unwrap();
+            track.artist = "Peverelist".into();
+        }
+        {
+            let track = library.get_mut(other).unwrap();
+            track.artist = "Peverelist".into();
+            track.album = "Livity Sound".into();
+            track.year = Some(2019);
+            track.tags = vec!["peak".into()];
+            track.play_count = 3;
+        }
+
+        let plan = library.plan_merge(keep, other);
+        assert!(plan.is_clean(), "nothing here disagrees: {:?}", plan.conflicts);
+        let added: Vec<&str> = plan.adds.iter().map(|(field, _)| field.name()).collect();
+        assert_eq!(added, vec!["album", "year", "tags", "plays"]);
+
+        library.merge_copy(keep, other, &HashMap::new());
+        let kept = library.get(keep).unwrap();
+        assert_eq!(kept.album, "Livity Sound");
+        assert_eq!(kept.year, Some(2019));
+        assert_eq!(kept.tags, vec!["peak".to_string()]);
+        assert_eq!(kept.play_count, 3, "the plays of both copies are the plays of the record");
+        assert_eq!(kept.artist, "Peverelist", "the answer they agreed on did not change");
+    }
+
+    #[test]
+    fn two_different_answers_are_a_question_rather_than_a_choice_made_quietly() {
+        let mut library = Library::new();
+        let keep = copy_of(&mut library, "/music/a.flac", "F1", "A1");
+        let other = copy_of(&mut library, "/downloads/a.flac", "F2", "A1");
+        library.get_mut(keep).unwrap().title = "Sirens".into();
+        {
+            let track = library.get_mut(other).unwrap();
+            track.title = "Sirens (Original Mix)".into();
+            track.album = "Livity Sound".into();
+        }
+
+        let plan = library.plan_merge(keep, other);
+        assert!(!plan.is_clean(), "a title said two ways is a conflict");
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].field, Field::Title);
+        assert_eq!(plan.conflicts[0].kept, "Sirens");
+        assert_eq!(plan.conflicts[0].other, "Sirens (Original Mix)");
+        assert_eq!(
+            plan.adds.iter().map(|(f, _)| f.name()).collect::<Vec<_>>(),
+            vec!["album"],
+            "the blank is still filled in; only the disagreement waits"
+        );
+
+        // Unanswered, the kept track's own answer stands.
+        let mut quiet = library.clone();
+        quiet.merge_copy(keep, other, &HashMap::new());
+        assert_eq!(quiet.get(keep).unwrap().title, "Sirens");
+        assert_eq!(quiet.get(keep).unwrap().album, "Livity Sound");
+
+        // Answered the other way, the copy's does.
+        library.merge_copy(keep, other, &HashMap::from([(Field::Title, Side::Other)]));
+        assert_eq!(library.get(keep).unwrap().title, "Sirens (Original Mix)");
+    }
+
+    #[test]
+    fn the_listening_and_the_playlists_come_across() {
+        let mut library = Library::new();
+        let keep = copy_of(&mut library, "/music/a.flac", "F1", "A1");
+        let other = copy_of(&mut library, "/downloads/a.flac", "F2", "A1");
+        {
+            let track = library.get_mut(other).unwrap();
+            track.analyzed = true;
+            track.bpm = 128.5;
+            track.key = "8A".into();
+            track.has_grid = true;
+            track.cues =
+                vec![CueMark { letter: 1, time_ms: 1000, label: String::new(), color: [1, 2, 3] }];
+        }
+        library.add_playlist("Saturday peak", "").unwrap();
+        library.playlists[0].tracks.push(other);
+
+        let plan = library.plan_merge(keep, other);
+        assert!(plan.is_clean(), "an unanalysed track has no opinion to contradict");
+        library.merge_copy(keep, other, &HashMap::new());
+
+        let kept = library.get(keep).unwrap();
+        assert!(kept.analyzed, "the hours of listening were thrown away");
+        assert_eq!(kept.bpm, 128.5);
+        assert_eq!(kept.key, "8A");
+        assert_eq!(kept.cues.len(), 1, "the cues came with it");
+        assert_eq!(
+            library.playlists[0].tracks,
+            vec![keep],
+            "the playlist was left pointing at the copy that is about to go"
+        );
+    }
+
+    #[test]
+    fn two_analyses_of_the_same_audio_are_not_a_question() {
+        // They measured identical bytes. Any difference between them is noise,
+        // and asking somebody to choose between two noises is not a question.
+        let mut library = Library::new();
+        let keep = copy_of(&mut library, "/music/a.flac", "F1", "A1");
+        let other = copy_of(&mut library, "/downloads/a.flac", "F2", "A1");
+        for (id, bpm) in [(keep, 128.02), (other, 128.03)] {
+            let track = library.get_mut(id).unwrap();
+            track.analyzed = true;
+            track.bpm = bpm;
+        }
+
+        let plan = library.plan_merge(keep, other);
+        assert!(plan.is_clean(), "{:?}", plan.conflicts);
+        assert!(
+            !plan.adds.iter().any(|(field, _)| *field == Field::Analysis),
+            "the kept track's own listening should stand"
+        );
+        library.merge_copy(keep, other, &HashMap::new());
+        assert_eq!(library.get(keep).unwrap().bpm, 128.02);
+    }
+
+    #[test]
+    fn the_copy_that_knows_the_most_is_kept_wherever_it_sits() {
+        // Where two copies disagree the kept one's answer stands, so the kept
+        // one had better be the copy that knows the record — not merely the
+        // copy that happens to be in the right folder.
+        let mut library = Library::new();
+        let bare = copy_of(&mut library, "/music/a.flac", "F1", "A1");
+        let full = copy_of(&mut library, "/downloads/a.flac", "F2", "A1");
+        {
+            let track = library.get_mut(bare).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+        }
+        {
+            let track = library.get_mut(full).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+            track.album = "Livity Sound".into();
+            track.year = Some(2019);
+            track.tags = vec!["peak".into()];
+        }
+
+        let groups = library.duplicate_groups(Path::new("/music"));
+        assert_eq!(
+            groups[0].keep, full,
+            "the copy in the library folder was kept though it knows less about the record"
+        );
+    }
+
+    #[test]
+    fn the_library_folder_only_settles_a_tie() {
+        let mut library = Library::new();
+        let inside = copy_of(&mut library, "/music/a.flac", "F1", "A1");
+        let outside = copy_of(&mut library, "/downloads/a.flac", "F2", "A1");
+        for id in [inside, outside] {
+            let track = library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+        }
+
+        let groups = library.duplicate_groups(Path::new("/music"));
+        assert_eq!(
+            groups[0].keep, inside,
+            "with nothing to choose between them, keep the one this program looks after"
+        );
+    }
+
+    #[test]
+    fn a_pile_of_tags_is_not_more_than_knowing_what_the_record_is() {
+        let mut library = Library::new();
+        let noisy = copy_of(&mut library, "/downloads/a.flac", "F1", "A1");
+        let known = copy_of(&mut library, "/downloads/b.flac", "F2", "A1");
+        library.get_mut(noisy).unwrap().tags = (0..8).map(|n| format!("tag{n}")).collect();
+        {
+            let track = library.get_mut(known).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+            track.album = "Livity Sound".into();
+            track.year = Some(2019);
+        }
+
+        let groups = library.duplicate_groups(Path::new("/music"));
+        assert_eq!(groups[0].keep, known, "eight tags outweighed knowing the record");
+
+        // But between two copies that know the same kinds of thing, more of it
+        // is more.
+        let mut tie = Library::new();
+        let one = copy_of(&mut tie, "/downloads/a.flac", "F1", "A1");
+        let two = copy_of(&mut tie, "/downloads/b.flac", "F2", "A1");
+        tie.get_mut(one).unwrap().tags = vec!["peak".into()];
+        tie.get_mut(two).unwrap().tags = vec!["peak".into(), "warmup".into()];
+        assert_eq!(tie.duplicate_groups(Path::new("/music"))[0].keep, two);
     }
 
     #[test]
