@@ -54,6 +54,12 @@ pub enum Job {
     /// Measure how loud each stem is across a track, for colouring its
     /// waveform by what is playing rather than by frequency.
     StemEnvelopes { id: u32, kit: StemKit },
+    /// Work out the two hashes for tracks that have none.
+    ///
+    /// Import does this as it goes, so this is for the tracks that were already
+    /// in the collection before it did — without it, a library built before
+    /// hashing existed can never be checked for copies at all.
+    Hash(Vec<(u32, PathBuf)>),
     /// Fingerprint tracks and ask AcoustID what they are.
     Identify { tracks: Vec<(u32, PathBuf)>, key: String },
     /// Write a drive.
@@ -72,6 +78,7 @@ impl Job {
             Job::Decode { .. } => "loading",
             Job::StemEnvelopes { .. } => "measuring stems",
             Job::Identify { .. } => "identifying",
+            Job::Hash(_) => "checking for copies",
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Sync { .. } => "writing",
@@ -122,6 +129,12 @@ pub enum Update {
     Decoded {
         id: u32,
         sound: Arc<crate::player::Sound>,
+    },
+    /// The two hashes for one track that had none.
+    Hashed {
+        id: u32,
+        file: String,
+        audio: String,
     },
     /// What a fingerprint said a track is. Empty when nothing matched, which
     /// is itself worth recording so it is not asked again.
@@ -634,6 +647,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         }
         Job::Retag(tracks) => retag(&tracks, reporter),
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
+        Job::Hash(tracks) => hash_all(&tracks, reporter),
         Job::StemEnvelopes { id, kit } => {
             let envelopes = stem_envelopes(&kit)?;
             let _ = reporter.tx.send(Update::Envelopes { id, envelopes });
@@ -690,6 +704,43 @@ fn import(paths: &[PathBuf], recursive: bool, reporter: &Channel) -> anyhow::Res
         let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
         (reporter.wake)();
     }
+    Ok(())
+}
+
+/// Hash tracks that have none, so they can be compared with the rest.
+///
+/// In parallel like analysis, and for the same reason: it is a read of every
+/// byte of every file and nothing else, so the only limit worth having is the
+/// disk's. Unlike analysis it does not decode, so a whole library is minutes
+/// rather than hours.
+fn hash_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<()> {
+    use rayon::prelude::*;
+    use std::sync::atomic::AtomicUsize;
+
+    let total = tracks.len();
+    let done = AtomicUsize::new(0);
+
+    tracks.par_iter().for_each(|(id, path)| {
+        if reporter.cancelled() {
+            return;
+        }
+        // A file that will not open is not a failure worth stopping for — it
+        // has bigger problems than being a copy, and an empty hash simply
+        // never matches another. Both are sent even so, so that a track is
+        // marked as looked at rather than asked about again every time.
+        let file = musicai::hash::file_sha256(path).unwrap_or_else(|e| {
+            crate::debug!("no file hash for {}: {e:#}", path.display());
+            String::new()
+        });
+        let audio = musicai::hash::audio_sha256(path).unwrap_or_else(|e| {
+            crate::debug!("no audio hash for {}: {e:#}", path.display());
+            String::new()
+        });
+        let _ = reporter.tx.send(Update::Hashed { id: *id, file, audio });
+        let now = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let _ = reporter.tx.send(Update::Progress { done: now, total });
+        (reporter.wake)();
+    });
     Ok(())
 }
 

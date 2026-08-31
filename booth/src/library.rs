@@ -802,6 +802,20 @@ impl Library {
     /// rest are somebody's download folder; failing that, the one with the
     /// most filled in, since that is the work that would be lost. Never the
     /// shortest path or the newest file: both are accidents.
+    /// The tracks whose audio has never been hashed, and where their files are.
+    ///
+    /// Import hashes as it goes, so these are the ones that were already in the
+    /// collection before it did. They are invisible to `duplicate_groups`,
+    /// which is why they have to be findable: a library that predates hashing
+    /// would otherwise report no copies for ever and never say why.
+    pub fn unhashed(&self) -> Vec<(u32, PathBuf)> {
+        self.tracks
+            .iter()
+            .filter(|track| track.role == Role::Track && track.audio_hash.is_empty())
+            .map(|track| (track.id, track.path.clone()))
+            .collect()
+    }
+
     pub fn duplicate_groups(&self, library_path: &Path) -> Vec<Copies> {
         let mut by_audio: Vec<(&str, Vec<u32>)> = Vec::new();
         for track in self.tracks.iter().filter(|t| t.role == Role::Track) {

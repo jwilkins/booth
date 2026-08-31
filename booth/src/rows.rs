@@ -183,6 +183,12 @@ pub fn header_row(ui: &mut Ui, widths: &Widths, sort: Sort) -> Option<Column> {
         x += width;
     }
 
+    // Painted rather than built out of widgets, like the rows below it, so
+    // this is the only thing that says the strip is there and that clicking it
+    // does something — and it is what lets a test ask where the header is, to
+    // check that scrolling the list has not carried it off.
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "columns"));
+
     if pointer.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }

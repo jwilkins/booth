@@ -519,6 +519,11 @@ impl App {
         // check captures the first frame, and a window caught halfway through
         // its fade-in photographs as a half-transparent one.
         #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_OPEN_SETTINGS").is_some() {
+            app.settings = true;
+            cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
+        }
+        #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_OPEN_DUPES").is_some() {
             app.duplicates = Some(std::collections::HashSet::new());
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
@@ -1166,6 +1171,13 @@ impl App {
                         }
                     }
                 }
+                Update::Hashed { id, file, audio } => {
+                    if let Some(track) = self.library.get_mut(id) {
+                        track.file_hash = file;
+                        track.audio_hash = audio;
+                        changed = true;
+                    }
+                }
                 Update::Identified { id, best } => {
                     if let Some(track) = self.library.get_mut(id) {
                         track.identified = true;
@@ -1699,6 +1711,16 @@ fn bar_frame() -> egui::Frame {
 }
 
 /// The chrome every sheet shares.
+/// The most a sheet may be, so that it always fits on the screen.
+///
+/// A window taller than the viewport is still centred on it, which puts the
+/// title bar — and with it the close button, the only way out — off the top of
+/// the screen, and cuts the bottom off too. Capping the height and scrolling
+/// the body inside it is what keeps a long sheet closable on a small display.
+fn sheet_height(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().height() - 72.0).max(240.0)
+}
+
 fn sheet_frame() -> egui::Frame {
     egui::Frame::NONE
         .fill(theme::BOOTH)
@@ -1729,6 +1751,34 @@ impl App {
         }
     }
 
+    /// Shut the topmost open sheet, and say whether there was one.
+    ///
+    /// Topmost is last-drawn, which is the order `update` puts them on the
+    /// screen in — so the answer matches what is actually in front of the eye
+    /// rather than the order the fields happen to be declared in.
+    fn close_top_sheet(&mut self) -> bool {
+        if self.duplicates.take().is_some() {
+            return true;
+        }
+        if std::mem::take(&mut self.help) {
+            return true;
+        }
+        // Not the questions sheet: each of those is an answer the import is
+        // waiting on, and dismissing the lot with a keystroke is not one.
+        if !self.incompatible.is_empty() {
+            self.incompatible.clear();
+            return true;
+        }
+        if !self.asking.is_empty() {
+            self.asking.clear();
+            return true;
+        }
+        if std::mem::take(&mut self.settings) {
+            return true;
+        }
+        std::mem::take(&mut self.sheet)
+    }
+
     /// The keys that make the browser a browser: arrows to dig, and one
     /// shortcut to the bar.
     fn keys(&mut self, ctx: &egui::Context) {
@@ -1752,10 +1802,13 @@ impl App {
                     self.pending.push(Pending::TogglePlayback(id));
                 }
             }
-            // Escape is the way back out of anything; here that is the whole
-            // track. It does nothing when the whole track is already showing,
-            // rather than being a key that sometimes means something else.
-            if i.key_pressed(egui::Key::Escape) && !self.zoom.is_fit() {
+            // Escape is the way back out of anything. A sheet is the
+            // outermost thing to be inside, so it goes first, one press per
+            // sheet; only once they are all shut does the key mean the
+            // waveform, and there it does nothing when the whole track is
+            // already showing rather than being a key that sometimes means
+            // something else.
+            if i.key_pressed(egui::Key::Escape) && !self.close_top_sheet() && !self.zoom.is_fit() {
                 self.pending.push(Pending::FitWave);
             }
         });
@@ -1889,32 +1942,49 @@ impl App {
         self.view_row(ui, View::Unprepared, "Unprepared", unprepared, theme::DIM);
         self.view_row(ui, View::Attention, "Needs attention", attention, theme::ALERT);
 
-        // Only offered when there is something to offer. A row reading zero is
-        // a thing to check rather than a thing to know.
+        // Offered when there is either something to show or something to look
+        // through. A row reading zero when everything has been checked is a
+        // thing to check rather than a thing to know, so it goes; but a row
+        // that never appears because nothing has been hashed yet is a feature
+        // with no way in, which is worse — that is the case the question mark
+        // is for.
         let copies: usize = self
             .library
             .duplicate_groups(&self.config.library_path)
             .iter()
             .map(|group| group.rest.len())
             .sum();
-        if copies > 0 {
+        let unchecked = self.library.unhashed().len();
+        if copies > 0 || unchecked > 0 {
             ui.horizontal(|ui| {
                 if ui
                     .add(
                         egui::Label::new(RichText::new("In here twice").color(theme::AMBER))
                             .sense(egui::Sense::click()),
                     )
-                    .on_hover_text("The same recording in more than one file")
+                    .on_hover_text(match unchecked {
+                        0 => "The same recording in more than one file".to_string(),
+                        n => format!(
+                            "The same recording in more than one file — {} not looked at yet",
+                            plural(n, "track")
+                        ),
+                    })
                     .clicked()
                 {
                     self.duplicates = Some(std::collections::HashSet::new());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(copies.to_string())
-                            .font(theme::mono(theme::SMALL))
-                            .color(theme::DIM),
-                    );
+                    // A question mark rather than a count while there is
+                    // anything left to look at: the number is only the copies
+                    // among the files already hashed, and printing it as if it
+                    // were the answer would be a lie in the direction that
+                    // stops somebody looking.
+                    let (text, colour) = match (copies, unchecked) {
+                        (n, 0) => (n.to_string(), theme::DIM),
+                        (0, _) => ("?".to_string(), theme::AMBER),
+                        (n, _) => (format!("{n}?"), theme::AMBER),
+                    };
+                    ui.label(RichText::new(text).font(theme::mono(theme::SMALL)).color(colour));
                 });
             });
         }
@@ -2197,12 +2267,23 @@ impl App {
 
     /// The list, and the prep editor underneath it.
     fn browser(&mut self, ui: &mut Ui) {
-        let list_height = (ui.available_height() - PREP_HEIGHT).max(120.0);
+        // The column widths are worked out here, once, and handed to both the
+        // header and the rows, so the two cannot drift apart — and the header
+        // is drawn outside the scroll area, so that scrolling a long list never
+        // takes away the names of the columns or the way to sort by them.
+        //
+        // The width the rows will get is what is left after the scroll bar, and
+        // that is what both are measured against: when there is no bar the
+        // widths are unchanged and only a sliver of space goes unused at the
+        // right, which is nothing next to a header that lines up either way.
+        let widths = rows::columns(ui.available_width() - ui.spacing().scroll.allocated_width());
+        self.header(ui, &widths);
 
+        let list_height = (ui.available_height() - PREP_HEIGHT).max(120.0);
         egui::ScrollArea::vertical()
             .max_height(list_height)
             .auto_shrink([false, false])
-            .show(ui, |ui| self.rows_table(ui));
+            .show(ui, |ui| self.rows_table(ui, &widths));
 
         ui.add_space(6.0);
         self.actions(ui);
@@ -2380,7 +2461,24 @@ impl App {
         self.pending_rebuild = true;
     }
 
-    fn rows_table(&mut self, ui: &mut Ui) {
+    /// The column names, pinned above the list.
+    fn header(&mut self, ui: &mut Ui, widths: &rows::Widths) {
+        let Some(column) = rows::header_row(ui, widths, self.sort) else { return };
+        let was = self.sort;
+        self.sort = self.sort.clicked(column);
+        self.config.sort = self.sort;
+        let _ = self.config.save(&self.config_path);
+        crate::debug!(
+            "sort {} {} (was {} {})",
+            self.sort.column.name(),
+            if self.sort.descending { "descending" } else { "ascending" },
+            was.column.name(),
+            if was.descending { "descending" } else { "ascending" }
+        );
+        self.pending.push(Pending::Resort);
+    }
+
+    fn rows_table(&mut self, ui: &mut Ui, widths: &rows::Widths) {
         // Gathered once rather than per row: the menu names the same playlists
         // whichever line it was opened on, and the index it reports back is
         // into this.
@@ -2397,22 +2495,6 @@ impl App {
                 .collect(),
             false => Vec::new(),
         };
-        let widths = rows::columns(ui.available_width());
-        if let Some(column) = rows::header_row(ui, &widths, self.sort) {
-            let was = self.sort;
-            self.sort = self.sort.clicked(column);
-            self.config.sort = self.sort;
-            let _ = self.config.save(&self.config_path);
-            crate::debug!(
-                "sort {} {} (was {} {})",
-                self.sort.column.name(),
-                if self.sort.descending { "descending" } else { "ascending" },
-                was.column.name(),
-                if was.descending { "descending" } else { "ascending" }
-            );
-            self.pending.push(Pending::Resort);
-        }
-
         let playing = self
             .player
             .as_ref()
@@ -2438,7 +2520,7 @@ impl App {
                 playlists: &playlist_names,
                 dragging: &carrying,
             };
-            if let Some(what) = rows::row(ui, &line.track, line.indented, selected, &widths, menu) {
+            if let Some(what) = rows::row(ui, &line.track, line.indented, selected, widths, menu) {
                 hit = Some((line.track.id, what));
             }
         }
@@ -3911,6 +3993,7 @@ impl App {
             .resizable(true)
             .default_width(760.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
             .frame(sheet_frame())
             .show(ctx, |ui| {
                 ui.label(
@@ -4028,10 +4111,12 @@ impl App {
     /// megabytes before it does.
     fn duplicates_sheet(&mut self, ctx: &egui::Context) {
         let groups = self.library.duplicate_groups(&self.config.library_path);
+        let unchecked = self.library.unhashed().len();
         let mut open = true;
         let mut ticked = self.duplicates.clone().unwrap_or_default();
         let mut delete = false;
         let mut tick_all_identical = false;
+        let mut look = false;
 
         egui::Window::new("The same record, more than once")
             .open(&mut open)
@@ -4040,6 +4125,7 @@ impl App {
             .default_width(720.0)
             .default_height(560.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BOOTH)
@@ -4047,8 +4133,44 @@ impl App {
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
+                // What has not been looked at yet, said before anything else:
+                // "nothing is in here twice" means something quite different
+                // when half the collection has never been read.
+                if unchecked > 0 {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} {} never been looked at. Reading them is the only way to \
+                             know whether they are copies.",
+                            plural(unchecked, "track"),
+                            if unchecked == 1 { "has" } else { "have" },
+                        ))
+                        .color(theme::AMBER)
+                        .size(theme::SMALL),
+                    );
+                    ui.add_space(4.0);
+                    if ui
+                        .add_enabled(
+                            !self.running(),
+                            egui::Button::new(format!("Look through {unchecked}")),
+                        )
+                        .on_hover_text(
+                            "Reads every byte of each file, but decodes nothing — minutes \
+                             for a library, not hours",
+                        )
+                        .clicked()
+                    {
+                        look = true;
+                    }
+                    ui.add_space(8.0);
+                }
                 if groups.is_empty() {
-                    ui.label(RichText::new("Nothing is in here twice.").color(theme::DIM));
+                    ui.label(
+                        RichText::new(match unchecked {
+                            0 => "Nothing is in here twice.",
+                            _ => "Nothing among the tracks looked at so far is in here twice.",
+                        })
+                        .color(theme::DIM),
+                    );
                     return;
                 }
                 ui.label(
@@ -4070,50 +4192,53 @@ impl App {
                 }
                 ui.add_space(8.0);
 
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    for group in &groups {
-                        let Some(kept) = self.library.get(group.keep) else { continue };
-                        ui.label(
-                            RichText::new(kept.display_title())
-                                .color(theme::TEXT)
-                                .size(theme::BODY),
-                        );
-                        ui.horizontal(|ui| {
-                            ui.add_space(14.0);
+                egui::ScrollArea::vertical()
+                    .max_height(sheet_height(ctx) - 150.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for group in &groups {
+                            let Some(kept) = self.library.get(group.keep) else { continue };
                             ui.label(
-                                RichText::new(format!("keep  {}", kept.path.display()))
-                                    .font(theme::mono(10.0))
-                                    .color(theme::GO),
+                                RichText::new(kept.display_title())
+                                    .color(theme::TEXT)
+                                    .size(theme::BODY),
                             );
-                        });
-                        for copy in &group.rest {
-                            let Some(track) = self.library.get(copy.id) else { continue };
                             ui.horizontal(|ui| {
                                 ui.add_space(14.0);
-                                let mut on = ticked.contains(&copy.id);
-                                if ui.checkbox(&mut on, "").changed() {
-                                    match on {
-                                        true => ticked.insert(copy.id),
-                                        false => ticked.remove(&copy.id),
-                                    };
-                                }
-                                let (note, color) = match copy.identical {
-                                    true => ("identical", theme::DIM),
-                                    // Said plainly, because it is the one case
-                                    // where deleting costs something.
-                                    false => ("same sound, different tags", theme::AMBER),
-                                };
                                 ui.label(
-                                    RichText::new(format!("{}", track.path.display()))
+                                    RichText::new(format!("keep  {}", kept.path.display()))
                                         .font(theme::mono(10.0))
-                                        .color(theme::DIM),
+                                        .color(theme::GO),
                                 );
-                                ui.label(RichText::new(note).size(theme::SMALL).color(color));
                             });
+                            for copy in &group.rest {
+                                let Some(track) = self.library.get(copy.id) else { continue };
+                                ui.horizontal(|ui| {
+                                    ui.add_space(14.0);
+                                    let mut on = ticked.contains(&copy.id);
+                                    if ui.checkbox(&mut on, "").changed() {
+                                        match on {
+                                            true => ticked.insert(copy.id),
+                                            false => ticked.remove(&copy.id),
+                                        };
+                                    }
+                                    let (note, color) = match copy.identical {
+                                        true => ("identical", theme::DIM),
+                                        // Said plainly, because it is the one case
+                                        // where deleting costs something.
+                                        false => ("same sound, different tags", theme::AMBER),
+                                    };
+                                    ui.label(
+                                        RichText::new(format!("{}", track.path.display()))
+                                            .font(theme::mono(10.0))
+                                            .color(theme::DIM),
+                                    );
+                                    ui.label(RichText::new(note).size(theme::SMALL).color(color));
+                                });
+                            }
+                            ui.add_space(8.0);
                         }
-                        ui.add_space(8.0);
-                    }
-                });
+                    });
             });
 
         if tick_all_identical {
@@ -4171,6 +4296,23 @@ impl App {
             self.pending.push(Pending::TrashDuplicates(ticked.into_iter().collect()));
             self.duplicates = None;
         }
+        if look {
+            self.hash_unchecked();
+        }
+    }
+
+    /// Read the tracks that have never been hashed, so they can be compared.
+    ///
+    /// The sheet stays open while this runs: the groups are worked out afresh
+    /// each frame, so they fill in as the answers arrive rather than all at the
+    /// end.
+    fn hash_unchecked(&mut self) {
+        let waiting = self.library.unhashed();
+        if waiting.is_empty() || self.running() {
+            return;
+        }
+        crate::info!("looking through {} for copies", plural(waiting.len(), "track"));
+        self.start(Job::Hash(waiting));
     }
 
     fn help_sheet(&mut self, ctx: &egui::Context) {
@@ -4201,33 +4343,38 @@ impl App {
                 );
                 ui.add_space(10.0);
 
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    for (heading, lines) in crate::query::HELP {
-                        pane_label(ui, heading);
-                        for help in *lines {
-                            ui.horizontal(|ui| {
-                                let example = ui.add(
-                                    egui::Label::new(
-                                        RichText::new(help.example)
-                                            .font(theme::mono(11.0))
-                                            .color(theme::AMBER),
-                                    )
-                                    .sense(egui::Sense::click()),
-                                );
-                                if example.clicked() {
-                                    chosen = Some(help.example.to_string());
-                                }
-                                if example.hovered() {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                }
-                                ui.label(
-                                    RichText::new(help.means).color(theme::DIM).size(theme::SMALL),
-                                );
-                            });
+                egui::ScrollArea::vertical()
+                    .max_height(sheet_height(ctx) - 150.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (heading, lines) in crate::query::HELP {
+                            pane_label(ui, heading);
+                            for help in *lines {
+                                ui.horizontal(|ui| {
+                                    let example = ui.add(
+                                        egui::Label::new(
+                                            RichText::new(help.example)
+                                                .font(theme::mono(11.0))
+                                                .color(theme::AMBER),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    );
+                                    if example.clicked() {
+                                        chosen = Some(help.example.to_string());
+                                    }
+                                    if example.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    ui.label(
+                                        RichText::new(help.means)
+                                            .color(theme::DIM)
+                                            .size(theme::SMALL),
+                                    );
+                                });
+                            }
+                            ui.add_space(10.0);
                         }
-                        ui.add_space(10.0);
-                    }
-                });
+                    });
             });
 
         if let Some(text) = chosen {
@@ -4390,244 +4537,265 @@ impl App {
             .resizable(false)
             .default_width(560.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
             .frame(sheet_frame())
             .show(ctx, |ui| {
-                pane_label(ui, "Library folder");
-                ui.label(
-                    RichText::new(
-                        "Where music copied into the collection is kept, one folder per \
+                // Scrolled, because the sheet is no taller than the screen now.
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    pane_label(ui, "Library folder");
+                    ui.label(
+                        RichText::new(
+                            "Where music copied into the collection is kept, one folder per \
                          artist — the same shape a drive gets.",
-                    )
-                    .color(theme::DIM)
-                    .size(theme::SMALL),
-                );
-                ui.horizontal(|ui| {
-                    let mut shown = self.config.library_path.display().to_string();
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut shown)
-                                .desired_width(ui.available_width() - 90.0)
-                                .font(theme::mono(11.0)),
                         )
-                        .changed()
-                    {
-                        self.config.library_path = PathBuf::from(shown.trim());
-                        changed = true;
-                    }
-                    if ui.button("Choose…").clicked() {
-                        pick_library = true;
-                    }
-                });
-
-                ui.add_space(14.0);
-                pane_label(ui, "Music from elsewhere");
-                for policy in OnExternal::ALL {
-                    if ui
-                        .radio_value(&mut self.config.on_external, policy, policy.label())
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    ui.label(RichText::new(policy.blurb()).color(theme::DIM).size(theme::SMALL));
-                    ui.add_space(4.0);
-                }
-
-                ui.add_space(14.0);
-                pane_label(ui, "Stem quality");
-                for quality in crate::config::Quality::ALL {
-                    if ui
-                        .radio_value(&mut self.config.stem_quality, quality, quality.label())
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    ui.label(RichText::new(quality.blurb()).color(theme::DIM).size(theme::SMALL));
-                }
-                ui.label(
-                    RichText::new(
-                        "A kit is rendered once and then played for years, so the slow one is \
-                         the default. The fast one is for a first pass over a whole library.",
-                    )
-                    .color(theme::DIM)
-                    .size(theme::SMALL),
-                );
-
-                ui.add_space(14.0);
-                pane_label(ui, "Track length");
-                ui.horizontal(|ui| {
-                    for unit in crate::config::Length::ALL {
-                        if ui.radio_value(&mut self.config.length, unit, unit.label()).changed() {
+                        .color(theme::DIM)
+                        .size(theme::SMALL),
+                    );
+                    ui.horizontal(|ui| {
+                        let mut shown = self.config.library_path.display().to_string();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut shown)
+                                    .desired_width(ui.available_width() - 90.0)
+                                    .font(theme::mono(11.0)),
+                            )
+                            .changed()
+                        {
+                            self.config.library_path = PathBuf::from(shown.trim());
                             changed = true;
                         }
+                        if ui.button("Choose…").clicked() {
+                            pick_library = true;
+                        }
+                    });
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Music from elsewhere");
+                    for policy in OnExternal::ALL {
+                        if ui
+                            .radio_value(&mut self.config.on_external, policy, policy.label())
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(
+                            RichText::new(policy.blurb()).color(theme::DIM).size(theme::SMALL),
+                        );
+                        ui.add_space(4.0);
+                    }
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Stem quality");
+                    for quality in crate::config::Quality::ALL {
+                        if ui
+                            .radio_value(&mut self.config.stem_quality, quality, quality.label())
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(
+                            RichText::new(quality.blurb()).color(theme::DIM).size(theme::SMALL),
+                        );
                     }
                     ui.label(
-                        RichText::new("Four beats to the bar, as the drive's own format counts.")
+                        RichText::new(
+                            "A kit is rendered once and then played for years, so the slow one is \
+                         the default. The fast one is for a first pass over a whole library.",
+                        )
+                        .color(theme::DIM)
+                        .size(theme::SMALL),
+                    );
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Track length");
+                    ui.horizontal(|ui| {
+                        for unit in crate::config::Length::ALL {
+                            if ui.radio_value(&mut self.config.length, unit, unit.label()).changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                        ui.label(
+                            RichText::new(
+                                "Four beats to the bar, as the drive's own format counts.",
+                            )
                             .color(theme::DIM)
                             .size(theme::SMALL),
-                    );
-                });
+                        );
+                    });
 
-                ui.add_space(14.0);
-                pane_label(ui, "Identifying tracks");
-                if ui
-                    .checkbox(
-                        &mut self.config.identify,
-                        "Fingerprint tracks when analysing, and fill in missing names",
-                    )
-                    .changed()
-                {
-                    changed = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("AcoustID key").color(theme::DIM).size(theme::SMALL));
+                    ui.add_space(14.0);
+                    pane_label(ui, "Identifying tracks");
                     if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.config.acoustid_key)
-                                .desired_width(ui.available_width())
-                                .font(theme::mono(11.0))
-                                .hint_text(
-                                    RichText::new(match std::env::var("ACOUSTID_API_KEY") {
-                                        Ok(_) => "using ACOUSTID_API_KEY",
-                                        Err(_) => "free from acoustid.org/new-application",
-                                    })
-                                    .monospace()
-                                    .color(theme::DIM),
-                                ),
+                        .checkbox(
+                            &mut self.config.identify,
+                            "Fingerprint tracks when analysing, and fill in missing names",
                         )
                         .changed()
                     {
                         changed = true;
                     }
-                });
-                let mut percent = self.config.autotag_score * 100.0;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut percent, 50.0..=100.0)
-                            .suffix("%")
-                            .text("apply without asking at"),
-                    )
-                    .changed()
-                {
-                    self.config.autotag_score = percent / 100.0;
-                    changed = true;
-                }
-                ui.label(
-                    RichText::new(
-                        "Below this, and for anything that disagrees with a name already in \
-                         the file's tags, the match is put to you instead. Nothing under 50% \
-                         is offered at all.",
-                    )
-                    .color(theme::DIM)
-                    .size(theme::SMALL),
-                );
-
-                ui.add_space(10.0);
-                pane_label(ui, "Tags");
-                for level in crate::config::WriteTags::ALL {
-                    if ui.radio_value(&mut self.config.write_tags, level, level.label()).changed() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("AcoustID key").color(theme::DIM).size(theme::SMALL),
+                        );
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.config.acoustid_key)
+                                    .desired_width(ui.available_width())
+                                    .font(theme::mono(11.0))
+                                    .hint_text(
+                                        RichText::new(match std::env::var("ACOUSTID_API_KEY") {
+                                            Ok(_) => "using ACOUSTID_API_KEY",
+                                            Err(_) => "free from acoustid.org/new-application",
+                                        })
+                                        .monospace()
+                                        .color(theme::DIM),
+                                    ),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
+                    let mut percent = self.config.autotag_score * 100.0;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut percent, 50.0..=100.0)
+                                .suffix("%")
+                                .text("apply without asking at"),
+                        )
+                        .changed()
+                    {
+                        self.config.autotag_score = percent / 100.0;
                         changed = true;
                     }
-                    ui.label(RichText::new(level.blurb()).color(theme::DIM).size(theme::SMALL));
-                    ui.add_space(4.0);
-                }
-                ui.label(
-                    RichText::new(
-                        "Filling in a blank is not the same act as overwriting somebody's \
+                    ui.label(
+                        RichText::new(
+                            "Below this, and for anything that disagrees with a name already in \
+                         the file's tags, the match is put to you instead. Nothing under 50% \
+                         is offered at all.",
+                        )
+                        .color(theme::DIM)
+                        .size(theme::SMALL),
+                    );
+
+                    ui.add_space(10.0);
+                    pane_label(ui, "Tags");
+                    for level in crate::config::WriteTags::ALL {
+                        if ui
+                            .radio_value(&mut self.config.write_tags, level, level.label())
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(RichText::new(level.blurb()).color(theme::DIM).size(theme::SMALL));
+                        ui.add_space(4.0);
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Filling in a blank is not the same act as overwriting somebody's \
                          answer, which is why the middle one is the default: a lookup that \
                          names an untagged file has found out something true about it. \
                          FLAC and MP3 only — a WAV has nowhere to put them. The inspector's \
                          own button always overwrites, whatever this says.",
-                    )
-                    .color(theme::DIM)
-                    .size(theme::SMALL),
-                );
+                        )
+                        .color(theme::DIM)
+                        .size(theme::SMALL),
+                    );
 
-                ui.add_space(14.0);
-                pane_label(ui, "rekordbox");
-                ui.label(
-                    RichText::new(
-                        "rekordbox keeps its library in an encrypted SQLite file. The key is \
+                    ui.add_space(14.0);
+                    pane_label(ui, "rekordbox");
+                    ui.label(
+                        RichText::new(
+                            "rekordbox keeps its library in an encrypted SQLite file. The key is \
                          the same on every installation; this build does not carry one. \
                          `python -m pyrekordbox download-key` prints it, or leave this blank \
                          and set REKORDBOX_KEY.",
-                    )
-                    .color(theme::DIM)
-                    .size(theme::SMALL),
-                );
-                let mut key = self.config.rekordbox_key.clone();
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut key)
-                            .desired_width(ui.available_width())
-                            .hint_text("SQLCipher key")
-                            .password(true)
-                            .font(theme::mono(11.0)),
-                    )
-                    .changed()
-                {
-                    self.config.rekordbox_key = key.trim().to_string();
-                    changed = true;
-                }
-                if ui
-                    .button("Import a rekordbox library")
-                    .on_hover_text(
-                        "Reads master.db. Nothing already here is overwritten — what comes \
-                         across is what is missing, plus the playlists.",
-                    )
-                    .clicked()
-                {
-                    self.want_pick = Some(Picking::Rekordbox);
-                }
-
-                ui.add_space(14.0);
-                pane_label(ui, "Where stems go");
-                for where_ in [crate::config::StemsIn::Beside, crate::config::StemsIn::Folder] {
-                    if ui.radio_value(&mut self.config.stems_in, where_, where_.label()).changed() {
-                        changed = true;
-                    }
-                    ui.label(RichText::new(where_.blurb()).color(theme::DIM).size(theme::SMALL));
-                    ui.add_space(4.0);
-                }
-                if self.config.stems_in == crate::config::StemsIn::Folder {
-                    let mut shown = self.config.stems_path.display().to_string();
+                        )
+                        .color(theme::DIM)
+                        .size(theme::SMALL),
+                    );
+                    let mut key = self.config.rekordbox_key.clone();
                     if ui
                         .add(
-                            egui::TextEdit::singleline(&mut shown)
+                            egui::TextEdit::singleline(&mut key)
                                 .desired_width(ui.available_width())
+                                .hint_text("SQLCipher key")
+                                .password(true)
                                 .font(theme::mono(11.0)),
                         )
                         .changed()
                     {
-                        self.config.stems_path = PathBuf::from(shown.trim());
+                        self.config.rekordbox_key = key.trim().to_string();
                         changed = true;
                     }
-                }
-                ui.label(
-                    RichText::new(
-                        "Both places are searched whichever is set, so changing this never \
-                         loses a kit that is already rendered.",
-                    )
-                    .color(theme::DIM)
-                    .size(theme::SMALL),
-                );
+                    if ui
+                        .button("Import a rekordbox library")
+                        .on_hover_text(
+                            "Reads master.db. Nothing already here is overwritten — what comes \
+                         across is what is missing, plus the playlists.",
+                        )
+                        .clicked()
+                    {
+                        self.want_pick = Some(Picking::Rekordbox);
+                    }
 
-                ui.add_space(12.0);
-                let outside =
-                    self.external(&self.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>());
-                if !outside.is_empty() {
+                    ui.add_space(14.0);
+                    pane_label(ui, "Where stems go");
+                    for where_ in [crate::config::StemsIn::Beside, crate::config::StemsIn::Folder] {
+                        if ui
+                            .radio_value(&mut self.config.stems_in, where_, where_.label())
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(
+                            RichText::new(where_.blurb()).color(theme::DIM).size(theme::SMALL),
+                        );
+                        ui.add_space(4.0);
+                    }
+                    if self.config.stems_in == crate::config::StemsIn::Folder {
+                        let mut shown = self.config.stems_path.display().to_string();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut shown)
+                                    .desired_width(ui.available_width())
+                                    .font(theme::mono(11.0)),
+                            )
+                            .changed()
+                        {
+                            self.config.stems_path = PathBuf::from(shown.trim());
+                            changed = true;
+                        }
+                    }
                     ui.label(
-                        RichText::new(format!(
-                            "{} {} in the collection are outside this folder.",
-                            outside.len(),
-                            if outside.len() == 1 { "track is" } else { "tracks are" }
-                        ))
-                        .color(theme::AMBER)
+                        RichText::new(
+                            "Both places are searched whichever is set, so changing this never \
+                         loses a kit that is already rendered.",
+                        )
+                        .color(theme::DIM)
                         .size(theme::SMALL),
                     );
-                    if ui.button("Copy them all in").clicked() {
-                        self.pending.extend(outside.into_iter().map(Pending::Adopt));
+
+                    ui.add_space(12.0);
+                    let outside = self
+                        .external(&self.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>());
+                    if !outside.is_empty() {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {} in the collection are outside this folder.",
+                                outside.len(),
+                                if outside.len() == 1 { "track is" } else { "tracks are" }
+                            ))
+                            .color(theme::AMBER)
+                            .size(theme::SMALL),
+                        );
+                        if ui.button("Copy them all in").clicked() {
+                            self.pending.extend(outside.into_iter().map(Pending::Adopt));
+                        }
                     }
-                }
+                });
             });
 
         if changed {
@@ -4696,6 +4864,7 @@ impl App {
             .resizable(false)
             .default_width(600.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
             .frame(sheet_frame())
             .show(ctx, |ui| {
                 ui.label(
@@ -4802,6 +4971,7 @@ impl App {
             .resizable(false)
             .default_width(560.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
             .frame(sheet_frame())
             .show(ctx, |ui| {
                 ui.label(
@@ -4887,6 +5057,7 @@ impl App {
             .resizable(false)
             .default_width(620.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BOOTH)
@@ -4894,85 +5065,89 @@ impl App {
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "Target: CDJ-3000 · writes: Device Library (export.pdb) + ANLZ{}",
-                        if drive.is_image { " · into a FAT32 image" } else { "" }
-                    ))
-                    .font(theme::mono(10.5))
-                    .color(theme::DIM),
-                );
-                ui.label(
-                    RichText::new(format!(
-                        "{} A CDJ-3000X will not read this drive: it needs OneLibrary, \
-                         whose schema is not published.",
-                        theme::WARN
-                    ))
-                    .font(theme::mono(10.5))
-                    .color(theme::ALERT),
-                );
-
-                // What the browse tree on the player will look like, because
-                // that is the thing being written and the easiest to get wrong.
-                let specs = self.drive_playlists(&drive);
-                let line = match specs.is_empty() {
-                    true => "no playlists — nothing will be written".to_string(),
-                    false => specs
-                        .iter()
-                        .map(|p| match p.folder.is_empty() {
-                            true => format!("{} ({})", p.name, p.tracks.len()),
-                            false => format!("{}/{} ({})", p.folder, p.name, p.tracks.len()),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("  ·  "),
-                };
-                ui.label(
-                    RichText::new(format!("Playlists: {line}"))
+                // Scrolled, because the sheet is no taller than the screen now.
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Target: CDJ-3000 · writes: Device Library (export.pdb) + ANLZ{}",
+                            if drive.is_image { " · into a FAT32 image" } else { "" }
+                        ))
                         .font(theme::mono(10.5))
-                        .color(if specs.is_empty() { theme::ALERT } else { theme::DIM }),
-                );
-                ui.add_space(10.0);
+                        .color(theme::DIM),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "{} A CDJ-3000X will not read this drive: it needs OneLibrary, \
+                         whose schema is not published.",
+                            theme::WARN
+                        ))
+                        .font(theme::mono(10.5))
+                        .color(theme::ALERT),
+                    );
 
-                sheet_line(
-                    ui,
-                    "Add",
-                    &self.names(&self.plan.add),
-                    &sync::bytes(self.plan.add_bytes),
-                );
-                sheet_line(
-                    ui,
-                    "Update",
-                    &self.update_text(),
-                    if self.plan.update.is_empty() { "—" } else { "analysis only" },
-                );
-                sheet_line(ui, "Remove", &self.names(&self.plan.remove), "—");
-                sheet_line(
-                    ui,
-                    "Stems",
-                    &match self.plan.stems.len() {
-                        0 => "none".to_string(),
-                        n => format!("{n} files"),
-                    },
-                    &sync::bytes(self.plan.stem_bytes),
-                );
+                    // What the browse tree on the player will look like, because
+                    // that is the thing being written and the easiest to get wrong.
+                    let specs = self.drive_playlists(&drive);
+                    let line = match specs.is_empty() {
+                        true => "no playlists — nothing will be written".to_string(),
+                        false => specs
+                            .iter()
+                            .map(|p| match p.folder.is_empty() {
+                                true => format!("{} ({})", p.name, p.tracks.len()),
+                                false => format!("{}/{} ({})", p.folder, p.name, p.tracks.len()),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("  ·  "),
+                    };
+                    ui.label(
+                        RichText::new(format!("Playlists: {line}"))
+                            .font(theme::mono(10.5))
+                            .color(if specs.is_empty() { theme::ALERT } else { theme::DIM }),
+                    );
+                    ui.add_space(10.0);
 
-                ui.add_space(12.0);
-                for check in &checks {
-                    ui.horizontal(|ui| {
-                        let (mark, color) = match check.level {
-                            Level::Ok => (theme::TICK, theme::GO),
-                            Level::Warn => (theme::WARN, theme::AMBER),
-                            Level::Bad => (theme::CROSS, theme::ALERT),
-                        };
-                        ui.label(RichText::new(mark).color(color).font(theme::mono(11.5)));
-                        ui.label(
-                            RichText::new(&check.text).font(theme::mono(11.5)).color(theme::TEXT),
-                        );
-                    });
-                }
+                    sheet_line(
+                        ui,
+                        "Add",
+                        &self.names(&self.plan.add),
+                        &sync::bytes(self.plan.add_bytes),
+                    );
+                    sheet_line(
+                        ui,
+                        "Update",
+                        &self.update_text(),
+                        if self.plan.update.is_empty() { "—" } else { "analysis only" },
+                    );
+                    sheet_line(ui, "Remove", &self.names(&self.plan.remove), "—");
+                    sheet_line(
+                        ui,
+                        "Stems",
+                        &match self.plan.stems.len() {
+                            0 => "none".to_string(),
+                            n => format!("{n} files"),
+                        },
+                        &sync::bytes(self.plan.stem_bytes),
+                    );
 
-                ui.add_space(6.0);
-                ui.label(
+                    ui.add_space(12.0);
+                    for check in &checks {
+                        ui.horizontal(|ui| {
+                            let (mark, color) = match check.level {
+                                Level::Ok => (theme::TICK, theme::GO),
+                                Level::Warn => (theme::WARN, theme::AMBER),
+                                Level::Bad => (theme::CROSS, theme::ALERT),
+                            };
+                            ui.label(RichText::new(mark).color(color).font(theme::mono(11.5)));
+                            ui.label(
+                                RichText::new(&check.text)
+                                    .font(theme::mono(11.5))
+                                    .color(theme::TEXT),
+                            );
+                        });
+                    }
+
+                    ui.add_space(6.0);
+                    ui.label(
                     RichText::new(
                         "The database and every analysis file are read back off the drive after \
                          writing, by a parser that shares no code with the writer. Until that \
@@ -4982,37 +5157,38 @@ impl App {
                     .color(theme::DIM),
                 );
 
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    let verb = if worst == Level::Bad { "Write anyway" } else { "Write" };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(theme::label_text(verb))
-                                    .size(11.0)
-                                    .color(theme::BOOTH)
-                                    .strong(),
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let verb = if worst == Level::Bad { "Write anyway" } else { "Write" };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(theme::label_text(verb))
+                                        .size(11.0)
+                                        .color(theme::BOOTH)
+                                        .strong(),
+                                )
+                                .fill(if worst == Level::Bad {
+                                    theme::ALERT
+                                } else {
+                                    theme::AMBER
+                                }),
                             )
-                            .fill(if worst == Level::Bad {
-                                theme::ALERT
-                            } else {
-                                theme::AMBER
-                            }),
-                        )
-                        .clicked()
-                    {
-                        self.write_drive();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.sheet = false;
-                    }
-                    if worst == Level::Bad {
-                        ui.label(
-                            RichText::new("the files above will be skipped; the rest still go")
-                                .color(theme::DIM)
-                                .size(theme::SMALL),
-                        );
-                    }
+                            .clicked()
+                        {
+                            self.write_drive();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.sheet = false;
+                        }
+                        if worst == Level::Bad {
+                            ui.label(
+                                RichText::new("the files above will be skipped; the rest still go")
+                                    .color(theme::DIM)
+                                    .size(theme::SMALL),
+                            );
+                        }
+                    });
                 });
             });
         if !open {
@@ -5438,7 +5614,10 @@ mod tests {
                 |ui, app: &mut App| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| app.sidebar(ui));
-                        ui.vertical(|ui| app.rows_table(ui));
+                        ui.vertical(|ui| {
+                            let widths = rows::columns(ui.available_width());
+                            app.rows_table(ui, &widths)
+                        });
                     });
                     // As the window does: the panels ask, and what they asked
                     // for happens once they have all drawn.
@@ -5555,6 +5734,123 @@ mod tests {
 
             app.mark_range_to(ids[2]);
             assert_eq!(app.acting_on(|_| true), ids[..3], "the selection is what acts");
+        }
+
+        #[test]
+        fn scrolling_the_list_leaves_the_column_headers_where_they_are() {
+            // The header is what says which column is which and is the only way
+            // to sort by one, so scrolling a long list past it would take away
+            // the thing that makes the list readable at the moment there is
+            // most list to read.
+            let mut app = app("header");
+            for n in 0..120 {
+                let id = app.library.add(&std::path::PathBuf::from(format!("/music/{n}.flac")));
+                let track = app.library.get_mut(id).unwrap();
+                track.artist = "Peverelist".into();
+                track.title = format!("Track {n}");
+            }
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.browser(ui), app);
+            harness.run();
+
+            let header = harness.get_by_label("columns").rect();
+            let row_before = harness.get_by_label("Peverelist — Track 0").rect();
+
+            harness.get_by_label("Peverelist — Track 0").scroll_down();
+            harness.run();
+            harness.run();
+
+            assert_eq!(
+                harness.get_by_label("columns").rect(),
+                header,
+                "the header moved when the list was scrolled"
+            );
+            assert!(
+                harness.get_by_label("Peverelist — Track 0").rect().top() < row_before.top(),
+                "the list did not scroll, so this proves nothing"
+            );
+        }
+
+        #[test]
+        fn the_way_into_the_duplicate_finder_is_there_before_anything_is_hashed() {
+            // The complaint that started this: with nothing hashed there were
+            // no groups, so the row was hidden, so the finder could not be
+            // reached — and the one thing that would have fixed it was behind
+            // the row.
+            let mut app = app("wayin");
+            app.library.add(std::path::Path::new("/music/one.flac"));
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.sidebar(ui), app);
+            harness.run();
+            harness.get_by_label("In here twice").click();
+            harness.run();
+
+            assert!(
+                harness.state().duplicates.is_some(),
+                "clicking the row did not open the duplicates sheet"
+            );
+        }
+
+        #[test]
+        fn escape_shuts_the_sheet_that_is_in_front() {
+            // Sheets are capped to the screen so the close button is always
+            // reachable, but a key that always works is the belt to that
+            // brace — and it is what a person tries first.
+            let mut app = app("escape");
+            app.settings = true;
+            app.duplicates = Some(std::collections::HashSet::new());
+
+            assert!(app.close_top_sheet(), "nothing was closed");
+            assert!(app.duplicates.is_none(), "the front sheet stayed open");
+            assert!(app.settings, "the sheet behind it closed too, on one press");
+
+            assert!(app.close_top_sheet());
+            assert!(!app.settings, "the second press did not reach the settings");
+            assert!(!app.close_top_sheet(), "it claimed to close a sheet with none open");
+        }
+
+        #[test]
+        fn a_collection_from_before_hashing_can_still_be_checked() {
+            // The case that made the feature invisible: every track imported
+            // before hashing existed has no hash, so nothing groups, so the
+            // sidebar row never appears and there is no way in at all.
+            let dir = std::env::temp_dir().join(format!("booth-rehash-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let one = dir.join("one.flac");
+            let two = dir.join("two.flac");
+            std::fs::write(&one, b"identical bytes").unwrap();
+            std::fs::write(&two, b"identical bytes").unwrap();
+
+            let mut app = app("rehash");
+            for path in [&one, &two] {
+                app.library.add(path);
+            }
+            assert!(
+                app.library.duplicate_groups(&app.config.library_path).is_empty(),
+                "unhashed tracks should group into nothing, which is the whole problem"
+            );
+            assert_eq!(app.library.unhashed().len(), 2, "both are waiting to be looked at");
+
+            // What the button does, and then what the window does with what
+            // comes back.
+            app.hash_unchecked();
+            let mut waited = 0;
+            while app.running() && waited < 6000 {
+                app.collect();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                waited += 5;
+            }
+            app.collect();
+
+            assert!(app.library.unhashed().is_empty(), "the tracks were not hashed");
+            let groups = app.library.duplicate_groups(&app.config.library_path);
+            assert_eq!(groups.len(), 1, "the two copies did not become a group");
+            assert_eq!(groups[0].rest.len(), 1);
+
+            let _ = std::fs::remove_dir_all(&dir);
         }
 
         #[test]
