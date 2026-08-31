@@ -1737,6 +1737,22 @@ struct Dupes {
     seen: std::collections::HashSet<u32>,
 }
 
+/// A path, wrapped rather than run off the edge.
+///
+/// The sheet is a list of paths and the decision is which of them to delete, so
+/// a path that runs past the right-hand edge is the one thing it cannot afford
+/// to hide. Wrapped rather than scrolled sideways, and rather than elided in
+/// the middle: two copies of a record often differ only deep in the path, which
+/// is exactly the part an ellipsis eats.
+fn path_label(ui: &mut Ui, path: &std::path::Path, color: egui::Color32) {
+    ui.add(
+        egui::Label::new(
+            RichText::new(path.display().to_string()).font(theme::mono(10.0)).color(color),
+        )
+        .wrap(),
+    );
+}
+
 /// The most a sheet may be, so that it always fits on the screen.
 ///
 /// A window taller than the viewport is still centred on it, which puts the
@@ -4275,24 +4291,36 @@ impl App {
                     .max_height(list_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        for group in &groups {
+                        for (n, group) in groups.iter().enumerate() {
                             let Some(kept) = self.library.get(group.keep) else { continue };
+                            // A rule between records rather than only a gap:
+                            // every line in a group is a path in the same
+                            // typeface, and without one it is not obvious where
+                            // one record's copies end and the next begin.
+                            if n > 0 {
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+                            }
                             ui.label(
                                 RichText::new(kept.display_title())
                                     .color(theme::TEXT)
                                     .size(theme::BODY),
                             );
-                            ui.horizontal(|ui| {
+                            ui.horizontal_top(|ui| {
                                 ui.add_space(14.0);
                                 ui.label(
-                                    RichText::new(format!("keep  {}", kept.path.display()))
-                                        .font(theme::mono(10.0))
-                                        .color(theme::GO),
+                                    RichText::new("keep").font(theme::mono(10.0)).color(theme::GO),
                                 );
+                                ui.vertical(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        path_label(ui, &kept.path, theme::GO);
+                                    });
+                                });
                             });
                             for copy in &group.rest {
                                 let Some(track) = self.library.get(copy.id) else { continue };
-                                let path = track.path.display().to_string();
+                                let path = track.path.clone();
                                 let plan = plans.get(&copy.id).cloned().unwrap_or_default();
                                 // Every disagreement answered is a copy that is
                                 // no longer waiting on anybody.
@@ -4301,7 +4329,12 @@ impl App {
                                     .iter()
                                     .all(|c| state.picked.contains_key(&(copy.id, c.field)));
 
-                                ui.horizontal(|ui| {
+                                // The checkbox sits to the left of a column
+                                // holding everything else, so that a path too
+                                // long for the sheet wraps to under itself
+                                // rather than back to the margin — which read
+                                // as a new entry rather than the rest of one.
+                                ui.horizontal_top(|ui| {
                                     ui.add_space(14.0);
                                     let mut on = state.ticked.contains(&copy.id);
                                     if ui
@@ -4317,76 +4350,82 @@ impl App {
                                             false => state.ticked.remove(&copy.id),
                                         };
                                     }
-                                    ui.label(
-                                        RichText::new(path)
-                                            .font(theme::mono(10.0))
-                                            .color(theme::DIM),
-                                    );
-                                    let (note, color) = match (copy.identical, answered) {
-                                        (true, _) => ("identical".to_string(), theme::DIM),
-                                        (false, false) => (
-                                            format!(
-                                                "disagrees about {}",
-                                                plan.conflicts
-                                                    .iter()
-                                                    .map(|c| c.field.name())
-                                                    .collect::<Vec<_>>()
-                                                    .join(", ")
-                                            ),
-                                            theme::ALERT,
-                                        ),
-                                        (false, true) => (plan.summary(), theme::AMBER),
-                                    };
-                                    ui.label(RichText::new(note).size(theme::SMALL).color(color));
-                                });
+                                    ui.vertical(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            path_label(ui, &path, theme::DIM);
+                                            let (note, color) = match (copy.identical, answered) {
+                                                (true, _) => ("identical".to_string(), theme::DIM),
+                                                (false, false) => (
+                                                    format!(
+                                                        "disagrees about {}",
+                                                        plan.conflicts
+                                                            .iter()
+                                                            .map(|c| c.field.name())
+                                                            .collect::<Vec<_>>()
+                                                            .join(", ")
+                                                    ),
+                                                    theme::ALERT,
+                                                ),
+                                                (false, true) => (plan.summary(), theme::AMBER),
+                                            };
+                                            ui.label(
+                                                RichText::new(note).size(theme::SMALL).color(color),
+                                            );
+                                        });
 
-                                // One line per disagreement, with both answers
-                                // to choose between. Answering the last one
-                                // ticks the copy, because that is what having
-                                // answered it means.
-                                for conflict in &plan.conflicts {
-                                    let key = (copy.id, conflict.field);
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(38.0);
-                                        ui.label(
-                                            RichText::new(format!("{}:", conflict.field.name()))
-                                                .size(theme::SMALL)
-                                                .color(theme::DIM),
-                                        );
-                                        for (side, value) in [
-                                            (Side::Kept, &conflict.kept),
-                                            (Side::Other, &conflict.other),
-                                        ] {
-                                            let chosen = state.picked.get(&key) == Some(&side);
-                                            // A radio rather than a label that
-                                            // happens to be clickable: this is
-                                            // the one place in the sheet that
-                                            // is waiting on a person, and it
-                                            // has to look like it.
-                                            if ui
-                                                .radio(
-                                                    chosen,
-                                                    RichText::new(value).size(theme::SMALL),
-                                                )
-                                                .on_hover_text(match side {
-                                                    Side::Kept => "what the kept copy says",
-                                                    Side::Other => "what this copy says",
-                                                })
-                                                .clicked()
-                                            {
-                                                state.picked.insert(key, side);
-                                                if plan.conflicts.iter().all(|c| {
-                                                    c.field == conflict.field
-                                                        || state
-                                                            .picked
-                                                            .contains_key(&(copy.id, c.field))
-                                                }) {
-                                                    state.ticked.insert(copy.id);
+                                        // One line per disagreement, with both answers
+                                        // to choose between. Answering the last one
+                                        // ticks the copy, because that is what having
+                                        // answered it means.
+                                        for conflict in &plan.conflicts {
+                                            let key = (copy.id, conflict.field);
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add_space(10.0);
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{}:",
+                                                        conflict.field.name()
+                                                    ))
+                                                    .size(theme::SMALL)
+                                                    .color(theme::DIM),
+                                                );
+                                                for (side, value) in [
+                                                    (Side::Kept, &conflict.kept),
+                                                    (Side::Other, &conflict.other),
+                                                ] {
+                                                    let chosen =
+                                                        state.picked.get(&key) == Some(&side);
+                                                    // A radio rather than a label that
+                                                    // happens to be clickable: this is
+                                                    // the one place in the sheet that
+                                                    // is waiting on a person, and it
+                                                    // has to look like it.
+                                                    if ui
+                                                        .radio(
+                                                            chosen,
+                                                            RichText::new(value).size(theme::SMALL),
+                                                        )
+                                                        .on_hover_text(match side {
+                                                            Side::Kept => "what the kept copy says",
+                                                            Side::Other => "what this copy says",
+                                                        })
+                                                        .clicked()
+                                                    {
+                                                        state.picked.insert(key, side);
+                                                        if plan.conflicts.iter().all(|c| {
+                                                            c.field == conflict.field
+                                                                || state.picked.contains_key(&(
+                                                                    copy.id, c.field,
+                                                                ))
+                                                        }) {
+                                                            state.ticked.insert(copy.id);
+                                                        }
+                                                    }
                                                 }
-                                            }
+                                            });
                                         }
                                     });
-                                }
+                                });
                             }
                             ui.add_space(8.0);
                         }
@@ -6120,6 +6159,45 @@ mod tests {
                 "Sirens (Original Mix)",
                 "the answer given in the sheet was not the one applied"
             );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_path_too_long_for_the_sheet_wraps_instead_of_running_off_it() {
+            // The sheet is a list of paths and the decision is which of them to
+            // delete, so a path running past the right-hand edge is the one
+            // thing it cannot afford to hide — and there is no scrolling
+            // sideways to go and find it.
+            let (mut app, dir, _keep, other) = two_copies("wrapping");
+            let long = dir.join("downloads").join(
+                "Peverelist - Sirens (Original Mix) - Livity Sound Recordings 2019 \
+                 Remastered Edition - 24bit 44.1kHz FLAC - 01 Sirens.flac",
+            );
+            app.library.get_mut(other).unwrap().path = long.clone();
+            app.duplicates = Some(Dupes::default());
+
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.duplicates_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+
+            let shown = harness.get_by_label(long.display().to_string().as_str()).rect();
+            let sheet = harness.ctx.content_rect();
+            assert!(
+                shown.right() <= sheet.right(),
+                "the path runs {:.0} points past the edge of the screen, where nothing can \
+                 reach it",
+                shown.right() - sheet.right()
+            );
+            assert!(
+                shown.height() > 14.0,
+                "the path fitted on one line, so this proves nothing about wrapping"
+            );
+
             let _ = std::fs::remove_dir_all(&dir);
         }
 
