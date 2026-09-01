@@ -190,6 +190,10 @@ pub struct App {
     /// Whether the duplicates sheet is open, and what has been decided in it
     /// so far.
     duplicates: Option<Dupes>,
+    /// Kept files whose names a copier wrote, and the name each could go back
+    /// to now that what it was copied from has gone. Offered, never done on its
+    /// own: renaming somebody's file is not a tidy-up to spring on them.
+    renames: Vec<(u32, PathBuf)>,
     /// Set when a panel has been dragged and the new size is not written out
     /// yet. See [`App::save_panels`].
     panels_moved: bool,
@@ -255,11 +259,12 @@ enum Pending {
     },
     /// Put these tracks in the playlist of that name, making it if it is new.
     AddToPlaylist(Vec<u32>, String),
-    /// Fold these copies into the tracks being kept, then send their files to
-    /// the trash and forget them. The picks say how each disagreement between a
-    /// copy and its keeper was settled.
+    /// Fold each of these copies into the track it is paired with, then send
+    /// its file to the trash and forget it. The picks say how each disagreement
+    /// between a copy and the track keeping it was settled.
     TrashDuplicates {
-        ticked: Vec<u32>,
+        /// The copy to be rid of, and the track it is folded into.
+        going: Vec<(u32, u32)>,
         picked: Vec<(u32, crate::library::Field, crate::library::Side)>,
     },
     /// Open the sidebar's naming field, and put these in whatever it is called.
@@ -494,6 +499,7 @@ impl App {
             naming: None,
             help: false,
             duplicates: None,
+            renames: Vec::new(),
             panels_moved: false,
             pending_save: false,
             pending_rebuild: false,
@@ -529,6 +535,16 @@ impl App {
         #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_OPEN_SETTINGS").is_some() {
             app.settings = true;
+            cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
+        }
+        #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_OPEN_RENAMES").is_some() {
+            app.renames = app
+                .library
+                .tracks
+                .iter()
+                .filter_map(|t| Some((t.id, crate::library::name_without_copy_number(&t.path)?)))
+                .collect();
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
         }
         #[cfg(feature = "screenshot")]
@@ -1697,6 +1713,9 @@ impl eframe::App for App {
         if self.duplicates.is_some() {
             self.duplicates_sheet(ctx);
         }
+        if !self.renames.is_empty() {
+            self.renames_sheet(ctx);
+        }
         self.log_window(ctx);
 
         // Everything the panels asked for happens here, after they have all
@@ -1726,15 +1745,55 @@ fn bar_frame() -> egui::Frame {
 /// them are rebuilt every frame as tracks are hashed.
 #[derive(Default)]
 struct Dupes {
-    /// The copies to be rid of.
-    ticked: std::collections::HashSet<u32>,
+    /// The copies to keep. Everything else in a group goes, which is what makes
+    /// the opening state — one tick per group — the tidiest one on offer.
+    keeping: std::collections::HashSet<u32>,
     /// How a disagreement between one copy and the track being kept was
     /// settled, by copy and by field.
     picked: std::collections::HashMap<(u32, crate::library::Field), crate::library::Side>,
-    /// Copies that have already been given their opening answer, so that
-    /// unticking one is not undone on the next frame — and so that a copy that
-    /// turns up later, as hashing goes on, still gets one.
+    /// Groups that have already been given their opening tick, so that moving
+    /// it is not undone on the next frame — and so that a group that turns up
+    /// later, as hashing goes on, still gets one.
     seen: std::collections::HashSet<u32>,
+}
+
+/// One group of copies as the sheet is showing it this frame.
+///
+/// Worked out once per frame rather than per row: the rows read it, the button
+/// counts it, and the button's own work uses it, so all three are looking at
+/// the same thing.
+struct DupeGroup {
+    /// The group's stable name, which does not move when the tick does.
+    key: u32,
+    /// The kept copy the rest would be folded into.
+    into: u32,
+    /// Every copy: its id, whether it is being kept, whether it is
+    /// byte-for-byte the one being kept, and what folding it in would do.
+    members: Vec<(u32, bool, bool, crate::library::Merge)>,
+}
+
+/// Which copies the button would send to the trash, and what each is folded
+/// into first.
+///
+/// Everything in a group that is not being kept — except a copy whose
+/// disagreement with the kept one has not been answered. That copy is left
+/// where it is: deleting it would settle the question by throwing away one of
+/// the two answers, which is the one thing the sheet promises not to do.
+///
+/// Here rather than inline because the number on the button and the work the
+/// button does must be the same answer, and two ways of working it out is how
+/// they come to differ.
+fn going_to_the_trash(groups: &[DupeGroup], state: &Dupes) -> Vec<(u32, u32)> {
+    groups
+        .iter()
+        .flat_map(|group| {
+            group.members.iter().filter_map(move |(id, kept, _, plan)| {
+                let answered =
+                    plan.conflicts.iter().all(|c| state.picked.contains_key(&(*id, c.field)));
+                (!kept && answered).then_some((*id, group.into))
+            })
+        })
+        .collect()
 }
 
 /// A path, wrapped rather than run off the edge.
@@ -1799,6 +1858,10 @@ impl App {
     /// screen in — so the answer matches what is actually in front of the eye
     /// rather than the order the fields happen to be declared in.
     fn close_top_sheet(&mut self) -> bool {
+        if !self.renames.is_empty() {
+            self.renames.clear();
+            return true;
+        }
         if self.duplicates.take().is_some() {
             return true;
         }
@@ -2428,29 +2491,20 @@ impl App {
     /// pointing at it, which is a worse state than the duplicate was.
     fn trash_duplicates(
         &mut self,
-        ids: &[u32],
+        going: &[(u32, u32)],
         picked: &[(u32, crate::library::Field, crate::library::Side)],
     ) {
         let mut gone = 0usize;
         let mut freed = 0u64;
-        // Which group each copy belongs to, so the merge knows what it is being
-        // folded into. Worked out before anything is deleted, because removing
-        // a track changes the groups.
-        let keepers: std::collections::HashMap<u32, u32> = self
-            .library
-            .duplicate_groups(&self.config.library_path)
-            .iter()
-            .flat_map(|group| group.rest.iter().map(|copy| (copy.id, group.keep)))
-            .collect();
 
-        for id in ids {
+        for (id, keep) in going {
             let Some(track) = self.library.get(*id) else { continue };
             let (path, bytes) = (track.path.clone(), track.bytes);
             // Folded in first, and only then deleted: doing it the other way
             // round would be reading a record that is already gone. A file that
             // then will not go leaves the copy in the collection with its own
             // answers still on it, which is untidy but loses nothing.
-            if let Some(keep) = keepers.get(id) {
+            {
                 let answers: std::collections::HashMap<_, _> = picked
                     .iter()
                     .filter(|(copy, _, _)| copy == id)
@@ -2486,8 +2540,26 @@ impl App {
         // the same situation as importing from outside, and gets the same
         // answer: whatever the setting says, which is to take a copy unless
         // told otherwise.
-        let survivors: Vec<u32> = keepers.values().copied().collect();
+        let survivors: Vec<u32> = going.iter().map(|(_, keep)| *keep).collect();
         self.ensure_local(&survivors);
+
+        // A kept file called `track_04 (1).flac` was named by a copier, and now
+        // that the `track_04.flac` it was copied from has gone, the plain name
+        // is free again. Worked out here rather than before the deleting,
+        // because until then the name is taken.
+        let mut offers: Vec<(u32, PathBuf)> = Vec::new();
+        for id in &survivors {
+            let Some(track) = self.library.get(*id) else { continue };
+            let Some(plain) = crate::library::name_without_copy_number(&track.path) else {
+                continue;
+            };
+            if plain.exists() || offers.iter().any(|(_, taken)| *taken == plain) {
+                continue;
+            }
+            offers.push((*id, plain));
+        }
+        offers.retain(|(id, _)| !self.renames.iter().any(|(seen, _)| seen == id));
+        self.renames.extend(offers);
     }
 
     /// Put the selection, or everything showing, into a playlist.
@@ -3525,8 +3597,8 @@ impl App {
                     self.replan();
                 }
                 Pending::AddToPlaylist(ids, name) => self.add_tracks_to_playlist(&ids, &name),
-                Pending::TrashDuplicates { ticked, picked } => {
-                    self.trash_duplicates(&ticked, &picked);
+                Pending::TrashDuplicates { going, picked } => {
+                    self.trash_duplicates(&going, &picked);
                     touched = true;
                 }
                 Pending::NamePlaylistFor(ids) => {
@@ -4166,54 +4238,76 @@ impl App {
 
     /// The same recordings, more than once, and the offer to be rid of them.
     ///
-    /// What only one copy knows is folded into the one being kept before the
-    /// rest go, so that being rid of a copy costs nothing: the album name that
-    /// was only on the download, the cues placed on it, the playlist it was in.
-    /// A copy that is byte-for-byte the kept one, or that merges without
-    /// contradicting it, is ticked when the sheet opens — there is nothing to
-    /// decide about either. A copy that disagrees is not, and says what about,
-    /// until somebody says which answer is right.
+    /// A tick means keep this one. Every group opens with exactly one ticked —
+    /// the copy that knows the most about the record — because the point of the
+    /// sheet is to end up with one file per recording, and anything else is a
+    /// decision somebody has to make rather than a default worth having. The
+    /// first copy is only a guess at which that should be, so it is a tick like
+    /// any other and can be moved.
+    ///
+    /// What only the untick copies know is folded into the one kept before they
+    /// go, so being rid of them costs nothing: the album name that was only on
+    /// the download, the cues placed on it, the playlist it was in. Where two
+    /// of them answer the same field differently there is nothing to fold and
+    /// somebody has to say which is right; until they do, that copy is left
+    /// where it is rather than deleted on a guess.
     ///
     /// Nothing happens until the button at the bottom is pressed. This is the
     /// only thing in the program that deletes somebody's music, and it says how
     /// many files and how many megabytes before it does.
     fn duplicates_sheet(&mut self, ctx: &egui::Context) {
-        use crate::library::{Field, Side};
+        use crate::library::{Field, Merge, Side};
 
         let groups = self.library.duplicate_groups(&self.config.library_path);
         let unchecked = self.library.unhashed().len();
-        // What each copy would do to the track being kept, worked out once for
-        // the frame: the rows read it, the opening ticks read it, and the
-        // button at the bottom counts it.
-        let plans: std::collections::HashMap<u32, crate::library::Merge> = groups
-            .iter()
-            .flat_map(|group| {
-                group
-                    .rest
-                    .iter()
-                    .map(|copy| (copy.id, self.library.plan_merge(group.keep, copy.id)))
-            })
-            .collect();
-
         let mut state = self.duplicates.take().unwrap_or_default();
-        // A copy nobody has seen yet gets its opening answer: ticked when there
-        // is nothing to decide, left alone when there is. Once seen it is the
-        // user's, so unticking sticks.
+
+        // A group nobody has looked at yet opens keeping one file: the copy
+        // that knows the most. Keyed by the group rather than by the copy, so
+        // that moving the tick within a group is not undone on the next frame.
         for group in &groups {
-            for copy in &group.rest {
-                if !state.seen.insert(copy.id) {
-                    continue;
-                }
-                let clean = plans.get(&copy.id).is_none_or(|plan| plan.is_clean());
-                if copy.identical || clean {
-                    state.ticked.insert(copy.id);
-                }
+            if state.seen.insert(group.key()) {
+                state.keeping.insert(group.keep);
             }
         }
+
+        // What each group looks like this frame: its members in order, which of
+        // them is being kept, and what folding each of the others in would do.
+        // The plans are against the copy actually being kept, so they follow
+        // the tick when it moves.
+        let shown: Vec<DupeGroup> = groups
+            .iter()
+            .map(|group| {
+                let ids = group.all();
+                let into = ids.iter().copied().find(|id| state.keeping.contains(id));
+                // Nothing ticked is a state the user can reach by untidying a
+                // group; the plans still need something to be about, and the
+                // group's own choice is the honest stand-in.
+                let into = into.unwrap_or(group.keep);
+                let hash = self.library.get(into).map(|t| t.file_hash.clone()).unwrap_or_default();
+                let members = ids
+                    .iter()
+                    .map(|id| {
+                        let kept = state.keeping.contains(id);
+                        let same = self
+                            .library
+                            .get(*id)
+                            .is_some_and(|t| !t.file_hash.is_empty() && t.file_hash == hash);
+                        let plan = match kept {
+                            true => Merge::default(),
+                            false => self.library.plan_merge(into, *id),
+                        };
+                        (*id, kept, same && *id != into, plan)
+                    })
+                    .collect();
+                DupeGroup { key: group.key(), into, members }
+            })
+            .collect();
 
         let mut open = true;
         let mut delete = false;
         let mut look = false;
+        let mut tidy = false;
 
         egui::Window::new("The same record, more than once")
             .open(&mut open)
@@ -4274,8 +4368,8 @@ impl App {
                 ui.label(
                     RichText::new(
                         "Grouped by the sound in the file rather than by its name, so the \
-                         same rip tagged twice is one record here. What only a copy knows \
-                         is folded into the one kept, on top, before the rest go.",
+                         same rip tagged twice is one record here. Ticked is kept; what the \
+                         rest know is folded into it before they go.",
                     )
                     .color(theme::DIM)
                     .size(theme::SMALL),
@@ -4291,8 +4385,7 @@ impl App {
                     .max_height(list_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        for (n, group) in groups.iter().enumerate() {
-                            let Some(kept) = self.library.get(group.keep) else { continue };
+                        for (n, group) in shown.iter().enumerate() {
                             // A rule between records rather than only a gap:
                             // every line in a group is a path in the same
                             // typeface, and without one it is not obvious where
@@ -4302,32 +4395,25 @@ impl App {
                                 ui.separator();
                                 ui.add_space(6.0);
                             }
-                            ui.label(
-                                RichText::new(kept.display_title())
-                                    .color(theme::TEXT)
-                                    .size(theme::BODY),
-                            );
-                            ui.horizontal_top(|ui| {
-                                ui.add_space(14.0);
+                            if let Some(track) = self.library.get(group.into) {
                                 ui.label(
-                                    RichText::new("keep").font(theme::mono(10.0)).color(theme::GO),
+                                    RichText::new(track.display_title())
+                                        .color(theme::TEXT)
+                                        .size(theme::BODY),
                                 );
-                                ui.vertical(|ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        path_label(ui, &kept.path, theme::GO);
-                                    });
-                                });
-                            });
-                            for copy in &group.rest {
-                                let Some(track) = self.library.get(copy.id) else { continue };
+                            }
+
+                            let kept_here =
+                                group.members.iter().filter(|(_, kept, _, _)| *kept).count();
+                            for (id, kept, same, plan) in &group.members {
+                                let Some(track) = self.library.get(*id) else { continue };
                                 let path = track.path.clone();
-                                let plan = plans.get(&copy.id).cloned().unwrap_or_default();
                                 // Every disagreement answered is a copy that is
                                 // no longer waiting on anybody.
                                 let answered = plan
                                     .conflicts
                                     .iter()
-                                    .all(|c| state.picked.contains_key(&(copy.id, c.field)));
+                                    .all(|c| state.picked.contains_key(&(*id, c.field)));
 
                                 // The checkbox sits to the left of a column
                                 // holding everything else, so that a path too
@@ -4336,26 +4422,42 @@ impl App {
                                 // as a new entry rather than the rest of one.
                                 ui.horizontal_top(|ui| {
                                     ui.add_space(14.0);
-                                    let mut on = state.ticked.contains(&copy.id);
+                                    // The last tick in a group cannot be
+                                    // cleared: a group with nothing kept is an
+                                    // offer to delete every copy of a record,
+                                    // which is not a thing to make reachable by
+                                    // one stray click.
+                                    let last = *kept && kept_here == 1;
+                                    let mut on = *kept;
                                     if ui
-                                        .add_enabled(
-                                            answered,
-                                            egui::Checkbox::without_text(&mut on),
+                                        .add_enabled(!last, egui::Checkbox::without_text(&mut on))
+                                        .on_hover_text("Keep this one")
+                                        .on_disabled_hover_text(
+                                            "Something has to stay — tick another first",
                                         )
-                                        .on_disabled_hover_text("Say which answer is right first")
                                         .changed()
                                     {
                                         match on {
-                                            true => state.ticked.insert(copy.id),
-                                            false => state.ticked.remove(&copy.id),
+                                            true => state.keeping.insert(*id),
+                                            false => state.keeping.remove(id),
                                         };
                                     }
                                     ui.vertical(|ui| {
                                         ui.horizontal_wrapped(|ui| {
-                                            path_label(ui, &path, theme::DIM);
-                                            let (note, color) = match (copy.identical, answered) {
-                                                (true, _) => ("identical".to_string(), theme::DIM),
-                                                (false, false) => (
+                                            path_label(
+                                                ui,
+                                                &path,
+                                                match kept {
+                                                    true => theme::GO,
+                                                    false => theme::DIM,
+                                                },
+                                            );
+                                            let (note, color) = match (kept, same, answered) {
+                                                (true, _, _) => ("keep".to_string(), theme::GO),
+                                                (false, true, _) => {
+                                                    ("identical".to_string(), theme::DIM)
+                                                }
+                                                (false, false, false) => (
                                                     format!(
                                                         "disagrees about {}",
                                                         plan.conflicts
@@ -4366,19 +4468,19 @@ impl App {
                                                     ),
                                                     theme::ALERT,
                                                 ),
-                                                (false, true) => (plan.summary(), theme::AMBER),
+                                                (false, false, true) => {
+                                                    (plan.summary(), theme::AMBER)
+                                                }
                                             };
                                             ui.label(
                                                 RichText::new(note).size(theme::SMALL).color(color),
                                             );
                                         });
 
-                                        // One line per disagreement, with both answers
-                                        // to choose between. Answering the last one
-                                        // ticks the copy, because that is what having
-                                        // answered it means.
+                                        // One line per disagreement, with both
+                                        // answers to choose between.
                                         for conflict in &plan.conflicts {
-                                            let key = (copy.id, conflict.field);
+                                            let key = (*id, conflict.field);
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.add_space(10.0);
                                                 ui.label(
@@ -4395,11 +4497,12 @@ impl App {
                                                 ] {
                                                     let chosen =
                                                         state.picked.get(&key) == Some(&side);
-                                                    // A radio rather than a label that
-                                                    // happens to be clickable: this is
-                                                    // the one place in the sheet that
-                                                    // is waiting on a person, and it
-                                                    // has to look like it.
+                                                    // A radio rather than a
+                                                    // label that happens to be
+                                                    // clickable: this is the one
+                                                    // place in the sheet that is
+                                                    // waiting on a person, and
+                                                    // it has to look like it.
                                                     if ui
                                                         .radio(
                                                             chosen,
@@ -4412,14 +4515,6 @@ impl App {
                                                         .clicked()
                                                     {
                                                         state.picked.insert(key, side);
-                                                        if plan.conflicts.iter().all(|c| {
-                                                            c.field == conflict.field
-                                                                || state.picked.contains_key(&(
-                                                                    copy.id, c.field,
-                                                                ))
-                                                        }) {
-                                                            state.ticked.insert(copy.id);
-                                                        }
                                                     }
                                                 }
                                             });
@@ -4427,36 +4522,43 @@ impl App {
                                     });
                                 });
                             }
-                            ui.add_space(8.0);
                         }
                     });
 
                 // The footer, in the space kept for it above.
                 ui.separator();
-                let bytes: u64 = state
-                    .ticked
+                let going = going_to_the_trash(&shown, &state);
+                let bytes: u64 = going
                     .iter()
-                    .filter_map(|id| self.library.get(*id))
+                    .filter_map(|(id, _)| self.library.get(*id))
                     .map(|track| track.bytes)
                     .sum();
-                let waiting = plans
+                // Untidy is a group keeping more than the one file it needs to.
+                let untidy = shown
                     .iter()
-                    .filter(|(id, plan)| {
-                        !plan.is_clean()
+                    .filter(|group| {
+                        group.members.iter().filter(|(_, kept, _, _)| *kept).count() > 1
+                    })
+                    .count();
+                let waiting = shown
+                    .iter()
+                    .flat_map(|group| group.members.iter())
+                    .filter(|(id, kept, _, plan)| {
+                        !kept
                             && !plan
                                 .conflicts
                                 .iter()
-                                .all(|c| state.picked.contains_key(&(**id, c.field)))
+                                .all(|c| state.picked.contains_key(&(*id, c.field)))
                     })
                     .count();
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
-                            !state.ticked.is_empty(),
+                            !going.is_empty(),
                             egui::Button::new(
                                 RichText::new(format!(
                                     "Move {} to the trash  ({})",
-                                    plural(state.ticked.len(), "file"),
+                                    plural(going.len(), "file"),
                                     crate::sync::bytes(bytes)
                                 ))
                                 .color(theme::BOOTH)
@@ -4472,18 +4574,20 @@ impl App {
                     {
                         delete = true;
                     }
-                    if ui
-                        .button(RichText::new("Untick all").size(theme::SMALL))
-                        .on_hover_text("Start again from nothing chosen")
-                        .clicked()
+                    if untidy > 0
+                        && ui
+                            .button(RichText::new("Keep one of each").size(theme::SMALL))
+                            .on_hover_text("Go back to keeping only the best copy of each record")
+                            .clicked()
                     {
-                        state.ticked.clear();
+                        tidy = true;
                     }
                     if waiting > 0 {
                         ui.label(
                             RichText::new(format!(
-                                "{} still waiting on an answer",
-                                plural(waiting, "copy")
+                                "{} left alone until {} disagreement is answered",
+                                plural(waiting, "copy"),
+                                if waiting == 1 { "its" } else { "each" },
                             ))
                             .size(theme::SMALL)
                             .color(theme::ALERT),
@@ -4496,12 +4600,22 @@ impl App {
             // The picks travel with the ids: by the time this runs the sheet is
             // shut, and the merge still has to know how each disagreement was
             // settled.
-            let ticked: Vec<u32> = state.ticked.iter().copied().collect();
+            let going = going_to_the_trash(&shown, &state);
             let picked: Vec<(u32, Field, Side)> =
                 state.picked.iter().map(|((id, field), side)| (*id, *field, *side)).collect();
-            self.pending.push(Pending::TrashDuplicates { ticked, picked });
+            self.pending.push(Pending::TrashDuplicates { going, picked });
             self.duplicates = None;
         } else {
+            if tidy {
+                for group in &shown {
+                    for (id, _, _, _) in &group.members {
+                        state.keeping.remove(id);
+                    }
+                    if let Some(best) = groups.iter().find(|g| g.key() == group.key) {
+                        state.keeping.insert(best.keep);
+                    }
+                }
+            }
             match open {
                 true => self.duplicates = Some(state),
                 false => self.duplicates = None,
@@ -4509,6 +4623,128 @@ impl App {
         }
         if look {
             self.hash_unchecked();
+        }
+    }
+
+    /// The offer to put a copier's name right, once what it was copied from
+    /// has gone.
+    ///
+    /// An offer rather than something done on the way past. The file is
+    /// somebody's, its name may be what a playlist somewhere else refers to,
+    /// and `track_04 (1).flac` is a perfectly working name — the only argument
+    /// for changing it is tidiness, which is not an argument for doing it
+    /// without being asked.
+    fn renames_sheet(&mut self, ctx: &egui::Context) {
+        let offers = self.renames.clone();
+        let mut open = true;
+        let mut rename: Option<Vec<(u32, PathBuf)>> = None;
+
+        egui::Window::new("Names a copier wrote")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(680.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "These were kept, and the files they were copied from have gone — so \
+                         the plain name is free again.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .max_height(sheet_height(ctx) - 150.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (id, plain) in &offers {
+                            let Some(track) = self.library.get(*id) else { continue };
+                            let from = track.path.clone();
+                            ui.horizontal_top(|ui| {
+                                ui.add_space(6.0);
+                                ui.vertical(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        path_label(ui, &from, theme::DIM);
+                                    });
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.add_space(10.0);
+                                        ui.label(
+                                            RichText::new("\u{2192}")
+                                                .font(theme::mono(10.0))
+                                                .color(theme::GO),
+                                        );
+                                        path_label(ui, plain, theme::GO);
+                                    });
+                                });
+                            });
+                            ui.add_space(6.0);
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(format!("Rename {}", plural(offers.len(), "file")))
+                                    .strong(),
+                            )
+                            .fill(theme::BOOTH_2),
+                        )
+                        .on_hover_text("Renames the files on disk, and follows them here")
+                        .clicked()
+                    {
+                        rename = Some(offers.clone());
+                    }
+                    if ui.button("Leave them").on_hover_text("The names stay as they are").clicked()
+                    {
+                        rename = Some(Vec::new());
+                    }
+                });
+            });
+
+        if let Some(doing) = rename {
+            self.rename_files(&doing);
+            self.renames.clear();
+        } else if !open {
+            self.renames.clear();
+        }
+    }
+
+    /// Rename files on disk and follow them in the collection.
+    ///
+    /// A name already taken is skipped rather than written over: the whole
+    /// point of the offer is that the name was free, and if something has taken
+    /// it since then the offer was wrong.
+    fn rename_files(&mut self, doing: &[(u32, PathBuf)]) {
+        let mut done = 0usize;
+        for (id, to) in doing {
+            let Some(track) = self.library.get(*id) else { continue };
+            let from = track.path.clone();
+            if to.exists() {
+                crate::warn!("not renaming {}: {} is taken", from.display(), to.display());
+                continue;
+            }
+            match std::fs::rename(&from, to) {
+                Ok(()) => {
+                    crate::info!("renamed {} to {}", from.display(), to.display());
+                    if let Some(track) = self.library.get_mut(*id) {
+                        track.path = to.clone();
+                    }
+                    done += 1;
+                }
+                Err(e) => {
+                    crate::warn!("could not rename {}: {e}", from.display());
+                    self.note(format!("{} would not rename", from.display()), theme::ALERT);
+                }
+            }
+        }
+        if done > 0 {
+            self.note(format!("{} renamed", plural(done, "file")), theme::TEXT);
+            self.save();
         }
     }
 
@@ -6111,6 +6347,83 @@ mod tests {
         }
 
         #[test]
+        fn a_kept_copy_is_offered_the_name_the_one_it_replaced_gave_up() {
+            // The tidy-up the whole rule is for: the file a copier numbered
+            // turned out to be the one worth keeping, and now that the file it
+            // was copied from has gone, the plain name is free.
+            let dir = std::env::temp_dir().join(format!("booth-rename-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let plain = dir.join("track_04.flac");
+            let numbered = dir.join("track_04 (1).flac");
+            std::fs::write(&plain, b"same bytes").unwrap();
+            std::fs::write(&numbered, b"same bytes").unwrap();
+
+            let mut app = app("rename");
+            let going = app.library.add(&plain);
+            let keep = app.library.add(&numbered);
+            for id in [going, keep] {
+                let track = app.library.get_mut(id).unwrap();
+                track.audio_hash = "SAME".into();
+                track.file_hash = format!("F{id}");
+                track.artist = "Peverelist".into();
+            }
+            app.library.get_mut(keep).unwrap().album = "Livity Sound".into();
+
+            app.trash_duplicates(&[(going, keep)], &[]);
+            assert_eq!(
+                app.renames,
+                vec![(keep, dir.join("track_04.flac"))],
+                "no rename was offered though the plain name is now free"
+            );
+
+            app.rename_files(&app.renames.clone());
+            assert!(dir.join("track_04.flac").exists(), "the file was not renamed on disk");
+            assert!(!numbered.exists(), "the old name is still there");
+            assert_eq!(
+                app.library.get(keep).unwrap().path,
+                dir.join("track_04.flac"),
+                "the collection is still pointing at the old name"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_name_that_is_still_taken_is_not_offered_or_written_over() {
+            // The offer's whole premise is that the name came free. If the file
+            // it was copied from is still there — because it was kept too, or
+            // because it would not go to the trash — there is nothing to offer.
+            let dir =
+                std::env::temp_dir().join(format!("booth-rename-taken-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let plain = dir.join("track_04.flac");
+            let numbered = dir.join("track_04 (1).flac");
+            std::fs::write(&plain, b"the original").unwrap();
+            std::fs::write(&numbered, b"the copy").unwrap();
+
+            let mut app = app("rename-taken");
+            let keep = app.library.add(&numbered);
+            app.library.get_mut(keep).unwrap().audio_hash = "SAME".into();
+
+            // Nothing was deleted, so nothing is offered.
+            app.trash_duplicates(&[], &[]);
+            assert!(app.renames.is_empty(), "a name still in use was offered");
+
+            // And asked to do it anyway, it refuses rather than overwriting.
+            app.rename_files(&[(keep, plain.clone())]);
+            assert_eq!(
+                std::fs::read(&plain).unwrap(),
+                b"the original",
+                "the rename wrote over a file that was already there"
+            );
+            assert!(numbered.exists(), "and it moved the copy anyway");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
         fn what_only_the_copy_knows_survives_being_rid_of_it() {
             // The point of merging: throwing away a duplicate should cost
             // nothing at all, so the album name that was only on the download
@@ -6129,7 +6442,7 @@ mod tests {
             app.library.add_playlist("Saturday", "").unwrap();
             app.library.playlists[0].tracks.push(other);
 
-            app.trash_duplicates(&[other], &[]);
+            app.trash_duplicates(&[(other, keep)], &[]);
 
             let kept = app.library.get(keep).expect("the kept track went");
             assert_eq!(kept.tags, vec!["peak".to_string()], "the tag went with the file");
@@ -6150,7 +6463,7 @@ mod tests {
             app.library.get_mut(other).unwrap().title = "Sirens (Original Mix)".into();
 
             app.trash_duplicates(
-                &[other],
+                &[(other, keep)],
                 &[(other, crate::library::Field::Title, crate::library::Side::Other)],
             );
 
@@ -6202,11 +6515,12 @@ mod tests {
         }
 
         #[test]
-        fn the_copies_with_nothing_to_decide_are_ticked_and_the_rest_are_not() {
-            // What opening the sheet should do on its own: an identical file is
-            // a no-brainer and so is one that only fills blanks in, but a copy
-            // that contradicts the kept track has to wait for a person.
-            let (mut app, dir, _keep, clean) = two_copies("ticks");
+        fn a_group_opens_keeping_one_file_and_only_one() {
+            // The point of the sheet is to end up with one file per recording,
+            // so that is what it opens proposing — and the copy it proposes is
+            // a tick like any other, because the guess about which one is best
+            // may not be the user's answer.
+            let (mut app, dir, keep, clean) = two_copies("ticks");
             let arguing = app.library.add(&dir.join("downloads").join("third.flac"));
             {
                 let track = app.library.get_mut(arguing).unwrap();
@@ -6228,21 +6542,56 @@ mod tests {
             harness.run();
 
             let state = harness.state().duplicates.as_ref().expect("the sheet shut itself");
-            assert!(
-                state.ticked.contains(&clean),
-                "a copy that only fills blanks in was not ticked"
-            );
-            assert!(
-                !state.ticked.contains(&arguing),
-                "a copy that contradicts the kept track was ticked without being asked about"
+            assert_eq!(
+                state.keeping.iter().copied().collect::<Vec<_>>(),
+                vec![keep],
+                "a group should open keeping exactly one file, and it should be the best one"
             );
 
             let _ = std::fs::remove_dir_all(&dir);
         }
 
         #[test]
-        fn unticking_a_copy_is_not_undone_on_the_next_frame() {
-            let (mut app, dir, _keep, clean) = two_copies("sticky");
+        fn a_copy_that_disagrees_is_left_alone_until_it_is_answered() {
+            // Deleting it would settle the question by throwing one of the two
+            // answers away, which is the one thing the sheet promises not to do.
+            let (mut app, dir, keep, clean) = two_copies("waiting");
+            let arguing = app.library.add(&dir.join("downloads").join("third.flac"));
+            {
+                let track = app.library.get_mut(arguing).unwrap();
+                track.audio_hash = "SAME".into();
+                track.file_hash = "FILE-THIRD".into();
+                track.artist = "Peverelist".into();
+                track.title = "Sirens (Original Mix)".into();
+            }
+            app.duplicates = Some(Dupes::default());
+
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.duplicates_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+            harness.get_by_label("Sirens (Original Mix)").click();
+            harness.run();
+
+            let state = harness.state().duplicates.as_ref().unwrap();
+            assert_eq!(
+                state.picked.get(&(arguing, crate::library::Field::Title)),
+                Some(&crate::library::Side::Other),
+                "clicking the answer did not record it"
+            );
+            assert!(state.keeping.contains(&keep), "the kept copy stopped being kept");
+            assert!(!state.keeping.contains(&clean), "the clean copy was not slated to go");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn moving_the_tick_within_a_group_is_not_undone_on_the_next_frame() {
+            let (mut app, dir, keep, other) = two_copies("sticky");
             app.duplicates = Some(Dupes::default());
             let mut harness = Harness::new_ui_state(
                 |ui, app: &mut App| {
@@ -6252,16 +6601,21 @@ mod tests {
                 app,
             );
             harness.run();
-            assert!(harness.state().duplicates.as_ref().unwrap().ticked.contains(&clean));
+            assert!(harness.state().duplicates.as_ref().unwrap().keeping.contains(&keep));
 
-            harness.state_mut().duplicates.as_mut().unwrap().ticked.remove(&clean);
+            // What clicking the other copy's box, and then the first one's,
+            // amounts to: the group is now keeping the copy instead.
+            {
+                let state = harness.state_mut().duplicates.as_mut().unwrap();
+                state.keeping.insert(other);
+                state.keeping.remove(&keep);
+            }
             harness.run();
             harness.run();
 
-            assert!(
-                !harness.state().duplicates.as_ref().unwrap().ticked.contains(&clean),
-                "the opening ticks were applied again over what the user did"
-            );
+            let state = harness.state().duplicates.as_ref().unwrap();
+            assert!(state.keeping.contains(&other), "the opening tick was put back over the user");
+            assert!(!state.keeping.contains(&keep));
             let _ = std::fs::remove_dir_all(&dir);
         }
 
@@ -6292,7 +6646,7 @@ mod tests {
                 track.audio_hash = "SAME".into();
             }
 
-            app.trash_duplicates(&[doomed], &[]);
+            app.trash_duplicates(&[(doomed, kept)], &[]);
 
             assert!(keep.exists(), "the wrong file went");
             assert!(!copy.exists(), "the duplicate is still on disk");
@@ -6308,9 +6662,10 @@ mod tests {
             // file behind with nothing pointing at it — a worse state than the
             // duplicate it was.
             let mut app = app("stubborn");
+            let keep = app.library.add(std::path::Path::new("/nowhere/at/all/kept.flac"));
             let id = app.library.add(std::path::Path::new("/nowhere/at/all/missing.flac"));
 
-            app.trash_duplicates(&[id], &[]);
+            app.trash_duplicates(&[(id, keep)], &[]);
             assert!(
                 app.library.get(id).is_some(),
                 "the track was forgotten though its file could not be trashed"

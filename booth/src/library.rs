@@ -491,6 +491,41 @@ pub fn energy_from(intensity: f32) -> u8 {
     1 + STEPS.iter().filter(|&&step| intensity >= step).count() as u8
 }
 
+/// The name a file would have if it were not a copy of one.
+///
+/// A file duplicated by a file manager, a browser or a sync client comes back
+/// as `track_04 (1).flac` beside the `track_04.flac` it was made from, so a
+/// name ending in a parenthesised number says the file was made by copying
+/// something — which is a fact about where it came from, and worth a say in
+/// which copy of a record is the original.
+///
+/// Only the parenthesised form, which is what every tool that renames on
+/// collision uses. Not "final (2 of 3)", which is not a number; not a title
+/// that happens to end in one, like `Untitled (1994).flac`, since a year is
+/// four digits and a copy number is not.
+///
+/// The extension is kept as it is: `track_04 (3).m4a` came from an `.m4a`, and
+/// the file it collided with may well have been a different format.
+pub fn name_without_copy_number(path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_str()?;
+    let inside = stem.trim_end().strip_suffix(')')?.rsplit_once('(')?.1;
+    // A run of digits, and short enough to be a copy count rather than a year
+    // or a catalogue number.
+    if inside.is_empty() || inside.len() > 3 || !inside.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let base = stem.trim_end().strip_suffix(')')?.rsplit_once('(')?.0.trim_end();
+    if base.is_empty() {
+        return None;
+    }
+    let mut renamed = path.to_path_buf();
+    renamed.set_file_name(match path.extension().and_then(|e| e.to_str()) {
+        Some(extension) => format!("{base}.{extension}"),
+        None => base.to_string(),
+    });
+    Some(renamed)
+}
+
 /// One thing about a recording that two copies of it can differ on.
 ///
 /// Only the things a person put there or a lookup filled in. Everything else a
@@ -581,6 +616,22 @@ pub struct Copies {
     pub keep: u32,
     /// The others, in the order they were found.
     pub rest: Vec<Duplicate>,
+}
+
+impl Copies {
+    /// Every copy in the group, the one to keep first.
+    pub fn all(&self) -> Vec<u32> {
+        let mut ids = vec![self.keep];
+        ids.extend(self.rest.iter().map(|copy| copy.id));
+        ids
+    }
+
+    /// A name for this group that does not move when the choice of which copy
+    /// to keep does — so that a decision made about a group survives the user
+    /// changing their mind about which of its files to keep.
+    pub fn key(&self) -> u32 {
+        self.all().into_iter().min().unwrap_or(self.keep)
+    }
 }
 
 /// One copy that is not the one being kept.
@@ -1154,8 +1205,10 @@ impl Library {
     /// one with the album, the year, the tags, the cues, the listening — since
     /// that is the work that would be lost, and since a disagreement between
     /// two copies is settled in the keeper's favour unless somebody says
-    /// otherwise. Being inside the library folder only breaks a tie. Never the
-    /// shortest path or the newest file: both are accidents.
+    /// otherwise. Then the file whose name no copier wrote — a
+    /// `track_04 (1).flac` was made from something, and that something is the
+    /// likelier original. Being inside the library folder only breaks what is
+    /// left. Never the shortest path or the newest file: both are accidents.
     pub fn duplicate_groups(&self, library_path: &Path) -> Vec<Copies> {
         let mut by_audio: Vec<(&str, Vec<u32>)> = Vec::new();
         for track in self.tracks.iter().filter(|t| t.role == Role::Track) {
@@ -1199,18 +1252,25 @@ impl Library {
         // Most known first, because the copy that knows the most is the one
         // whose answer should stand where two of them disagree — and a
         // disagreement is decided in the keeper's favour unless somebody says
-        // otherwise. Being inside the library folder only settles a tie: it
-        // says which copy this program is responsible for, not which one is
-        // right about the record.
+        // otherwise. Being inside the library folder only settles what the
+        // name has not: it says which copy this program is responsible for,
+        // not which one is right about the record.
         //
         // The last term settles the rest. Without it two copies that score the
         // same left the answer to whichever `max_by_key` happened to reach
         // last, which is neither a decision nor the same one twice; the
         // earliest known copy is the one playlists and drives already point at.
-        let score = |id: &u32| -> ((usize, usize), bool, std::cmp::Reverse<u32>) {
-            let Some(track) = self.get(*id) else { return ((0, 0), false, std::cmp::Reverse(*id)) };
+        let score = |id: &u32| -> ((usize, usize), bool, bool, std::cmp::Reverse<u32>) {
+            let Some(track) = self.get(*id) else {
+                return ((0, 0), false, false, std::cmp::Reverse(*id));
+            };
             (
                 track.how_much_is_known(),
+                // A name a copier wrote — `track_04 (1).flac` — says this file
+                // was made from another one, which is a fact about where it
+                // came from rather than about the record. So it ranks below
+                // what the file knows and above where it happens to sit.
+                name_without_copy_number(&track.path).is_none(),
                 track.path.starts_with(library_path),
                 std::cmp::Reverse(*id),
             )
@@ -1769,6 +1829,63 @@ mod tests {
         );
         library.merge_copy(keep, other, &HashMap::new());
         assert_eq!(library.get(keep).unwrap().bpm, 128.02);
+    }
+
+    #[test]
+    fn a_name_ending_in_a_number_in_brackets_is_a_copy_of_something() {
+        let of = |name: &str| {
+            name_without_copy_number(Path::new(name)).map(|path| path.display().to_string())
+        };
+        assert_eq!(of("/music/track_04 (1).flac"), Some("/music/track_04.flac".into()));
+        assert_eq!(of("/music/track_04 (12).mp3"), Some("/music/track_04.mp3".into()));
+        // The extension is the copy's own: it collided with a different format.
+        assert_eq!(of("/music/track_04 (3).m4a"), Some("/music/track_04.m4a".into()));
+        assert_eq!(of("/music/Sirens(2).flac"), Some("/music/Sirens.flac".into()));
+
+        // Not everything in brackets is a copy number.
+        assert_eq!(of("/music/Untitled (1994).flac"), None, "a year is not a copy count");
+        assert_eq!(of("/music/Sirens (Original Mix).flac"), None);
+        assert_eq!(of("/music/Sirens.flac"), None);
+        assert_eq!(of("/music/(2).flac"), None, "a number alone leaves nothing to rename to");
+    }
+
+    #[test]
+    fn the_copy_whose_name_says_it_is_a_copy_is_not_the_one_kept() {
+        let mut library = Library::new();
+        let numbered = copy_of(&mut library, "/music/track_04 (1).flac", "F1", "A1");
+        let original = copy_of(&mut library, "/music/track_04.flac", "F2", "A1");
+        for id in [numbered, original] {
+            let track = library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+        }
+
+        let groups = library.duplicate_groups(Path::new("/music"));
+        assert_eq!(
+            groups[0].keep, original,
+            "the file whose name says a copier made it was kept over the one it was made from"
+        );
+    }
+
+    #[test]
+    fn knowing_more_still_beats_having_a_tidier_name() {
+        let mut library = Library::new();
+        let numbered = copy_of(&mut library, "/music/track_04 (1).flac", "F1", "A1");
+        let bare = copy_of(&mut library, "/music/track_04.flac", "F2", "A1");
+        {
+            let track = library.get_mut(numbered).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+            track.album = "Livity Sound".into();
+            track.year = Some(2019);
+        }
+        library.get_mut(bare).unwrap().artist = "Peverelist".into();
+
+        let groups = library.duplicate_groups(Path::new("/music"));
+        assert_eq!(
+            groups[0].keep, numbered,
+            "the name is a hint about where a file came from, not about what it knows"
+        );
     }
 
     #[test]
