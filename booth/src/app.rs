@@ -266,6 +266,9 @@ enum Pending {
         /// The copy to be rid of, and the track it is folded into.
         going: Vec<(u32, u32)>,
         picked: Vec<(u32, crate::library::Field, crate::library::Side)>,
+        /// What the kept track's tags should be once the folding is done, for
+        /// each track something was folded into.
+        tags: Vec<(u32, Vec<String>)>,
     },
     /// Open the sidebar's naming field, and put these in whatever it is called.
     NamePlaylistFor(Vec<u32>),
@@ -1751,6 +1754,11 @@ struct Dupes {
     /// How a disagreement between one copy and the track being kept was
     /// settled, by copy and by field.
     picked: std::collections::HashMap<(u32, crate::library::Field), crate::library::Side>,
+    /// Which tags the kept file should end up with, by group. Tags are the one
+    /// thing the copies hold that is a set rather than an answer, so instead of
+    /// asking which copy is right the sheet offers the lot and lets them be
+    /// picked over — the only place a merge is not simply additive.
+    tags: std::collections::HashMap<u32, std::collections::HashSet<String>>,
     /// Groups that have already been given their opening tick, so that moving
     /// it is not undone on the next frame — and so that a group that turns up
     /// later, as hashing goes on, still gets one.
@@ -1770,6 +1778,10 @@ struct DupeGroup {
     /// Every copy: its id, whether it is being kept, whether it is
     /// byte-for-byte the one being kept, and what folding it in would do.
     members: Vec<(u32, bool, bool, crate::library::Merge)>,
+    /// Every tag any copy in the group carries, in the order they were met —
+    /// the kept file's own first — and whether it is already on the kept file.
+    /// What is ticked among these is what the kept file ends up with.
+    tags: Vec<(String, bool)>,
 }
 
 /// Which copies the button would send to the trash, and what each is folded
@@ -2493,6 +2505,7 @@ impl App {
         &mut self,
         going: &[(u32, u32)],
         picked: &[(u32, crate::library::Field, crate::library::Side)],
+        tags: &[(u32, Vec<String>)],
     ) {
         let mut gone = 0usize;
         let mut freed = 0u64;
@@ -2528,6 +2541,18 @@ impl App {
                 }
             }
         }
+        // After the folding, not before: folding a copy in unions its tags
+        // onto the kept track, so this is the last word on which of them stay —
+        // including a tag the kept track already had and somebody has just
+        // struck out, which is the one part of a merge that can take away.
+        for (id, wanted) in tags {
+            let Some(track) = self.library.get_mut(*id) else { continue };
+            if track.tags != *wanted {
+                crate::debug!("#{id} tags: {} -> {}", track.tags.join(" "), wanted.join(" "));
+                track.tags.clone_from(wanted);
+            }
+        }
+
         if gone > 0 {
             self.note(
                 format!("{} to the trash, {} freed", plural(gone, "file"), sync::bytes(freed)),
@@ -3597,8 +3622,8 @@ impl App {
                     self.replan();
                 }
                 Pending::AddToPlaylist(ids, name) => self.add_tracks_to_playlist(&ids, &name),
-                Pending::TrashDuplicates { going, picked } => {
-                    self.trash_duplicates(&going, &picked);
+                Pending::TrashDuplicates { going, picked, tags } => {
+                    self.trash_duplicates(&going, &picked, &tags);
                     touched = true;
                 }
                 Pending::NamePlaylistFor(ids) => {
@@ -4266,9 +4291,20 @@ impl App {
         // that knows the most. Keyed by the group rather than by the copy, so
         // that moving the tick within a group is not undone on the next frame.
         for group in &groups {
-            if state.seen.insert(group.key()) {
-                state.keeping.insert(group.keep);
+            if !state.seen.insert(group.key()) {
+                continue;
             }
+            state.keeping.insert(group.keep);
+            // Every tag any copy carries, to begin with: a tag is somebody
+            // having said something about the record, and the default is to
+            // keep what everybody said.
+            let all: std::collections::HashSet<String> = group
+                .all()
+                .into_iter()
+                .filter_map(|id| self.library.get(id))
+                .flat_map(|track| track.tags.iter().cloned())
+                .collect();
+            state.tags.insert(group.key(), all);
         }
 
         // What each group looks like this frame: its members in order, which of
@@ -4300,7 +4336,22 @@ impl App {
                         (*id, kept, same && *id != into, plan)
                     })
                     .collect();
-                DupeGroup { key: group.key(), into, members }
+
+                // The kept file's own tags first, then whatever the rest bring,
+                // each named once however many copies carry it.
+                let mine: Vec<String> =
+                    self.library.get(into).map(|t| t.tags.clone()).unwrap_or_default();
+                let mut tags: Vec<(String, bool)> =
+                    mine.iter().map(|tag| (tag.clone(), true)).collect();
+                for id in &ids {
+                    let Some(track) = self.library.get(*id) else { continue };
+                    for tag in &track.tags {
+                        if !tags.iter().any(|(seen, _)| seen == tag) {
+                            tags.push((tag.clone(), false));
+                        }
+                    }
+                }
+                DupeGroup { key: group.key(), into, members, tags }
             })
             .collect();
 
@@ -4405,6 +4456,7 @@ impl App {
 
                             let kept_here =
                                 group.members.iter().filter(|(_, kept, _, _)| *kept).count();
+                            let folding_in = group.members.iter().any(|(_, kept, _, _)| !kept);
                             for (id, kept, same, plan) in &group.members {
                                 let Some(track) = self.library.get(*id) else { continue };
                                 let path = track.path.clone();
@@ -4476,6 +4528,68 @@ impl App {
                                                 RichText::new(note).size(theme::SMALL).color(color),
                                             );
                                         });
+
+                                        // What this file itself says, so that
+                                        // a tag can be traced to the copy it
+                                        // came from rather than appearing in a
+                                        // pooled list belonging to nobody.
+                                        if !track.tags.is_empty() {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add_space(10.0);
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "tagged  {}",
+                                                        track.tags.join("  ")
+                                                    ))
+                                                    .font(theme::mono(10.0))
+                                                    .color(theme::DIM),
+                                                );
+                                            });
+                                        }
+
+                                        // On the kept file, every tag in the
+                                        // group, to be picked over: what is
+                                        // ticked is what it ends up with. Only
+                                        // where something is actually being
+                                        // folded in, since otherwise there is
+                                        // no merge for the choice to be about.
+                                        if *kept && folding_in && !group.tags.is_empty() {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add_space(10.0);
+                                                ui.label(
+                                                    RichText::new("keep tags")
+                                                        .size(theme::SMALL)
+                                                        .color(theme::DIM),
+                                                );
+                                                let chosen =
+                                                    state.tags.entry(group.key).or_default();
+                                                for (tag, mine) in &group.tags {
+                                                    let on = chosen.contains(tag);
+                                                    if ui
+                                                        .selectable_label(
+                                                            on,
+                                                            RichText::new(tag)
+                                                                .size(theme::SMALL)
+                                                                .color(match (on, mine) {
+                                                                    (false, _) => theme::DIM,
+                                                                    (true, true) => theme::TEXT,
+                                                                    (true, false) => theme::AMBER,
+                                                                }),
+                                                        )
+                                                        .on_hover_text(match mine {
+                                                            true => "already on this file",
+                                                            false => "from one of the others",
+                                                        })
+                                                        .clicked()
+                                                    {
+                                                        match on {
+                                                            true => chosen.remove(tag),
+                                                            false => chosen.insert(tag.clone()),
+                                                        };
+                                                    }
+                                                }
+                                            });
+                                        }
 
                                         // One line per disagreement, with both
                                         // answers to choose between.
@@ -4603,7 +4717,25 @@ impl App {
             let going = going_to_the_trash(&shown, &state);
             let picked: Vec<(u32, Field, Side)> =
                 state.picked.iter().map(|((id, field), side)| (*id, *field, *side)).collect();
-            self.pending.push(Pending::TrashDuplicates { going, picked });
+            // Only for the groups something is actually leaving, and in the
+            // order the chips were drawn in, so what is written reads the way
+            // the sheet read.
+            let tags: Vec<(u32, Vec<String>)> = shown
+                .iter()
+                .filter(|group| going.iter().any(|(_, into)| *into == group.into))
+                .map(|group| {
+                    let chosen = state.tags.get(&group.key);
+                    let wanted = group
+                        .tags
+                        .iter()
+                        .map(|(tag, _)| tag)
+                        .filter(|tag| chosen.is_none_or(|set| set.contains(*tag)))
+                        .cloned()
+                        .collect();
+                    (group.into, wanted)
+                })
+                .collect();
+            self.pending.push(Pending::TrashDuplicates { going, picked, tags });
             self.duplicates = None;
         } else {
             if tidy {
@@ -6347,6 +6479,62 @@ mod tests {
         }
 
         #[test]
+        fn a_group_opens_offering_every_tag_any_copy_carries() {
+            let (mut app, dir, keep, other) = two_copies("tag-union");
+            app.library.get_mut(keep).unwrap().tags = vec!["peak".into()];
+            app.library.get_mut(other).unwrap().tags = vec!["warmup".into(), "peak".into()];
+            app.duplicates = Some(Dupes::default());
+
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.duplicates_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+
+            let state = harness.state().duplicates.as_ref().unwrap();
+            let chosen = state.tags.values().next().expect("no tags were offered");
+            assert_eq!(
+                chosen.iter().cloned().collect::<std::collections::BTreeSet<_>>(),
+                ["peak".to_string(), "warmup".to_string()].into_iter().collect(),
+                "a tag is somebody having said something, so all of it is kept to begin with"
+            );
+
+            // And each file still says which of them are its own, so a tag can
+            // be traced to the copy it came from.
+            assert!(harness.query_by_label("tagged  warmup  peak").is_some());
+            assert!(harness.query_by_label("tagged  peak").is_some());
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_tag_struck_out_of_the_selection_does_not_end_up_on_the_kept_file() {
+            // The one part of a merge that can take something away, so it is
+            // worth knowing it really does: this includes a tag the kept file
+            // already had.
+            let (mut app, dir, keep, other) = two_copies("tag-pick");
+            app.library.get_mut(keep).unwrap().tags = vec!["peak".into(), "vinyl rip".into()];
+            app.library.get_mut(other).unwrap().tags = vec!["warmup".into()];
+
+            app.trash_duplicates(
+                &[(other, keep)],
+                &[],
+                &[(keep, vec!["peak".to_string(), "warmup".to_string()])],
+            );
+
+            assert_eq!(
+                app.library.get(keep).unwrap().tags,
+                vec!["peak".to_string(), "warmup".to_string()],
+                "the selection was not the last word on the tags"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
         fn a_kept_copy_is_offered_the_name_the_one_it_replaced_gave_up() {
             // The tidy-up the whole rule is for: the file a copier numbered
             // turned out to be the one worth keeping, and now that the file it
@@ -6370,7 +6558,7 @@ mod tests {
             }
             app.library.get_mut(keep).unwrap().album = "Livity Sound".into();
 
-            app.trash_duplicates(&[(going, keep)], &[]);
+            app.trash_duplicates(&[(going, keep)], &[], &[]);
             assert_eq!(
                 app.renames,
                 vec![(keep, dir.join("track_04.flac"))],
@@ -6408,7 +6596,7 @@ mod tests {
             app.library.get_mut(keep).unwrap().audio_hash = "SAME".into();
 
             // Nothing was deleted, so nothing is offered.
-            app.trash_duplicates(&[], &[]);
+            app.trash_duplicates(&[], &[], &[]);
             assert!(app.renames.is_empty(), "a name still in use was offered");
 
             // And asked to do it anyway, it refuses rather than overwriting.
@@ -6442,7 +6630,7 @@ mod tests {
             app.library.add_playlist("Saturday", "").unwrap();
             app.library.playlists[0].tracks.push(other);
 
-            app.trash_duplicates(&[(other, keep)], &[]);
+            app.trash_duplicates(&[(other, keep)], &[], &[]);
 
             let kept = app.library.get(keep).expect("the kept track went");
             assert_eq!(kept.tags, vec!["peak".to_string()], "the tag went with the file");
@@ -6465,6 +6653,7 @@ mod tests {
             app.trash_duplicates(
                 &[(other, keep)],
                 &[(other, crate::library::Field::Title, crate::library::Side::Other)],
+                &[],
             );
 
             assert_eq!(
@@ -6646,7 +6835,7 @@ mod tests {
                 track.audio_hash = "SAME".into();
             }
 
-            app.trash_duplicates(&[(doomed, kept)], &[]);
+            app.trash_duplicates(&[(doomed, kept)], &[], &[]);
 
             assert!(keep.exists(), "the wrong file went");
             assert!(!copy.exists(), "the duplicate is still on disk");
@@ -6665,7 +6854,7 @@ mod tests {
             let keep = app.library.add(std::path::Path::new("/nowhere/at/all/kept.flac"));
             let id = app.library.add(std::path::Path::new("/nowhere/at/all/missing.flac"));
 
-            app.trash_duplicates(&[(id, keep)], &[]);
+            app.trash_duplicates(&[(id, keep)], &[], &[]);
             assert!(
                 app.library.get(id).is_some(),
                 "the track was forgotten though its file could not be trashed"
