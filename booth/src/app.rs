@@ -74,6 +74,11 @@ impl LogWindow {
 /// Added up from its parts rather than guessed, because the failure is silent:
 /// a budget a few points short does not overflow, it quietly clips the last row
 /// off the bottom of the window, and the measurements line is the row it takes.
+/// How many stray files the check names before saying how many more there are.
+/// A first import into an empty library folder can turn up thousands, and a
+/// sheet listing all of them is a scrollbar rather than an answer.
+const ORPHANS_SHOWN: usize = 40;
+
 /// The room the duplicates sheet keeps for its footer, so the button that does
 /// the deleting is never scrolled away from.
 const FOOTER_HEIGHT: f32 = 46.0;
@@ -190,6 +195,9 @@ pub struct App {
     /// Whether the duplicates sheet is open, and what has been decided in it
     /// so far.
     duplicates: Option<Dupes>,
+    /// What checking the collection against its files found, while the sheet
+    /// showing it is open.
+    checked: Option<Checked>,
     /// Kept files whose names a copier wrote, and the name each could go back
     /// to now that what it was copied from has gone. Offered, never done on its
     /// own: renaming somebody's file is not a tidy-up to spring on them.
@@ -502,6 +510,7 @@ impl App {
             naming: None,
             help: false,
             duplicates: None,
+            checked: None,
             renames: Vec::new(),
             panels_moved: false,
             pending_save: false,
@@ -538,6 +547,11 @@ impl App {
         #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_OPEN_SETTINGS").is_some() {
             app.settings = true;
+            cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
+        }
+        #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_CHECK").is_some() {
+            app.verify_showing(false);
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
         }
         #[cfg(feature = "screenshot")]
@@ -1203,6 +1217,16 @@ impl App {
                         }
                     }
                 }
+                Update::Verified(report) => {
+                    if let Some(checked) = &mut self.checked {
+                        checked.troubles.push(*report);
+                    }
+                }
+                Update::Orphans(paths) => {
+                    if let Some(checked) = &mut self.checked {
+                        checked.orphans = paths;
+                    }
+                }
                 Update::Hashed { id, file, audio } => {
                     if let Some(track) = self.library.get_mut(id) {
                         track.file_hash = file;
@@ -1356,6 +1380,16 @@ impl App {
             self.runner = None;
             self.progress = None;
             self.step = None;
+            if let Some(checked) = &mut self.checked {
+                checked.running = false;
+                // Worst first, and then in the order the collection is in, so
+                // that running the same check twice reads the same way — the
+                // answers arrive from several threads at once and their order
+                // is otherwise whatever the disk felt like.
+                checked.troubles.sort_by_key(|report| {
+                    (report.troubles.first().map(|t| t.rank()).unwrap_or(u8::MAX), report.id)
+                });
+            }
             self.save();
         }
         if !imported.is_empty() {
@@ -1724,6 +1758,9 @@ impl eframe::App for App {
         if !self.renames.is_empty() {
             self.renames_sheet(ctx);
         }
+        if self.checked.is_some() {
+            self.verify_sheet(ctx);
+        }
         self.log_window(ctx);
 
         // Everything the panels asked for happens here, after they have all
@@ -1773,6 +1810,26 @@ struct Dupes {
     /// it is not undone on the next frame — and so that a group that turns up
     /// later, as hashing goes on, still gets one.
     seen: std::collections::HashSet<u32>,
+}
+
+/// What a check of the collection turned up.
+///
+/// Held while the sheet is open rather than stored: it is a reading of the
+/// files as they were a moment ago, and keeping it would mean showing somebody
+/// yesterday's answer about a folder they have since tidied.
+#[derive(Default)]
+struct Checked {
+    /// One per track that had something to say, worst first.
+    troubles: Vec<crate::verify::Report>,
+    /// Playable files in the library folder that no track points at.
+    orphans: Vec<PathBuf>,
+    /// How many were looked at, so a clean answer can say what it covered.
+    looked_at: usize,
+    /// Whether the reading is still going.
+    running: bool,
+    /// Whether it read every byte, which is what the wording turns on: a quick
+    /// check finding nothing means less than a thorough one finding nothing.
+    deep: bool,
 }
 
 /// One group of copies as the sheet is showing it this frame.
@@ -1880,6 +1937,9 @@ impl App {
     /// screen in — so the answer matches what is actually in front of the eye
     /// rather than the order the fields happen to be declared in.
     fn close_top_sheet(&mut self) -> bool {
+        if self.checked.take().is_some() {
+            return true;
+        }
         if !self.renames.is_empty() {
             self.renames.clear();
             return true;
@@ -2467,6 +2527,20 @@ impl App {
                 .clicked()
             {
                 self.render_stems();
+            }
+            // Reads rather than changes anything, so it sits at the end of the
+            // strip after the three that do. Shift for the thorough version:
+            // one modifier beats a second button for the same verb.
+            let thorough = ui.input(|i| i.modifiers.shift);
+            if ui
+                .add_enabled(idle && showing > 0, egui::Button::new(format!("Check {showing}")))
+                .on_hover_text(match thorough {
+                    false => "Are the files still there, still that size, still tagged that                               way — hold shift to read every byte instead",
+                    true => "Reads every byte of every file, which also catches one edited in                              place without changing length",
+                })
+                .clicked()
+            {
+                self.verify_showing(thorough);
             }
 
             ui.separator();
@@ -4905,6 +4979,379 @@ impl App {
         }
     }
 
+    /// Read the files of the tracks showing back, and compare.
+    ///
+    /// Everything showing, like the rest of the strip: narrow the list to the
+    /// part of the collection in question and check that part. The whole
+    /// collection is what showing means when nothing is typed in the bar.
+    fn verify_showing(&mut self, deep: bool) {
+        if self.running() {
+            return;
+        }
+        let ids = self.acting_on(|_| true);
+        let tracks: Vec<crate::library::Track> =
+            ids.iter().filter_map(|id| self.library.get(*id)).cloned().collect();
+        if tracks.is_empty() {
+            return;
+        }
+        crate::info!(
+            "checking {}{}",
+            plural(tracks.len(), "track"),
+            if deep { ", reading every byte" } else { "" }
+        );
+        self.checked =
+            Some(Checked { looked_at: tracks.len(), running: true, deep, ..Default::default() });
+        // The walk for files nobody knows about is only honest over the whole
+        // collection: with the list narrowed, every file outside the filter
+        // would be reported as a stray.
+        let library = match ids.len() == self.library.tracks.len() {
+            true => self.config.library_path.clone(),
+            false => PathBuf::new(),
+        };
+        self.start(Job::Verify { tracks, deep, library });
+    }
+
+    /// What the check found, and what can be done about it.
+    ///
+    /// A reading of the files as they were a moment ago, so nothing here is
+    /// kept: shutting the sheet throws it away rather than leaving somebody
+    /// yesterday's answer about a folder they have since tidied.
+    fn verify_sheet(&mut self, ctx: &egui::Context) {
+        let Some(checked) = &self.checked else { return };
+        let (running, deep, looked_at) = (checked.running, checked.deep, checked.looked_at);
+        let reports = checked.troubles.clone();
+        let orphans = checked.orphans.clone();
+        let mut open = true;
+        let mut fix: Vec<u32> = Vec::new();
+        let mut forget: Vec<u32> = Vec::new();
+        let mut adopt_strays = false;
+
+        let fixable: Vec<u32> = reports
+            .iter()
+            .filter(|report| report.troubles.iter().any(|t| t.is_fixable()))
+            .map(|report| report.id)
+            .collect();
+        let missing: Vec<u32> = reports
+            .iter()
+            .filter(|report| report.troubles.contains(&crate::verify::Trouble::Missing))
+            .map(|report| report.id)
+            .collect();
+
+        egui::Window::new("The collection against its files")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(760.0)
+            .default_height(520.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::BOOTH)
+                    .stroke(egui::Stroke::new(1.0, theme::RULE))
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(match running {
+                        true => format!("Reading {} back…", plural(looked_at, "track")),
+                        false => format!(
+                            "Read {} back{}.",
+                            plural(looked_at, "track"),
+                            match deep {
+                                true => ", every byte of each",
+                                false => "",
+                            }
+                        ),
+                    })
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+
+                if !running && reports.is_empty() && orphans.is_empty() {
+                    ui.label(
+                        RichText::new(match deep {
+                            true => "Every file is there and is the file it was.",
+                            false => {
+                                "Every file is there, the right size, and tagged as \
+                                      the collection says."
+                            }
+                        })
+                        .color(theme::GO),
+                    );
+                    if !deep {
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(
+                                "A file edited in place without changing length would not \
+                                 show up here. Checking that means reading every byte.",
+                            )
+                            .color(theme::DIM)
+                            .size(theme::SMALL),
+                        );
+                    }
+                }
+
+                let list_height = (ui.available_height() - FOOTER_HEIGHT).max(120.0);
+                egui::ScrollArea::vertical()
+                    .max_height(list_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (n, report) in reports.iter().enumerate() {
+                            if n > 0 {
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+                            }
+                            if let Some(track) = self.library.get(report.id) {
+                                ui.label(
+                                    RichText::new(track.display_title())
+                                        .color(theme::TEXT)
+                                        .size(theme::BODY),
+                                );
+                            }
+                            ui.horizontal_top(|ui| {
+                                ui.add_space(14.0);
+                                ui.vertical(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        path_label(ui, &report.path, theme::DIM);
+                                    });
+                                    for trouble in &report.troubles {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.add_space(10.0);
+                                            ui.label(
+                                                RichText::new(trouble.what())
+                                                    .size(theme::SMALL)
+                                                    .color(match trouble.is_fixable() {
+                                                        true => theme::AMBER,
+                                                        false => theme::ALERT,
+                                                    }),
+                                            );
+                                            // Both answers, where there are two
+                                            // — a difference is not worth
+                                            // reporting if it cannot be seen.
+                                            if let crate::verify::Trouble::Field {
+                                                stored,
+                                                file,
+                                                ..
+                                            } = trouble
+                                            {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{stored}  \u{2192}  {file}"
+                                                    ))
+                                                    .font(theme::mono(10.0))
+                                                    .color(theme::TEXT),
+                                                );
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+                        }
+
+                        if !orphans.is_empty() {
+                            if !reports.is_empty() {
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+                            }
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} in the library folder that no track points at",
+                                    plural(orphans.len(), "file")
+                                ))
+                                .color(theme::TEXT)
+                                .size(theme::BODY),
+                            );
+                            for path in orphans.iter().take(ORPHANS_SHOWN) {
+                                ui.horizontal_top(|ui| {
+                                    ui.add_space(14.0);
+                                    ui.vertical(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            path_label(ui, path, theme::DIM);
+                                        });
+                                    });
+                                });
+                            }
+                            if orphans.len() > ORPHANS_SHOWN {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(14.0);
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "and {} more",
+                                            orphans.len() - ORPHANS_SHOWN
+                                        ))
+                                        .size(theme::SMALL)
+                                        .color(theme::DIM),
+                                    );
+                                });
+                            }
+                        }
+                    });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if !fixable.is_empty()
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!(
+                                        "Take the files' word for {}",
+                                        plural(fixable.len(), "track")
+                                    ))
+                                    .strong(),
+                                )
+                                .fill(theme::BOOTH_2),
+                            )
+                            .on_hover_text(
+                                "A file's size and its tags are facts about the file, so where \
+                                 they differ the collection is the one that is out of date",
+                            )
+                            .clicked()
+                    {
+                        fix = fixable.clone();
+                    }
+                    if !missing.is_empty()
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!(
+                                        "Forget {}",
+                                        plural(missing.len(), "missing track")
+                                    ))
+                                    .color(theme::BOOTH)
+                                    .strong(),
+                                )
+                                .fill(theme::ALERT),
+                            )
+                            .on_hover_text(
+                                "Only the records go. There is no file to delete — though an \
+                                 unplugged drive looks the same from here as a deleted one",
+                            )
+                            .clicked()
+                    {
+                        forget = missing.clone();
+                    }
+                    if !orphans.is_empty()
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!(
+                                        "Add {}",
+                                        plural(orphans.len(), "stray file")
+                                    ))
+                                    .strong(),
+                                )
+                                .fill(theme::BOOTH_2),
+                            )
+                            .on_hover_text("Read them in, as an import would")
+                            .clicked()
+                    {
+                        adopt_strays = true;
+                    }
+                });
+            });
+
+        if !fix.is_empty() {
+            self.take_the_files_word(&fix);
+        }
+        if !forget.is_empty() {
+            for id in &forget {
+                self.library.remove(*id);
+            }
+            self.note(format!("{} forgotten", plural(forget.len(), "track")), theme::TEXT);
+            self.checked = None;
+            self.rebuild();
+            self.save();
+        }
+        if adopt_strays {
+            self.import(orphans);
+            self.checked = None;
+        }
+        if !open {
+            self.checked = None;
+        }
+    }
+
+    /// Bring the collection up to date with what its files actually say.
+    ///
+    /// Only what the file answers for itself: its size, its hashes, and the
+    /// tags it carries. Never the other way about — writing the collection's
+    /// answers into the files is what the inspector's own button is for, and
+    /// doing it here would turn a check into an edit of somebody's music.
+    ///
+    /// A track whose audio has changed stops counting as analysed. The grid and
+    /// the cues were measured against bytes that are no longer there, and
+    /// keeping them would be keeping an answer to a question nobody asked.
+    fn take_the_files_word(&mut self, ids: &[u32]) {
+        let Some(checked) = &self.checked else { return };
+        let reports: Vec<crate::verify::Report> =
+            checked.troubles.iter().filter(|report| ids.contains(&report.id)).cloned().collect();
+
+        let mut put_right = 0usize;
+        let mut restale = 0usize;
+        for report in &reports {
+            let Some(fresh) = &report.fresh else { continue };
+            let Some(track) = self.library.get_mut(report.id) else { continue };
+            let was_audio = track.audio_hash.clone();
+
+            track.bytes = fresh.bytes;
+            track.float_samples = fresh.float_samples;
+            track.protected = fresh.protected;
+            if !fresh.file_hash.is_empty() {
+                track.file_hash.clone_from(&fresh.file_hash);
+            }
+            if !fresh.audio_hash.is_empty() {
+                track.audio_hash.clone_from(&fresh.audio_hash);
+            }
+            for trouble in &report.troubles {
+                match trouble {
+                    crate::verify::Trouble::Field { field, file, .. } => {
+                        use crate::library::Field;
+                        match field {
+                            Field::Artist => track.artist.clone_from(file),
+                            Field::Album => track.album.clone_from(file),
+                            Field::Title => track.title.clone_from(file),
+                            Field::Year => track.year = file.parse().ok(),
+                            _ => {}
+                        }
+                    }
+                    crate::verify::Trouble::StemGone { part } => track.stems.forget(part),
+                    _ => {}
+                }
+            }
+            // Only when the sound itself changed, and only when both answers
+            // are known: an empty hash on either side is not evidence.
+            let changed_audio = !was_audio.is_empty()
+                && !fresh.audio_hash.is_empty()
+                && was_audio != fresh.audio_hash;
+            if changed_audio && track.analyzed {
+                track.analyzed = false;
+                restale += 1;
+            }
+            put_right += 1;
+        }
+
+        if put_right > 0 {
+            self.note(
+                match restale {
+                    0 => format!("{} brought up to date", plural(put_right, "track")),
+                    n => format!(
+                        "{} brought up to date, {} to listen to again",
+                        plural(put_right, "track"),
+                        n
+                    ),
+                },
+                theme::TEXT,
+            );
+            self.checked = None;
+            self.rebuild();
+            self.save();
+        }
+    }
+
     /// Read the tracks that have never been hashed, so they can be compared.
     ///
     /// The sheet stays open while this runs: the groups are worked out afresh
@@ -6772,6 +7219,114 @@ mod tests {
             assert!(
                 shown.height() > 14.0,
                 "the path fitted on one line, so this proves nothing about wrapping"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn taking_the_files_word_brings_the_collection_up_to_date() {
+            // The whole point of checking: what it found has to be something
+            // that can then be put right, and the record afterwards has to
+            // agree with the file it describes.
+            let dir = std::env::temp_dir().join(format!("booth-check-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("track.flac");
+            std::fs::write(&path, b"a longer file than the collection remembers").unwrap();
+
+            let mut app = app("check");
+            let id = app.library.add(&path);
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.bytes = 12;
+                track.stems.vocals = Some(dir.join("not-there.flac"));
+            }
+
+            let report = crate::verify::check(app.library.get(id).unwrap(), false);
+            assert!(
+                report.troubles.contains(&crate::verify::Trouble::Resized { was: 12, now: 43 }),
+                "{:?}",
+                report.troubles
+            );
+            assert!(
+                report.troubles.contains(&crate::verify::Trouble::StemGone { part: "vocals" }),
+                "{:?}",
+                report.troubles
+            );
+
+            app.checked = Some(Checked { troubles: vec![report], ..Default::default() });
+            app.take_the_files_word(&[id]);
+
+            let track = app.library.get(id).unwrap();
+            assert_eq!(track.bytes, 43, "the size was not brought up to date");
+            assert!(track.stems.vocals.is_none(), "the kit still lists a stem that is not there");
+            assert!(app.checked.is_none(), "the answer is stale once it has been acted on");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_track_whose_audio_changed_stops_counting_as_analysed() {
+            // The grid and the cues were measured against bytes that are not
+            // there any more. Keeping them would be keeping an answer to a
+            // question nobody asked.
+            let dir = std::env::temp_dir().join(format!("booth-restale-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("track.flac");
+            std::fs::write(&path, b"different audio entirely").unwrap();
+
+            let mut app = app("restale");
+            let id = app.library.add(&path);
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.analyzed = true;
+                track.bpm = 128.0;
+                track.audio_hash = "THE-OLD-SOUND".into();
+                track.bytes = 1;
+            }
+
+            let report = crate::verify::check(app.library.get(id).unwrap(), true);
+            app.checked = Some(Checked { troubles: vec![report], ..Default::default() });
+            app.take_the_files_word(&[id]);
+
+            let track = app.library.get(id).unwrap();
+            assert!(!track.analyzed, "the stale listening was kept");
+            assert_ne!(track.audio_hash, "THE-OLD-SOUND", "the hash was not brought up to date");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_retag_by_another_program_is_not_a_reason_to_listen_again() {
+            // The sound did not change, only what is written beside it, so the
+            // analysis still describes the file exactly.
+            let dir = std::env::temp_dir().join(format!("booth-retagged-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("track.flac");
+            std::fs::write(&path, b"the audio").unwrap();
+
+            let mut app = app("retagged");
+            let id = app.library.add(&path);
+            let audio = musicai::hash::audio_sha256(&path).unwrap();
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.analyzed = true;
+                track.audio_hash = audio;
+                track.file_hash = "SOMETHING-ELSE".into();
+                track.bytes = std::fs::metadata(&path).unwrap().len();
+            }
+
+            let report = crate::verify::check(app.library.get(id).unwrap(), true);
+            assert_eq!(report.troubles, vec![crate::verify::Trouble::Rewritten]);
+            app.checked = Some(Checked { troubles: vec![report], ..Default::default() });
+            app.take_the_files_word(&[id]);
+
+            assert!(
+                app.library.get(id).unwrap().analyzed,
+                "hours of listening were thrown away over a tag write"
             );
 
             let _ = std::fs::remove_dir_all(&dir);

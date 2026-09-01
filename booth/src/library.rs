@@ -82,6 +82,20 @@ impl StemKit {
         self.vocals.is_some() && self.melody.is_some() && self.drums.is_some()
     }
 
+    /// Drop a part the kit lists but the disk does not have.
+    ///
+    /// A kit naming a file that is not there is worse than an empty one: the
+    /// browser offers an acapella row that cannot be played, and a drive write
+    /// fails on it in the middle of the write.
+    pub fn forget(&mut self, part: &str) {
+        match part {
+            "vocals" => self.vocals = None,
+            "drums" => self.drums = None,
+            "melody" => self.melody = None,
+            _ => {}
+        }
+    }
+
     /// The parts `other` has rendered that this kit has not.
     ///
     /// A stem kit is rendered from the audio, and two copies of a recording

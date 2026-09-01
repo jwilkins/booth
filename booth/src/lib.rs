@@ -23,4 +23,5 @@ pub mod query;
 pub mod rows;
 pub mod sync;
 pub mod theme;
+pub mod verify;
 pub mod wave;

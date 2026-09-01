@@ -54,6 +54,17 @@ pub enum Job {
     /// Measure how loud each stem is across a track, for colouring its
     /// waveform by what is playing rather than by frequency.
     StemEnvelopes { id: u32, kit: StemKit },
+    /// Read the collection's files back and say where they and the collection
+    /// have come apart. `deep` reads every byte; without it, a stat and a tag
+    /// read per file.
+    Verify {
+        /// The records themselves, because the check is a comparison and the
+        /// stored side of it is what is being compared.
+        tracks: Vec<Track>,
+        deep: bool,
+        /// Walked for files no track points at. Empty to skip that half.
+        library: PathBuf,
+    },
     /// Work out the two hashes for tracks that have none.
     ///
     /// Import does this as it goes, so this is for the tracks that were already
@@ -79,6 +90,7 @@ impl Job {
             Job::StemEnvelopes { .. } => "measuring stems",
             Job::Identify { .. } => "identifying",
             Job::Hash(_) => "checking for copies",
+            Job::Verify { .. } => "checking the collection",
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Sync { .. } => "writing",
@@ -130,6 +142,10 @@ pub enum Update {
         id: u32,
         sound: Arc<crate::player::Sound>,
     },
+    /// One track, read back and compared with what the collection says.
+    Verified(Box<crate::verify::Report>),
+    /// Playable files in the library folder that no track points at.
+    Orphans(Vec<PathBuf>),
     /// The two hashes for one track that had none.
     Hashed {
         id: u32,
@@ -214,7 +230,11 @@ pub struct Analyzed {
 /// for a WAV — the header field that says whether the samples are floats, which
 /// is the single most common way a file that plays on a laptop refuses to load
 /// in a booth.
-pub fn read_record(id: u32, path: &Path) -> Track {
+///
+/// `hashes` reads every byte, twice over. Import always wants that, since the
+/// file is open anyway and the answer is what makes copies findable later; a
+/// check that only wants the size and the tags should not pay for it.
+pub fn read_record(id: u32, path: &Path, hashes: bool) -> Track {
     let mut track = Track::placeholder(id);
     track.path = path.to_path_buf();
     track.format = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -240,6 +260,9 @@ pub fn read_record(id: u32, path: &Path) -> Track {
         .unwrap_or_default();
     track.year = metadata.date.as_deref().and_then(|d| d.get(..4)?.parse().ok());
 
+    if !hashes {
+        return track;
+    }
     // Both hashes at import, because both are a read of the file and the file
     // is open anyway. A failure is not one: an unreadable file has bigger
     // problems, and an empty hash simply never matches another.
@@ -648,6 +671,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Retag(tracks) => retag(&tracks, reporter),
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
         Job::Hash(tracks) => hash_all(&tracks, reporter),
+        Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
         Job::StemEnvelopes { id, kit } => {
             let envelopes = stem_envelopes(&kit)?;
             let _ = reporter.tx.send(Update::Envelopes { id, envelopes });
@@ -700,9 +724,55 @@ fn import(paths: &[PathBuf], recursive: bool, reporter: &Channel) -> anyhow::Res
         }
         // The id is filled in by the window, which owns the counter; zero here
         // means "not yet placed".
-        let _ = reporter.tx.send(Update::Imported(Box::new(read_record(0, path))));
+        let _ = reporter.tx.send(Update::Imported(Box::new(read_record(0, path, true))));
         let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
         (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// Read the collection's files back and report where they disagree with it.
+///
+/// In parallel, like the other passes that only read: each file is a stat, a
+/// tag read, and — when the check is thorough — every byte of it. The walk for
+/// files nobody knows about comes last, because it is one pass over the folder
+/// rather than one per track and there is no reason to make the per-file
+/// answers wait for it.
+fn verify_all(
+    tracks: &[Track],
+    deep: bool,
+    library: &Path,
+    reporter: &Channel,
+) -> anyhow::Result<()> {
+    use rayon::prelude::*;
+    use std::sync::atomic::AtomicUsize;
+
+    let total = tracks.len();
+    let done = AtomicUsize::new(0);
+
+    tracks.par_iter().for_each(|track| {
+        if reporter.cancelled() {
+            return;
+        }
+        let report = crate::verify::check(track, deep);
+        // Only what has something to say. A collection that is entirely in
+        // order should send nothing at all rather than one message per file
+        // saying so.
+        if !report.troubles.is_empty() {
+            let _ = reporter.tx.send(Update::Verified(Box::new(report)));
+        }
+        let now = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let _ = reporter.tx.send(Update::Progress { done: now, total });
+        (reporter.wake)();
+    });
+
+    if !reporter.cancelled() && !library.as_os_str().is_empty() {
+        let known: Vec<PathBuf> = tracks.iter().map(|track| track.path.clone()).collect();
+        let strays = crate::verify::orphans(library, &known);
+        if !strays.is_empty() {
+            let _ = reporter.tx.send(Update::Orphans(strays));
+            (reporter.wake)();
+        }
     }
     Ok(())
 }
@@ -1087,7 +1157,7 @@ mod tests {
         let path = dir.join("track.wav");
         write_beats(&path, 128.0, 4);
 
-        let track = read_record(7, &path);
+        let track = read_record(7, &path, true);
         assert_eq!(track.id, 7);
         assert_eq!(track.format, "wav");
         assert_eq!(track.title, "track", "the file name, until a tag says otherwise");
@@ -1125,9 +1195,9 @@ mod tests {
         std::fs::write(&float, &bytes).unwrap();
 
         assert!(is_float_wav(&float));
-        assert!(read_record(1, &float).float_samples);
+        assert!(read_record(1, &float, false).float_samples);
         // And it is exactly the kind of thing the sidebar counts.
-        assert!(read_record(1, &float).needs_attention().is_some());
+        assert!(read_record(1, &float, false).needs_attention().is_some());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
