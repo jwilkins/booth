@@ -553,6 +553,11 @@ impl App {
         #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_OPEN_DUPES").is_some() {
             app.duplicates = Some(Dupes::default());
+            if let Ok(also) = std::env::var("BOOTH_ALSO_KEEP") {
+                if let Ok(id) = also.parse::<u32>() {
+                    app.duplicates.as_mut().unwrap().keeping.insert(id);
+                }
+            }
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
         }
         #[cfg(feature = "screenshot")]
@@ -1754,10 +1759,15 @@ struct Dupes {
     /// How a disagreement between one copy and the track being kept was
     /// settled, by copy and by field.
     picked: std::collections::HashMap<(u32, crate::library::Field), crate::library::Side>,
-    /// Which tags the kept file should end up with, by group. Tags are the one
-    /// thing the copies hold that is a set rather than an answer, so instead of
-    /// asking which copy is right the sheet offers the lot and lets them be
-    /// picked over — the only place a merge is not simply additive.
+    /// Which tags each kept file should end up with, by that file. Tags are the
+    /// one thing the copies hold that is a set rather than an answer, so
+    /// instead of asking which copy is right the sheet offers the lot and lets
+    /// them be picked over — the only place a merge is not simply additive.
+    ///
+    /// Per kept file rather than per group, because a group can legitimately
+    /// keep two: the same audio on an EP and on a compilation is two records,
+    /// and they do not have to be filed the same way. They choose from the same
+    /// list, which is every tag anybody in the group wrote.
     tags: std::collections::HashMap<u32, std::collections::HashSet<String>>,
     /// Groups that have already been given their opening tick, so that moving
     /// it is not undone on the next frame — and so that a group that turns up
@@ -1778,10 +1788,10 @@ struct DupeGroup {
     /// Every copy: its id, whether it is being kept, whether it is
     /// byte-for-byte the one being kept, and what folding it in would do.
     members: Vec<(u32, bool, bool, crate::library::Merge)>,
-    /// Every tag any copy in the group carries, in the order they were met —
-    /// the kept file's own first — and whether it is already on the kept file.
-    /// What is ticked among these is what the kept file ends up with.
-    tags: Vec<(String, bool)>,
+    /// Every tag any copy in the group carries, in the order they were met,
+    /// starting with the group's own first choice of keeper — so the list does
+    /// not reshuffle when the tick moves. Each kept file picks from it.
+    tags: Vec<String>,
 }
 
 /// Which copies the button would send to the trash, and what each is folded
@@ -4295,16 +4305,17 @@ impl App {
                 continue;
             }
             state.keeping.insert(group.keep);
-            // Every tag any copy carries, to begin with: a tag is somebody
-            // having said something about the record, and the default is to
-            // keep what everybody said.
+            // The file everything is folded into starts with every tag any
+            // copy carries: a tag is somebody having said something about the
+            // record, and the default is to keep what everybody said. A file
+            // kept alongside it later starts as itself instead — see below.
             let all: std::collections::HashSet<String> = group
                 .all()
                 .into_iter()
                 .filter_map(|id| self.library.get(id))
                 .flat_map(|track| track.tags.iter().cloned())
                 .collect();
-            state.tags.insert(group.key(), all);
+            state.tags.insert(group.keep, all);
         }
 
         // What each group looks like this frame: its members in order, which of
@@ -4337,17 +4348,14 @@ impl App {
                     })
                     .collect();
 
-                // The kept file's own tags first, then whatever the rest bring,
-                // each named once however many copies carry it.
-                let mine: Vec<String> =
-                    self.library.get(into).map(|t| t.tags.clone()).unwrap_or_default();
-                let mut tags: Vec<(String, bool)> =
-                    mine.iter().map(|tag| (tag.clone(), true)).collect();
+                // Every tag anybody in the group wrote, each named once however
+                // many copies carry it, in the order the copies come in.
+                let mut tags: Vec<String> = Vec::new();
                 for id in &ids {
                     let Some(track) = self.library.get(*id) else { continue };
                     for tag in &track.tags {
-                        if !tags.iter().any(|(seen, _)| seen == tag) {
-                            tags.push((tag.clone(), false));
+                        if !tags.contains(tag) {
+                            tags.push(tag.clone());
                         }
                     }
                 }
@@ -4547,13 +4555,20 @@ impl App {
                                             });
                                         }
 
-                                        // On the kept file, every tag in the
-                                        // group, to be picked over: what is
-                                        // ticked is what it ends up with. Only
-                                        // where something is actually being
-                                        // folded in, since otherwise there is
-                                        // no merge for the choice to be about.
+                                        // Under each file being kept, and only
+                                        // there: every tag in the group, to be
+                                        // picked over, and what is ticked is
+                                        // what that file ends up with. The
+                                        // files going have nothing to choose —
+                                        // what they know is folded in and then
+                                        // they are gone — so they only say what
+                                        // they are tagged, above.
+                                        //
+                                        // Only where something is actually
+                                        // leaving, since otherwise there is no
+                                        // merge for the choice to be part of.
                                         if *kept && folding_in && !group.tags.is_empty() {
+                                            let own: Vec<String> = track.tags.clone();
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.add_space(10.0);
                                                 ui.label(
@@ -4561,10 +4576,19 @@ impl App {
                                                         .size(theme::SMALL)
                                                         .color(theme::DIM),
                                                 );
+                                                // A file kept alongside the
+                                                // first starts as itself rather
+                                                // than as the pile: nothing is
+                                                // folded into it, so taking the
+                                                // others' tags would be filing
+                                                // it as a record it is not.
                                                 let chosen =
-                                                    state.tags.entry(group.key).or_default();
-                                                for (tag, mine) in &group.tags {
+                                                    state.tags.entry(*id).or_insert_with(|| {
+                                                        own.iter().cloned().collect()
+                                                    });
+                                                for tag in &group.tags {
                                                     let on = chosen.contains(tag);
+                                                    let mine = own.contains(tag);
                                                     if ui
                                                         .selectable_label(
                                                             on,
@@ -4723,16 +4747,17 @@ impl App {
             let tags: Vec<(u32, Vec<String>)> = shown
                 .iter()
                 .filter(|group| going.iter().any(|(_, into)| *into == group.into))
-                .map(|group| {
-                    let chosen = state.tags.get(&group.key);
-                    let wanted = group
-                        .tags
-                        .iter()
-                        .map(|(tag, _)| tag)
-                        .filter(|tag| chosen.is_none_or(|set| set.contains(*tag)))
-                        .cloned()
-                        .collect();
-                    (group.into, wanted)
+                .flat_map(|group| {
+                    group.members.iter().filter(|(_, kept, _, _)| *kept).filter_map(|(id, ..)| {
+                        let chosen = state.tags.get(id)?;
+                        let wanted = group
+                            .tags
+                            .iter()
+                            .filter(|tag| chosen.contains(*tag))
+                            .cloned()
+                            .collect();
+                        Some((*id, wanted))
+                    })
                 })
                 .collect();
             self.pending.push(Pending::TrashDuplicates { going, picked, tags });
@@ -6495,7 +6520,7 @@ mod tests {
             harness.run();
 
             let state = harness.state().duplicates.as_ref().unwrap();
-            let chosen = state.tags.values().next().expect("no tags were offered");
+            let chosen = state.tags.get(&keep).expect("no tags were offered for the kept file");
             assert_eq!(
                 chosen.iter().cloned().collect::<std::collections::BTreeSet<_>>(),
                 ["peak".to_string(), "warmup".to_string()].into_iter().collect(),
@@ -6506,6 +6531,55 @@ mod tests {
             // be traced to the copy it came from.
             assert!(harness.query_by_label("tagged  warmup  peak").is_some());
             assert!(harness.query_by_label("tagged  peak").is_some());
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_second_file_kept_gets_its_own_list_and_starts_as_itself() {
+            // The same audio on an EP and on a compilation is two records, so
+            // keeping both is a real answer — and they do not have to be filed
+            // the same way. Nothing is folded into the second one, so it starts
+            // tagged as it already is rather than taking the others' tags.
+            let (mut app, dir, keep, other) = two_copies("two-kept");
+            let third = app.library.add(&dir.join("downloads").join("third.flac"));
+            {
+                let track = app.library.get_mut(third).unwrap();
+                track.audio_hash = "SAME".into();
+                track.file_hash = "FILE-THIRD".into();
+                track.artist = "Peverelist".into();
+            }
+            app.library.get_mut(keep).unwrap().tags = vec!["peak".into()];
+            app.library.get_mut(other).unwrap().tags = vec!["compilation".into()];
+            app.library.get_mut(third).unwrap().tags = vec!["warmup".into()];
+            app.duplicates = Some(Dupes::default());
+
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.duplicates_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+            // Only the first has a list to begin with.
+            assert!(!harness.state().duplicates.as_ref().unwrap().tags.contains_key(&other));
+
+            // Keeping the second one is what gives it one.
+            harness.state_mut().duplicates.as_mut().unwrap().keeping.insert(other);
+            harness.run();
+
+            let state = harness.state().duplicates.as_ref().unwrap();
+            assert_eq!(
+                state.tags.get(&other).map(|set| set.iter().cloned().collect::<Vec<_>>()),
+                Some(vec!["compilation".to_string()]),
+                "the second kept file was filed as a record it is not"
+            );
+            assert_eq!(
+                state.tags.get(&keep).map(|set| set.len()),
+                Some(3),
+                "the file everything is folded into should still start with the lot"
+            );
 
             let _ = std::fs::remove_dir_all(&dir);
         }
