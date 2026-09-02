@@ -58,15 +58,18 @@ impl Plan {
     }
 }
 
-/// What a sync would do to `drive`, given what is in its playlists now.
+/// Every track that should be on `drive`, in the order it goes on.
 ///
-/// A track in two of the drive's playlists is one track on the drive, so the
-/// wanted set is a union that keeps first-seen order: the same file copied
-/// twice would be two rows on the player and twice the space.
-pub fn plan(library: &Library, drive: &Drive) -> Plan {
-    let names = drive.playlist_names();
+/// A track in two of the drive's playlists is one track on the drive, so this
+/// is a union that keeps first-seen order: the same file copied twice would be
+/// two rows on the player and twice the space.
+///
+/// The plan is a comparison against this, and the write has to put the same
+/// question to the collection — asking it twice in two places is how the two
+/// come to disagree about what the drive is supposed to hold.
+pub fn wanted(library: &Library, drive: &Drive) -> Vec<u32> {
     let mut wanted: Vec<u32> = Vec::new();
-    for name in &names {
+    for name in &drive.playlist_names() {
         let Some(playlist) = library.playlists.iter().find(|p| p.name == *name) else { continue };
         for id in &playlist.tracks {
             if !wanted.contains(id) {
@@ -74,6 +77,16 @@ pub fn plan(library: &Library, drive: &Drive) -> Plan {
             }
         }
     }
+    wanted
+}
+
+/// What a sync would do to `drive`, given what is in its playlists now.
+///
+/// A track in two of the drive's playlists is one track on the drive, so the
+/// wanted set is a union that keeps first-seen order: the same file copied
+/// twice would be two rows on the player and twice the space.
+pub fn plan(library: &Library, drive: &Drive) -> Plan {
+    let wanted = wanted(library, drive);
 
     let mut plan = Plan::default();
     for id in &wanted {
@@ -403,7 +416,11 @@ mod tests {
             playlist: "peak".into(),
             written: written
                 .iter()
-                .map(|id| Written { id: *id, prep: fingerprint(library.get(*id).unwrap()) })
+                .map(|id| Written {
+                    id: *id,
+                    prep: fingerprint(library.get(*id).unwrap()),
+                    row: None,
+                })
                 .collect(),
             ..Drive::default()
         }

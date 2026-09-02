@@ -438,6 +438,19 @@ pub struct ExportArgs {
     /// came from which, and there is no way to say it on one line.
     #[arg(skip)]
     pub companions: Vec<(PathBuf, PathBuf)>,
+    /// Rows already on the drive that this run is not rewriting, each with the
+    /// file it was made from.
+    ///
+    /// A drive is written once and then added to. Preparing a track means
+    /// decoding it, so a second write is given only what changed — and a
+    /// database built from only that describes a drive that no longer exists,
+    /// with everything written before it gone from the player's browse. These
+    /// carry through unchanged, so the database always describes the whole
+    /// drive rather than the last thing done to it.
+    ///
+    /// Empty for a command-line export, where the files given are the drive.
+    #[arg(skip)]
+    pub already: Vec<(PathBuf, crate::export::pdb::Track)>,
 }
 
 /// One playlist to write onto a drive, named by the files that belong to it.

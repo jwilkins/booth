@@ -91,7 +91,7 @@ impl Table {
 /// The identifiers a player uses to link a track to its artist, album and so on
 /// are assigned by [`Database`]; this is the human-facing version, and names are
 /// interned into the right tables on the way out.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     /// The id a player reports when this track is loaded. Must be non-zero and
     /// unique within the drive.

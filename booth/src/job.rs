@@ -144,6 +144,9 @@ pub enum Update {
     },
     /// One track, read back and compared with what the collection says.
     Verified(Box<crate::verify::Report>),
+    /// What the drive's database says after a write: each row and the file it
+    /// was made from.
+    Wrote(Vec<(PathBuf, musicai::export::pdb::Track)>),
     /// Playable files in the library folder that no track points at.
     Orphans(Vec<PathBuf>),
     /// The two hashes for one track that had none.
@@ -705,7 +708,12 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
                     .unwrap_or_default()
             );
             args.input = InputArgs { inputs: files, recursive: false };
-            musicai::commands::export(&args, reporter)
+            // The rows the drive ended up with, so the next write can carry
+            // them rather than preparing everything again.
+            let rows = musicai::commands::export(&args, reporter)?;
+            let _ = reporter.tx.send(Update::Wrote(rows));
+            (reporter.wake)();
+            Ok(())
         }
     }
 }

@@ -137,7 +137,7 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
     // Collected rather than Stdio: a passing test should be quiet, and a
     // failing one has the command's own account of what it did.
     let reporter = musicai::report::Collected::new();
-    musicai::commands::export(&args, &reporter).expect("the drive should write");
+    let first_write = musicai::commands::export(&args, &reporter).expect("the drive should write");
 
     // -- and read it back the way a player would, with a parser that shares no
     //    code with the writer
@@ -153,7 +153,7 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
     let written: Vec<Written> = collection
         .tracks
         .iter()
-        .map(|track| Written { id: track.id, prep: sync::fingerprint(track) })
+        .map(|track| Written { id: track.id, prep: sync::fingerprint(track), row: None })
         .collect();
     collection.drives[0].written = written;
     assert!(sync::plan(&collection, &collection.drives[0]).is_empty());
@@ -169,6 +169,30 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
     assert!(plan.add.is_empty(), "the file is already there");
     assert_eq!(plan.update.len(), 1);
     assert_eq!(plan.delta(), "1 changed");
+
+    // -- a second write, given only what changed, still describes the whole
+    //    drive. Building the database from the delta is how a drive written
+    //    twice came to browse as though the first write never happened.
+    let mut second = musicai::cli::ExportArgs::defaults();
+    second.drive = Some(drive_path.clone());
+    second.playlist = "tonight".into();
+    second.input = musicai::cli::InputArgs { inputs: vec![files[0].clone()], recursive: false };
+    second.playlists = vec![musicai::cli::PlaylistSpec {
+        name: "tonight".into(),
+        folder: "Sat".into(),
+        tracks: files.clone(),
+    }];
+    second.already = first_write.iter().filter(|(from, _)| *from != files[0]).cloned().collect();
+    musicai::commands::export(&second, &musicai::report::Collected::new())
+        .expect("the second write should work");
+
+    let bytes = std::fs::read(&database).unwrap();
+    let tables = musicai::export::pdb::inspect(&bytes).expect("the database should parse");
+    let tracks = tables.iter().find(|t| t.table.contains("Track")).map(|t| t.rows).unwrap_or(0);
+    assert_eq!(
+        tracks, 2,
+        "the drive holds two tracks; after rewriting one of them its database says {tracks}"
+    );
 }
 
 /// A stem written to a drive carries its parent's grid and cues.

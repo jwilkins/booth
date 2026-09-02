@@ -241,19 +241,32 @@ fn playlist_tree(
 
 /// Build a drive: the audio, the analysis files, and the database that indexes
 /// them.
-pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
+/// Returns the drive's rows and the files they were made from, so that a
+/// caller writing the same drive again can hand them back as `already` rather
+/// than preparing everything a second time.
+pub fn export(
+    args: &ExportArgs,
+    reporter: &dyn Reporter,
+) -> Result<Vec<(PathBuf, crate::export::pdb::Track)>> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
     let destination = if args.dry_run { None } else { Some(open_destination(args, &files)?) };
     let progress = Progress::new(reporter, files.len());
 
-    let mut tracks = Vec::new();
+    // What is already on the drive, carried through unchanged. Its ids are
+    // taken, and so are the analysis directories derived from them, so this
+    // run's ids start above the highest of them.
+    let mut tracks: Vec<pdb::Track> = args.already.iter().map(|(_, row)| row.clone()).collect();
     let mut failures = Vec::new();
     let mut lines = Vec::new();
-    let mut ids_by_path: HashMap<PathBuf, u32> = HashMap::new();
+    let mut ids_by_path: HashMap<PathBuf, u32> =
+        args.already.iter().map(|(from, row)| (from.clone(), row.id)).collect();
     let analyses = Analyses::default();
+    let taken = tracks.iter().map(|row| row.id).max().unwrap_or(0);
+    // What this run put on, to be handed back for the next one to carry.
+    let mut made: Vec<(PathBuf, crate::export::pdb::Track)> = args.already.clone();
 
     for (batch, chunk) in files.chunks(BATCH).enumerate() {
-        let first_id = (batch * BATCH) as u32 + 1;
+        let first_id = taken + (batch * BATCH) as u32 + 1;
         let prepared: Vec<Result<Prepared>> = chunk
             .par_iter()
             .enumerate()
@@ -303,6 +316,7 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
                         // playlist that named it, rather than leaving a row
                         // pointing at a track the drive does not have.
                         ids_by_path.insert(path.clone(), track.id);
+                        made.push((path.clone(), track.clone()));
                         tracks.push(track);
                     }
                 }
@@ -354,7 +368,8 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
     }
     let mut outcome = Outcome::new(files.len(), failures);
     outcome.cancelled = reporter.cancelled();
-    outcome.report(reporter)
+    outcome.report(reporter)?;
+    Ok(made)
 }
 
 /// One track's worth of drive: the row that describes it, and the files that

@@ -687,10 +687,22 @@ pub struct SavedQuery {
 /// The fingerprint is what makes an update distinguishable from an addition
 /// without re-reading the drive: it summarises the prep the player will see, so
 /// a moved cue marks the track for rewriting and a play count does not.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Written {
     pub id: u32,
     pub prep: u64,
+    /// The row this track has in the drive's own database.
+    ///
+    /// Kept because a second write is only given what changed — preparing a
+    /// track means decoding it — and a database built from only that describes
+    /// a drive that no longer exists. Handing these back is what lets the
+    /// database always describe the whole drive.
+    ///
+    /// Absent for a drive written before this was recorded, and for a track
+    /// whose write failed. Those are written again rather than carried, which
+    /// costs a decode and is always correct.
+    #[serde(default)]
+    pub row: Option<musicai::export::pdb::Track>,
 }
 
 /// A drive the collection has written to, and what was on it when it did.
@@ -1505,7 +1517,10 @@ mod tests {
         });
         library.drives.push(Drive {
             label: "USB".into(),
-            written: vec![Written { id, prep: 0 }, Written { id: other, prep: 0 }],
+            written: vec![
+                Written { id, prep: 0, row: None },
+                Written { id: other, prep: 0, row: None },
+            ],
             ..Drive::default()
         });
 

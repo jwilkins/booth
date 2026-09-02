@@ -96,6 +96,7 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         playlists: Vec::new(),
         dry_run: false,
         companions: Vec::new(),
+        already: Vec::new(),
     }
 }
 
@@ -575,4 +576,72 @@ fn which(program: &str) -> Result<PathBuf, ()> {
         .map(|dir| dir.join(program))
         .find(|candidate| candidate.is_file())
         .ok_or(())
+}
+
+/// The tracks a playlist holds, by their file paths on the drive.
+fn playlist_entries(drive: &Path) -> Vec<u32> {
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let mut cursor = Cursor::new(&bytes);
+    let header = Header::read(&mut cursor).unwrap();
+    let table = header.tables.iter().find(|t| t.page_type == PageType::PlaylistEntries).unwrap();
+    let pages = header
+        .read_pages(&mut cursor, binrw::Endian::Little, (&table.first_page, &table.last_page))
+        .unwrap();
+    let mut out = Vec::new();
+    for row in pages
+        .iter()
+        .filter(|p| p.has_data())
+        .flat_map(|p| p.row_groups.iter().flat_map(|g| g.present_rows()))
+    {
+        let Row::PlaylistEntry(entry) = row else { continue };
+        let described = format!("{entry:?}");
+        let marker = "track_id: TrackId(";
+        let at = described.find(marker).unwrap() + marker.len();
+        out.push(described[at..][..described[at..].find(')').unwrap()].parse().unwrap());
+    }
+    out
+}
+
+#[test]
+fn a_second_sync_keeps_what_the_first_one_wrote() {
+    // A drive is written once and then added to, week after week. If the
+    // second write describes only what it added, everything already on the
+    // drive stops existing as far as the player is concerned: the audio is
+    // still there and nothing browses to it.
+    let scratch = Scratch::new("incremental");
+    let drive = scratch.path("USB");
+    let first = write_song(&scratch, "first.flac");
+    let second = write_song(&scratch, "second.flac");
+
+    let mut args = ExportArgs { drive: Some(drive.clone()), ..args_for(vec![first.clone()]) };
+    args.playlists = vec![PlaylistSpec {
+        name: "Saturday".to_string(),
+        folder: String::new(),
+        tracks: vec![first.clone()],
+    }];
+    let after_first = commands::export(&args, &Collected::new()).expect("the first write failed");
+    assert_eq!(tracks_on(&drive).len(), 1, "the first write should put one track on");
+
+    // The second week: one new track, and a playlist that now names both.
+    let mut args = ExportArgs { drive: Some(drive.clone()), ..args_for(vec![second.clone()]) };
+    args.playlists = vec![PlaylistSpec {
+        name: "Saturday".to_string(),
+        folder: String::new(),
+        tracks: vec![first.clone(), second.clone()],
+    }];
+    args.already = after_first;
+    commands::export(&args, &Collected::new()).expect("the second write failed");
+
+    let on_drive = tracks_on(&drive);
+    assert_eq!(
+        on_drive.len(),
+        2,
+        "the drive's database lists {} tracks after adding one to a drive that had one: {on_drive:?}",
+        on_drive.len()
+    );
+    assert_eq!(
+        playlist_entries(&drive).len(),
+        2,
+        "the playlist on the drive does not hold both tracks"
+    );
 }

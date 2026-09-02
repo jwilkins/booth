@@ -1217,6 +1217,22 @@ impl App {
                         }
                     }
                 }
+                Update::Wrote(rows) => {
+                    // Matched back by the file each row was made from, which is
+                    // the only thing the drive's database and the collection
+                    // have in common — its ids are the drive's, not ours.
+                    let Some(drive) = self.library.drives.get_mut(self.drive) else { continue };
+                    for (from, row) in rows {
+                        let Some(track) = self.library.tracks.iter().find(|t| t.path == from)
+                        else {
+                            continue;
+                        };
+                        if let Some(written) = drive.written.iter_mut().find(|w| w.id == track.id) {
+                            written.row = Some(row);
+                        }
+                    }
+                    changed = true;
+                }
                 Update::Verified(report) => {
                     if let Some(checked) = &mut self.checked {
                         checked.troubles.push(*report);
@@ -1453,9 +1469,40 @@ impl App {
 
     fn write_drive(&mut self) {
         let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
-        let files: Vec<PathBuf> = self
-            .plan
-            .writes()
+        // What should be on the drive when this is done: the union of its
+        // playlists, which is what the plan was worked out against.
+        let wanted: Vec<u32> = sync::wanted(&self.library, &drive);
+
+        // An image is made from nothing every time — there is no previous
+        // volume to add to — so it is written in full. A drive is added to, so
+        // only what changed is prepared and the rest of its database is
+        // carried through from what the last write recorded.
+        let already: Vec<(PathBuf, musicai::export::pdb::Track)> = match drive.is_image {
+            true => Vec::new(),
+            false => drive
+                .written
+                .iter()
+                .filter(|written| wanted.contains(&written.id))
+                .filter(|written| !self.plan.writes().contains(&written.id))
+                .filter_map(|written| {
+                    let track = self.library.get(written.id)?;
+                    Some((track.path.clone(), written.row.clone()?))
+                })
+                .collect(),
+        };
+        // A row that was never recorded — an older collection, or a write that
+        // failed — cannot be carried, so its file is prepared again.
+        let carried: Vec<u32> = already
+            .iter()
+            .filter_map(|(path, _)| self.library.tracks.iter().find(|t| t.path == *path))
+            .map(|track| track.id)
+            .collect();
+        let preparing: Vec<u32> = match drive.is_image {
+            true => wanted.clone(),
+            false => wanted.iter().copied().filter(|id| !carried.contains(id)).collect(),
+        };
+
+        let files: Vec<PathBuf> = preparing
             .iter()
             .filter_map(|id| self.library.get(*id))
             .map(|track| track.path.clone())
@@ -1464,9 +1511,7 @@ impl App {
 
         // Which stem came from which track, so each one takes its parent's
         // grid, cues, key and phrases rather than being listened to alone.
-        let companions: Vec<(PathBuf, PathBuf)> = self
-            .plan
-            .writes()
+        let companions: Vec<(PathBuf, PathBuf)> = preparing
             .iter()
             .filter_map(|id| self.library.get(*id))
             .flat_map(|track| {
@@ -1474,12 +1519,15 @@ impl App {
                     .stems
                     .each()
                     .into_iter()
-                    .filter_map(|(_, stem)| stem.cloned())
+                    .filter_map(|(_, stem): (&str, Option<&PathBuf>)| stem.cloned())
                     .map(|stem| (stem, track.path.clone()))
                     .collect::<Vec<_>>()
             })
             .collect();
-        if files.is_empty() {
+        // Nothing to prepare is not nothing to do: a playlist that gained a
+        // track already on the drive, or lost one, changes the database and
+        // not a single audio file.
+        if files.is_empty() && already.is_empty() {
             self.note("nothing to write", theme::DIM);
             return;
         }
@@ -1493,17 +1541,24 @@ impl App {
         }
         args.playlists = self.drive_playlists(&drive);
         args.companions = companions;
+        args.already = already;
 
-        // The drive's record is updated before the write rather than after,
-        // because the fingerprints being recorded are the ones being written.
-        // A failure is reported in the log, and the next plan will find the
-        // difference again from the drive itself.
-        let written: Vec<Written> = self
-            .plan
-            .writes()
+        // The drive's record is everything that should be on it once this is
+        // done, not the part being written now. Recording only the part is how
+        // a drive whose second write added one track came to have a record
+        // saying one track was all it held.
+        //
+        // Written before the write rather than after, because the fingerprints
+        // being recorded are the ones being written; the rows are filled in
+        // when the write reports what the database ended up saying.
+        let written: Vec<Written> = wanted
             .iter()
             .filter_map(|id| self.library.get(*id))
-            .map(|track| Written { id: track.id, prep: sync::fingerprint(track) })
+            .map(|track| Written {
+                id: track.id,
+                prep: sync::fingerprint(track),
+                row: drive.written.iter().find(|w| w.id == track.id).and_then(|w| w.row.clone()),
+            })
             .collect();
         if let Some(drive) = self.library.drives.get_mut(self.drive) {
             drive.written = written;
