@@ -33,12 +33,14 @@ turned out to be wrong.
   independent readers and three writers, with a real rekordbox export checked in
   as a test fixture in a rekordcrate pull request. §4 reproduces the DDL from
   that export.
-- **The gap is hardware evidence, not documentation.** One hand-written drive is
-  documented on a CDJ-3000X (dj-usb-tkit, firmware 1.31, 2 September 2026), and
-  it carried both databases. One OneLibrary-only drive is documented on a
-  CDJ-3000 (FableGear, July 2026, firmware unrecorded). Nobody has documented a
-  OneLibrary-only drive on a OneLibrary-only player, and nobody has documented
-  whether a hand-written drive's waveforms and grids were used or re-analysed.
+- **The gap is hardware evidence, not documentation.** A drive this project
+  wrote has been browsed on a CDJ-3000X — playlists, track list, key search
+  (§7). Two other projects report the same for their own writers: dj-usb-tkit
+  on a CDJ-3000X (firmware 1.31, 2 September 2026) and FableGear on a CDJ-3000
+  with no `export.pdb` on the stick at all. What nobody has reported, here
+  included, is **whether the player used the analysis files it was handed or
+  measured its own** — the difference between a drive that browses and a drive
+  that plays as prepared.
 - **There is no specification, SDK, licence or developer programme.** The
   partners (Algoriddim, Native Instruments) got the format privately. The Mixxx
   project has decided not to write the file at all, on anti-circumvention
@@ -396,6 +398,7 @@ reads can change with a firmware update.
 | **dj-usb-tkit** (Rust/Tauri, MIT) | Both databases from scratch (`usb_utils.rs`: DDL, 27 menu items, 22 categories, 17 sorts, 8 colours, 28 My Tags; `PRAGMA key` only; no `cue` rows, no `exportExt.pdb`, no `.2EX`) | **CDJ-3000X, firmware 1.31, 2026-09-02**: four scenarios pass — normal export, strict-parity repair, non-ASCII strings, and a fresh-initialised stick with more than 16 tracks ("accepted and playable"). CDJ-3000 3.20 also. Self-reported in the project's own test matrix; waveform and grid provenance not recorded. |
 | **FableGear** (Python, sqlcipher3) | `exportLibrary.db` only, from DDL and rows copied from a real export; `.DAT`/`.EXT` writers, no `.2EX`; `cue` rows written | **CDJ-3000, 2026-07-29**: a OneLibrary-only stick "loaded and played … without issues". Firmware not recorded. Not tested on a CDJ-3000X. |
 | **fourfour** pioneer-usb-writer (Rust) | Both databases, `.DAT`/`.EXT`, artwork; WAL then checkpoint; `analysedBits` 105, `contentLink` 0 | CDJ-3000, firmware 3.19: a dual-format drive works, and fourfour says that player reads OneLibrary but still needs the legacy `.EXT`. CDJ-3000X "from reference specs" only. |
+| **this project** (`src/export/onelibrary.rs`) | Both databases from one collection, all three ANLZ files, no `exportExt.pdb`, no artwork; `cue` left empty | **CDJ-3000X, September 2026**: playlists, track list and key search all read off the drive. Firmware not recorded. Whether the analysis files were used is not known — see §5.1, and note this writer's directory names are id-derived rather than rekordbox's |
 | rbox (Rust, GPL-3.0) | Create and insert; no cue insert | None |
 | pyrekordbox `devicelib_plus` (git only; 0.4.4 on PyPI predates it) | Read and write | None |
 | rekordbox-explorer (JavaScript) | A playlist writer, deliberately unshipped: "we still have no CDJ to test against" | None |
@@ -403,15 +406,22 @@ reads can change with a firmware update.
 | Readers only | rekordcrate PR #269 (real fixture), libdjinterop PR #196, onelibrary-connect, clubtagger (over Pro DJ Link NFS from a CDJ-3000X), CueMirror, beat-link's OpusProvider (which needs the key supplied by the user and reads only `analysisDataFilePath` and `image`) | — |
 
 Two things are notable by their absence. Nobody has documented a
-**OneLibrary-only** drive on a **OneLibrary-only** player: the CDJ-3000X result
-used a drive with both databases, and the OneLibrary-only result was on a
-CDJ-3000, which officially does not read OneLibrary at all — so either that
-unit was on 3.30, or the CDJ-3000 reads `exportLibrary.db` when `export.pdb` is
-absent regardless of what AlphaTheta says (fourfour and rekordbox-explorer both
-claim it does, on 3.15+ or 3.19+, and no primary source settles it). And
-nobody has recorded whether a hand-written drive's grids and waveforms were
-used rather than re-analysed, which is the difference between a player that
-*mounts* the drive and one that *plays* it as prepared.
+**OneLibrary-only** drive on a **OneLibrary-only** player: every CDJ-3000X
+result, this project's included, used a drive carrying both databases, and the
+OneLibrary-only result was on a CDJ-3000, which officially does not read
+OneLibrary at all — so either that unit was on 3.30, or the CDJ-3000 reads
+`exportLibrary.db` when `export.pdb` is absent regardless of what AlphaTheta
+says (fourfour and rekordbox-explorer both claim it does, on 3.15+ or 3.19+,
+and no primary source settles it). Strictly, a 3000X browsing a dual-database
+drive does not by itself prove it read the OneLibrary one — except that the
+3000X is documented not to read the other, and a drive whose legacy database it
+ignored would show nothing at all.
+
+And **nobody has recorded whether a hand-written drive's grids and waveforms
+were used rather than re-analysed**, which is the difference between a player
+that *mounts* the drive and one that *plays* it as prepared. It is the cheapest
+outstanding experiment on this page: load a track, and watch whether the
+waveform is there at once or the player thinks about it first.
 
 ## 8. Is there a specification?
 
@@ -453,8 +463,11 @@ says so.
 
 Against §2 to §5 what is left is:
 
-- **No player has read one.** Everything above is a file that reads back
-  correctly, which is not the same claim.
+- **The analysis half is unproven.** A CDJ-3000X has browsed a drive this
+  wrote — playlists, track list and key search — so the database is right
+  enough to read. Nobody has yet reported whether a track loaded off one comes
+  up with its waveform and grid or is re-analysed, which is what the next two
+  entries decide.
 - No `exportExt.pdb`. rekordbox writes it; whether any player needs it is not
   established (dj-usb-tkit and FableGear omit it and passed).
 - Analysis directories are `P{id % 1000:03}/{id:08X}` in decimal, so they can

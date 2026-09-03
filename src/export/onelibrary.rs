@@ -44,16 +44,21 @@
 //!   played on a CDJ-3000 used. Real exports carry other values whose meaning
 //!   nobody has established.
 //!
-//! # What this does not make true
+//! # What has and has not been seen on a player
 //!
-//! No player has read a drive this wrote. Writing a well-formed database is
-//! not the same as a player browsing it, and the two things known to be
-//! missing from what is published — whether a player recomputes the analysis
-//! directory rather than trusting the path in the row, and whether it accepts
-//! a hand-made analysis file or quietly measures its own — are exactly the
-//! things that would show up as "it mounts but re-analyses everything". The
-//! sheet that offers this says so, and it should keep saying so until a player
-//! has been in front of it.
+//! A CDJ-3000X has read a drive this wrote: the playlists, the track list and
+//! the key search all came up. That is the database — the part this module is
+//! responsible for — and it is the first evidence any of it is right.
+//!
+//! It is not the whole drive. Whether the player *used* the analysis files or
+//! quietly measured its own is a separate question, and the one most likely to
+//! have a different answer: it turns on whether the player recomputes the
+//! analysis directory name from the audio path rather than trusting
+//! `analysisDataFilePath`, which `docs/onelibrary.md` §5.1 sets out and which
+//! this program's directory naming does not currently follow. A player that
+//! browses perfectly and re-analyses every track on load looks like success
+//! from the browse screen. Until somebody has watched a waveform come up
+//! instantly, that part is unproven.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

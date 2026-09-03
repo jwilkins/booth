@@ -57,10 +57,12 @@ stops being maintained tomorrow, your prep work is still readable.
 
 ### What it will not do
 
-**It does not write a drive a CDJ-3000X is known to play.** The 3000X reads the
+**It does not yet write a drive a CDJ-3000X is known to *play*.** The 3000X reads the
 OneLibrary database and does not fall back to the legacy one. That database is now
-written — from the same track list and playlist tree as the legacy one, and verified
-off the drive — but only when a key is supplied for it, and no player has read one.
+written — from the same track list and playlist tree as the legacy one, verified off the
+drive, and, as of September 2026, **browsed by a real CDJ-3000X**: playlists, track list
+and key search all came up. What that does not establish is the analysis half, which is
+where the drive stops being a catalogue and starts being playable.
 AlphaTheta has published no specification; the format has been documented in detail by
 other people, and [`docs/onelibrary.md`](onelibrary.md) is what is known, how sure each
 part is, and what would settle the rest. If a 3000X is what the club puts in front of you, this
@@ -817,10 +819,10 @@ played by a CDJ.
 | Area | State |
 |---|---|
 | Analysis — tempo, grid, downbeat, key, structure, cues (ANA-1..5) | Runs on real audio, seconds a track. No accuracy figures against a labelled set yet. |
-| Waveforms, all five packings including the 3-band (ANA-6) | Written and read back. Not yet seen on a player. |
+| Waveforms, all five packings including the 3-band (ANA-6) | Written and read back. Whether a player draws them, or re-analyses instead, is the open question of §4. |
 | Loudness and true peak (ANA-7) | Done, from the existing `src/loudness.rs`. |
 | Drive writer — `export.pdb`, ANLZ, disk image (EXP-1) | Writes a track list and a playlist tree with folders; verified by an independent parser; **unverified on hardware**. |
-| OneLibrary writer — `exportLibrary.db` | Written from the same collection as the legacy database, read back off the drive and counted. No `exportExt.pdb`, no artwork; **unverified on hardware**. |
+| OneLibrary writer — `exportLibrary.db` | Written from the same collection as the legacy database, read back off the drive and counted. No `exportExt.pdb`, no artwork. **A CDJ-3000X browses one** — playlists, track list, key search. Whether it uses the analysis files is unproven. |
 | Delta sync and preflight (EXP-2, SAFE-2) | Done, and the file checks run at import as well as at write. |
 | Medium checks (SAFE-3) | Free space and path length only. Filesystem type, folder depth and per-folder file counts are not checked. |
 | Compatibility target (EXP-3) | Not built. The rules are the CDJ-3000's, in `src/compat.rs`, and are not yet selectable. |
@@ -833,7 +835,7 @@ played by a CDJ.
 | Preview deck (PREP-6) | One deck, not two. Enough to audition and set cues. |
 | Stems, rendered and playable (STEM-1..3, 7, 8, 11, 12) | Done: three rows a track, in the window and on the drive, each inheriting the parent's analysis and sorted under it in the exported playlist. Quality scoring (STEM-6) and the drive's loudness pass (STEM-4, STEM-5) are not. |
 | rekordbox import (INTEROP-1) | Done, from the encrypted `master.db`. |
-| OneLibrary (INTEROP-5, EXP-3 for the 3000X) | Reads and dumps a schema; writes one beside the legacy database when given a key, verified off the drive and unread by any player. [`docs/onelibrary.md`](onelibrary.md). |
+| OneLibrary (INTEROP-5, EXP-3 for the 3000X) | Reads and dumps a schema; writes one beside the legacy database, verified off the drive and browsed on a real CDJ-3000X. [`docs/onelibrary.md`](onelibrary.md). |
 | Serato, Traktor, Engine DJ (INTEROP-2) | Not started. |
 | Play history and booth round-trip (HIST-1..3) | Not started. |
 | Plug-in interface (INTEROP-4) | Not started. |

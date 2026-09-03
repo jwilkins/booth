@@ -475,7 +475,8 @@ fn write_onelibrary(
     let summary = onelibrary::inspect(&destination.read(onelibrary::DRIVE_PATH)?, &key)
         .context("the OneLibrary database did not read back off the drive")?;
     Ok(vec![format!(
-        "wrote {} to {}: {} tables, {} tracks, {} playlists, verified — untested on hardware",
+        "wrote {} to {}: {} tables, {} tracks, {} playlists, verified — a CDJ-3000X browses \
+         these; whether it uses the analysis files is unproven",
         onelibrary::DRIVE_PATH,
         destination.describe(),
         summary.tables,

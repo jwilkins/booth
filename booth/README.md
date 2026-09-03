@@ -351,9 +351,12 @@ carries it, as it carries the one for rekordbox's own library — they are
 different keys, and both are in `src/rekordbox/mod.rs` with where they came
 from. The sheet says which databases a drive will carry before it writes them.
 
-That is not player support. It is a file that reads back off the drive, keyed
-and counted, which is where support starts and not where it ends: support is
-demonstrated by a player playing a drive, and none has.
+**A CDJ-3000X has read one.** Playlists, track list and key search all came up
+off a drive this wrote, which is the first hardware evidence the database is
+right — and it is evidence about the database, not the drive. Whether the
+player used the analysis files it was given or measured its own on load is a
+separate question, still open, and the one where this program is most likely to
+be wrong.
 
 ## What a player will actually open
 
@@ -448,16 +451,16 @@ asked for, and neither ever moves or deletes an original.
 
 ## What it does not do yet
 
-- No player has read a drive this wrote. The format is validated against an
-  independent parser, which is not the same as validation against hardware.
-- **A drive with OneLibrary on it has still never been read by a CDJ-3000X.**
-  The database is written from the same collection as the legacy one and
-  verified off the drive, and the two things most likely to be wrong — whether
-  a player recomputes the analysis directory rather than trusting the row, and
-  whether it accepts a hand-made analysis file — would show up as a player that
-  mounts the drive and re-analyses everything.
-  [`docs/onelibrary.md`](../docs/onelibrary.md) says what is known and what is
-  guessed.
+- **The analysis half is unproven on hardware.** A CDJ-3000X has browsed a
+  drive this wrote — playlists, tracks, key search — so the OneLibrary database
+  is right enough to read. Nobody has yet watched a track load off one and
+  reported whether the waveform and beat grid came up instantly or the player
+  re-analysed. That is the open question, and this program's analysis directory
+  names are the likeliest reason for it to go the wrong way:
+  [`docs/onelibrary.md`](../docs/onelibrary.md) §5.1.
+- No player has read a legacy `export.pdb` this wrote either. That half is
+  validated against an independent parser, which is not the same as validation
+  against hardware.
 - Stem colouring needs the kit rendered first, which is minutes a track.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with

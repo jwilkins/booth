@@ -6287,12 +6287,14 @@ impl App {
                     );
                     ui.label(
                         RichText::new(match both {
-                            // Written, read back, and never yet put in front of
-                            // a player — which is a different thing from
-                            // supported, and the sheet should not blur them.
+                            // A CDJ-3000X has browsed one of these. What it did
+                            // with the analysis files is not known, and the
+                            // sheet should not let the first half stand in for
+                            // the second.
                             true => format!(
-                                "{} The CDJ-3000X database is written and verified off the \
-                                 drive, but no player has read one this wrote.",
+                                "{} A CDJ-3000X has browsed a drive written this way. Whether \
+                                 it used the waveforms and grids, or measured its own, is \
+                                 still unproven.",
                                 theme::WARN
                             ),
                             false => format!(
