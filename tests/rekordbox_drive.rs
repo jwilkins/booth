@@ -717,21 +717,47 @@ fn a_drive_written_with_a_key_carries_both_databases_and_they_agree() {
 }
 
 #[test]
-fn a_drive_written_without_a_key_is_the_drive_it_always_was_and_says_so() {
-    let scratch = Scratch::new("onelibrary-none");
+fn an_ordinary_export_carries_both_databases_without_being_asked() {
+    // Nobody should have to know that there are two formats, or which player
+    // reads which, to walk out of the house with a drive that works. So the
+    // default is both, under the keys the build carries.
+    let scratch = Scratch::new("onelibrary-default");
     let drive = scratch.path("drive");
     let lines = export(vec![write_song(&scratch, "one.flac")], &drive);
 
+    assert!(drive.join("PIONEER/rekordbox/export.pdb").exists(), "the legacy database");
+    let at = drive.join("PIONEER/rekordbox/exportLibrary.db");
+    assert!(at.exists(), "the newer players' database: {lines:?}");
+
+    // Opened with the key the build carries, the same way a player would find
+    // it: nothing passed in, nothing in the environment.
+    let key = musicai::rekordbox::onelibrary_key(None).expect("this build carries a key");
+    let summary = musicai::export::onelibrary::inspect(&std::fs::read(&at).unwrap(), &key)
+        .expect("the drive's OneLibrary database would not open with the built-in key");
+    assert_eq!(summary.tables, 22);
+    assert_eq!(summary.tracks, 1);
+}
+
+#[test]
+fn the_two_keys_are_two_keys_and_neither_opens_the_other_file() {
+    use musicai::rekordbox::{BUNDLED_KEY, BUNDLED_ONELIBRARY_KEY};
+
+    // The mistake this guards against is using one for the other, which
+    // produces a perfectly valid file that no player and no rekordbox can
+    // read. They are told apart by shape: hex, and not hex.
+    assert_ne!(BUNDLED_KEY, BUNDLED_ONELIBRARY_KEY);
+    assert_eq!(BUNDLED_KEY.len(), 64);
+    assert_eq!(BUNDLED_ONELIBRARY_KEY.len(), 64);
+    assert!(BUNDLED_KEY.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(!BUNDLED_ONELIBRARY_KEY.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let scratch = Scratch::new("onelibrary-keys");
+    let drive = scratch.path("drive");
+    export(vec![write_song(&scratch, "one.flac")], &drive);
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/exportLibrary.db")).unwrap();
     assert!(
-        !drive.join("PIONEER/rekordbox/exportLibrary.db").exists(),
-        "nothing should have been written without a key"
+        musicai::export::onelibrary::inspect(&bytes, BUNDLED_KEY).is_err(),
+        "the library key must not open a drive"
     );
-    assert!(
-        drive.join("PIONEER/rekordbox/export.pdb").exists(),
-        "the legacy database still goes on"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("no OneLibrary database written")),
-        "the export should say what it did not write and why: {lines:?}"
-    );
+    assert!(musicai::export::onelibrary::inspect(&bytes, BUNDLED_ONELIBRARY_KEY).is_ok());
 }

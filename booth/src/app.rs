@@ -5889,9 +5889,9 @@ impl App {
                     ui.label(
                         RichText::new(
                             "rekordbox keeps its library in an encrypted SQLite file. The key is \
-                         the same on every installation; this build does not carry one. \
-                         `python -m pyrekordbox download-key` prints it, or leave this blank \
-                         and set REKORDBOX_KEY.",
+                         the same on every installation and this build carries it, so there is \
+                         nothing to fill in here. It is only worth using if AlphaTheta ever \
+                         changes the key: put the new one here, or in REKORDBOX_KEY.",
                         )
                         .color(theme::DIM)
                         .size(theme::SMALL),
@@ -5914,10 +5914,10 @@ impl App {
                     ui.label(
                         RichText::new(
                             "A drive carries a second, separate library for the CDJ-3000X and \
-                         the other newer players, under its own key — not the one above. With \
-                         it, a sync writes that database as well as the legacy one. Leave it \
-                         blank and only the legacy one is written, which every player up to \
-                         the CDJ-3000 reads and the newer ones do not.",
+                         the other newer players, under its own key — a different one from \
+                         above, also carried by this build. A sync writes both databases. \
+                         This is here for the same reason as the one above: the day the key \
+                         changes, it is what keeps the program working.",
                         )
                         .color(theme::DIM)
                         .size(theme::SMALL),

@@ -23,7 +23,8 @@
 //! project has not made.
 //!
 //! So this module reads and describes. Writing one is
-//! [`crate::export::onelibrary`]'s job, and it needs a key it does not ship;
+//! [`crate::export::onelibrary`]'s job, under the drive key rather than this
+//! one;
 //! being able to open a drive that rekordbox wrote is how what that writes
 //! gets checked against what rekordbox writes.
 

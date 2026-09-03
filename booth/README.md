@@ -300,11 +300,10 @@ minutes of work a track, and a preference must not look like a delete.
 
 rekordbox keeps its library in `master.db`, a SQLCipher-encrypted SQLite file.
 The key is the same on every installation — it is not derived from your machine
-or your licence — so this is a matter of having it, not of breaking anything.
-**This build does not carry one.** Put it in Settings or set `REKORDBOX_KEY`;
-`python -m pyrekordbox download-key` prints one. There is a
-`BUNDLED_KEY` constant in `src/rekordbox/mod.rs` if you would rather compile it
-in.
+or your licence — and this build carries it, so importing a library is a matter
+of pointing at the file. The Settings field and `REKORDBOX_KEY` are there for
+the day AlphaTheta changes the key; the constant is `BUNDLED_KEY` in
+`src/rekordbox/mod.rs`, and blanking it builds a program that asks for one.
 
 Settings → **Import a rekordbox library** brings across tracks, playlists and
 their folders, beat grids, hot cues, keys, ratings, play counts and My Tags.
@@ -345,12 +344,12 @@ OneLibrary-only player, or checked whether the player used the grids and
 waveforms it was given or quietly measured its own. And writing the file means
 using a recovered key, which is a decision this project has not made.
 
-So a sync writes one, when it has a key to write it with: the same track list
-and the same playlist tree as `export.pdb`, from one source, so the two files
-on the drive cannot come apart. Put the key in Settings — it is not the one
-rekordbox's own library uses, and this build ships neither — and the sheet says
-which databases the drive will carry. Without it the drive is what it always
-was.
+So a sync writes one: the same track list and the same playlist tree as
+`export.pdb`, from one source, so the two files on the drive cannot come apart.
+The key it is encrypted with is fixed for every drive there is and this build
+carries it, as it carries the one for rekordbox's own library — they are
+different keys, and both are in `src/rekordbox/mod.rs` with where they came
+from. The sheet says which databases a drive will carry before it writes them.
 
 That is not player support. It is a file that reads back off the drive, keyed
 and counted, which is where support starts and not where it ends: support is

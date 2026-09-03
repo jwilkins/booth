@@ -27,34 +27,43 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-/// The key this build was compiled with, if any.
+/// The key `master.db` is encrypted with.
 ///
-/// Empty by default. The key is not this project's to publish, and the
-/// reference implementation everyone uses — `pyrekordbox` — deliberately ships
-/// without it and fetches it on demand for the same reason. Everything works
-/// without filling this in: see [`resolve`] for the two ways to supply one at
-/// runtime.
+/// Not a secret in any useful sense. rekordbox ships it inside its own binary
+/// on every machine that runs it, it is the same for every installation on
+/// earth, and it has been published for years — in the notes everyone working
+/// on these formats cites, in a repository that exists to document it, and in
+/// most of the libraries that read these files. Leaving it out protected
+/// nothing; it only meant that opening your own library took a detour through
+/// somebody else's Python package first.
 ///
-/// If you would rather have it baked into the binary, put it here. It is a
-/// 64-character hex string, and it is the same for every installation.
-pub const BUNDLED_KEY: &str = "";
+/// Sixty-four hex digits, and a different key from
+/// [`BUNDLED_ONELIBRARY_KEY`]. Blank it to build without one: [`resolve`]
+/// then falls back to `REKORDBOX_KEY`, and everything else still works.
+pub const BUNDLED_KEY: &str = "402fd482c38817c35ffa8ffb8c7d93143b749e7d315df7a81732a1ff43608497";
 
 /// Where to look for the key when none was passed in.
 pub const KEY_ENV: &str = "REKORDBOX_KEY";
 
-/// The OneLibrary key this build was compiled with, if any.
+/// The key `exportLibrary.db` is encrypted with, on every drive there is.
 ///
-/// Empty, on the same terms and for the same reason as [`BUNDLED_KEY`], and
-/// with one more: this one is what a *writer* needs, and a drive is a thing
-/// that leaves the building. See `docs/onelibrary.md`.
-pub const BUNDLED_ONELIBRARY_KEY: &str = "";
+/// Public on the same terms as [`BUNDLED_KEY`], and recovered the same two
+/// ways — by reading the rekordbox binary, and by watching it key the file.
+/// It is a different key, and one worth not confusing with that one: sixty-four
+/// characters of ordinary text rather than hex, because SQLCipher takes it as a
+/// passphrase and derives the real key from it. `docs/onelibrary.md` says where
+/// it came from and who else uses it.
+///
+/// Blank it to build a binary that writes legacy drives only.
+pub const BUNDLED_ONELIBRARY_KEY: &str =
+    "r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls";
 
 /// Work out which key to use.
 ///
-/// In order: what the caller was given, the environment, then whatever this
-/// build was compiled with. The error says what to do rather than that
-/// something went wrong, because "no key" is the normal first-run state and
-/// not a fault.
+/// In order: what the caller was given, the environment, then what this build
+/// carries. The first two exist because a key that was changed once can be
+/// changed again, and a program that cannot be told a new one is a program that
+/// stops working on the day that happens.
 pub fn resolve(supplied: Option<&str>) -> Result<String> {
     let candidates = [
         supplied.map(str::to_string),
@@ -69,7 +78,8 @@ pub fn resolve(supplied: Option<&str>) -> Result<String> {
     }
     bail!(
         "no rekordbox database key. rekordbox encrypts its library with SQLCipher, using a \
-         key that is the same on every installation. Put it in Settings, or set {KEY_ENV}. \
+         key that is the same on every installation; this build carries none. Put it in \
+         Settings, or set {KEY_ENV}. \
          `python -m pyrekordbox download-key` will fetch and print one."
     )
 }
@@ -83,9 +93,9 @@ pub fn resolve(supplied: Option<&str>) -> Result<String> {
 /// file. So they get separate settings rather than one that would sometimes be
 /// wrong, and this returns nothing rather than falling back to the other one.
 ///
-/// Nothing here fails when there is no key: a drive without a OneLibrary
-/// database is the drive this program has always written, and the export says
-/// so in a line rather than stopping.
+/// Nothing here fails when there is no key: a build with
+/// [`BUNDLED_ONELIBRARY_KEY`] blanked, and nothing in the environment, writes
+/// the legacy drive it always did and says so in a line rather than stopping.
 pub fn onelibrary_key(supplied: Option<&str>) -> Option<String> {
     let candidates = [
         supplied.map(str::to_string),
@@ -98,7 +108,8 @@ pub fn onelibrary_key(supplied: Option<&str>) -> Option<String> {
 /// What to say when there is no OneLibrary key, said once and in one place.
 pub fn no_onelibrary_key() -> String {
     format!(
-        "no OneLibrary database written: the newer players read one, and writing it needs the          key rekordbox encrypts it with — the same on every installation, and not this          project's to ship. Set {} to write one.",
+        "no OneLibrary database written: the newer players read one, and this build carries no \
+         key to encrypt it with. Set {} to write one.",
         crate::export::onelibrary::KEY_ENV
     )
 }

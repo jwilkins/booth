@@ -820,7 +820,7 @@ played by a CDJ.
 | Waveforms, all five packings including the 3-band (ANA-6) | Written and read back. Not yet seen on a player. |
 | Loudness and true peak (ANA-7) | Done, from the existing `src/loudness.rs`. |
 | Drive writer — `export.pdb`, ANLZ, disk image (EXP-1) | Writes a track list and a playlist tree with folders; verified by an independent parser; **unverified on hardware**. |
-| OneLibrary writer — `exportLibrary.db` | Written from the same collection as the legacy database, read back off the drive and counted. Needs a key it does not ship; no `exportExt.pdb`, no artwork; **unverified on hardware**. |
+| OneLibrary writer — `exportLibrary.db` | Written from the same collection as the legacy database, read back off the drive and counted. No `exportExt.pdb`, no artwork; **unverified on hardware**. |
 | Delta sync and preflight (EXP-2, SAFE-2) | Done, and the file checks run at import as well as at write. |
 | Medium checks (SAFE-3) | Free space and path length only. Filesystem type, folder depth and per-folder file counts are not checked. |
 | Compatibility target (EXP-3) | Not built. The rules are the CDJ-3000's, in `src/compat.rs`, and are not yet selectable. |
@@ -903,13 +903,14 @@ because our own reader agreeing with our own writer proves nothing.
   was drawn from and the cues were placed against. Play counts, My Tags and the star
   rating have no local equivalent and are taken whenever rekordbox holds more of them.
   Importing the same library twice changes nothing the second time, which is a test.
-- **The key is not bundled.** There is a constant to compile one into and the reasoning is
-  written beside it; otherwise it is read from Settings or `REKORDBOX_KEY`, and the tool
-  says where to get one rather than failing obscurely.
+- **The key is bundled**, because it is the same on every installation, ships inside
+  rekordbox itself, and has been published for years; leaving it out only sent users to
+  fetch it from somewhere else first. Settings and `REKORDBOX_KEY` override it and the
+  constant can be blanked, for the day it changes.
 - **`onelibrary.rs`** — opens an `exportLibrary.db` and prints its tables, columns and row
-  counts, and that is all it does. Its key is public too, so the encryption was never what
-  stood in the way; the schema is, and this is where learning it starts. It is not player
-  support and §4 says why.
+  counts. Writing one is `export/onelibrary.rs`, under the drive key rather than this one;
+  neither the encryption nor the schema is what stands in the way now, and §4 says what
+  does.
 
 `tests/rekordbox_library.rs` and `tests/rekordbox_database.rs` build real SQLCipher
 fixtures rather than mocking one: written encrypted, closed, and reopened through the path

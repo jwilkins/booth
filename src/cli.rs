@@ -428,10 +428,9 @@ pub struct ExportArgs {
     /// The key for the OneLibrary database the newer players read.
     ///
     /// Different from the one `rekordbox read` wants: that opens rekordbox's
-    /// own library, this encrypts a drive. Without it the export writes the
-    /// legacy database only, which every player up to and including the
-    /// CDJ-3000 reads and the CDJ-3000X does not. Defaults to
-    /// `ONELIBRARY_KEY`.
+    /// own library, this encrypts a drive. Every drive uses the same one and
+    /// this build carries it, so there is nothing to pass here unless it has
+    /// changed. Defaults to `ONELIBRARY_KEY`, then to the built-in one.
     #[arg(long, value_name = "KEY")]
     pub onelibrary_key: Option<String>,
 

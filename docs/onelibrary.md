@@ -26,8 +26,8 @@ turned out to be wrong.
   drive since 6.8.1 (December 2023).
 - **The file is an ordinary SQLite database encrypted with SQLCipher 4 at its
   default settings**, under one fixed passphrase that is the same for every
-  drive in the world. The key is public and recoverable from the rekordbox
-  binary; this project does not ship it, for the reason given in
+  drive in the world. The key is public, recoverable from the rekordbox binary,
+  and published in half a dozen projects; this one carries it too, in
   `src/rekordbox/mod.rs`.
 - **The schema is known in full.** Twenty-two tables, documented by at least six
   independent readers and three writers, with a real rekordbox export checked in
@@ -137,10 +137,11 @@ fixed string, then zlib-inflated — and it has been recovered two independent
 ways: by hooking `sqlite3_key` in rekordbox's bundled SQLite with Frida
 (DjManager) and by reading the binary (fourfour, with radare2). It is
 published in pyrekordbox, rbox, fourfour, the 0xdevalias gist and DjManager's
-issue #300. **It is deliberately not reproduced here**, and this project does
-not bundle it: `src/rekordbox/mod.rs` takes it from `REKORDBOX_KEY` or `--key`
-and says where to get one. That is the same policy pyrekordbox follows, and it
-is the reason the Mixxx question in §8 exists.
+issue #300, and it is in `src/rekordbox/mod.rs` here — with `master.db`'s
+beside it, which is published in as many places and just as fixed. Both can be
+overridden (`ONELIBRARY_KEY`, `REKORDBOX_KEY`, `--onelibrary-key`, `--key`) and
+both can be blanked at build time, because a key that has been changed once can
+be changed again. §8 records the argument against carrying them.
 
 ## 4. The schema
 
@@ -442,13 +443,13 @@ between them.
 
 `musicai export` and the app's sync write a Device Library drive —
 `export.pdb`, the three ANLZ files per track, audio under
-`/Contents/<Artist>/` — and, when a key is supplied, a OneLibrary database
-beside it, built from the same track list and playlist tree so the two cannot
-disagree about what is on the drive. `src/export/onelibrary.rs` is the writer;
-it follows §4 exactly, leaves `cue` empty as rekordbox does, and the export
-reads the file back off the drive, keys it and counts it before calling itself
-done. Without a key (`ONELIBRARY_KEY`, `--onelibrary-key`, or the field in the
-app's settings) the drive is what it always was, and the export says so.
+`/Contents/<Artist>/` — and a OneLibrary database beside it, built from the
+same track list and playlist tree so the two cannot disagree about what is on
+the drive. `src/export/onelibrary.rs` is the writer; it follows §4 exactly,
+leaves `cue` empty as rekordbox does, and the export reads the file back off
+the drive, keys it and counts it before calling itself done. A build with the
+key blanked, and nothing in `ONELIBRARY_KEY`, writes the legacy drive alone and
+says so.
 
 Against §2 to §5 what is left is:
 

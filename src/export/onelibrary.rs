@@ -14,9 +14,11 @@
 //!
 //! It is an ordinary SQLite database encrypted with SQLCipher 4 at its default
 //! settings, under a passphrase that is fixed and identical on every drive in
-//! the world. This project does not ship that passphrase — see
-//! [`crate::rekordbox::resolve_onelibrary`] — so nothing here writes anything
-//! until somebody supplies one.
+//! the world, and that this build carries — see
+//! [`crate::rekordbox::BUNDLED_ONELIBRARY_KEY`]. The encryption is not a
+//! defence of anything and never was: it is what the file happens to be
+//! wrapped in, and reading or writing one is a matter of using the same
+//! wrapping rekordbox does.
 //!
 //! # Where the shape of it comes from
 //!
@@ -626,10 +628,10 @@ mod tests {
     use super::*;
     use crate::export::pdb::{Database, Playlist, Track};
 
-    /// Not the real one, and it does not have to be: SQLCipher takes any
-    /// passphrase, and what these tests check is that what was written reads
-    /// back. A drive a player will read needs the passphrase rekordbox uses,
-    /// which is not this project's to ship.
+    /// Not the real one, on purpose: SQLCipher takes any passphrase, and what
+    /// these tests check is that what was written reads back. Using the real
+    /// key here would test the same thing while making every fixture a file
+    /// that opens in rekordbox, which is not what a test is for.
     const KEY: &str = "a-key-that-is-not-the-real-one";
 
     fn a_track(id: u32, title: &str, artist: &str) -> Track {
@@ -786,9 +788,11 @@ mod tests {
     #[test]
     fn the_wrong_one_of_the_two_rekordbox_keys_is_refused_rather_than_written() {
         // A file encrypted with the master.db key is a valid file no player can
-        // read, and the mistake is easy: it is the key somebody already has.
-        let hex = "402fd482c38817c35ffa8ffb8c7d93143b749e7d315df7a81732a1ff43608497";
+        // read, and the mistake is easy: this build carries both keys, so the
+        // wrong one is always to hand.
+        let hex = crate::rekordbox::BUNDLED_KEY;
         assert!(is_the_other_key(hex));
+        assert!(!is_the_other_key(crate::rekordbox::BUNDLED_ONELIBRARY_KEY));
         assert!(!is_the_other_key(KEY));
         let refused = to_bytes(&a_database(), hex, "TESTSTICK").unwrap_err().to_string();
         assert!(refused.contains("master.db key"), "{refused}");
