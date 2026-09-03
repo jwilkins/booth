@@ -550,6 +550,11 @@ impl App {
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
         }
         #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_OPEN_SYNC").is_some() {
+            app.sheet = true;
+            cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
+        }
+        #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_CHECK").is_some() {
             app.verify_showing(false);
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
@@ -1568,6 +1573,35 @@ impl App {
         self.sheet = false;
         self.start(Job::Sync { args: Box::new(args), files });
         self.replan();
+    }
+
+    /// Forget what a drive is holding, so the next write puts it all on again.
+    ///
+    /// The record is what lets a write be a small one: it says which tracks are
+    /// already there and carries their rows into the new database rather than
+    /// preparing them a second time. Dropping it makes the next write a first
+    /// write — every track decoded, every row made afresh — which is what to do
+    /// with a drive that something else has been at, or one whose database is
+    /// not to be trusted.
+    ///
+    /// Nothing on the drive is touched here. This forgets, and the write that
+    /// follows overwrites; a file on the drive that no longer belongs to any of
+    /// its playlists is left where it is either way.
+    fn forget_drive_contents(&mut self) {
+        let Some(drive) = self.library.drives.get_mut(self.drive) else { return };
+        let held = drive.written.len();
+        if held == 0 {
+            return;
+        }
+        drive.written.clear();
+        let label = drive.label.clone();
+        crate::info!("forgot what {label} was holding: {}", plural(held, "track"));
+        self.note(
+            format!("{label} will be written from scratch — {} to put on", plural(held, "track")),
+            theme::AMBER,
+        );
+        self.replan();
+        self.save();
     }
 
     fn add_drive(&mut self, path: PathBuf, is_image: bool) {
@@ -6157,6 +6191,7 @@ impl App {
         let worst = checks.iter().map(|c| c.level).max().unwrap_or(Level::Ok);
 
         let mut open = true;
+        let mut forget = false;
         egui::Window::new(format!("SYNC → {}", drive.label))
             .open(&mut open)
             .collapsible(false)
@@ -6287,6 +6322,22 @@ impl App {
                         if ui.button("Cancel").clicked() {
                             self.sheet = false;
                         }
+                        // Forgetting what is on the drive rather than writing
+                        // straight away: the plan and the space check above
+                        // redraw as soon as it is pressed, so the size of what
+                        // was just asked for is on screen before Write is. A
+                        // whole drive prepared again is minutes to hours, and
+                        // that is not a thing to start without seeing it.
+                        if !drive.written.is_empty()
+                            && ui
+                                .button("Write it all again")
+                                .on_hover_text(
+                                    "Forget what this drive is holding, so the next write                                      prepares every track afresh — for a drive something else                                      has been at, or one whose database is not to be trusted",
+                                )
+                                .clicked()
+                        {
+                            forget = true;
+                        }
                         if worst == Level::Bad {
                             ui.label(
                                 RichText::new("the files above will be skipped; the rest still go")
@@ -6297,6 +6348,9 @@ impl App {
                     });
                 });
             });
+        if forget {
+            self.forget_drive_contents();
+        }
         if !open {
             self.sheet = false;
         }
@@ -7277,6 +7331,48 @@ mod tests {
             );
 
             let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn forgetting_what_a_drive_holds_makes_the_next_write_a_first_write() {
+            // The way back from a drive something else has been at. The record
+            // is what makes a write a small one; without it every track is
+            // prepared again and the database is made from scratch.
+            let mut app = app("resync");
+            let id = app.library.add(std::path::Path::new("/music/Sirens.flac"));
+            app.library.add_playlist("Saturday", "").unwrap();
+            app.library.playlists[0].tracks.push(id);
+            app.library.drives.push(crate::library::Drive {
+                label: "USB".into(),
+                path: std::path::PathBuf::from("/media/usb"),
+                playlists: vec!["Saturday".into()],
+                written: vec![crate::library::Written {
+                    id,
+                    prep: sync::fingerprint(app.library.get(id).unwrap()),
+                    row: Some(musicai::export::pdb::Track {
+                        id: 1,
+                        file_path: "/Contents/Peverelist/Sirens.flac".into(),
+                        ..Default::default()
+                    }),
+                }],
+                ..Default::default()
+            });
+            app.drive = 0;
+            app.replan();
+            assert!(app.plan.is_empty(), "the drive is up to date to begin with");
+
+            app.forget_drive_contents();
+
+            assert!(
+                app.library.drives[0].written.is_empty(),
+                "the record of what is on the drive was kept"
+            );
+            assert_eq!(app.plan.add, vec![id], "the next write should put the track on again");
+
+            // And a second press has nothing to forget, so it says nothing.
+            let said = app.status.clone();
+            app.forget_drive_contents();
+            assert_eq!(app.status, said, "forgetting nothing announced something");
         }
 
         #[test]
