@@ -550,6 +550,26 @@ impl App {
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
         }
         #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_DRIVE_SYNCED").is_some() {
+            let wanted = match app.library.drives.first() {
+                Some(drive) => crate::sync::wanted(&app.library, drive),
+                None => Vec::new(),
+            };
+            let written: Vec<crate::library::Written> = wanted
+                .iter()
+                .filter_map(|id| app.library.get(*id))
+                .map(|track| crate::library::Written {
+                    id: track.id,
+                    prep: crate::sync::fingerprint(track),
+                    row: None,
+                })
+                .collect();
+            if let Some(drive) = app.library.drives.first_mut() {
+                drive.written = written;
+            }
+            app.replan();
+        }
+        #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_OPEN_SYNC").is_some() {
             app.sheet = true;
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
@@ -4239,18 +4259,37 @@ impl App {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let ready = !self.plan.is_empty() && !self.running();
+                        // Open whenever there is a drive and nothing running,
+                        // even with nothing to write. What the sheet is for is
+                        // deciding whether to write, and "up to date" is a
+                        // claim about the drive worth being able to look at —
+                        // and to disagree with, since the way to make the next
+                        // write a full one is in there. A drive that believed
+                        // itself finished was a drive with no way in at all.
+                        let empty = self.plan.is_empty();
                         if ui
                             .add_enabled(
-                                ready,
+                                !self.running(),
                                 egui::Button::new(
                                     RichText::new(theme::label_text("Sync"))
                                         .size(11.0)
-                                        .color(theme::BOOTH)
+                                        .color(match empty {
+                                            true => theme::TEXT,
+                                            false => theme::BOOTH,
+                                        })
                                         .strong(),
                                 )
-                                .fill(theme::AMBER),
+                                // Quiet when there is nothing to write, so the
+                                // button being there is not itself a summons.
+                                .fill(match empty {
+                                    true => theme::BOOTH_2,
+                                    false => theme::AMBER,
+                                }),
                             )
+                            .on_hover_text(match empty {
+                                true => "Look at what this drive is holding, or write it again",
+                                false => "What would go on, and whether it can",
+                            })
                             .clicked()
                         {
                             self.sheet = true;
@@ -6301,8 +6340,10 @@ impl App {
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         let verb = if worst == Level::Bad { "Write anyway" } else { "Write" };
+                        let nothing = self.plan.is_empty();
                         if ui
-                            .add(
+                            .add_enabled(
+                                !nothing,
                                 egui::Button::new(
                                     RichText::new(theme::label_text(verb))
                                         .size(11.0)
@@ -6314,6 +6355,10 @@ impl App {
                                 } else {
                                     theme::AMBER
                                 }),
+                            )
+                            .on_disabled_hover_text(
+                                "This drive already holds what its playlists say — write it all \
+                                 again to put it on from scratch",
                             )
                             .clicked()
                         {
@@ -7331,6 +7376,47 @@ mod tests {
             );
 
             let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// A collection with one track, one playlist and a drive holding it —
+        /// which is to say a drive with nothing to do.
+        fn a_drive_up_to_date(name: &str) -> App {
+            let mut app = app(name);
+            let id = app.library.add(std::path::Path::new("/music/Sirens.flac"));
+            app.library.add_playlist("Saturday", "").unwrap();
+            app.library.playlists[0].tracks.push(id);
+            app.library.drives.push(crate::library::Drive {
+                label: "USB".into(),
+                path: std::path::PathBuf::from("/media/usb"),
+                playlists: vec!["Saturday".into()],
+                written: vec![crate::library::Written {
+                    id,
+                    prep: sync::fingerprint(app.library.get(id).unwrap()),
+                    row: None,
+                }],
+                ..Default::default()
+            });
+            app.drive = 0;
+            app.replan();
+            assert!(app.plan.is_empty(), "the drive should have nothing to do");
+            app
+        }
+
+        #[test]
+        fn a_drive_with_nothing_to_do_can_still_be_opened() {
+            // The way in has to exist when the collection believes the drive is
+            // finished, because disagreeing with that belief is exactly what
+            // the sheet is for — and it was the one state that closed it.
+            let mut harness =
+                Harness::new_ui_state(|ui, app: &mut App| app.dock(ui), a_drive_up_to_date("dock"));
+            harness.run();
+
+            // The same spacing the button is drawn with, rather than a guess
+            // at what it looks like.
+            harness.get_by_label(theme::label_text("Sync").as_str()).click();
+            harness.run();
+
+            assert!(harness.state().sheet, "the sync sheet did not open for an idle drive");
         }
 
         #[test]
