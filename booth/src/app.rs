@@ -1567,6 +1567,7 @@ impl App {
         args.playlists = self.drive_playlists(&drive);
         args.companions = companions;
         args.already = already;
+        args.onelibrary_key = self.config.onelibrary_key().map(str::to_string);
 
         // The drive's record is everything that should be on it once this is
         // done, not the part being written now. Recording only the part is how
@@ -5909,6 +5910,33 @@ impl App {
                         self.config.rekordbox_key = key.trim().to_string();
                         changed = true;
                     }
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(
+                            "A drive carries a second, separate library for the CDJ-3000X and \
+                         the other newer players, under its own key — not the one above. With \
+                         it, a sync writes that database as well as the legacy one. Leave it \
+                         blank and only the legacy one is written, which every player up to \
+                         the CDJ-3000 reads and the newer ones do not.",
+                        )
+                        .color(theme::DIM)
+                        .size(theme::SMALL),
+                    );
+                    let mut onelibrary = self.config.onelibrary_key.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut onelibrary)
+                                .desired_width(ui.available_width())
+                                .hint_text("OneLibrary key")
+                                .password(true)
+                                .font(theme::mono(11.0)),
+                        )
+                        .changed()
+                    {
+                        self.config.onelibrary_key = onelibrary.trim().to_string();
+                        changed = true;
+                    }
+                    ui.add_space(10.0);
                     if ui
                         .button("Import a rekordbox library")
                         .on_hover_text(
@@ -6247,22 +6275,37 @@ impl App {
             .show(ctx, |ui| {
                 // Scrolled, because the sheet is no taller than the screen now.
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    let both = self.config.writes_onelibrary();
                     ui.label(
                         RichText::new(format!(
-                            "Target: CDJ-3000 · writes: Device Library (export.pdb) + ANLZ{}",
+                            "Target: CDJ-3000 · writes: Device Library (export.pdb){} + ANLZ{}",
+                            if both { " + OneLibrary (exportLibrary.db)" } else { "" },
                             if drive.is_image { " · into a FAT32 image" } else { "" }
                         ))
                         .font(theme::mono(10.5))
                         .color(theme::DIM),
                     );
                     ui.label(
-                        RichText::new(format!(
-                            "{} A CDJ-3000X will not read this drive: it needs OneLibrary, \
-                         whose schema is not published.",
-                            theme::WARN
-                        ))
+                        RichText::new(match both {
+                            // Written, read back, and never yet put in front of
+                            // a player — which is a different thing from
+                            // supported, and the sheet should not blur them.
+                            true => format!(
+                                "{} The CDJ-3000X database is written and verified off the \
+                                 drive, but no player has read one this wrote.",
+                                theme::WARN
+                            ),
+                            false => format!(
+                                "{} A CDJ-3000X will not read this drive: it needs OneLibrary, \
+                                 which needs its key in Settings.",
+                                theme::WARN
+                            ),
+                        })
                         .font(theme::mono(10.5))
-                        .color(theme::ALERT),
+                        .color(match both {
+                            true => theme::AMBER,
+                            false => theme::ALERT,
+                        }),
                     );
 
                     // What the browse tree on the player will look like, because

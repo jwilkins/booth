@@ -272,6 +272,15 @@ pub struct Config {
     /// the same reason the library path is: it describes this machine.
     #[serde(default)]
     pub rekordbox_key: String,
+    /// The key the OneLibrary database on a drive is encrypted with.
+    ///
+    /// A different key from the one above, for a different file, and the two
+    /// are not interchangeable: that one opens rekordbox's library on this
+    /// computer, this one writes the database the newer players read off a
+    /// drive. Empty means fall back to `ONELIBRARY_KEY`, and then to writing
+    /// no such database at all.
+    #[serde(default)]
+    pub onelibrary_key: String,
     /// How wide or tall each panel was left.
     #[serde(default)]
     pub panels: Panels,
@@ -374,6 +383,7 @@ impl Default for Config {
             autotag_score: 0.9,
             write_tags: WriteTags::default(),
             rekordbox_key: String::new(),
+            onelibrary_key: String::new(),
         }
     }
 }
@@ -426,6 +436,22 @@ impl Config {
     pub fn rekordbox_key(&self) -> Option<&str> {
         let key = self.rekordbox_key.trim();
         (!key.is_empty()).then_some(key)
+    }
+
+    /// The OneLibrary key from the settings, if one was put there.
+    pub fn onelibrary_key(&self) -> Option<&str> {
+        let key = self.onelibrary_key.trim();
+        (!key.is_empty()).then_some(key)
+    }
+
+    /// Whether a drive written now would carry the database the newer players
+    /// read.
+    ///
+    /// The settings first, then the environment — the same order the export
+    /// itself resolves it in, so what the sync sheet promises and what the
+    /// write does cannot come apart.
+    pub fn writes_onelibrary(&self) -> bool {
+        musicai::rekordbox::onelibrary_key(self.onelibrary_key()).is_some()
     }
 
     /// Where stems go and where to look for ones already rendered.

@@ -57,10 +57,13 @@ stops being maintained tomorrow, your prep work is still readable.
 
 ### What it will not do
 
-**It does not write a drive a CDJ-3000X will play.** The 3000X reads the OneLibrary
-database and does not fall back to the legacy one, and OneLibrary's schema has never
-been published. §4 sets out precisely where that stands, what is and is not in the
-way, and what would change it. If a 3000X is what the club puts in front of you, this
+**It does not write a drive a CDJ-3000X is known to play.** The 3000X reads the
+OneLibrary database and does not fall back to the legacy one. That database is now
+written — from the same track list and playlist tree as the legacy one, and verified
+off the drive — but only when a key is supplied for it, and no player has read one.
+AlphaTheta has published no specification; the format has been documented in detail by
+other people, and [`docs/onelibrary.md`](onelibrary.md) is what is known, how sure each
+part is, and what would settle the rest. If a 3000X is what the club puts in front of you, this
 is not your tool yet — and the current answer, writing the legacy drive here and
 handing off to free rekordbox for the last step, is clunky.
 
@@ -231,7 +234,7 @@ waveforms. There are three generations of that database:
 |---|---|---|---|---|
 | **Device Library** (legacy) | `PIONEER/rekordbox/export.pdb` + `.DAT`/`.EXT`/`.2EX` analysis | DeviceSQL, page-based, unencrypted | **Yes** — reverse-engineered byte-for-byte, two independent parsers | Everything since CDJ-2000 (2009), **including the CDJ-3000 as it ships today** |
 | **Device Library Plus** | `exportLibrary.db` | **Encrypted** SQLite | No | OPUS-QUAD and later |
-| **OneLibrary** | Device Library Plus, rebranded and opened to partners | Encrypted SQLite | **No** — spec not public | CDJ-3000X, CDJ-1500X, XDJ-AZ, XDJ-AN, OPUS-QUAD, OMNIS-DUO; djay Pro and rekordbox write it, Traktor announced |
+| **OneLibrary** | Device Library Plus, rebranded and opened to partners | Encrypted SQLite | **Not by its vendor** — but reverse-engineered in public: schema, key and seed rows are all documented ([`docs/onelibrary.md`](onelibrary.md)) | CDJ-3000X, CDJ-1500X, XDJ-AZ, XDJ-AN, OPUS-QUAD, OMNIS-DUO; djay Pro and rekordbox write it, Traktor announced |
 
 Three things about that table are easy to assume the wrong way round.
 
@@ -240,24 +243,31 @@ Three things about that table are easy to assume the wrong way round.
 rather than machine- or licence-dependent, so neither is a cryptographic
 obstacle: `pyrekordbox` reads `master.db` routinely, and
 the `exportLibrary.db` key has been recovered and published as well (it is
-stored obfuscated rather than derived — Base85 over an XOR blob). What is
-missing for OneLibrary is the **schema**: which tables, which columns, which
-of them a player actually requires, and in what state a drive has to be left.
-None of that is published, and as of this writing nobody has demonstrated an
-`exportLibrary.db` written from scratch that a CDJ-3000X will read.
+stored obfuscated rather than derived — Base85 over an XOR blob). The **schema** is not
+published by AlphaTheta either, but it is no longer unknown: twenty-two tables,
+their full DDL taken from a real rekordbox export, the seed rows that drive the
+player's browse screen, and the on-drive layout are all documented by other
+people, and [`docs/onelibrary.md`](onelibrary.md) collects them with their
+sources. Hand-written drives have been reported to work on a CDJ-3000X
+(firmware 1.31, September 2026) and on a CDJ-3000, in both cases by the
+projects that wrote them.
 
-That distinction decides the roadmap. Being able to *open* an
-`exportLibrary.db` that rekordbox wrote is the first step of the reverse
-engineering, not the end of it — the same position `export.pdb` was in before
-someone did the work. A player is supported when a player plays the drive.
-Until then, holding the key is a start and nothing more.
+What is still missing is the part that decides the roadmap: **evidence, not
+documentation**. No published test shows a OneLibrary-only drive on a
+OneLibrary-only player, or records whether a hand-written drive's grids and
+waveforms were used rather than silently re-analysed. Being able to *open* an
+`exportLibrary.db` that rekordbox wrote, and to copy a schema out of one, is
+where the reverse engineering starts — the same position `export.pdb` was in
+before someone did the work. A player is supported when a player plays the
+drive, and there is a licence question (§4, below) that documentation does not
+answer either.
 
 **The CDJ-3000X does not fall back to a legacy drive.** AlphaTheta's own
 compatibility notice lists Device Library as "–" for the CDJ-3000X, and the
 rekordbox FAQ says it directly: "The CDJ-3000X can browse tracks and playlists on
 a USB storage device only if OneLibrary (formerly Device Library Plus) has been
 exported to that device." What makes a modern rekordbox-written stick work on
-both old and new players is that rekordbox 6.8.2 and later write *both*
+both old and new players is that rekordbox 6.8.1 (December 2023) and later write *both*
 databases to the same drive — not that the new player reads the old format.
 Anecdotes that a 3000X played someone's old stick are almost certainly this:
 the stick had been re-synced by a recent rekordbox and carries both.
@@ -265,12 +275,17 @@ the stick had been re-synced by a recent rekordbox and carries both.
 **OneLibrary is standardised, not open.** It is a shared format agreed between
 AlphaTheta, Algoriddim and Native Instruments, and AlphaTheta's own page says
 only that they are "working with other brands". There is no published
-specification, no SDK, and no developer programme on any AlphaTheta page found.
-The Mixxx developers looked at exactly this question and concluded the route is
-a direct conversation with AlphaTheta rather than a public document. The
-rekordbox OneLibrary FAQ does point at a "rekordbox for Developers" support
-section, which is the first thing to chase — but until something is published,
-plan as though it is closed.
+specification, no SDK, and no developer programme on any AlphaTheta page found;
+"rekordbox for Developers" turns out to be a page about importing XML. The
+partners got the format privately, and everyone else has reverse-engineered it.
+That leaves a question documentation does not settle: the file is encrypted, so
+writing it means using a recovered key, and the Mixxx project has ruled
+OneLibrary out of its own exporter on anti-circumvention grounds while
+rekordcrate ships the key in a pull request. §4 and
+[`docs/onelibrary.md`](onelibrary.md) set out both positions; this project's
+own — read with a key the user supplies, ship none, write nothing — sits
+between them and is a decision to revisit deliberately rather than by
+accident.
 
 Three consequences follow, and they shape the whole roadmap.
 
@@ -285,12 +300,14 @@ and `PSSI` song-structure/phrase data (XOR-masked since rekordbox 6, and the mas
 known). **A drive that a CDJ-3000 will play can be written today, from Rust, with no
 agreement from anyone.**
 
-**The CDJ-3000X requires OneLibrary, and OneLibrary is closed.** The specification has
-not been published; the Mixxx developers' conclusion after looking at it was that the
-route is a direct conversation with AlphaTheta rather than a public spec. Lexicon ships
-support for both databases on one drive, so third-party implementation is evidently
-possible — by licence, by reverse engineering, or both. We should assume it takes a
-partnership and plan the product so that it is valuable before that partnership exists.
+**The CDJ-3000X requires OneLibrary, and OneLibrary is closed but no longer opaque.**
+AlphaTheta has published no specification, and none of the partners has either. The
+format has nevertheless been documented from real exports — see
+[`docs/onelibrary.md`](onelibrary.md) — and both commercial software (Lexicon, djay)
+and hobby projects write it, one of them onto a CDJ-3000X that played it. So the
+obstacle is no longer knowledge; it is that writing the file means using a recovered
+key, and that nobody has published the hardware evidence a claim of support would
+need. Plan the product so that it is valuable before that is settled.
 
 **Writing both databases is not optional, and getting it wrong is the 3.30 failure.**
 Rekordbox now writes both; firmware 3.30 read only the new one and DJs lost their
@@ -715,7 +732,7 @@ Two dependency decisions:
 | Capability | rekordbox | Serato | Engine DJ | **Booth** |
 |---|---|---|---|---|
 | Writes CDJ-3000 drives | ✅ | ❌ | ❌ | ✅ (v1) |
-| Writes CDJ-3000X / OneLibrary drives | ✅ | ❌ | ❌ | ⚠ phase 2, licence-dependent |
+| Writes CDJ-3000X / OneLibrary drives | ✅ | ❌ | ❌ | ⚠ written, key-dependent, unproven on hardware |
 | Stems on a standalone CDJ | ❌ | ❌ | n/a | **✅ (pre-rendered)** |
 | Stem quality | rated below peers, 3 stems | strong | pre-rendered | **demucs, 4 stems, scored per track** |
 | Variable-tempo gridding | weak | weak | weak | **first-class** |
@@ -803,6 +820,7 @@ played by a CDJ.
 | Waveforms, all five packings including the 3-band (ANA-6) | Written and read back. Not yet seen on a player. |
 | Loudness and true peak (ANA-7) | Done, from the existing `src/loudness.rs`. |
 | Drive writer — `export.pdb`, ANLZ, disk image (EXP-1) | Writes a track list and a playlist tree with folders; verified by an independent parser; **unverified on hardware**. |
+| OneLibrary writer — `exportLibrary.db` | Written from the same collection as the legacy database, read back off the drive and counted. Needs a key it does not ship; no `exportExt.pdb`, no artwork; **unverified on hardware**. |
 | Delta sync and preflight (EXP-2, SAFE-2) | Done, and the file checks run at import as well as at write. |
 | Medium checks (SAFE-3) | Free space and path length only. Filesystem type, folder depth and per-folder file counts are not checked. |
 | Compatibility target (EXP-3) | Not built. The rules are the CDJ-3000's, in `src/compat.rs`, and are not yet selectable. |
@@ -815,7 +833,7 @@ played by a CDJ.
 | Preview deck (PREP-6) | One deck, not two. Enough to audition and set cues. |
 | Stems, rendered and playable (STEM-1..3, 7, 8, 11, 12) | Done: three rows a track, in the window and on the drive, each inheriting the parent's analysis and sorted under it in the exported playlist. Quality scoring (STEM-6) and the drive's loudness pass (STEM-4, STEM-5) are not. |
 | rekordbox import (INTEROP-1) | Done, from the encrypted `master.db`. |
-| OneLibrary (INTEROP-5, EXP-3 for the 3000X) | Reads and dumps a schema. Writes nothing. |
+| OneLibrary (INTEROP-5, EXP-3 for the 3000X) | Reads and dumps a schema; writes one beside the legacy database when given a key, verified off the drive and unread by any player. [`docs/onelibrary.md`](onelibrary.md). |
 | Serato, Traktor, Engine DJ (INTEROP-2) | Not started. |
 | Play history and booth round-trip (HIST-1..3) | Not started. |
 | Plug-in interface (INTEROP-4) | Not started. |
@@ -1080,7 +1098,8 @@ Complaints, format details and hardware facts referenced above:
   [CDJ-3000 firmware ver. 3.30 — important notice (Pioneer DJ)](https://www.pioneerdj.com/en/news/2026/cdj-3000-firmware-ver330-important-notice/),
   [What really happened (DJ LIFE)](https://djlifemag.com/2025/11/cdj-3000-firmware-3-30-issue-what-really-happened-how-to-save-your-library/),
   [AlphaTheta pulls CDJ-3000 firmware (Digital DJ Tips)](https://www.digitaldjtips.com/alphatheta-pulls-cdj-3000-firmware-after-playlist-issues/).
-- Database formats:
+- Database formats: [`docs/onelibrary.md`](onelibrary.md) is this project's own survey of
+  OneLibrary, with its sources; the rest of the reading is
   [Device Library Plus explained (Lexicon)](https://www.lexicondj.com/blog/everything-you-need-to-know-about-device-library-plus-and-more),
   [What is Device Library Plus? (AlphaTheta)](https://support.pioneerdj.com/hc/en-us/articles/16290620247321-What-is-Device-Library-Plus),
   [OneLibrary (AlphaTheta)](https://alphatheta.com/en/onelibrary/),

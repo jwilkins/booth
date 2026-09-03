@@ -183,7 +183,7 @@ const COLORS: [&str; 8] = ["Pink", "Red", "Orange", "Yellow", "Green", "Aqua", "
 /// The browse menu, as rekordbox writes it: the categories a player offers when
 /// you turn the encoder. The second value of each pair identifies the menu item
 /// to the player and is not simply the row number — the gaps are rekordbox's.
-const COLUMNS: [(u16, &str); 27] = [
+pub(crate) const COLUMNS: [(u16, &str); 27] = [
     (0x0080, "GENRE"),
     (0x0081, "ARTIST"),
     (0x0082, "ALBUM"),

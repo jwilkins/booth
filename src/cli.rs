@@ -68,10 +68,11 @@ pub enum RekordboxCommand {
     /// Point it at `master.db` from a rekordbox installation, or at a mounted
     /// OneLibrary drive.
     Read(RekordboxArgs),
-    /// Describe the tables of a database, for a format nobody has published.
+    /// Describe the tables of a database, for a format its vendor has not
+    /// published.
     ///
-    /// This is how the OneLibrary schema gets learned. It reads; it does not
-    /// write a drive, and having the key does not make it able to.
+    /// This is how the OneLibrary schema in `docs/onelibrary.md` gets checked
+    /// against a drive. It reads; it does not write one.
     Schema(RekordboxArgs),
 }
 
@@ -423,6 +424,16 @@ pub struct ExportArgs {
     /// Report what would be written without touching the drive.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// The key for the OneLibrary database the newer players read.
+    ///
+    /// Different from the one `rekordbox read` wants: that opens rekordbox's
+    /// own library, this encrypts a drive. Without it the export writes the
+    /// legacy database only, which every player up to and including the
+    /// CDJ-3000 reads and the CDJ-3000X does not. Defaults to
+    /// `ONELIBRARY_KEY`.
+    #[arg(long, value_name = "KEY")]
+    pub onelibrary_key: Option<String>,
 
     /// Files that are stems of another track, as (stem, parent) pairs.
     ///

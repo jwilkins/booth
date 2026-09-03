@@ -8,14 +8,17 @@
 //!   Reading it is what [`master`] does, and it is how a library moves into
 //!   this program without being re-analysed from scratch.
 //! - **`exportLibrary.db`** is the OneLibrary database *on a USB drive*, which
-//!   is what a CDJ-3000X reads instead of `export.pdb`. [`onelibrary`] can open
-//!   one and describe it. That is all it can do, and the reason is in that
-//!   module.
+//!   is what a CDJ-3000X reads instead of `export.pdb`. [`onelibrary`] opens
+//!   one and describes it; [`crate::export::onelibrary`] writes one.
 //!
-//! Both are SQLCipher, and for both the key is fixed rather than derived from
-//! the machine or the licence — so neither is a cryptographic problem. What
-//! stands between this program and writing a drive a CDJ-3000X will play is
-//! the *schema*, which is not published for OneLibrary.
+//! Both are SQLCipher, and both are keyed the same way for everybody rather
+//! than per machine or per licence — so neither is a cryptographic problem,
+//! and neither is the schema: AlphaTheta publishes none, but OneLibrary's has
+//! been documented from real exports by other people (`docs/onelibrary.md`).
+//! **They are two different keys**, though, and each is useless on the other
+//! file, which is why [`resolve`] and [`onelibrary_key`] are separate and
+//! neither falls back to the other. What stands between this program and a
+//! drive a CDJ-3000X is *known* to play is hardware to prove it on.
 
 pub mod master;
 pub mod onelibrary;
@@ -39,6 +42,13 @@ pub const BUNDLED_KEY: &str = "";
 /// Where to look for the key when none was passed in.
 pub const KEY_ENV: &str = "REKORDBOX_KEY";
 
+/// The OneLibrary key this build was compiled with, if any.
+///
+/// Empty, on the same terms and for the same reason as [`BUNDLED_KEY`], and
+/// with one more: this one is what a *writer* needs, and a drive is a thing
+/// that leaves the building. See `docs/onelibrary.md`.
+pub const BUNDLED_ONELIBRARY_KEY: &str = "";
+
 /// Work out which key to use.
 ///
 /// In order: what the caller was given, the environment, then whatever this
@@ -61,6 +71,35 @@ pub fn resolve(supplied: Option<&str>) -> Result<String> {
         "no rekordbox database key. rekordbox encrypts its library with SQLCipher, using a \
          key that is the same on every installation. Put it in Settings, or set {KEY_ENV}. \
          `python -m pyrekordbox download-key` will fetch and print one."
+    )
+}
+
+/// The key for `exportLibrary.db`, if there is one to be had.
+///
+/// A **different key** from [`resolve`]'s. The two databases are both
+/// SQLCipher and both keyed the same way for everybody, and that is where the
+/// similarity stops: `master.db`'s key is sixty-four hex digits, OneLibrary's
+/// is sixty-four characters of ordinary text, and each is useless on the other
+/// file. So they get separate settings rather than one that would sometimes be
+/// wrong, and this returns nothing rather than falling back to the other one.
+///
+/// Nothing here fails when there is no key: a drive without a OneLibrary
+/// database is the drive this program has always written, and the export says
+/// so in a line rather than stopping.
+pub fn onelibrary_key(supplied: Option<&str>) -> Option<String> {
+    let candidates = [
+        supplied.map(str::to_string),
+        std::env::var(crate::export::onelibrary::KEY_ENV).ok(),
+        (!BUNDLED_ONELIBRARY_KEY.is_empty()).then(|| BUNDLED_ONELIBRARY_KEY.to_string()),
+    ];
+    candidates.into_iter().flatten().map(|key| key.trim().to_string()).find(|key| !key.is_empty())
+}
+
+/// What to say when there is no OneLibrary key, said once and in one place.
+pub fn no_onelibrary_key() -> String {
+    format!(
+        "no OneLibrary database written: the newer players read one, and writing it needs the          key rekordbox encrypts it with — the same on every installation, and not this          project's to ship. Set {} to write one.",
+        crate::export::onelibrary::KEY_ENV
     )
 }
 

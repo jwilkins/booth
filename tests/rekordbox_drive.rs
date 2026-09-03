@@ -95,6 +95,7 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         playlist: "Sat 14/9".to_string(),
         playlists: Vec::new(),
         dry_run: false,
+        onelibrary_key: None,
         companions: Vec::new(),
         already: Vec::new(),
     }
@@ -643,5 +644,94 @@ fn a_second_sync_keeps_what_the_first_one_wrote() {
         playlist_entries(&drive).len(),
         2,
         "the playlist on the drive does not hold both tracks"
+    );
+}
+
+/// A passphrase, not *the* passphrase. What is being checked here is that the
+/// database written to the drive is the database that comes back off it; the
+/// key that makes a drive a player will read is the one rekordbox uses, which
+/// this project does not ship.
+const ONELIBRARY_KEY: &str = "a-key-that-is-not-the-real-one";
+
+#[test]
+fn a_drive_written_with_a_key_carries_both_databases_and_they_agree() {
+    let scratch = Scratch::new("onelibrary");
+    let drive = scratch.path("drive");
+    let one = write_song(&scratch, "one.flac");
+    let two = write_song(&scratch, "two.flac");
+
+    let mut args =
+        ExportArgs { drive: Some(drive.clone()), ..args_for(vec![one.clone(), two.clone()]) };
+    args.onelibrary_key = Some(ONELIBRARY_KEY.to_string());
+    args.playlists = vec![PlaylistSpec {
+        name: "Saturday".to_string(),
+        folder: String::new(),
+        tracks: vec![one, two],
+    }];
+    let reporter = Collected::new();
+    commands::export(&args, &reporter).expect("export failed");
+
+    let at = drive.join("PIONEER/rekordbox/exportLibrary.db");
+    assert!(at.exists(), "no OneLibrary database was written: {:?}", reporter.lines());
+    let bytes = std::fs::read(&at).unwrap();
+    assert!(!bytes.starts_with(b"SQLite format 3"), "it should be encrypted");
+
+    let summary = musicai::export::onelibrary::inspect(&bytes, ONELIBRARY_KEY)
+        .expect("the drive's OneLibrary database would not open");
+    assert_eq!(summary.tables, 22);
+    assert_eq!(summary.playlists, 1);
+
+    // The point of writing both: a player that reads one and a player that
+    // reads the other are looking at the same drive.
+    let legacy = tracks_on(&drive);
+    assert_eq!(
+        summary.tracks as usize,
+        legacy.len(),
+        "the two databases disagree about how many tracks are on the drive"
+    );
+    assert_eq!(summary.entries as usize, playlist_entries(&drive).len());
+
+    // And the newer database points at files that are really there, the same
+    // check the legacy one gets.
+    let connection = musicai::rekordbox::open(&at, ONELIBRARY_KEY).unwrap();
+    let mut statement =
+        connection.prepare("SELECT path, analysisDataFilePath FROM content").unwrap();
+    let rows: Vec<(String, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    for (audio, analysis) in rows {
+        assert!(drive.join(audio.trim_start_matches('/')).exists(), "{audio} is not on the drive");
+        assert!(
+            drive.join(analysis.trim_start_matches('/')).exists(),
+            "{analysis} is not on the drive"
+        );
+        // Both databases name the same file for the same track.
+        assert!(
+            legacy.iter().any(|(_, path, anlz)| *path == audio && *anlz == analysis),
+            "{audio} is in one database and not the other"
+        );
+    }
+}
+
+#[test]
+fn a_drive_written_without_a_key_is_the_drive_it_always_was_and_says_so() {
+    let scratch = Scratch::new("onelibrary-none");
+    let drive = scratch.path("drive");
+    let lines = export(vec![write_song(&scratch, "one.flac")], &drive);
+
+    assert!(
+        !drive.join("PIONEER/rekordbox/exportLibrary.db").exists(),
+        "nothing should have been written without a key"
+    );
+    assert!(
+        drive.join("PIONEER/rekordbox/export.pdb").exists(),
+        "the legacy database still goes on"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("no OneLibrary database written")),
+        "the export should say what it did not write and why: {lines:?}"
     );
 }

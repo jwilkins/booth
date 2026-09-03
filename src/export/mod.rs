@@ -15,6 +15,7 @@
 
 pub mod anlz;
 pub mod image;
+pub mod onelibrary;
 pub mod pdb;
 pub mod waveform;
 

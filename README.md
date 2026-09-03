@@ -585,7 +585,10 @@ by different people, so that a misunderstanding of the format cannot be symmetri
 invisible. The database format is documented in the same place and checked the same way.
 
 [`docs/rekordbox-replacement-spec.md`](docs/rekordbox-replacement-spec.md) is the wider
-plan this belongs to.
+plan this belongs to, and [`docs/onelibrary.md`](docs/onelibrary.md) is what is known
+about OneLibrary — the database the CDJ-3000X and the other newer players read instead
+of `export.pdb`. `export` writes one alongside the legacy database when it is given a
+key for it (`--onelibrary-key`, or `ONELIBRARY_KEY`); no player has read one yet.
 
 ## The macOS app
 

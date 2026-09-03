@@ -357,6 +357,12 @@ pub fn export(
                 ));
             }
         }
+
+        // The same library again, in the format the newer players read. Both
+        // are built from the one `database` above, so the two files on the
+        // drive cannot disagree about what is on it — which is the failure
+        // that firmware 3.30 turned into a room full of DJs with no playlists.
+        lines.extend(write_onelibrary(args, &database, destination.as_ref())?);
     }
 
     if let Some(destination) = destination {
@@ -420,6 +426,64 @@ impl Prepared {
 /// The size has to be settled before a byte is written, so it is estimated from
 /// the audio plus a couple of megabytes a track for the analysis. That is
 /// generous for anything under about half an hour long.
+/// Write the OneLibrary database beside the legacy one, when there is a key
+/// for it.
+///
+/// A drive without it is the drive this program has always written: every
+/// player up to and including the CDJ-3000 reads it, and the CDJ-3000X and the
+/// other newer players read nothing at all. A drive with it is untested on
+/// hardware, which the line it returns says.
+///
+/// No key is not a failure. It is the ordinary case — the key is not this
+/// project's to ship — so this reports what was not written and why, and the
+/// export carries on.
+fn write_onelibrary(
+    args: &ExportArgs,
+    database: &pdb::Database,
+    destination: Option<&Destination>,
+) -> Result<Vec<String>> {
+    use crate::export::onelibrary;
+
+    let Some(key) = crate::rekordbox::onelibrary_key(args.onelibrary_key.as_deref()) else {
+        return Ok(vec![crate::rekordbox::no_onelibrary_key()]);
+    };
+
+    // What the drive calls itself. An image is formatted with a label; a
+    // folder is only ever known by its name.
+    let device = match (&args.image, &args.drive) {
+        (Some(_), _) => args.label.clone(),
+        (None, Some(drive)) => {
+            drive.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string()
+        }
+        (None, None) => String::new(),
+    };
+
+    let bytes = onelibrary::to_bytes(database, &key, &device)
+        .context("building the OneLibrary database")?;
+    let Some(destination) = destination else {
+        return Ok(vec![format!(
+            "would write {}: {} tracks, {} bytes",
+            onelibrary::DRIVE_PATH,
+            database.tracks.len(),
+            bytes.len()
+        )]);
+    };
+
+    destination.write(onelibrary::DRIVE_PATH, &bytes)?;
+    // Off the drive again, keyed again, counted again — the same standard the
+    // legacy database is held to.
+    let summary = onelibrary::inspect(&destination.read(onelibrary::DRIVE_PATH)?, &key)
+        .context("the OneLibrary database did not read back off the drive")?;
+    Ok(vec![format!(
+        "wrote {} to {}: {} tables, {} tracks, {} playlists, verified — untested on hardware",
+        onelibrary::DRIVE_PATH,
+        destination.describe(),
+        summary.tables,
+        summary.tracks,
+        summary.playlists
+    )])
+}
+
 fn open_destination(args: &ExportArgs, files: &[PathBuf]) -> Result<Destination> {
     if let Some(root) = &args.drive {
         return Ok(Destination::Directory(root.clone()));
@@ -1557,9 +1621,8 @@ pub fn rekordbox(args: &crate::cli::RekordboxCommand, reporter: &dyn Reporter) -
     let tables = crate::rekordbox::tables(&connection)?;
     if !tables.iter().any(|(name, _)| name == "djmdContent") {
         reporter.event(Event::Summary(
-            "this is not a rekordbox master.db. If it is a OneLibrary drive, its schema is \
-             not published and nothing here can read it as a library yet — `rekordbox schema` \
-             will describe it."
+            "this is not a rekordbox master.db. If it is a OneLibrary drive, nothing here \
+             reads it as a library yet — `rekordbox schema` will describe its tables."
                 .into(),
         ));
         return Ok(());

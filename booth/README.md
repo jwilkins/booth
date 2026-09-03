@@ -329,17 +329,32 @@ Importing the same library twice changes nothing the second time.
 ## OneLibrary, and what it would take
 
 `exportLibrary.db` is what a CDJ-3000X reads instead of `export.pdb`. It is
-SQLCipher too, and its key is fixed as well, so **the encryption is not what
-stands in the way**. The schema is: which tables a player reads, which columns
-it requires, and what state the rest of the drive has to be left in. None of
-that is published, and nobody has yet demonstrated an `exportLibrary.db`
-written from scratch that a CDJ-3000X will play.
+SQLCipher too, and its key is fixed as well, so the encryption is not what
+stands in the way — and neither, any more, is the schema. AlphaTheta has
+published nothing, but other people have taken the format apart in public:
+twenty-two tables, the DDL from a real export, the seed rows that draw the
+player's browse screen, the analysis files, which player reads which database.
+[`docs/onelibrary.md`](../docs/onelibrary.md) is that survey, with its sources
+and with the claims — including some of this project's own — that turned out to
+be wrong.
 
-So `musicai rekordbox schema <drive>` opens one and prints its tables, columns
-and row counts, and that is deliberately all it does. It is where the reverse
-engineering starts — the same position `export.pdb` was in before somebody did
-the work — and it is not player support. Support is demonstrated by a player
-playing a drive.
+What is missing is evidence rather than knowledge. Hand-written drives have
+been reported playing on a CDJ-3000X and on a CDJ-3000, by the projects that
+wrote them; nobody has published a test of a OneLibrary-only drive on a
+OneLibrary-only player, or checked whether the player used the grids and
+waveforms it was given or quietly measured its own. And writing the file means
+using a recovered key, which is a decision this project has not made.
+
+So a sync writes one, when it has a key to write it with: the same track list
+and the same playlist tree as `export.pdb`, from one source, so the two files
+on the drive cannot come apart. Put the key in Settings — it is not the one
+rekordbox's own library uses, and this build ships neither — and the sheet says
+which databases the drive will carry. Without it the drive is what it always
+was.
+
+That is not player support. It is a file that reads back off the drive, keyed
+and counted, which is where support starts and not where it ends: support is
+demonstrated by a player playing a drive, and none has.
 
 ## What a player will actually open
 
@@ -436,10 +451,14 @@ asked for, and neither ever moves or deletes an original.
 
 - No player has read a drive this wrote. The format is validated against an
   independent parser, which is not the same as validation against hardware.
-- **A CDJ-3000X cannot read a drive this writes.** It does not fall back to the
-  legacy format; it needs OneLibrary, whose schema is not published. Having its
-  encryption key — which is public — does not change that. `rekordbox schema`
-  can describe one rekordbox wrote, which is where that work would start.
+- **A drive with OneLibrary on it has still never been read by a CDJ-3000X.**
+  The database is written from the same collection as the legacy one and
+  verified off the drive, and the two things most likely to be wrong — whether
+  a player recomputes the analysis directory rather than trusting the row, and
+  whether it accepts a hand-made analysis file — would show up as a player that
+  mounts the drive and re-analyses everything.
+  [`docs/onelibrary.md`](../docs/onelibrary.md) says what is known and what is
+  guessed.
 - Stem colouring needs the kit rendered first, which is minutes a track.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with
