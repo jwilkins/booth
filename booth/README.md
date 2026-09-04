@@ -494,6 +494,28 @@ rather than links — but the copied half can: `PIONEER` could become one
 enough of these to see what they cost. The log line after each one says how
 much was carried, which is the number that decides it.
 
+## What was played comes back
+
+A player writes a history to the stick it played from: every track it loaded,
+in the order it loaded them, one session a night. It is the only thing on a
+drive the collection cannot produce for itself, and it is the record of what was
+actually played rather than what was prepared — so when a drive is copied, its
+history is read back and becomes playlists.
+
+They land in a folder named after the drive, with each session under the name
+the player gave it, which is a date. Reading the same drive again replaces those
+playlists rather than making a second set. A track the drive played that the
+library does not have is left out and counted, rather than making a playlist
+with holes in it that look like tracks.
+
+Two limits worth knowing. The folder is `History/<drive>` — the collection's
+playlists have one level of folder, not two, so that is a name with a prefix
+rather than a folder inside a folder. And the history is read from the
+OneLibrary database, which is where a CDJ-3000X and every other newer player
+writes; a CDJ-3000 writes its history into `export.pdb` instead, and reading
+individual rows back out of that format is a parser this does not have yet. A
+drive played only on older hardware has a history nothing here can see.
+
 ## What it does not do yet
 
 - **The analysis half is unproven on hardware.** A CDJ-3000X has browsed a

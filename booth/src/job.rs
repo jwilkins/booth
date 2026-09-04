@@ -89,6 +89,10 @@ pub enum Job {
         foreign: crate::config::OnForeign,
         /// Where music copied in goes, when that is what was asked for.
         library: PathBuf,
+        /// The key the drive's OneLibrary database is encrypted with, for the
+        /// play history to be read out of it. Without one, only the files are
+        /// kept.
+        key: Option<String>,
     },
 }
 
@@ -167,6 +171,12 @@ pub enum Update {
     Orphans(Vec<PathBuf>),
     /// A drive was copied.
     Kept(Box<crate::backup::Backup>),
+    /// What a player recorded having played, off a drive that is still mounted.
+    Played {
+        drive: String,
+        root: PathBuf,
+        sessions: Vec<crate::history::Session>,
+    },
     /// The two hashes for one track that had none.
     Hashed {
         id: u32,
@@ -693,10 +703,34 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
         Job::Hash(tracks) => hash_all(&tracks, reporter),
         Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
-        Job::Keep { root, drive, into, known, foreign, library } => {
+        Job::Keep { root, drive, into, known, foreign, library, key } => {
             let kept = crate::backup::keep(&root, &into, &drive, &known, foreign, &library)?;
             let _ = reporter.tx.send(Update::Kept(Box::new(kept)));
             (reporter.wake)();
+
+            // The one thing on a drive the collection cannot make for itself.
+            // Read after the copy rather than before it, so that a history this
+            // fails to make sense of has still been stored.
+            if let Some(key) = key {
+                match crate::history::read(&root, &key) {
+                    Ok(sessions) if !sessions.is_empty() => {
+                        let played = sessions.iter().map(|s| s.played.len()).sum::<usize>();
+                        crate::info!(
+                            "{} read off {drive}, {}",
+                            crate::library::plural(sessions.len(), "session"),
+                            crate::library::plural(played, "track")
+                        );
+                        let _ = reporter.tx.send(Update::Played {
+                            drive: drive.clone(),
+                            root: root.clone(),
+                            sessions,
+                        });
+                        (reporter.wake)();
+                    }
+                    Ok(_) => {}
+                    Err(e) => crate::debug!("no history off {drive}: {e:#}"),
+                }
+            }
             Ok(())
         }
         Job::StemEnvelopes { id, kit } => {

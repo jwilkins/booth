@@ -1300,6 +1300,10 @@ impl App {
                         self.import(kept.adopted.clone());
                     }
                 }
+                Update::Played { drive, root, sessions } => {
+                    self.take_history(&drive, &root, sessions);
+                    changed = true;
+                }
                 Update::Verified(report) => {
                     if let Some(checked) = &mut self.checked {
                         checked.troubles.push(*report);
@@ -2197,6 +2201,96 @@ impl App {
         }
     }
 
+    /// Turn what a player recorded having played into playlists.
+    ///
+    /// One playlist per session, named the way the player named it, in a folder
+    /// of the drive's own. Re-reading a drive replaces those playlists rather
+    /// than making a second set: a night that has been read once and is read
+    /// again is the same night.
+    ///
+    /// A track the library does not have is left out and counted. It cannot be
+    /// a row in a playlist without being a row in the collection, and adding
+    /// somebody else's music because it appeared in a history is a decision
+    /// [`crate::config::OnForeign`] already asks about in the one place it
+    /// belongs.
+    fn take_history(
+        &mut self,
+        drive: &str,
+        root: &std::path::Path,
+        sessions: Vec<crate::history::Session>,
+    ) {
+        let known: Vec<crate::backup::Known> = self
+            .library
+            .tracks
+            .iter()
+            .map(|track| crate::backup::Known {
+                path: track.path.clone(),
+                bytes: track.bytes,
+                audio_hash: track.audio_hash.clone(),
+            })
+            .collect();
+        let (by_name, by_sound) = crate::backup::index(&known);
+        let ids: std::collections::HashMap<&std::path::Path, u32> =
+            self.library.tracks.iter().map(|track| (track.path.as_path(), track.id)).collect();
+
+        let folder = crate::history::folder(drive);
+        let (mut made, mut played, mut strangers) = (0usize, 0usize, 0usize);
+        for session in sessions {
+            let mut tracks = Vec::new();
+            for track in &session.played {
+                let file = track.file(root);
+                let owner =
+                    crate::backup::owner(&by_name, &by_sound, &track.file_name, track.bytes, &file);
+                match owner.and_then(|known| ids.get(known.path.as_path())) {
+                    Some(id) => tracks.push(*id),
+                    None => strangers += 1,
+                }
+            }
+            if tracks.is_empty() {
+                continue;
+            }
+            played += tracks.len();
+            made += 1;
+            let playlist = crate::library::Playlist {
+                name: session.name.clone(),
+                folder: folder.clone(),
+                tracks,
+            };
+            match self
+                .library
+                .playlists
+                .iter_mut()
+                .find(|p| p.name == playlist.name && p.folder == folder)
+            {
+                Some(existing) => *existing = playlist,
+                None => self.library.playlists.push(playlist),
+            }
+        }
+
+        if made == 0 {
+            return;
+        }
+        if !self.library.folders.contains(&folder) {
+            self.library.folders.push(folder.clone());
+        }
+        self.note(
+            match strangers {
+                0 => {
+                    format!("{} from {drive} ({})", plural(made, "night"), plural(played, "track"))
+                }
+                n => format!(
+                    "{} from {drive} ({}, {} not in the library)",
+                    plural(made, "night"),
+                    plural(played, "track"),
+                    n
+                ),
+            },
+            theme::TEXT,
+        );
+        self.rebuild();
+        self.save();
+    }
+
     /// Start copying one drive.
     fn keep_drive(&mut self, root: &std::path::Path, name: &str) {
         let known: Vec<crate::backup::Known> = self
@@ -2217,6 +2311,7 @@ impl App {
             known,
             foreign: self.config.on_foreign,
             library: self.config.library_path.clone(),
+            key: musicai::rekordbox::onelibrary_key(self.config.onelibrary_key()),
         });
     }
 

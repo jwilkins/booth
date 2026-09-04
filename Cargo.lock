@@ -711,6 +711,7 @@ dependencies = [
  "musicai",
  "rayon",
  "rfd",
+ "rusqlite",
  "serde",
  "serde_json",
  "trash",

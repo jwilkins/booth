@@ -53,5 +53,9 @@ screenshot = ["eframe/__screenshot"]
 
 [dev-dependencies]
 accesskit = "0.21"
+# For the history tests only, which have to put rows into an encrypted database
+# the way a player does — the reader this crate uses opens one read-only, on
+# purpose. Same build as the one `musicai` already links.
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
 egui_kittest = { version = "0.33", default-features = false }
 ttf-parser = "0.25.1"

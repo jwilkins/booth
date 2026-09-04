@@ -15,6 +15,7 @@
 pub mod app;
 pub mod backup;
 pub mod config;
+pub mod history;
 pub mod identify;
 pub mod job;
 pub mod library;

@@ -297,18 +297,7 @@ pub fn keep(
     // The audio. Indexed both ways the library can be asked about a file, so
     // each lookup is a hash of the drive's file at worst rather than a walk of
     // the library.
-    let by_name: HashMap<(&str, u64), &Known> = known
-        .iter()
-        .filter_map(|track| {
-            let name = track.path.file_name()?.to_str()?;
-            Some(((name, track.bytes), track))
-        })
-        .collect();
-    let by_sound: HashMap<&str, &Known> = known
-        .iter()
-        .filter(|track| !track.audio_hash.is_empty())
-        .map(|track| (track.audio_hash.as_str(), track))
-        .collect();
+    let (by_name, by_sound) = index(known);
 
     let contents = root.join(CONTENTS);
     for file in walk(&contents) {
@@ -317,17 +306,7 @@ pub fn keep(
         let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         let name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
 
-        // The cheap question first: a drive this program wrote holds the
-        // library's own files, so name and length settle nearly everything
-        // without opening anything.
-        let owned = by_name.get(&(name, size)).copied().or_else(|| {
-            // And when they do not, the same question the duplicate finder
-            // asks: is this the same recording, whatever it has been called
-            // since. One read of the file, and only for a file that got this
-            // far.
-            let hash = musicai::hash::audio_sha256(&file).ok()?;
-            by_sound.get(hash.as_str()).copied()
-        });
+        let owned = owner(&by_name, &by_sound, name, size, &file);
 
         if let Some(track) = owned {
             if let Some(parent) = to.parent() {
@@ -380,6 +359,50 @@ pub fn keep(
 
     std::fs::write(dir.join("backup.json"), serde_json::to_vec_pretty(&backup)?)?;
     Ok(backup)
+}
+
+/// Which library track a file on a drive is, if any.
+///
+/// The cheap question first: a drive this program wrote holds the library's own
+/// files, so name and length settle nearly everything without opening anything.
+/// When they do not, the same question the duplicate finder asks — is this the
+/// same recording, whatever it has been called since — which costs one read of
+/// the file and is only ever reached by a file the cheap test could not answer
+/// for.
+pub fn owner<'a>(
+    by_name: &ByName<'a>,
+    by_sound: &BySound<'a>,
+    name: &str,
+    size: u64,
+    file: &Path,
+) -> Option<&'a Known> {
+    by_name.get(&(name, size)).copied().or_else(|| {
+        let hash = musicai::hash::audio_sha256(file).ok()?;
+        by_sound.get(hash.as_str()).copied()
+    })
+}
+
+/// The library indexed by file name and length, for the cheap half of the
+/// question.
+pub type ByName<'a> = HashMap<(&'a str, u64), &'a Known>;
+/// And by the sound of the audio, for the half that has to open a file.
+pub type BySound<'a> = HashMap<&'a str, &'a Known>;
+
+/// The two indexes [`owner`] looks in, built once for a whole drive.
+pub fn index(known: &[Known]) -> (ByName<'_>, BySound<'_>) {
+    let by_name = known
+        .iter()
+        .filter_map(|track| {
+            let name = track.path.file_name()?.to_str()?;
+            Some(((name, track.bytes), track))
+        })
+        .collect();
+    let by_sound = known
+        .iter()
+        .filter(|track| !track.audio_hash.is_empty())
+        .map(|track| (track.audio_hash.as_str(), track))
+        .collect();
+    (by_name, by_sound)
 }
 
 /// Point one path at another without copying it.
