@@ -1,0 +1,45 @@
+name: CI
+
+# Every push, so a branch is known good before anyone looks at it, and pull
+# requests from forks, which push events do not cover.
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # A pull request from a branch in this repository is already covered by the
+    # push that created it. Only fork pull requests need the second run.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      # The audio output binds ALSA at build time, so the headers are needed
+      # even though nothing here opens a device.
+      - name: Install ALSA headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+
+      # Warnings fail here rather than accumulating until nobody reads them.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The tests that need the network, an API key, or demucs are `#[ignore]`d
+      # and stay that way here: a run must not depend on somebody else's
+      # service being up.
+      - run: cargo test --workspace
