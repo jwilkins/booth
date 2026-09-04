@@ -342,9 +342,10 @@ Fixed by dropping the wrong tag (not by inventing a `PQT2`), reordering the
 `.2EX` to `PWV6`, `PWV7`, `PWVC`, and writing `PVBR` in the `.DAT` even for
 lossless files, as real exports do.
 
-**With that, the `.EXT` reads through: colour waveforms and hot cues both come
-up on the player.** So hand-written `PCOB`/`PCO2` cue lists work on a
-CDJ-3000X, which as far as I can tell nobody had confirmed before.
+**With that, the `.EXT` reads through: load a track and its colour waveform and
+its hot cues are both there** — the cues on the deck, where before the fix
+there were none. So hand-written `PCOB`/`PCO2` cue lists work on a CDJ-3000X,
+which as far as I can tell nobody had confirmed before.
 
 ### And once colour appears, it is a picture rather than a spec
 

@@ -516,7 +516,7 @@ Against §2 to §5 what is left is:
   (§5.1). With that fixed it drew waveforms — but monochrome ones, from the
   `.DAT`, because a wrong section in the `.EXT` hid the colour waveforms behind
   it (§5). With *that* fixed it reads the `.EXT` through: **colour waveforms
-  and hot cues both come up on the player**, which is the whole of what the
+  and hot cues both come up on a loaded track**, which is the whole of what the
   analysis files are for and the first confirmation that this project's
   `PCOB`/`PCO2` cues are written the way a player expects. Phrases (`PSSI`,
   last in the file) and the three-band waveform out of the `.2EX` are the two
