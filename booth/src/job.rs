@@ -75,6 +75,17 @@ pub enum Job {
     Identify { tracks: Vec<(u32, PathBuf)>, key: String },
     /// Write a drive.
     Sync { args: Box<ExportArgs>, files: Vec<PathBuf> },
+    /// Copy what a drive holds somewhere it will outlive the drive.
+    Keep {
+        /// The drive, mounted.
+        root: PathBuf,
+        /// What it calls itself, which becomes the folder the copies go in.
+        drive: String,
+        into: PathBuf,
+        /// The library's files, as (path, size), for the audio to be linked to
+        /// rather than copied.
+        known: Vec<(PathBuf, u64)>,
+    },
 }
 
 impl Job {
@@ -94,6 +105,7 @@ impl Job {
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Sync { .. } => "writing",
+            Job::Keep { .. } => "copying a drive",
         }
     }
 }
@@ -149,6 +161,8 @@ pub enum Update {
     Wrote(Vec<(PathBuf, musicai::export::pdb::Track)>),
     /// Playable files in the library folder that no track points at.
     Orphans(Vec<PathBuf>),
+    /// A drive was copied.
+    Kept(Box<crate::backup::Backup>),
     /// The two hashes for one track that had none.
     Hashed {
         id: u32,
@@ -675,6 +689,12 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
         Job::Hash(tracks) => hash_all(&tracks, reporter),
         Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
+        Job::Keep { root, drive, into, known } => {
+            let kept = crate::backup::keep(&root, &into, &drive, &known)?;
+            let _ = reporter.tx.send(Update::Kept(Box::new(kept)));
+            (reporter.wake)();
+            Ok(())
+        }
         Job::StemEnvelopes { id, kit } => {
             let envelopes = stem_envelopes(&kit)?;
             let _ = reporter.tx.send(Update::Envelopes { id, envelopes });

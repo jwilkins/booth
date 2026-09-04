@@ -198,6 +198,15 @@ pub struct App {
     /// What checking the collection against its files found, while the sheet
     /// showing it is open.
     checked: Option<Checked>,
+    /// When the mounted volumes were last looked through for a player's drive,
+    /// and which drive states have been copied already this run.
+    ///
+    /// The set is a cheap guard in front of the one on disk: a stick left
+    /// plugged in comes past every few seconds, and reading a directory of
+    /// backups each time to decide it is the same stick would be work for
+    /// nothing.
+    looked_for_drives: Option<std::time::Instant>,
+    kept_drives: std::collections::HashSet<String>,
     /// Kept files whose names a copier wrote, and the name each could go back
     /// to now that what it was copied from has gone. Offered, never done on its
     /// own: renaming somebody's file is not a tidy-up to spring on them.
@@ -511,6 +520,8 @@ impl App {
             help: false,
             duplicates: None,
             checked: None,
+            looked_for_drives: None,
+            kept_drives: std::collections::HashSet::new(),
             renames: Vec::new(),
             panels_moved: false,
             pending_save: false,
@@ -1257,6 +1268,31 @@ impl App {
                         }
                     }
                     changed = true;
+
+                    // A drive has just been written, which is the moment its
+                    // contents are worth keeping and the one moment this
+                    // program knows exactly where it is. Waiting for the next
+                    // sweep of the mounted volumes would find it too, but only
+                    // if it happens to be mounted somewhere a sweep looks.
+                    let (path, label, is_image) =
+                        (drive.path.clone(), drive.label.clone(), drive.is_image);
+                    if self.config.keep_drives && !is_image {
+                        let state = crate::backup::fingerprint(&path);
+                        let name = match label.is_empty() {
+                            true => path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("drive")
+                                .to_string(),
+                            false => label,
+                        };
+                        if !state.is_empty() && self.kept_drives.insert(format!("{name}:{state}")) {
+                            self.keep_drive(&path, &name);
+                        }
+                    }
+                }
+                Update::Kept(kept) => {
+                    self.note(format!("kept {}: {}", kept.drive, kept.summary()), theme::TEXT);
                 }
                 Update::Verified(report) => {
                     if let Some(checked) = &mut self.checked {
@@ -1799,6 +1835,7 @@ impl eframe::App for App {
         self.take_dropped(ctx);
         self.keys(ctx);
         self.follow_playback(ctx);
+        self.look_for_drives();
 
         egui::TopBottomPanel::top("bar").frame(bar_frame()).show(ctx, |ui| self.command_bar(ui));
         // The dock drags up, and the log fills whatever it is given. At its
@@ -2115,6 +2152,58 @@ impl App {
     /// window repainting so it moves.
     ///
     /// The playhead is the deck's when the deck is running and the window's
+    /// Look through the mounted volumes for a drive worth keeping a copy of.
+    ///
+    /// Every few seconds rather than every frame: it is a `read_dir` of the
+    /// places volumes mount plus a stat of two folders on each, which is
+    /// nothing next to a repaint, but it is also not worth doing sixty times a
+    /// second to notice something a person did with their hands.
+    ///
+    /// A drive is copied once per state. Plugging the same unchanged stick in
+    /// again is not an event; writing to it and plugging it in again is.
+    fn look_for_drives(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(4);
+
+        if !self.config.keep_drives || self.running() {
+            return;
+        }
+        if self.looked_for_drives.is_some_and(|at| at.elapsed() < EVERY) {
+            return;
+        }
+        self.looked_for_drives = Some(std::time::Instant::now());
+
+        for root in crate::backup::volumes() {
+            if !crate::backup::is_a_player_drive(&root) {
+                continue;
+            }
+            let name = root.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            let state = crate::backup::fingerprint(&root);
+            if state.is_empty() || !self.kept_drives.insert(format!("{name}:{state}")) {
+                continue;
+            }
+            if crate::backup::already_kept(&self.config.backups_path, &name, &state) {
+                continue;
+            }
+            self.keep_drive(&root, &name);
+            // One at a time. The next one will be found on the next look, and a
+            // queue of copies started at once would fight over the same disk.
+            return;
+        }
+    }
+
+    /// Start copying one drive.
+    fn keep_drive(&mut self, root: &std::path::Path, name: &str) {
+        let known: Vec<(PathBuf, u64)> =
+            self.library.tracks.iter().map(|track| (track.path.clone(), track.bytes)).collect();
+        crate::info!("keeping a copy of {name}");
+        self.start(Job::Keep {
+            root: root.to_path_buf(),
+            drive: name.to_string(),
+            into: self.config.backups_path.clone(),
+            known,
+        });
+    }
+
     /// when it is not — which is what lets a cue be placed by clicking while
     /// something is paused, without playback dragging the marker away.
     fn follow_playback(&mut self, ctx: &egui::Context) {
@@ -5947,6 +6036,29 @@ impl App {
                     {
                         self.want_pick = Some(Picking::Rekordbox);
                     }
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Keeping copies of drives");
+                    ui.label(
+                        RichText::new(
+                            "A stick holds hours of work in the place most likely to be dropped \
+                         or left in a booth. When one is written, or a prepared one is plugged \
+                         in, its databases, analysis, cues and history are copied here. The \
+                         audio is linked to the library's own copy rather than copied, so a \
+                         drive costs megabytes.",
+                        )
+                        .color(theme::DIM)
+                        .size(theme::SMALL),
+                    );
+                    if ui
+                        .checkbox(&mut self.config.keep_drives, "Keep a copy of every drive")
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        path_label(ui, &self.config.backups_path.clone(), theme::DIM);
+                    });
 
                     ui.add_space(14.0);
                     pane_label(ui, "Where stems go");

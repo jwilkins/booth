@@ -281,6 +281,18 @@ pub struct Config {
     /// no such database at all.
     #[serde(default)]
     pub onelibrary_key: String,
+    /// Where copies of prepared drives go.
+    ///
+    /// A drive holds hours of work in the one place most likely to be dropped,
+    /// left in a booth, or simply to stop working. What goes here is the part
+    /// that cannot be made again — the databases, the analysis, the cues, the
+    /// play history — with the audio linked rather than copied, so keeping
+    /// every drive costs megabytes rather than gigabytes.
+    #[serde(default = "default_backups_path")]
+    pub backups_path: PathBuf,
+    /// Whether a drive is copied when it is written or plugged in.
+    #[serde(default = "yes")]
+    pub keep_drives: bool,
     /// How wide or tall each panel was left.
     #[serde(default)]
     pub panels: Panels,
@@ -384,8 +396,25 @@ impl Default for Config {
             write_tags: WriteTags::default(),
             rekordbox_key: String::new(),
             onelibrary_key: String::new(),
+            backups_path: default_backups_path(),
+            keep_drives: true,
         }
     }
+}
+
+/// Beside the library rather than under the data directory: these are copies
+/// of somebody's work, and a person should be able to find them, look inside
+/// one and copy it back onto a stick without this program's help.
+fn default_backups_path() -> PathBuf {
+    default_library_path()
+        .parent()
+        .map(|at| at.join("booth-drives"))
+        .unwrap_or_else(|| data_dir().join("drives"))
+}
+
+/// Serde needs a function to call for a default that is not `false`.
+fn yes() -> bool {
+    true
 }
 
 /// Under the home directory's music folder, not under the data directory.

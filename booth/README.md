@@ -449,6 +449,32 @@ on disk, which is what makes it safe to rebuild from a rescan at any point. The
 two things that do touch files, copying music in and writing tags, are jobs you
 asked for, and neither ever moves or deletes an original.
 
+## Copies of every drive
+
+A stick is hours of work living on the cheapest thing in the booth. The audio
+on it is replaceable; the cues, the grids, the playlist order and the history a
+player wrote back after a gig are not, and they are a few files under
+`PIONEER`.
+
+So when a drive is written, or a prepared one is plugged in while this is
+running, those files are copied into `booth-drives` beside the library —
+databases, analysis, artwork, settings, the lot. The audio is **linked** to the
+library's own copy rather than copied, so a 64 GB stick costs a few megabytes
+and a directory entry per track. Each copy is a plain folder with a
+`backup.json` saying what was found, so getting one back onto a stick is a copy
+with no tool in the middle.
+
+A drive is stored once per state: leaving it plugged in does nothing, writing
+to it and plugging it in again stores the new state beside the old one. A drive
+of somebody else's that the library has no audio for is still worth keeping —
+its databases are copied and the manifest names the tracks it could not link,
+rather than pretending to be complete.
+
+There is no zip, and that is the trade: an archive has no links in it, so
+zipping a drive means copying every byte of audio, which is the thing being
+avoided. Turning a stored copy into a `.zip` or a `.dmg` afterwards is a step
+that can sit on top of what is stored without changing it.
+
 ## What it does not do yet
 
 - **The analysis half is unproven on hardware.** A CDJ-3000X has browsed a
