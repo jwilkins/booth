@@ -470,10 +470,11 @@ of somebody else's that the library has no audio for is still worth keeping —
 its databases are copied and the manifest names the tracks it could not link,
 rather than pretending to be complete.
 
-There is no zip, and that is the trade: an archive has no links in it, so
-zipping a drive means copying every byte of audio, which is the thing being
-avoided. Turning a stored copy into a `.zip` or a `.dmg` afterwards is a step
-that can sit on top of what is stored without changing it.
+Nothing is archived yet. A whole drive cannot be, since a zip holds contents
+rather than links — but the copied half can: `PIONEER` could become one
+`PIONEER.zip` with the links beside it, which is the next step once there are
+enough of these to see what they cost. The log line after each one says how
+much was carried, which is the number that decides it.
 
 ## What it does not do yet
 

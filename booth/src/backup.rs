@@ -14,14 +14,9 @@
 //! that gets plugged in while it is running, gets those files copied somewhere
 //! safe.
 //!
-//! # Why it is a directory and not a zip
+//! # Why it is a directory, for now
 //!
-//! The obvious way to save space is to not copy the audio twice, and the
-//! obvious way to do that is a link. But a zip file has no links in it — it is
-//! a container of *contents*, so zipping a drive means copying every byte of
-//! audio into the archive, which is the thing being avoided. The two ideas are
-//! mutually exclusive and the links are worth more, so a backup here is an
-//! ordinary directory:
+//! A backup is an ordinary directory:
 //!
 //! ```text
 //! <backups>/<drive>/<when>/
@@ -30,10 +25,21 @@
 //!     backup.json          what was found, what was linked, what was not
 //! ```
 //!
-//! A directory is also the thing that is easiest to get *out* of again: the
-//! restore is a copy, with no tool in the middle. Archiving one into a `.zip`
-//! or a `.dmg` afterwards is a reasonable thing to want, and is a step that can
-//! be added on top of this without changing what is stored.
+//! What cannot be done is putting the whole drive in an archive: a zip holds
+//! contents and not links, so zipping a drive means copying every byte of its
+//! audio, which is the thing the links exist to avoid.
+//!
+//! What *can* be done, and is the intended next step once there is a month of
+//! these to measure, is zipping the copied half alone — the `PIONEER` tree
+//! becomes one `PIONEER.zip` and the links stay beside it in the same folder.
+//! It saves whatever that tree compresses by, which is worth knowing before
+//! choosing: the analysis files are mostly waveform data and will not compress
+//! much, `export.pdb` is fixed-size pages padded with zeroes and will compress
+//! a lot, and `exportLibrary.db` is encrypted and will not compress at all.
+//!
+//! A directory is also the easiest thing to get *out* of again — the restore is
+//! a copy, with no tool in the middle — which is the other reason to start
+//! here and add the archiving once the sizes are known.
 //!
 //! # What the links point at
 //!
