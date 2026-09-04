@@ -82,9 +82,13 @@ pub enum Job {
         /// What it calls itself, which becomes the folder the copies go in.
         drive: String,
         into: PathBuf,
-        /// The library's files, as (path, size), for the audio to be linked to
-        /// rather than copied.
-        known: Vec<(PathBuf, u64)>,
+        /// The library's files, for the drive's audio to be linked to rather
+        /// than copied.
+        known: Vec<crate::backup::Known>,
+        /// What to do about music the library does not have.
+        foreign: crate::config::OnForeign,
+        /// Where music copied in goes, when that is what was asked for.
+        library: PathBuf,
     },
 }
 
@@ -689,8 +693,8 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
         Job::Hash(tracks) => hash_all(&tracks, reporter),
         Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
-        Job::Keep { root, drive, into, known } => {
-            let kept = crate::backup::keep(&root, &into, &drive, &known)?;
+        Job::Keep { root, drive, into, known, foreign, library } => {
+            let kept = crate::backup::keep(&root, &into, &drive, &known, foreign, &library)?;
             let _ = reporter.tx.send(Update::Kept(Box::new(kept)));
             (reporter.wake)();
             Ok(())

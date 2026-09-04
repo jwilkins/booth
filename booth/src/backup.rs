@@ -46,15 +46,45 @@
 //! The library's copy of the audio, never the drive's. A link into the drive
 //! would dangle the moment it is unplugged, which is exactly when the backup
 //! matters — and a hard link cannot cross from a stick to an internal disk
-//! anyway. Where the library has no copy, which is the case for somebody
-//! else's drive, the manifest records what was there and the audio is left out.
-//! A backup that says "these forty tracks were on it and I do not have them" is
+//! anyway.
+//!
+//! A track is the library's if a file there has the same name and length, which
+//! is true of everything on a drive this program wrote. Where that fails, the
+//! drive's file is hashed the way the duplicate finder hashes one — the audio
+//! stream alone, tags skipped — so the same recording tagged differently or
+//! renamed still counts as owned rather than missing. That costs a read of the
+//! file, and is only ever reached by a file the cheap test did not settle.
+//!
+//! # Somebody else's drive
+//!
+//! What is left after that is music the library does not have, and what to do
+//! with it is [`crate::config::OnForeign`]: name it and store none of it, copy
+//! it into the backup so that copy is complete on its own, or copy it into the
+//! library and keep it. The first is the default, because the other two are
+//! measured in gigabytes and plugging a stick in is not a decision to spend
+//! them.
+//!
+//! Whichever it is, the manifest says what was found and what was stored. A
+//! backup that says "these forty tracks were on it and I do not have them" is
 //! worth having; one that silently looks complete is not.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+
+use crate::config::OnForeign;
+
+/// A track the library holds, as much of it as matching needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Known {
+    pub path: PathBuf,
+    pub bytes: u64,
+    /// The hash of the audio alone, tags skipped — the duplicate finder's, so
+    /// that "the library already has this" means the same thing in both places.
+    /// Empty for a track that has never been read for one.
+    pub audio_hash: String,
+}
 
 /// Where a player's own files live on a drive, and the name macOS gives the
 /// same folder when a stick has been copied rather than written.
@@ -132,10 +162,18 @@ pub struct Backup {
     pub bytes: u64,
     /// Audio the library had, and which is therefore linked rather than copied.
     pub linked: usize,
-    /// Audio the library did not have. Named in `missing`, not stored.
+    /// Audio the library did not have, and which was copied in whole because
+    /// of it.
+    pub copied: usize,
+    /// Bytes those copies took.
+    pub copied_bytes: u64,
+    /// Audio the library did not have and which is not in this backup either.
     pub absent: usize,
     /// What was on the drive and is not in this backup.
     pub missing: Vec<String>,
+    /// Files copied into the library, for the collection to be told about.
+    #[serde(skip)]
+    pub adopted: Vec<PathBuf>,
 }
 
 impl Backup {
@@ -148,6 +186,13 @@ impl Backup {
         )];
         if self.linked > 0 {
             parts.push(format!("{} tracks linked", self.linked));
+        }
+        if self.copied > 0 {
+            parts.push(format!(
+                "{} copied in ({})",
+                self.copied,
+                crate::sync::bytes(self.copied_bytes)
+            ));
         }
         if self.absent > 0 {
             parts.push(format!("{} not in the library", self.absent));
@@ -210,11 +255,16 @@ pub fn already_kept(into: &Path, drive: &str, fingerprint: &str) -> bool {
 
 /// Copy a drive's own files, and link its audio to the library's copy.
 ///
-/// `known` is what the library holds, as (path, size) pairs. A track is matched
-/// by file name and length, which is what a drive keeps of it: the drive's copy
-/// was made from the library's, so the two agree on both, and neither the
-/// drive's folder layout nor its database ids survive to be compared.
-pub fn keep(root: &Path, into: &Path, drive: &str, known: &[(PathBuf, u64)]) -> Result<Backup> {
+/// `library` is where music copied in goes, and is only read when `foreign` is
+/// [`OnForeign::Adopt`].
+pub fn keep(
+    root: &Path,
+    into: &Path,
+    drive: &str,
+    known: &[Known],
+    foreign: OnForeign,
+    library: &Path,
+) -> Result<Backup> {
     let at = now();
     let dir = into.join(safe(drive)).join(stamp(at));
     std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
@@ -244,36 +294,86 @@ pub fn keep(root: &Path, into: &Path, drive: &str, known: &[(PathBuf, u64)]) -> 
         }
     }
 
-    // The audio, linked. Indexed by name and size so the lookup is one pass
-    // over the library rather than one per file on the drive.
-    let library: HashMap<(String, u64), &PathBuf> = known
+    // The audio. Indexed both ways the library can be asked about a file, so
+    // each lookup is a hash of the drive's file at worst rather than a walk of
+    // the library.
+    let by_name: HashMap<(&str, u64), &Known> = known
         .iter()
-        .filter_map(|(path, size)| {
-            let name = path.file_name()?.to_str()?.to_string();
-            Some(((name, *size), path))
+        .filter_map(|track| {
+            let name = track.path.file_name()?.to_str()?;
+            Some(((name, track.bytes), track))
         })
+        .collect();
+    let by_sound: HashMap<&str, &Known> = known
+        .iter()
+        .filter(|track| !track.audio_hash.is_empty())
+        .map(|track| (track.audio_hash.as_str(), track))
         .collect();
 
     let contents = root.join(CONTENTS);
     for file in walk(&contents) {
         let Ok(relative) = file.strip_prefix(&contents) else { continue };
-        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-
-        let Some(source) = library.get(&(name, size)) else {
-            backup.absent += 1;
-            backup.missing.push(relative.display().to_string());
-            continue;
-        };
         let to = dir.join(CONTENTS).join(relative);
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)?;
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+
+        // The cheap question first: a drive this program wrote holds the
+        // library's own files, so name and length settle nearly everything
+        // without opening anything.
+        let owned = by_name.get(&(name, size)).copied().or_else(|| {
+            // And when they do not, the same question the duplicate finder
+            // asks: is this the same recording, whatever it has been called
+            // since. One read of the file, and only for a file that got this
+            // far.
+            let hash = musicai::hash::audio_sha256(&file).ok()?;
+            by_sound.get(hash.as_str()).copied()
+        });
+
+        if let Some(track) = owned {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if link(&track.path, &to).is_ok() {
+                backup.linked += 1;
+                continue;
+            }
         }
-        match link(source, &to) {
-            Ok(()) => backup.linked += 1,
-            Err(_) => {
+
+        // Music the library does not have.
+        match foreign {
+            OnForeign::Ignore => {
                 backup.absent += 1;
                 backup.missing.push(relative.display().to_string());
+            }
+            OnForeign::Keep => {
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&file, &to)
+                    .with_context(|| format!("copying {} off the drive", file.display()))?;
+                backup.copied += 1;
+                backup.copied_bytes += size;
+            }
+            OnForeign::Adopt => {
+                // Into the library under the drive's own artist and album
+                // folders, which is the layout it was written in and the one
+                // the library uses. An existing file is left alone: this is
+                // somebody's music folder, not scratch space.
+                let at = library.join(relative);
+                if let Some(parent) = at.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if !at.exists() {
+                    std::fs::copy(&file, &at)
+                        .with_context(|| format!("copying {} into the library", file.display()))?;
+                }
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let _ = link(&at, &to);
+                backup.copied += 1;
+                backup.copied_bytes += size;
+                backup.adopted.push(at);
             }
         }
     }
@@ -403,14 +503,21 @@ mod tests {
     }
 
     /// A drive with one track on it, and a library holding that track.
-    fn a_drive(scratch: &Scratch) -> (PathBuf, Vec<(PathBuf, u64)>) {
+    fn a_drive(scratch: &Scratch) -> (PathBuf, Vec<Known>) {
         let audio = b"the audio itself, which is the big part".to_vec();
         scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a database");
         scratch.file("drive/PIONEER/rekordbox/exportLibrary.db", b"another one");
         scratch.file("drive/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT", b"a grid");
         scratch.file("drive/Contents/Peverelist/Roll With The Punches.flac", &audio);
         let in_library = scratch.file("library/Peverelist/Roll With The Punches.flac", &audio);
-        (scratch.path("drive"), vec![(in_library, audio.len() as u64)])
+        let known =
+            Known { path: in_library, bytes: audio.len() as u64, audio_hash: String::new() };
+        (scratch.path("drive"), vec![known])
+    }
+
+    /// The arguments that do not vary, for the tests that are not about them.
+    fn into(scratch: &Scratch) -> (PathBuf, PathBuf) {
+        (scratch.path("backups"), scratch.path("library"))
     }
 
     #[test]
@@ -438,9 +545,9 @@ mod tests {
     fn the_drives_own_files_are_copied_and_its_audio_is_linked() {
         let scratch = Scratch::new("keep");
         let (drive, known) = a_drive(&scratch);
-        let into = scratch.path("backups");
+        let (into, library) = into(&scratch);
 
-        let kept = keep(&drive, &into, "MY STICK", &known).unwrap();
+        let kept = keep(&drive, &into, "MY STICK", &known, OnForeign::Ignore, &library).unwrap();
         assert_eq!(kept.carried, 3, "the database, the other one, and the analysis");
         assert_eq!(kept.linked, 1);
         assert_eq!(kept.absent, 0);
@@ -463,20 +570,20 @@ mod tests {
         // entry per track.
         let scratch = Scratch::new("space");
         let (drive, known) = a_drive(&scratch);
-        let into = scratch.path("backups");
-        keep(&drive, &into, "MY STICK", &known).unwrap();
+        let (into, library) = into(&scratch);
+        keep(&drive, &into, "MY STICK", &known, OnForeign::Ignore, &library).unwrap();
 
         let at = std::fs::read_dir(into.join("MY STICK")).unwrap().next().unwrap().unwrap().path();
         let track = at.join("Contents/Peverelist/Roll With The Punches.flac");
         let kind = std::fs::symlink_metadata(&track).unwrap();
         let same_file = match kind.file_type().is_symlink() {
-            true => std::fs::read_link(&track).unwrap() == known[0].0,
+            true => std::fs::read_link(&track).unwrap() == known[0].path,
             false => {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::MetadataExt;
                     std::fs::metadata(&track).unwrap().ino()
-                        == std::fs::metadata(&known[0].0).unwrap().ino()
+                        == std::fs::metadata(&known[0].path).unwrap().ino()
                 }
                 #[cfg(not(unix))]
                 false
@@ -491,7 +598,8 @@ mod tests {
         // looks complete would be worse than one that says what it is missing.
         let scratch = Scratch::new("foreign");
         let (drive, _) = a_drive(&scratch);
-        let kept = keep(&drive, &scratch.path("backups"), "THEIRS", &[]).unwrap();
+        let (backups, library) = into(&scratch);
+        let kept = keep(&drive, &backups, "THEIRS", &[], OnForeign::Ignore, &library).unwrap();
 
         assert_eq!(kept.linked, 0);
         assert_eq!(kept.absent, 1);
@@ -499,13 +607,127 @@ mod tests {
         assert_eq!(kept.carried, 3, "the drive's own files are kept either way");
     }
 
+    /// A real FLAC, so that the audio hash the duplicate finder uses can be
+    /// taken of it. A made-up byte string has no audio stream to hash.
+    fn a_flac(at: &Path, seed: f32) -> u64 {
+        use musicai::audio::encode::{write_file, Codec, EncodeOptions};
+        use musicai::audio::Audio;
+
+        let plane: Vec<f32> = (0..8_000).map(|i| (i as f32 * seed / 800.0).sin() * 0.4).collect();
+        let audio = Audio::new(8_000, vec![plane.clone(), plane]).unwrap();
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        write_file(at, &audio, Codec::Flac, &EncodeOptions::default()).unwrap();
+        at.metadata().unwrap().len()
+    }
+
+    #[test]
+    fn the_same_recording_under_another_name_is_still_the_librarys() {
+        // The whole point of asking the duplicate finder's question: a drive
+        // written by somebody else names its files their way, and copying
+        // music we already have because of that would be the expensive kind of
+        // wrong.
+        let scratch = Scratch::new("bysound");
+        let (into, library_at) = into(&scratch);
+        scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a database");
+        a_flac(&scratch.path("drive/Contents/Their Folder/track_04.flac"), 3.0);
+        let mine = scratch.path("library/Peverelist/Roll With The Punches.flac");
+        a_flac(&mine, 3.0);
+
+        let known = vec![Known {
+            path: mine.clone(),
+            // Deliberately wrong, so only the sound can match them.
+            bytes: 1,
+            audio_hash: musicai::hash::audio_sha256(&mine).unwrap(),
+        }];
+        let kept =
+            keep(&scratch.path("drive"), &into, "THEIRS", &known, OnForeign::Ignore, &library_at)
+                .unwrap();
+
+        assert_eq!(kept.linked, 1, "the same recording should be recognised: {kept:?}");
+        assert_eq!(kept.absent, 0);
+        assert_eq!(kept.copied, 0);
+    }
+
+    #[test]
+    fn a_different_recording_is_not_mistaken_for_one_we_have() {
+        let scratch = Scratch::new("notmine");
+        let (into, library_at) = into(&scratch);
+        scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a database");
+        a_flac(&scratch.path("drive/Contents/Their Folder/theirs.flac"), 7.0);
+        let mine = scratch.path("library/Mine/mine.flac");
+        a_flac(&mine, 3.0);
+
+        let known = vec![Known {
+            path: mine.clone(),
+            bytes: 1,
+            audio_hash: musicai::hash::audio_sha256(&mine).unwrap(),
+        }];
+        let kept =
+            keep(&scratch.path("drive"), &into, "THEIRS", &known, OnForeign::Ignore, &library_at)
+                .unwrap();
+        assert_eq!(kept.linked, 0);
+        assert_eq!(kept.absent, 1);
+    }
+
+    #[test]
+    fn what_the_library_lacks_is_copied_into_the_backup_when_that_is_asked_for() {
+        let scratch = Scratch::new("keepforeign");
+        let (into, library_at) = into(&scratch);
+        let (drive, _) = a_drive(&scratch);
+
+        let kept = keep(&drive, &into, "THEIRS", &[], OnForeign::Keep, &library_at).unwrap();
+        assert_eq!(kept.copied, 1);
+        assert_eq!(kept.absent, 0, "nothing is missing from a backup that copied it");
+        assert!(kept.adopted.is_empty(), "the library is not touched");
+
+        let at = std::fs::read_dir(into.join("THEIRS")).unwrap().next().unwrap().unwrap().path();
+        let track = at.join("Contents/Peverelist/Roll With The Punches.flac");
+        assert!(!std::fs::symlink_metadata(&track).unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read(&track).unwrap(),
+            b"the audio itself, which is the big part",
+            "the backup holds the music itself, so it can be put back"
+        );
+    }
+
+    #[test]
+    fn what_the_library_lacks_is_copied_into_it_when_that_is_asked_for() {
+        let scratch = Scratch::new("adopt");
+        let (into, library_at) = into(&scratch);
+        let (drive, _) = a_drive(&scratch);
+        // The library's own copy of this track is not in `known`, so the drive
+        // is foreign as far as this call is concerned.
+        std::fs::remove_dir_all(&library_at).unwrap();
+
+        let kept = keep(&drive, &into, "THEIRS", &[], OnForeign::Adopt, &library_at).unwrap();
+        assert_eq!(kept.copied, 1);
+        assert_eq!(kept.absent, 0);
+
+        let landed = library_at.join("Peverelist/Roll With The Punches.flac");
+        assert_eq!(kept.adopted, vec![landed.clone()], "the collection is told what arrived");
+        assert!(landed.exists(), "under the drive's own artist folder, which the library uses too");
+        assert_eq!(std::fs::read(&landed).unwrap(), b"the audio itself, which is the big part");
+    }
+
+    #[test]
+    fn adopting_does_not_write_over_something_already_in_the_library() {
+        // A file already there is somebody's music, not scratch space.
+        let scratch = Scratch::new("adopt-existing");
+        let (into, library_at) = into(&scratch);
+        let (drive, _) = a_drive(&scratch);
+        let already = scratch.file("library/Peverelist/Roll With The Punches.flac", b"mine");
+
+        keep(&drive, &into, "THEIRS", &[], OnForeign::Adopt, &library_at).unwrap();
+        assert_eq!(std::fs::read(&already).unwrap(), b"mine");
+    }
+
     #[test]
     fn the_same_drive_unchanged_is_not_stored_twice() {
         let scratch = Scratch::new("dedupe");
         let (drive, known) = a_drive(&scratch);
-        let into = scratch.path("backups");
+        let (into, library) = into(&scratch);
 
-        let first = keep(&drive, &into, "MY STICK", &known).unwrap();
+        let first = keep(&drive, &into, "MY STICK", &known, OnForeign::Ignore, &library).unwrap();
         assert!(!first.fingerprint.is_empty());
         assert!(already_kept(&into, "MY STICK", &first.fingerprint));
 

@@ -465,10 +465,28 @@ and a directory entry per track. Each copy is a plain folder with a
 with no tool in the middle.
 
 A drive is stored once per state: leaving it plugged in does nothing, writing
-to it and plugging it in again stores the new state beside the old one. A drive
-of somebody else's that the library has no audio for is still worth keeping —
-its databases are copied and the manifest names the tracks it could not link,
-rather than pretending to be complete.
+to it and plugging it in again stores the new state beside the old one.
+
+A track counts as the library's if a file there has the same name and length,
+which is true of everything on a drive this wrote. Where that fails the drive's
+file is hashed the way the duplicate finder hashes one — the audio alone, tags
+skipped — so somebody else's copy of a record you own is linked rather than
+stored again, however they named it.
+
+What is left is music the library genuinely has not got, and there are three
+things Settings can do with it:
+
+- **Note what was on it** (the default) — the databases and analysis are kept
+  and the music is named in the manifest, not stored. Costs nothing, and the
+  music is gone if the drive is.
+- **Copy it into the backup** — the copy holds the music too and can be put
+  back on a stick as it was. Costs whatever the drive holds that you do not.
+- **Copy it into the library** — the music lands under the library's own artist
+  folders and joins the collection, where it can be analysed and played. A file
+  already there is never written over.
+
+The default is the cheap one deliberately: plugging in a stranger's stick is
+not a decision to spend gigabytes.
 
 Nothing is archived yet. A whole drive cannot be, since a zip holds contents
 rather than links — but the copied half can: `PIONEER` could become one

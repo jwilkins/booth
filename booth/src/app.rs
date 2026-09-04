@@ -1293,6 +1293,12 @@ impl App {
                 }
                 Update::Kept(kept) => {
                     self.note(format!("kept {}: {}", kept.drive, kept.summary()), theme::TEXT);
+                    // Music copied into the library is music the collection
+                    // should know about, and importing is what reads a file and
+                    // makes a row out of it.
+                    if !kept.adopted.is_empty() {
+                        self.import(kept.adopted.clone());
+                    }
                 }
                 Update::Verified(report) => {
                     if let Some(checked) = &mut self.checked {
@@ -2193,14 +2199,24 @@ impl App {
 
     /// Start copying one drive.
     fn keep_drive(&mut self, root: &std::path::Path, name: &str) {
-        let known: Vec<(PathBuf, u64)> =
-            self.library.tracks.iter().map(|track| (track.path.clone(), track.bytes)).collect();
+        let known: Vec<crate::backup::Known> = self
+            .library
+            .tracks
+            .iter()
+            .map(|track| crate::backup::Known {
+                path: track.path.clone(),
+                bytes: track.bytes,
+                audio_hash: track.audio_hash.clone(),
+            })
+            .collect();
         crate::info!("keeping a copy of {name}");
         self.start(Job::Keep {
             root: root.to_path_buf(),
             drive: name.to_string(),
             into: self.config.backups_path.clone(),
             known,
+            foreign: self.config.on_foreign,
+            library: self.config.library_path.clone(),
         });
     }
 
@@ -6059,6 +6075,24 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         path_label(ui, &self.config.backups_path.clone(), theme::DIM);
                     });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Music on somebody else's drive that the library has no copy of. \
+                         Yours is always linked, whatever this says — a track is recognised by \
+                         its sound, so a rename or a retag does not make a second copy of it.",
+                        )
+                        .color(theme::DIM)
+                        .size(theme::SMALL),
+                    );
+                    for what in crate::config::OnForeign::ALL {
+                        if ui.radio_value(&mut self.config.on_foreign, what, what.label()).changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(RichText::new(what.blurb()).color(theme::DIM).size(theme::SMALL));
+                        ui.add_space(4.0);
+                    }
 
                     ui.add_space(14.0);
                     pane_label(ui, "Where stems go");

@@ -17,6 +17,49 @@ use crate::library::data_dir;
 /// stick is a track that will be missing the night it matters. The default is
 /// to take a copy, because the cost of being wrong in that direction is some
 /// disk, and the cost of being wrong in the other is an empty deck.
+/// What to do about music on a drive that the library has no copy of.
+///
+/// Only ever somebody else's drive: a drive this program wrote holds the
+/// library's own files, which are linked rather than copied. The question is
+/// what a copy of a stranger's stick should be — a record of what was on it, a
+/// complete thing that can be put back, or an invitation to keep the music.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OnForeign {
+    /// Name it in the manifest and store none of it.
+    #[default]
+    Ignore,
+    /// Copy it into the backup, so that copy is complete on its own.
+    Keep,
+    /// Copy it into the library and add it to the collection.
+    Adopt,
+}
+
+impl OnForeign {
+    pub const ALL: [OnForeign; 3] = [OnForeign::Ignore, OnForeign::Keep, OnForeign::Adopt];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OnForeign::Ignore => "Note what was on it",
+            OnForeign::Keep => "Copy it into the backup",
+            OnForeign::Adopt => "Copy it into the library",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            OnForeign::Ignore => {
+                "The drive's databases, cues and analysis are kept; its music is named in the                  manifest and not stored. Costs nothing, and the music is gone if the drive is."
+            }
+            OnForeign::Keep => {
+                "The backup holds the music too, so it can be put back on a stick as it was.                  Costs whatever the drive holds that you do not — gigabytes, for a stranger's."
+            }
+            OnForeign::Adopt => {
+                "The music is copied into the library and added to the collection, where it can                  be analysed and played like anything else. The same cost, and a browser with                  somebody else's records in it."
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnExternal {
     /// Copy it in, without asking.
@@ -293,6 +336,9 @@ pub struct Config {
     /// Whether a drive is copied when it is written or plugged in.
     #[serde(default = "yes")]
     pub keep_drives: bool,
+    /// What to do about music on a drive that the library has no copy of.
+    #[serde(default)]
+    pub on_foreign: OnForeign,
     /// How wide or tall each panel was left.
     #[serde(default)]
     pub panels: Panels,
@@ -398,6 +444,7 @@ impl Default for Config {
             onelibrary_key: String::new(),
             backups_path: default_backups_path(),
             keep_drives: true,
+            on_foreign: OnForeign::default(),
         }
     }
 }
