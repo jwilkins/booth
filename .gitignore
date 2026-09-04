@@ -5,3 +5,4 @@
 
 # Built macOS app and disk image.
 /dist
+.DS_Store
