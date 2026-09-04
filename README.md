@@ -735,4 +735,7 @@ percentages rather than transcripts.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+The [Booth Public Source License](LICENSE): free to download, run and modify for personal,
+educational and internal use, and free to redistribute through non-commercial and open-source
+channels. Putting it inside a proprietary commercial product needs a separate licence from the
+copyright holder. It is not an OSI-approved licence, so GitHub shows it as "Other".

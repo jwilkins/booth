@@ -29,7 +29,7 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>MIT licensed. Everything runs locally.</string>
+	<string>© 2026 Jonathan Wilkins. Booth Public Source License. Everything runs locally.</string>
 	<!-- Dropping files on the Dock icon, and "Open With", both go through
 	     this. The app only ever reads what it is given. -->
 	<key>CFBundleDocumentTypes</key>

@@ -17,7 +17,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Local audio toolkit: EBU R128 loudness normalization and stem separation for mp3/flac/wav"
-license = "MIT"
+license-file = "LICENSE"
 
 [dependencies]
 anyhow = "1"
