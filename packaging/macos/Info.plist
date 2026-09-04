@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>musicai</string>
+	<string>Booth</string>
 	<key>CFBundleDisplayName</key>
-	<string>musicai</string>
+	<string>Booth</string>
 	<key>CFBundleIdentifier</key>
-	<string>pm.hack.musicai</string>
+	<string>pm.hack.booth</string>
 	<key>CFBundleExecutable</key>
-	<string>musicai-gui</string>
+	<string>booth</string>
 	<key>CFBundleIconFile</key>
 	<string>icon</string>
 	<key>CFBundlePackageType</key>
@@ -46,6 +46,8 @@
 				<string>public.mp3</string>
 				<string>org.xiph.flac</string>
 				<string>com.microsoft.waveform-audio</string>
+				<string>public.aifc-audio</string>
+				<string>public.mpeg-4-audio</string>
 				<string>public.folder</string>
 			</array>
 		</dict>

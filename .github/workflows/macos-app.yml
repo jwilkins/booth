@@ -1,6 +1,6 @@
 name: macOS app
 
-# Builds musicai.app and its disk image. Runs on demand, and on tags, because a
+# Builds Booth.app and its disk image. Runs on demand, and on tags, because a
 # universal build is two compiles of everything and is not worth doing on every
 # push.
 on:
@@ -29,19 +29,22 @@ jobs:
       - name: Check the app is put together properly
         run: |
           set -euo pipefail
-          app=dist/musicai.app
-          test -x "$app/Contents/MacOS/musicai-gui"
+          app=dist/Booth.app
+          test -x "$app/Contents/MacOS/booth"
           test -x "$app/Contents/MacOS/musicai"
           test -f "$app/Contents/Resources/icon.icns"
+          # What launching the app runs is the library window, not something
+          # else in the bundle that happens to be there.
+          plutil -extract CFBundleExecutable raw "$app/Contents/Info.plist" | grep -qx booth
           # Both architectures really are in there.
-          lipo -info "$app/Contents/MacOS/musicai-gui" | grep -q arm64
-          lipo -info "$app/Contents/MacOS/musicai-gui" | grep -q x86_64
+          lipo -info "$app/Contents/MacOS/booth" | grep -q arm64
+          lipo -info "$app/Contents/MacOS/booth" | grep -q x86_64
           # The command-line tool in the bundle actually runs.
           "$app/Contents/MacOS/musicai" --version
           codesign --verify --deep --strict "$app"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: musicai-macos
+          name: booth-macos
           path: dist/*.dmg
           if-no-files-found: error

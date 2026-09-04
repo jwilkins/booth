@@ -593,9 +593,16 @@ browsed one; whether it used the analysis files is still unproven.
 
 ## The macOS app
 
-Everything above, in a window. Pick a task along the top, drop files on the left, set the options
-in the middle, press the button. Results appear in the log at the bottom as they arrive, and a
-long job can be stopped without leaving a half-written file behind.
+The app is **Booth**: the library window described in [`booth/README.md`](booth/README.md), which
+prepares tracks, edits tags, and writes drives a player will open. That is what the bundle
+launches, and what a download of it is for.
+
+### The batch window
+
+There is a second, older window — `musicai-gui` — which is everything above, one job at a time.
+Pick a task along the top, drop files on the left, set the options in the middle, press the button.
+Results appear in the log at the bottom as they arrive, and a long job can be stopped without
+leaving a half-written file behind.
 
 It opens on **Batch**, which is the pipeline: tick the steps you want and press Run all. Each step
 uses the settings on its own tab, so there is one place to configure anything and no second copy of
@@ -604,13 +611,15 @@ every control. The step being run is shown next to the progress bar as the run m
 Stems default to `~/Music/musicai-stems` rather than the command line's relative `stems`, because
 an app launched from the Finder has no useful working directory.
 
-![The app, on the Batch tab](docs/screenshot.png)
+It is not in the bundle: run it with `cargo run -p musicai-gui`.
+
+![The batch window, on the Batch tab](docs/screenshot.png)
 
 ### Building it
 
 ```sh
 scripts/package-macos.sh
-# dist/musicai.app and dist/musicai-0.1.0.dmg
+# dist/Booth.app and dist/booth-0.1.0.dmg
 ```
 
 That builds for Apple silicon and Intel and `lipo`s them together, so the result runs natively on
@@ -621,21 +630,22 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 ```
 
 The bundle carries **both** binaries — the app you launch and the `musicai` command-line tool, at
-`musicai.app/Contents/MacOS/musicai`. One download gives you both, and they can never be different
+`Booth.app/Contents/MacOS/musicai`. One download gives you both, and they can never be different
 versions of each other. Symlink it onto your `PATH` if you want it there:
 
 ```sh
-ln -s /Applications/musicai.app/Contents/MacOS/musicai /usr/local/bin/musicai
+ln -s /Applications/Booth.app/Contents/MacOS/musicai /usr/local/bin/musicai
 ```
 
-To run the window without packaging anything:
+To run either window without packaging anything:
 
 ```sh
-cargo run -p musicai-gui --release
+cargo run -p booth --release        # the library
+cargo run -p musicai-gui --release  # the batch tool
 ```
 
-Files named on the command line start out selected, which is also how Finder's *Open With* hands
-over a selection.
+Files named on the command line are imported by Booth at startup, and start out selected in the
+batch window. That is also how Finder's *Open With* hands over a selection.
 
 ### Signing
 
@@ -651,7 +661,7 @@ MUSICAI_NOTARY_PROFILE=my-notary-profile \
 
 `.github/workflows/macos-app.yml` builds the same thing on a macOS runner, on a tag or on demand.
 
-### What the window is, and is not
+### What the batch window is, and is not
 
 It is a front end, not a second implementation. Every option is the command-line tool's own
 argument struct, filled in with the defaults clap would apply, and pressing the button calls the

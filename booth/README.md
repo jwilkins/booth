@@ -17,6 +17,11 @@ On Linux the audio output needs ALSA's headers at build time
 nothing extra. Without a working output device the window still opens and does
 everything else; the transport says `no audio out` instead.
 
+On macOS, `scripts/package-macos.sh` builds this window into `Booth.app` — a
+universal binary with the `musicai` command-line tool alongside it in the same
+bundle, and a disk image to install it from. See the packaging section of the
+[top-level README](../README.md#the-macos-app).
+
 ## One window
 
 There are no modes. The query bar is across the top, the collection down the

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# Build musicai.app and a disk image to install it from.
+# Build Booth.app and a disk image to install it from.
 #
 #   scripts/package-macos.sh [--target-dir DIR]
 #
-# Produces dist/musicai.app and dist/musicai-<version>.dmg.
+# Produces dist/Booth.app and dist/booth-<version>.dmg. The app is the library
+# window; the `musicai` command-line tool rides along inside the same bundle.
 #
 # Signing is optional and controlled by the environment:
 #
@@ -30,9 +31,9 @@ if [ "$(uname -s)" != "Darwin" ]; then
 	exit 1
 fi
 
-VERSION=$(awk -F'"' '/^version = /{print $2; exit}' "$REPO/gui/Cargo.toml")
+VERSION=$(awk -F'"' '/^version = /{print $2; exit}' "$REPO/booth/Cargo.toml")
 
-echo "==> building musicai $VERSION for ${TARGETS[*]}"
+echo "==> building Booth $VERSION for ${TARGETS[*]}"
 for target in "${TARGETS[@]}"; do
 	# Missing targets are the usual first-run failure, and the fix is one
 	# command, so say so rather than letting cargo's own error stand alone.
@@ -41,13 +42,13 @@ for target in "${TARGETS[@]}"; do
 		exit 1
 	fi
 	cargo build --release --target "$target" --bin musicai
-	cargo build --release --target "$target" --bin musicai-gui
+	cargo build --release --target "$target" --bin booth
 done
 
 # One binary that runs natively on both Apple silicon and Intel. Users should
 # not have to know which one they have.
 mkdir -p "$DIST/universal"
-for binary in musicai musicai-gui; do
+for binary in musicai booth; do
 	inputs=()
 	for target in "${TARGETS[@]}"; do
 		inputs+=("$REPO/target/$target/release/$binary")
@@ -58,7 +59,7 @@ done
 
 echo "==> assembling the bundle"
 APP=$("$REPO/scripts/make-bundle.sh" \
-	"$DIST/universal/musicai-gui" \
+	"$DIST/universal/booth" \
 	"$DIST/universal/musicai" \
 	"$DIST" \
 	"$VERSION")
@@ -78,7 +79,7 @@ else
 fi
 
 echo "==> building the disk image"
-DMG=$DIST/musicai-$VERSION.dmg
+DMG=$DIST/booth-$VERSION.dmg
 STAGE=$DIST/dmg
 rm -rf "$STAGE" "$DMG"
 mkdir -p "$STAGE"
@@ -87,7 +88,7 @@ cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
 hdiutil create \
-	-volname "musicai" \
+	-volname "Booth" \
 	-srcfolder "$STAGE" \
 	-ov \
 	-format UDZO \
