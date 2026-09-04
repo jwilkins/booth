@@ -501,6 +501,15 @@ says so.
 
 Against §2 to §5 what is left is:
 
+- **The waveform colours are a judgement call, not a measurement.** A player
+  draws them from three bits each of red, green and blue; what rekordbox puts
+  in those bits for a given piece of audio is not published, and nothing here
+  has been compared against a real export column for column. The first attempt
+  drew a real track almost entirely pale grey on a CDJ-3000X, which is at least
+  a floor to improve on: shares measured against the loudest band rather than
+  their own sum, averages rather than peaks so a kick does not whiten
+  everything, and a crossover placed to keep a whole tune's worth of music in
+  one band.
 - **The analysis half has failed twice and been fixed twice.** A CDJ-3000X on
   firmware 1.40 first showed nothing at all off the analysis files, because
   they were in directories named after the track id rather than the hash of the

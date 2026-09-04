@@ -342,6 +342,30 @@ Fixed by dropping the wrong tag (not by inventing a `PQT2`), reordering the
 `.2EX` to `PWV6`, `PWV7`, `PWVC`, and writing `PVBR` in the `.DAT` even for
 lossless files, as real exports do. Retest pending.
 
+### And once colour appears, it is a picture rather than a spec
+
+With the `.EXT` read through, the CDJ-3000X drew colour waveforms and hot-cue
+markers — but pale ones. Nothing in the format says what colour a given piece
+of audio should be: `PWV5` gives you three bits each of red, green and blue per
+column and the rest is up to the writer.
+
+Two mistakes are easy here, and both look like "the player is washing out my
+colours":
+
+- **Measuring each band's share against the sum of the three.** They then add
+  up to one, so the loudest band can never reach the top of its three bits and
+  every column comes out a different shade of grey. Measure against the
+  *loudest* band instead, so it saturates and the others fall away from it.
+- **Colouring from peak amplitude.** A kick drum's transient has energy in
+  every band at once, so peak-coloured columns are white whatever the track is
+  made of. Colour from an average over the column; keep the peak for the
+  *height*, which is what makes a waveform look like the track.
+
+Band corners are worth thinking of as picture-making rather than mixing
+choices, too: a 2 kHz upper crossover splits the middle of most music across
+two bands and draws it yellow-white, where putting it around 4 kHz keeps
+basslines through vocals in one band and one colour.
+
 ### CDJ-3000, firmware 2.05 — did not see the library at all
 
 The same stick, on a player that reads only the legacy `export.pdb`: no
