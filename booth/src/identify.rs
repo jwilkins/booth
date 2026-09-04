@@ -146,6 +146,61 @@ pub struct Question {
     /// Where that came from, in words.
     pub source: &'static str,
     pub candidate: Match,
+    /// What the file's own path says, when that is worth having and disagrees
+    /// with the fingerprint. Two answers that both look right is exactly the
+    /// case a person should settle.
+    pub from_path: Option<crate::guess::Guess>,
+}
+
+/// Which answer to a question was taken.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// Leave the track as it is.
+    Mine,
+    /// Take what the fingerprint said.
+    Fingerprint,
+    /// Take what the path said.
+    Path,
+}
+
+/// Whether a match and a path disagree about what a track is.
+///
+/// Compared the way [`agrees`] compares, and on the artist and title only: a
+/// path never carries a release, so a difference in album is not a
+/// disagreement about the recording.
+pub fn conflicts(candidate: &Match, guess: &crate::guess::Guess) -> bool {
+    if !guess.is_strong() || !candidate.is_useful() {
+        return false;
+    }
+    simplify(&candidate.artist) != simplify(&guess.artist)
+        || simplify(&candidate.title) != simplify(&guess.title)
+}
+
+/// What to do with a path's guess when no fingerprint came back.
+///
+/// A fingerprint that found nothing is not evidence of anything — the recording
+/// may simply not be in the database, which is the normal state of affairs for
+/// white labels, promos, edits and most of what a DJ owns. The path is then the
+/// only evidence there is, and a strongly structured one is better than
+/// "unknown artist".
+///
+/// It still never overwrites a name out of the file's own tags: somebody put
+/// that there.
+pub fn decide_from_path(track: &Track, guess: &crate::guess::Guess) -> Decision {
+    if !guess.is_strong() {
+        return Decision::Reject;
+    }
+    if track.from_tags {
+        return Decision::Reject;
+    }
+    match has_names(track)
+        && simplify(&track.artist) == simplify(&guess.artist)
+        && simplify(&track.title) == simplify(&guess.title)
+    {
+        // Already says what the path says.
+        true => Decision::Reject,
+        false => Decision::Apply,
+    }
 }
 
 /// How a track's current names should be described when asking about them.
@@ -272,6 +327,66 @@ mod tests {
         assert_eq!(source_of(&track("", "", false)), "nothing");
         assert_eq!(source_of(&track("A", "B", false)), "the file name");
         assert_eq!(source_of(&track("A", "B", true)), "the file's tags");
+    }
+
+    fn from_path(artist: &str, title: &str) -> crate::guess::Guess {
+        crate::guess::Guess {
+            artist: artist.into(),
+            title: title.into(),
+            ..crate::guess::Guess::default()
+        }
+    }
+
+    #[test]
+    fn a_path_that_says_the_same_thing_as_the_fingerprint_is_not_a_conflict() {
+        let found = candidate(0.9, "Peverelist", "Roll With The Punches");
+        assert!(!conflicts(&found, &from_path("peverelist", "roll with the punches!")));
+        assert!(!conflicts(&found, &from_path("Peverelist", "Roll With The Punches")));
+    }
+
+    #[test]
+    fn a_path_that_names_another_record_is_a_conflict() {
+        let found = candidate(0.99, "Peverelist", "Roll With The Punches");
+        assert!(conflicts(&found, &from_path("Batu", "Marius")));
+        // Even at a score that would otherwise be applied without asking: a
+        // fingerprint is about the audio and a path is about what somebody
+        // filed it as, and both being confident is the case worth a person.
+        assert!(conflicts(&found, &from_path("Peverelist", "Sun Dance")));
+    }
+
+    #[test]
+    fn a_path_with_no_artist_in_it_is_not_evidence_of_anything() {
+        let found = candidate(0.99, "Peverelist", "Roll With The Punches");
+        assert!(!conflicts(&found, &from_path("", "track04")), "nothing to disagree with");
+    }
+
+    #[test]
+    fn a_strong_path_names_a_track_no_fingerprint_could() {
+        // The normal state of affairs for a white label, a promo or an edit:
+        // AcoustID has never heard of it, and the folder it is filed in has.
+        let unnamed = track("", "", false);
+        assert_eq!(decide_from_path(&unnamed, &from_path("Batu", "Marius")), Decision::Apply);
+    }
+
+    #[test]
+    fn a_path_never_overwrites_what_the_files_own_tags_said() {
+        let tagged = track("Peverelist", "Roll With The Punches", true);
+        assert_eq!(decide_from_path(&tagged, &from_path("Batu", "Marius")), Decision::Reject);
+    }
+
+    #[test]
+    fn a_path_that_says_what_the_track_already_says_is_no_news() {
+        let named = track("Batu", "Marius", false);
+        assert_eq!(decide_from_path(&named, &from_path("Batu", "Marius")), Decision::Reject);
+        // And one that says something else about a name off a file name is
+        // worth taking: the path is the better read of the two.
+        assert_eq!(decide_from_path(&named, &from_path("Batu", "Gehenna")), Decision::Apply);
+    }
+
+    #[test]
+    fn a_weak_path_is_left_alone() {
+        let unnamed = track("", "", false);
+        assert_eq!(decide_from_path(&unnamed, &from_path("", "track04")), Decision::Reject);
     }
 
     #[test]

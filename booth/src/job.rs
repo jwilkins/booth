@@ -137,6 +137,7 @@ pub struct Convertible {
     pub path: PathBuf,
 }
 
+#[derive(Clone, Debug)]
 pub struct Retag {
     pub id: u32,
     pub path: PathBuf,
@@ -310,6 +311,41 @@ pub fn read_record(id: u32, path: &Path, hashes: bool) -> Track {
         Err(e) => crate::debug!("no audio hash for {}: {e:#}", path.display()),
     }
     track
+}
+
+/// Fill in from the path what the file's own tags did not say.
+///
+/// Only ever a gap-filler, and deliberately not part of [`read_record`]: that
+/// reports what the *file* says, and the collection check compares a fresh one
+/// of those against what is stored. A name read off a folder is not something
+/// the file said, and treating it as one would turn every track in a tidy
+/// folder into a disagreement with itself.
+///
+/// A file filed as `Peverelist/Tessellations/02 - Roll With The Punches.flac`
+/// has already said who made it and what it is called. Reporting "unknown
+/// artist" for it because its tags are empty throws away the best evidence on
+/// the disk.
+pub fn name_from_path(track: &mut Track) {
+    if track.from_tags {
+        return;
+    }
+    let from_path = crate::guess::from_path(&track.path);
+    crate::debug!(
+        "{}: no tags worth having; the path says {}",
+        track.path.display(),
+        from_path.describe()
+    );
+    if track.artist.trim().is_empty() && !from_path.artist.is_empty() {
+        track.artist = from_path.artist;
+    }
+    if track.album.trim().is_empty() && !from_path.album.is_empty() {
+        track.album = from_path.album;
+    }
+    // The title always, when the path found one: what `read_record` leaves
+    // there is the whole file stem, numbering and all.
+    if !from_path.title.is_empty() {
+        track.title = from_path.title;
+    }
 }
 
 /// Whether a WAV holds floating-point samples.
@@ -770,6 +806,18 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default()
             );
+            crate::debug!(
+                "labelled {:?}, {} playlists, {}",
+                args.label,
+                args.playlists.len(),
+                match args.dry_run {
+                    true => "a dry run",
+                    false => "for real",
+                }
+            );
+            for file in &files {
+                crate::debug!("  {}", file.display());
+            }
             args.input = InputArgs { inputs: files, recursive: false };
             // The rows the drive ended up with, so the next write can carry
             // them rather than preparing everything again.
@@ -795,7 +843,15 @@ fn import(paths: &[PathBuf], recursive: bool, reporter: &Channel) -> anyhow::Res
         }
         // The id is filled in by the window, which owns the counter; zero here
         // means "not yet placed".
-        let _ = reporter.tx.send(Update::Imported(Box::new(read_record(0, path, true))));
+        let mut record = read_record(0, path, true);
+        name_from_path(&mut record);
+        crate::debug!(
+            "imported {} ({}, {})",
+            record.path.display(),
+            record.format,
+            crate::sync::bytes(record.bytes)
+        );
+        let _ = reporter.tx.send(Update::Imported(Box::new(record)));
         let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
         (reporter.wake)();
     }
