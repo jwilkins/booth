@@ -735,4 +735,4 @@ percentages rather than transcripts.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
