@@ -1,9 +1,9 @@
 # OneLibrary, as far as it is known
 
 What a CDJ-3000X reads off a USB drive, established from primary sources and
-checked on 3 September 2026. This is research, not player support: nothing in
-this document has been run on a player by this project, and it says so wherever
-somebody else's hardware result is being relied on.
+checked on 3 September 2026, with the hardware results this project has of its
+own marked as such. It is research rather than a claim of player support, and
+it says whose observation each finding is.
 
 It exists because the rest of this repository used to say that OneLibrary's
 schema "has never been published" and that "nobody has demonstrated" a
@@ -298,7 +298,21 @@ one, all 354 track directories of a 412-track capture on the other:
 
 Two corrections to folklore. The phrase data (`PSSI`) is in the `.EXT`, not
 the `.2EX`; the `.2EX` holds only the three-band waveforms and a 20-byte
-`PWVC` summary. And the `.2EX` is a CDJ-3000 file that predates OneLibrary,
+`PWVC` summary.
+
+**The order and the exact section list matter, and a player does not say when
+they are wrong.** With the analysis files finally being found (§5.1), a
+CDJ-3000X drew the monochrome preview from the `.DAT` and no colour at all.
+The cause was in the `.EXT`: this project wrote a second `PQTZ` where rekordbox
+writes `PQT2`, and everything after it — `PWV5`, `PWV4`, `PSSI`, which is to
+say the colour waveforms and the phrases — went unread, while the cues that
+sit *before* it came through. So a player reads these files in order and
+stops making sense of one at the first section it did not expect there.
+
+`PQT2` is an extended beat grid at two bytes a beat and that is the whole of
+what is published about it, so the honest thing is to write nothing in its
+place: a missing section is skipped, and a wrong one costs everything behind
+it. And the `.2EX` is a CDJ-3000 file that predates OneLibrary,
 though fourfour's hardware notes say the OneLibrary-only players require it
 where a CDJ-3000 merely draws a worse waveform without it.
 
@@ -487,11 +501,13 @@ says so.
 
 Against §2 to §5 what is left is:
 
-- **The analysis half has failed once and been fixed once.** A CDJ-3000X on
-  firmware 1.40 browsed a drive this wrote and showed nothing at all off the
-  analysis files, because they were in directories named after the track id
-  rather than the hash of the audio path (§5.1). The naming is now rekordbox's;
-  no drive written since has been in front of a player.
+- **The analysis half has failed twice and been fixed twice.** A CDJ-3000X on
+  firmware 1.40 first showed nothing at all off the analysis files, because
+  they were in directories named after the track id rather than the hash of the
+  audio path (§5.1). With that fixed it drew waveforms — but monochrome ones,
+  from the `.DAT`, because a wrong section in the `.EXT` hid the colour
+  waveforms behind it (§5). That is fixed too, and untested since. Phrases and
+  the three-band waveform are the next things to look for, in that order.
 - **A CDJ-3000 on firmware 2.05 does not see the library at all**, which is the
   legacy `export.pdb` being refused rather than anything about OneLibrary — the
   3000 never reads that database. This is the first time the legacy writer has
@@ -504,9 +520,11 @@ Against §2 to §5 what is left is:
   satisfied without knowing what a valid history row looks like.
 - No `exportExt.pdb`. rekordbox writes it; whether any player needs it is not
   established (dj-usb-tkit and FableGear omit it and passed).
-- The `.2EX` carries `PWV7` then `PWV6` and no `PWVC`; rekordbox writes
-  `PWV6`, `PWV7`, `PWVC`.
-- The `.EXT` carries a `PQTZ` grid where rekordbox writes `PQT2`.
+- The `.2EX` now carries `PWV6`, `PWV7` and a `PWVC` whose three values are a
+  guess at what a real one holds — a per-band average, which is the shape of
+  the numbers a capture reported.
+- The `.EXT` carries no extended beat grid at all, where rekordbox writes
+  `PQT2`; see §5.
 - No artwork, so `image` is empty and every `image_id` is 0.
 - No My Tags beyond rekordbox's four empty groups, no history, no hot-cue
   banks: the collection has none of them to write.

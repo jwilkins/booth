@@ -1,9 +1,13 @@
-# OneLibrary (`exportLibrary.db`): what's known, and two hardware results
+# OneLibrary (`exportLibrary.db`): what's known, and what a CDJ-3000X did with it
 
 Notes on the database a CDJ-3000X reads off a USB stick, written up because
-the format is now documented well enough to write one — and because two things
-that were open questions in the public research turned out to have answers
-when a hand-written drive was put in front of real players.
+the format is now documented well enough to write one — and because several
+things that were open questions in the public research turned out to have
+answers once a hand-written drive was put in front of real players.
+
+The useful findings here are the **negative** ones. Two separate mistakes each
+produced a drive that looked like it was working, and neither the player nor
+any parser said a word about either.
 
 Everything below is either cited to a primary source or is a hardware
 observation made on **CDJ-3000X firmware 1.40** and **CDJ-3000 firmware 2.05**
@@ -26,6 +30,12 @@ in September 2026. Where a claim is inference, it says so.
   no beat grid, no cues, no phrases and no BPM on the deck. It does *not*
   re-analyse to cover the gap. This is the single most expensive thing to get
   wrong, because it looks like success.
+- **Sections in the analysis files are read in order, and one the player did
+  not expect there costs you everything behind it.** A stray `PQTZ` in the
+  `.EXT` where rekordbox writes `PQT2` hid the colour waveforms and the phrase
+  data, while leaving the cues in front of it working — so the player drew a
+  monochrome waveform out of the older `.DAT` section and looked, at a glance,
+  fine.
 - The schema is fully known (22 tables), the container is stock SQLCipher 4,
   and the key is a fixed passphrase identical on every drive.
 - AlphaTheta publishes **no specification, SDK, or developer programme** for
@@ -237,6 +247,15 @@ Two corrections to things often repeated: **`PSSI` (phrase/lighting data) is in
 the `.EXT`, not the `.2EX`**, and the `.2EX` holds only the three-band
 waveforms plus a 20-byte `PWVC` summary.
 
+**Order and section list matter, and getting them wrong is silent.** See §6:
+writing a second `PQTZ` in the `.EXT` where rekordbox writes `PQT2` cost a
+CDJ-3000X everything after that tag — the colour waveforms and the phrases —
+while the cues *before* it came through fine. A player reads these files in
+order and stops making sense of one at the first section it did not expect.
+`PQT2` is "an extended beat grid, two bytes a beat" and that is all anyone has
+published, so writing nothing there is safer than writing a guess: a missing
+section is skipped, a wrong one costs everything behind it.
+
 ### The directory name
 
 rekordbox names each track's analysis directory `P{3 hex}/{8 hex}` — real
@@ -304,6 +323,25 @@ Practical upshot for anyone writing this format:
   — explicitly did not record this, so neither of them establishes that their
   analysis files were ever opened either.
 
+### CDJ-3000X again, after fixing the directory name — waveforms, but monochrome
+
+Same player, same stick rewritten with the hash above. Waveforms appeared in
+the browse preview column, which confirms the diagnosis. But they were
+**monochrome** — the mono preview out of `PWAV` in the `.DAT` — with no colour
+waveform, no phrases.
+
+Cause: the `.EXT` had a second `PQTZ` where rekordbox writes `PQT2`, and
+`PWV5`, `PWV4` and `PSSI` all sit *after* it in the file. Cues, which sit
+before it, worked. So: sections after an unexpected one are not read, and the
+player reports nothing about it — you get a plausible-looking waveform drawn
+from the older, simpler section in the other file.
+
+If you are writing these files, match a real export's section list and order
+exactly, per file, and treat "I can see a waveform" as insufficient evidence.
+Fixed by dropping the wrong tag (not by inventing a `PQT2`), reordering the
+`.2EX` to `PWV6`, `PWV7`, `PWVC`, and writing `PVBR` in the `.DAT` even for
+lossless files, as real exports do. Retest pending.
+
 ### CDJ-3000, firmware 2.05 — did not see the library at all
 
 The same stick, on a player that reads only the legacy `export.pdb`: no
@@ -354,6 +392,7 @@ this off, that's the open one.
 | `property.dbVersion` is `'10000'` | `'1000'` |
 | "Works on CDJ-3000" proves an `exportLibrary.db` is right | The CDJ-3000 reads `export.pdb`; if a writer emits both, the pdb may be doing the work |
 | Phrase data is in the `.2EX` | It's `PSSI` in the `.EXT` |
+| A waveform on screen means your analysis files are being read | It may be the mono `PWAV` from the `.DAT` while the whole `.EXT` after a bad section goes unread |
 | A drive that browses proves the analysis files are good | See §6 |
 
 ## 9. Sources

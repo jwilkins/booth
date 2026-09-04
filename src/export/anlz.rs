@@ -320,6 +320,28 @@ pub fn wave_3band_detail(data: &[u8]) -> Vec<u8> {
     entry_section(b"PWV7", 3, data, Some(0x0096_0000))
 }
 
+/// `PWVC` — the twenty bytes that close a real `.2EX`.
+///
+/// Three small numbers whose meaning nobody has published; a capture of a real
+/// export read them as something like `[88, 81, 127]`, which is the shape of a
+/// per-band average and is what this writes. It goes last, after both
+/// waveforms, so that a player which does not understand it has already read
+/// everything that matters.
+pub fn wave_3band_summary(bands: &[u8]) -> Vec<u8> {
+    let mut out = start(b"PWVC", 0x0e);
+    put_u16(&mut out, 0);
+    for band in 0..3 {
+        let mut total = 0u64;
+        let mut count = 0u64;
+        for entry in bands.chunks_exact(3) {
+            total += u64::from(entry[band]);
+            count += 1;
+        }
+        put_u16(&mut out, (total.checked_div(count).unwrap_or(0)) as u16);
+    }
+    finish(out)
+}
+
 fn entry_section(fourcc: &[u8; 4], entry_bytes: u32, data: &[u8], unknown: Option<u32>) -> Vec<u8> {
     let len_header = if unknown.is_some() { 0x18 } else { 0x14 };
     let mut out = start(fourcc, len_header);
@@ -419,11 +441,12 @@ impl Analysis<'_> {
     /// The `.DAT` file: what a player from 2009 onwards can read.
     pub fn dat(&self) -> Vec<u8> {
         // PVBR sits right after the path, as it does in a real export, and only
-        // in the .DAT — the .EXT and .2EX do not carry it.
+        // in the .DAT — the .EXT and .2EX do not carry it. A file with no
+        // variable bitrate to index still gets the section, as a table of
+        // zeroes: every real export has one, and a section a player expects and
+        // does not find is not a risk worth taking for 1.6 kB a track.
         let mut sections = vec![path(self.on_drive_path)];
-        if let Some(offsets) = self.vbr {
-            sections.push(vbr(offsets));
-        }
+        sections.push(vbr(self.vbr.unwrap_or(&[0; 401])));
         sections.extend([
             beat_grid(self.grid),
             wave_preview(&self.waveforms.preview),
@@ -441,6 +464,16 @@ impl Analysis<'_> {
     /// ones, so a player that reads `.EXT` but predates the nexus 2 cue format
     /// still finds cues.
     pub fn ext(&self) -> Vec<u8> {
+        // No beat grid here. rekordbox writes one — `PQT2`, a second, terser
+        // encoding of the same beats — and this used to write a copy of the
+        // `.DAT`'s `PQTZ` in its place, which is a section that does not belong
+        // in this file. A CDJ-3000X handed one drew the monochrome preview from
+        // the `.DAT` and none of the colour: everything after the wrong tag,
+        // which is exactly the colour waveforms and the phrases, went unread.
+        //
+        // `PQT2`'s layout is not published beyond "two bytes a beat", so
+        // nothing is written in its place rather than something invented. The
+        // grid the player uses is the `.DAT`'s, which it already reads.
         let mut sections = vec![
             path(self.on_drive_path),
             wave_detail(&self.waveforms.detail),
@@ -448,7 +481,6 @@ impl Analysis<'_> {
             cues(self.cues, true),
             cues_extended(self.cues, false),
             cues_extended(self.cues, true),
-            beat_grid(self.grid),
             wave_color_detail(&self.waveforms.color_detail),
             wave_color_preview(&self.waveforms.color_preview),
         ];
@@ -458,13 +490,17 @@ impl Analysis<'_> {
         file(&sections)
     }
 
-    /// The `.2EX` file: the CDJ-3000's three-band waveforms, detail first, as
-    /// rekordbox writes them.
+    /// The `.2EX` file: the CDJ-3000's three-band waveforms, and the summary
+    /// that closes one.
+    ///
+    /// Preview before detail, which is the order a real export writes them in
+    /// and the opposite of what this used to do.
     pub fn two_ex(&self) -> Vec<u8> {
         file(&[
             path(self.on_drive_path),
-            wave_3band_detail(&self.waveforms.band_detail),
             wave_3band_preview(&self.waveforms.band_preview),
+            wave_3band_detail(&self.waveforms.band_detail),
+            wave_3band_summary(&self.waveforms.band_preview),
         ])
     }
 }
@@ -739,15 +775,22 @@ mod tests {
             vbr: None,
         };
 
+        // Measured across some seven hundred tracks of two real rekordbox
+        // exports, and worth holding to exactly: a section in the wrong file,
+        // or in the wrong place in the right file, is not something a player
+        // reports. It draws what it managed to read and says nothing about the
+        // rest.
         assert_eq!(
             codes(&inspect(&analysis.dat()).unwrap()),
-            ["PPTH", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"]
+            ["PPTH", "PVBR", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"]
         );
         assert_eq!(
             codes(&inspect(&analysis.ext()).unwrap()),
-            ["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PQTZ", "PWV5", "PWV4", "PSSI"]
+            ["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PWV5", "PWV4", "PSSI"],
+            "rekordbox has a PQT2 between the cues and the colour waveforms; \
+             nothing goes there until its layout is known, and never a PQTZ"
         );
-        assert_eq!(codes(&inspect(&analysis.two_ex()).unwrap()), ["PPTH", "PWV7", "PWV6"]);
+        assert_eq!(codes(&inspect(&analysis.two_ex()).unwrap()), ["PPTH", "PWV6", "PWV7", "PWVC"]);
     }
 
     #[test]

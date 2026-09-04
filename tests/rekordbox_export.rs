@@ -100,6 +100,9 @@ fn a_dat_file_holds_what_a_2009_player_looks_for() {
         kinds(&file),
         [
             ContentKind::Path,
+            // Written even for a file with no variable bitrate to index, as a
+            // table of zeroes, because every real export has one.
+            ContentKind::VBR,
             ContentKind::BeatGrid,
             ContentKind::WaveformPreview,
             ContentKind::TinyWaveformPreview,
@@ -184,7 +187,10 @@ fn an_ext_file_carries_the_colour_waveforms_and_the_named_cues() {
             ContentKind::CueList,
             ContentKind::ExtendedCueList,
             ContentKind::ExtendedCueList,
-            ContentKind::BeatGrid,
+            // No beat grid: rekordbox puts a PQT2 here, whose layout is not
+            // published, and a copy of the .DAT's PQTZ in its place cost a
+            // CDJ-3000X everything after it — the colour waveforms and the
+            // phrases.
             ContentKind::WaveformColorDetail,
             ContentKind::WaveformColorPreview,
             ContentKind::SongStructure,
@@ -297,15 +303,18 @@ fn a_2ex_file_frames_the_three_band_waveforms() {
     // rekordcrate 0.3 predates the CDJ-3000's three-band sections, so it reads
     // them as unknown — which is exactly the check that matters here: the
     // section framing is right even to a parser that has never heard of them.
-    assert_eq!(file.sections.len(), 3);
+    // Preview, then detail, then the twenty-byte summary — the order a real
+    // export uses.
+    assert_eq!(file.sections.len(), 4);
     assert_eq!(file.sections[0].header.kind, ContentKind::Path);
-    assert_eq!(file.sections[1].header.kind, ContentKind::Unknown(*b"PWV7"));
-    assert_eq!(file.sections[2].header.kind, ContentKind::Unknown(*b"PWV6"));
+    assert_eq!(file.sections[1].header.kind, ContentKind::Unknown(*b"PWV6"));
+    assert_eq!(file.sections[2].header.kind, ContentKind::Unknown(*b"PWV7"));
+    assert_eq!(file.sections[3].header.kind, ContentKind::Unknown(*b"PWVC"));
 
     // And our own reader, which does know about them, agrees on the sizes.
     let ours = anlz::inspect(&bytes).unwrap();
-    assert_eq!(ours[1].summary, format!("{} entries of 3 bytes", 8 * 150));
-    assert_eq!(ours[2].summary, "1200 entries of 3 bytes");
+    assert_eq!(ours[1].summary, "1200 entries of 3 bytes");
+    assert_eq!(ours[2].summary, format!("{} entries of 3 bytes", 8 * 150));
 }
 
 #[test]
@@ -354,7 +363,7 @@ fn a_track_with_no_cues_or_phrases_still_produces_readable_files() {
 
     let dat = parse(&analysis.dat());
     let ext = parse(&analysis.ext());
-    assert_eq!(kinds(&dat).len(), 6);
+    assert_eq!(kinds(&dat).len(), 7);
     assert!(!kinds(&ext).contains(&ContentKind::SongStructure));
 }
 
