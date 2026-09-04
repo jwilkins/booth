@@ -170,16 +170,45 @@ impl Column {
 
     /// Six bytes: two of whiteness, then the energy in the bottom half of the
     /// range, then the low, mid and high bands.
+    ///
+    /// The three band bytes are what the browse list draws its little pictures
+    /// from, and a rekordbox-written drive draws them in strong oranges,
+    /// greens, magentas and blues. Writing each band's own loudness there gives
+    /// three large similar numbers for most music, which is a pale wash — so
+    /// each band is scaled by how much of the column it accounts for. The
+    /// loudest band keeps its full value, and the ones underneath it fall away,
+    /// which is what leaves a colour rather than a grey.
     fn color_preview_bytes(&self) -> [u8; 6] {
         let white = self.whiteness() * 36; // 0-7 spread across a byte
+        let (low, mid, high) = self.shares();
         [
             white,
             white,
             level(self.low.max(self.mid)),
-            level(self.low),
-            level(self.mid),
-            level(self.high),
+            level(self.low * low),
+            level(self.mid * mid),
+            level(self.high * high),
         ]
+    }
+
+    /// How much of this column each band accounts for, against the loudest of
+    /// them rather than against their sum.
+    ///
+    /// Against the sum the three always add to one, so the loudest band can
+    /// never reach the top of its range and every column comes out a shade of
+    /// grey. Against the peak, whatever dominates the column saturates —
+    /// squared, so that a band a third as loud as the leader tints the colour
+    /// instead of diluting it.
+    ///
+    /// From the averages rather than the peaks: a kick drum's transient is loud
+    /// in every band at once, so peaks would call almost every column white.
+    fn shares(&self) -> (f32, f32, f32) {
+        let peak = self.low_rms.max(self.mid_rms).max(self.high_rms);
+        if peak <= f32::EPSILON {
+            return (0.0, 0.0, 0.0);
+        }
+        let share = |band: f32| (band / peak) * (band / peak);
+        (share(self.low_rms), share(self.mid_rms), share(self.high_rms))
     }
 
     /// Three bytes, in the order the player wants them: mid, high, low. Drawn
@@ -201,12 +230,7 @@ impl Column {
     /// it — and squaring the ratios sharpens that, because a band 30% as loud
     /// as the leader should tint the colour rather than dilute it.
     fn color(&self) -> (u8, u8, u8) {
-        let peak = self.low_rms.max(self.mid_rms).max(self.high_rms);
-        if peak <= f32::EPSILON {
-            return (0, 0, 0);
-        }
-        let share = |band: f32| (band / peak) * (band / peak);
-        let (low, mid, high) = (share(self.low_rms), share(self.mid_rms), share(self.high_rms));
+        let (low, mid, high) = self.shares();
         let bit = |v: f32| (v * 7.0).round().clamp(0.0, 7.0) as u8;
         // Amber is red with about half its green; treble lifts all three
         // towards white without quite reaching it on its own.
@@ -392,6 +416,40 @@ mod tests {
         let middle = (w.color_detail.len() / 4) * 2;
         let packed = u16::from_be_bytes([w.color_detail[middle], w.color_detail[middle + 1]]);
         ((packed >> 13) & 7, (packed >> 10) & 7, (packed >> 7) & 7)
+    }
+
+    /// The three band bytes of the middle column of the browse-list preview.
+    fn preview_hue(hz: f32) -> (u8, u8, u8) {
+        let w = analyze(&tone(hz, 1.0, 0.8));
+        let at = (w.color_preview.len() / 12) * 6;
+        (w.color_preview[at + 3], w.color_preview[at + 4], w.color_preview[at + 5])
+    }
+
+    #[test]
+    fn the_browse_preview_is_a_colour_rather_than_a_wash() {
+        // The picture beside each row in the browse list. A rekordbox drive
+        // draws these in strong oranges, greens and blues; writing each band's
+        // own loudness gave three large similar numbers and a pale wash, which
+        // is what a player showed.
+        let saturation = |(a, b, c): (u8, u8, u8)| {
+            let (top, bottom) = (a.max(b).max(c) as f32, a.min(b).min(c) as f32);
+            bottom / top.max(1.0)
+        };
+
+        let (low, mid, high) = preview_hue(60.0);
+        assert!(low > mid && mid > high, "bass column reads {low},{mid},{high}");
+        let (low, mid, high) = preview_hue(700.0);
+        assert!(mid > low && mid > high, "a mid column reads {low},{mid},{high}");
+        let (low, mid, high) = preview_hue(9_000.0);
+        assert!(high > low && high > mid, "a treble column reads {low},{mid},{high}");
+
+        for hz in [60.0, 700.0, 9_000.0] {
+            let washed = saturation(preview_hue(hz));
+            assert!(
+                washed < 0.35,
+                "{hz} Hz is a wash: the quietest band is {washed} of the loudest"
+            );
+        }
     }
 
     #[test]
