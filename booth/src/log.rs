@@ -91,21 +91,33 @@ impl fmt::Display for Level {
 /// One line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// Milliseconds since the program started. Not a wall clock: what a run's
-    /// log is read for is what happened relative to everything else in it, and
-    /// elapsed time needs no timezone to be unambiguous.
+    /// When it happened, as seconds since the epoch, UTC.
+    ///
+    /// A wall clock, because a log is read alongside things that have their own
+    /// clocks — a file's modification time, a message from somebody about when
+    /// their drive stopped working, yesterday's log — and "412.008 seconds into
+    /// some run" cannot be lined up with any of them.
+    pub at: u64,
+    /// Milliseconds since the program started, which is what says how long
+    /// something took without a subtraction.
     pub at_ms: u64,
     pub level: Level,
     pub text: String,
 }
 
 impl Entry {
-    /// `  12.345  info  text`, the shape the file and the window both use.
+    /// `20260904 21:14:03 info text`, the shape the file and the window both
+    /// use.
     pub fn line(&self) -> String {
         format!("{} {} {}", self.stamp(), self.level.tag(), self.text)
     }
 
     pub fn stamp(&self) -> String {
+        crate::clock::stamp(self.at)
+    }
+
+    /// Seconds since the program started, for the window's own column.
+    pub fn elapsed(&self) -> String {
         format!("{:>7}.{:03}", self.at_ms / 1000, self.at_ms % 1000)
     }
 }
@@ -181,7 +193,7 @@ pub fn record(level: Level, text: String) {
         return;
     }
     let at_ms = START.get().map(|start| start.elapsed().as_millis() as u64).unwrap_or(0);
-    let entry = Entry { at_ms, level, text };
+    let entry = Entry { at: crate::clock::now(), at_ms, level, text };
 
     let Ok(mut sink) = sink().lock() else { return };
     if let Some(file) = &mut sink.file {
@@ -341,11 +353,16 @@ mod tests {
     }
 
     #[test]
-    fn a_line_reads_as_a_time_a_level_and_a_message() {
-        let entry = Entry { at_ms: 12_345, level: Level::Info, text: "started".into() };
-        assert_eq!(entry.line(), "     12.345 info started");
-        let entry = Entry { at_ms: 7, level: Level::Error, text: "no".into() };
-        assert_eq!(entry.line(), "      0.007 err  no");
+    fn a_line_reads_as_a_date_a_time_a_level_and_a_message() {
+        // The wall clock, so a line can be lined up with a file's modification
+        // time or with what somebody says happened at half past nine.
+        let entry =
+            Entry { at: 1_788_556_443, at_ms: 12_345, level: Level::Info, text: "started".into() };
+        assert_eq!(entry.line(), "20260904 21:14:03 info started");
+        assert_eq!(entry.elapsed(), "     12.345", "and the run's own clock is still there");
+
+        let entry = Entry { at: 1_788_556_443, at_ms: 7, level: Level::Error, text: "no".into() };
+        assert_eq!(entry.line(), "20260904 21:14:03 err  no");
     }
 
     #[test]
