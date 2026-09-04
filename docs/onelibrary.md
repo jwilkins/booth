@@ -510,13 +510,17 @@ Against §2 to §5 what is left is:
   their own sum, averages rather than peaks so a kick does not whiten
   everything, and a crossover placed to keep a whole tune's worth of music in
   one band.
-- **The analysis half has failed twice and been fixed twice.** A CDJ-3000X on
-  firmware 1.40 first showed nothing at all off the analysis files, because
-  they were in directories named after the track id rather than the hash of the
-  audio path (§5.1). With that fixed it drew waveforms — but monochrome ones,
-  from the `.DAT`, because a wrong section in the `.EXT` hid the colour
-  waveforms behind it (§5). That is fixed too, and untested since. Phrases and
-  the three-band waveform are the next things to look for, in that order.
+- **The analysis half works, after failing twice.** A CDJ-3000X on firmware
+  1.40 first showed nothing at all off the analysis files, because they were in
+  directories named after the track id rather than the hash of the audio path
+  (§5.1). With that fixed it drew waveforms — but monochrome ones, from the
+  `.DAT`, because a wrong section in the `.EXT` hid the colour waveforms behind
+  it (§5). With *that* fixed it reads the `.EXT` through: **colour waveforms
+  and hot cues both come up on the player**, which is the whole of what the
+  analysis files are for and the first confirmation that this project's
+  `PCOB`/`PCO2` cues are written the way a player expects. Phrases (`PSSI`,
+  last in the file) and the three-band waveform out of the `.2EX` are the two
+  things not yet reported either way.
 - **A CDJ-3000 on firmware 2.05 does not see the library at all**, which is the
   legacy `export.pdb` being refused rather than anything about OneLibrary — the
   3000 never reads that database. This is the first time the legacy writer has
