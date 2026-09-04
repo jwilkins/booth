@@ -1936,7 +1936,7 @@ fn bar_frame() -> egui::Frame {
     egui::Frame::NONE
         .fill(theme::BOOTH_2)
         .inner_margin(egui::Margin::symmetric(12, 8))
-        .stroke(egui::Stroke::new(1.0, theme::RULE))
+        .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
 }
 
 /// The chrome every sheet shares.
@@ -2061,7 +2061,7 @@ fn sheet_height(ctx: &egui::Context) -> f32 {
 fn sheet_frame() -> egui::Frame {
     egui::Frame::NONE
         .fill(theme::BOOTH)
-        .stroke(egui::Stroke::new(1.0, theme::RULE))
+        .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
         .inner_margin(egui::Margin::same(14))
 }
 
@@ -4782,7 +4782,7 @@ impl App {
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0, theme::RULE))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -5377,7 +5377,7 @@ impl App {
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0, theme::RULE))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -5709,7 +5709,7 @@ impl App {
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0, theme::RULE))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -6510,7 +6510,7 @@ impl App {
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0, theme::RULE))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {

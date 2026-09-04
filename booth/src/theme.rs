@@ -142,7 +142,7 @@ pub fn install(ctx: &egui::Context) {
     visuals.window_fill = BOOTH;
     visuals.extreme_bg_color = BOOTH_2;
     visuals.faint_bg_color = BOOTH_2;
-    visuals.window_stroke = egui::Stroke::new(1.0, RULE);
+    visuals.window_stroke = egui::Stroke::new(1.0_f32, RULE);
 
     // Nothing is rounded except by a point, and nothing casts a shadow. The
     // panel edges are rules, so the widgets inside them should not compete.
@@ -155,12 +155,12 @@ pub fn install(ctx: &egui::Context) {
         &mut visuals.widgets.open,
     ] {
         widget.corner_radius = radius;
-        widget.bg_stroke = egui::Stroke::new(1.0, RULE);
-        widget.fg_stroke = egui::Stroke::new(1.0, TEXT);
+        widget.bg_stroke = egui::Stroke::new(1.0_f32, RULE);
+        widget.fg_stroke = egui::Stroke::new(1.0_f32, TEXT);
     }
     visuals.widgets.noninteractive.bg_fill = BOOTH;
     visuals.widgets.noninteractive.weak_bg_fill = BOOTH;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, DIM);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, DIM);
     visuals.widgets.inactive.bg_fill = BOOTH_2;
     visuals.widgets.inactive.weak_bg_fill = BOOTH_2;
     visuals.widgets.hovered.bg_fill = RULE;
@@ -168,7 +168,7 @@ pub fn install(ctx: &egui::Context) {
     visuals.widgets.active.bg_fill = RULE;
     visuals.widgets.active.weak_bg_fill = RULE;
     visuals.selection.bg_fill = AMBER.gamma_multiply(0.30);
-    visuals.selection.stroke = egui::Stroke::new(1.0, TEXT);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, TEXT);
     visuals.window_shadow = egui::epaint::Shadow::NONE;
     visuals.popup_shadow = egui::epaint::Shadow::NONE;
 

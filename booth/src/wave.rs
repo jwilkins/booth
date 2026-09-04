@@ -428,7 +428,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
             let x = rect.left() + rect.width() * across;
             painter.line_segment(
                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                Stroke::new(1.0, theme::TEXT),
+                Stroke::new(1.0_f32, theme::TEXT),
             );
         }
     }
@@ -570,7 +570,7 @@ fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
         let height = if bar { 9.0 } else { 4.0 };
         painter.line_segment(
             [egui::pos2(x, rect.bottom() - height), egui::pos2(x, rect.bottom())],
-            Stroke::new(1.0, faint),
+            Stroke::new(1.0_f32, faint),
         );
     }
 }
@@ -597,7 +597,7 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
 
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom() - 10.0)],
-            Stroke::new(1.5, color),
+            Stroke::new(1.5_f32, color),
         );
         // A flag, pointing the way the cue reads: from the marker into the
         // track.
@@ -690,7 +690,7 @@ pub fn phrase_strip(
     painter.rect_stroke(
         Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(right, rect.bottom())),
         0.0,
-        Stroke::new(1.0, theme::TEXT.gamma_multiply(0.75)),
+        Stroke::new(1.0_f32, theme::TEXT.gamma_multiply(0.75)),
         egui::StrokeKind::Inside,
     );
 

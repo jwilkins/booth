@@ -194,7 +194,7 @@ pub fn header_row(ui: &mut Ui, widths: &Widths, sort: Sort) -> Option<Column> {
     }
     painter.line_segment(
         [egui::pos2(rect.left(), rect.bottom()), egui::pos2(rect.right(), rect.bottom())],
-        egui::Stroke::new(1.0, theme::RULE),
+        egui::Stroke::new(1.0_f32, theme::RULE),
     );
     clicked
 }
@@ -350,7 +350,7 @@ pub fn row(
     }
     painter.line_segment(
         [egui::pos2(rect.left(), rect.bottom()), egui::pos2(rect.right(), rect.bottom())],
-        egui::Stroke::new(1.0, theme::RULE.gamma_multiply(0.55)),
+        egui::Stroke::new(1.0_f32, theme::RULE.gamma_multiply(0.55)),
     );
 
     // A companion is dim, and the whole line is dim rather than only its name:
@@ -677,7 +677,7 @@ fn pill(painter: &egui::Painter, rect: Rect, x: f32, content: &str, color: Color
     painter.rect_stroke(
         box_rect,
         2.0,
-        egui::Stroke::new(1.0, theme::RULE),
+        egui::Stroke::new(1.0_f32, theme::RULE),
         egui::StrokeKind::Inside,
     );
     painter.galley(egui::pos2(x + 4.0, box_rect.top() + 1.0), galley, color);
