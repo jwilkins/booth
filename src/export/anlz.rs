@@ -92,7 +92,7 @@ fn put_u32(out: &mut Vec<u8>, v: u32) {
 }
 
 fn put_pad(out: &mut Vec<u8>, n: usize) {
-    out.extend(std::iter::repeat(0u8).take(n));
+    out.extend(std::iter::repeat_n(0u8, n));
 }
 
 /// Start a section: its code, the length of its header, and a placeholder for
