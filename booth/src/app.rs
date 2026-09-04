@@ -292,6 +292,9 @@ pub struct App {
     /// Files waiting to have their tags rewritten, collected so that
     /// identifying a crate is one tagging job rather than one per track.
     to_retag: Vec<Retag>,
+    /// Tag writes held back because the file's own name looks nothing like
+    /// what is about to be written into it. See [`App::write_tags`].
+    unlike: Vec<Retag>,
     /// Rows whose waveform has already been asked for once this run, so a
     /// measurement that cannot succeed is not attempted on every frame.
     remeasured: std::collections::HashSet<u32>,
@@ -369,10 +372,17 @@ enum Pending {
     TogglePlayback(u32),
     /// Change how the waveform is coloured.
     PaintAs(wave::Paint),
-    /// Take or refuse one fingerprint match.
+    /// Settle one question: the fingerprint's answer, the path's, or the one
+    /// the track already had.
     AnswerMatch {
         id: u32,
-        take: bool,
+        answer: crate::identify::Answer,
+    },
+    /// Write, or do not write, tags into a file whose name looks nothing like
+    /// them.
+    AnswerNaming {
+        id: u32,
+        write: bool,
     },
     /// Move the deck to a position in a track, if that track is on it.
     SeekDeck {
@@ -593,6 +603,7 @@ impl App {
             started: None,
             incompatible: Vec::new(),
             to_retag: Vec::new(),
+            unlike: Vec::new(),
             remeasured: std::collections::HashSet::new(),
             re_enveloped: std::collections::HashSet::new(),
             playhead_ms: None,
@@ -1390,8 +1401,9 @@ impl App {
                     if let Some(track) = self.library.get_mut(id) {
                         track.identified = true;
                     }
-                    if let Some(found) = best {
-                        self.consider(id, found);
+                    match best {
+                        Some(found) => self.consider(id, found),
+                        None => self.consider_path(id),
                     }
                     changed = true;
                 }
@@ -1971,6 +1983,7 @@ impl eframe::App for App {
             self.compatibility_sheet(ctx);
         }
         self.questions_sheet(ctx);
+        self.naming_sheet(ctx);
         if self.help {
             self.help_sheet(ctx);
         }
@@ -4204,18 +4217,65 @@ impl App {
                     }
                     crate::debug!("waveform coloured by {}", mode.label());
                 }
-                Pending::AnswerMatch { id, take } => {
+                Pending::AnswerMatch { id, answer } => {
                     if let Some(at) = self.questions.iter().position(|q| q.id == id) {
                         let question = self.questions.remove(at);
-                        if take {
-                            self.apply_match(id, &question.candidate);
-                        } else {
-                            crate::info!("#{id} kept its own name over the fingerprint");
-                            // Marked as answered, so the same question is not
-                            // asked again on the next pass.
-                            if let Some(track) = self.library.get_mut(id) {
-                                track.from_tags = true;
+                        match answer {
+                            crate::identify::Answer::Fingerprint => {
+                                crate::info!(
+                                    "#{id} took the fingerprint's answer: {}",
+                                    question.candidate.describe()
+                                );
+                                self.apply_match(id, &question.candidate);
                             }
+                            crate::identify::Answer::Path => {
+                                if let Some(from_path) = &question.from_path {
+                                    crate::info!(
+                                        "#{id} took the path's answer: {}",
+                                        from_path.describe()
+                                    );
+                                    self.apply_guess(id, from_path);
+                                }
+                                // Answered, so the fingerprint does not come
+                                // back with the same question.
+                                if let Some(track) = self.library.get_mut(id) {
+                                    track.from_tags = true;
+                                }
+                            }
+                            crate::identify::Answer::Mine => {
+                                crate::info!("#{id} kept its own name over the fingerprint");
+                                // Marked as answered, so the same question is
+                                // not asked again on the next pass.
+                                if let Some(track) = self.library.get_mut(id) {
+                                    track.from_tags = true;
+                                }
+                            }
+                        }
+                        touched = true;
+                    }
+                }
+                Pending::AnswerNaming { id, write } => {
+                    if let Some(at) = self.unlike.iter().position(|held| held.id == id) {
+                        let held = self.unlike.remove(at);
+                        match write {
+                            true => {
+                                crate::info!(
+                                    "{}: tagging it {} — {} anyway",
+                                    held.path.file_name().unwrap_or_default().to_string_lossy(),
+                                    held.artist,
+                                    held.title
+                                );
+                                // Straight past the check that held it up:
+                                // it has been answered, and asking again on
+                                // the way out would be the same question
+                                // forever.
+                                self.to_retag.push(held);
+                                self.flush_retags();
+                            }
+                            false => crate::info!(
+                                "{}: left as it is",
+                                held.path.file_name().unwrap_or_default().to_string_lossy()
+                            ),
                         }
                         touched = true;
                     }
@@ -4325,10 +4385,35 @@ impl App {
     }
 
     /// Decide what to do with one match, and do it.
+    ///
+    /// Two sources of evidence, not one: the fingerprint, and what the file's
+    /// own path says it is. They usually agree, and the interesting case is
+    /// when they do not — a fingerprint is about the audio and a path is about
+    /// what somebody filed it as, so a confident disagreement between them is
+    /// a question rather than something to settle by rule.
     fn consider(&mut self, id: u32, found: crate::identify::Match) {
         let Some(track) = self.library.get(id) else { return };
+        let from_path = crate::guess::from_path(&track.path);
         let decision = crate::identify::decide(track, &found, self.config.autotag_score);
-        crate::debug!("#{id} {} at {:.0}%: {decision:?}", found.describe(), found.score * 100.0);
+        let clash = crate::identify::conflicts(&found, &from_path);
+        crate::debug!(
+            "#{id} {} at {:.0}%: {decision:?}; the path says {}{}",
+            found.describe(),
+            found.score * 100.0,
+            from_path.describe(),
+            match clash {
+                true => ", which disagrees",
+                false => "",
+            }
+        );
+
+        // A disagreement with a strong path is asked about however confident
+        // the fingerprint is. Applying it silently is how a track ends up
+        // filed under a remix nobody has of a record they do have.
+        let decision = match clash {
+            true => crate::identify::Decision::Ask,
+            false => decision,
+        };
 
         match decision {
             crate::identify::Decision::Apply => self.apply_match(id, &found),
@@ -4341,6 +4426,7 @@ impl App {
                     },
                     source: crate::identify::source_of(track),
                     candidate: found,
+                    from_path: clash.then_some(from_path),
                 };
                 if !self.questions.iter().any(|q| q.id == id) {
                     self.questions.push(question);
@@ -4348,6 +4434,47 @@ impl App {
             }
             crate::identify::Decision::Reject => {}
         }
+    }
+
+    /// What to do about a track no fingerprint could name.
+    ///
+    /// The path is then the only evidence there is. A record that is not in
+    /// AcoustID — a white label, a promo, an edit, most of a DJ's crate — is
+    /// still filed under somebody's name in somebody's folder, and that beats
+    /// leaving it unnamed.
+    fn consider_path(&mut self, id: u32) {
+        let Some(track) = self.library.get(id) else { return };
+        let from_path = crate::guess::from_path(&track.path);
+        match crate::identify::decide_from_path(track, &from_path) {
+            crate::identify::Decision::Apply => {
+                crate::info!(
+                    "#{id} not in AcoustID; taking {} from the path",
+                    from_path.describe()
+                );
+                self.apply_guess(id, &from_path);
+            }
+            other => crate::debug!(
+                "#{id} not in AcoustID; the path says {} ({other:?})",
+                from_path.describe()
+            ),
+        }
+    }
+
+    /// Write what a path said into a track's record.
+    fn apply_guess(&mut self, id: u32, from_path: &crate::guess::Guess) {
+        let Some(track) = self.library.get_mut(id) else { return };
+        if !from_path.artist.trim().is_empty() {
+            track.artist = from_path.artist.clone();
+        }
+        if !from_path.title.trim().is_empty() {
+            track.title = from_path.title.clone();
+        }
+        if track.album.trim().is_empty() && !from_path.album.trim().is_empty() {
+            track.album = from_path.album.clone();
+        }
+        // Not `from_tags`: this came off a path, and a later fingerprint is
+        // still allowed to correct it without asking.
+        self.rebuild();
     }
 
     /// Write a match into a track's record.
@@ -4473,7 +4600,8 @@ impl App {
         // per track, and one job per file would be forty "started tagging,
         // finished tagging" lines for what is one errand.
         self.to_retag.retain(|waiting| waiting.id != track.id);
-        self.to_retag.push(Retag {
+        self.unlike.retain(|waiting| waiting.id != track.id);
+        let write = Retag {
             id: track.id,
             path: track.path.clone(),
             artist: track.artist.clone(),
@@ -4481,7 +4609,24 @@ impl App {
             album: track.album.clone(),
             date: track.year.map(|year| year.to_string()),
             on_existing,
-        });
+        };
+
+        // A file whose own name has nothing in common with the names about to
+        // go into it is the shape of a mistake worth stopping for: a
+        // fingerprint that found the wrong record, or the wrong row acted on.
+        // Tagging is the one thing here that writes to somebody's files, and
+        // the wrong answer written into forty of them is a bad afternoon.
+        let file_name = track.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if crate::guess::resembles(&file_name, &write.artist, &write.title) {
+            self.to_retag.push(write);
+            return;
+        }
+        crate::warn!(
+            "{file_name} would be tagged {} — {}, which its name says nothing about; asking first",
+            write.artist,
+            write.title
+        );
+        self.unlike.push(write);
     }
 
     /// Start the tagging that has piled up, if any has.
@@ -4683,6 +4828,121 @@ impl App {
     /// One row per track: what it says now and where that came from, against
     /// what the audio was identified as and how sure that is. Both are shown in
     /// full, because the whole reason this is a question is that they disagree.
+    /// Files whose names say nothing about what is about to be written into
+    /// them.
+    ///
+    /// Not the same question as the match sheet, and deliberately a separate
+    /// one: that sheet is about what a track *is*, and answering it changes
+    /// only the collection. This one is about writing to somebody's files, and
+    /// the answer is spent immediately.
+    fn naming_sheet(&mut self, ctx: &egui::Context) {
+        let held = self.unlike.clone();
+        if held.is_empty() {
+            return;
+        }
+        let mut open = true;
+
+        egui::Window::new(format!("{} to check before tagging", plural(held.len(), "file")))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(760.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "These files are named nothing like the tags about to go into them.                          That is usually a fingerprint that found the wrong record — and                          tagging is the one thing here that writes to your files.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for write in &held {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(format!("{} — {}", write.artist, write.title))
+                                        .color(theme::TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "file: {}",
+                                        write
+                                            .path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                    ))
+                                    .font(theme::mono(10.0))
+                                    .color(theme::AMBER),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Leave it").clicked() {
+                                        self.pending.push(Pending::AnswerNaming {
+                                            id: write.id,
+                                            write: false,
+                                        });
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Tag it anyway")
+                                                    .color(theme::BOOTH)
+                                                    .strong(),
+                                            )
+                                            .fill(theme::AMBER),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.pending.push(Pending::AnswerNaming {
+                                            id: write.id,
+                                            write: true,
+                                        });
+                                    }
+                                },
+                            );
+                        });
+                        ui.separator();
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Tag them all").clicked() {
+                        for write in &held {
+                            self.pending
+                                .push(Pending::AnswerNaming { id: write.id, write: true });
+                        }
+                    }
+                    if ui.button("Leave them all").clicked() {
+                        for write in &held {
+                            self.pending
+                                .push(Pending::AnswerNaming { id: write.id, write: false });
+                        }
+                    }
+                    ui.label(
+                        RichText::new("Leaving one alone changes nothing, here or on disk.")
+                            .color(theme::DIM)
+                            .size(theme::SMALL),
+                    );
+                });
+            });
+
+        // Closing the sheet is not an answer either way, so nothing is written
+        // and nothing is lost: the files stay in the queue.
+        if !open {
+            self.unlike.clear();
+            crate::info!("left the files whose names did not match as they are");
+        }
+    }
+
     fn questions_sheet(&mut self, ctx: &egui::Context) {
         let questions = self.questions.clone();
         if questions.is_empty() {
@@ -4733,6 +4993,16 @@ impl App {
                                     .font(theme::mono(10.0))
                                     .color(theme::DIM),
                                 );
+                                // Only when the path says something else. Two
+                                // answers that both look right is the case a
+                                // person is here to settle.
+                                if let Some(from_path) = &question.from_path {
+                                    ui.label(
+                                        RichText::new(format!("path: {}", from_path.describe()))
+                                            .font(theme::mono(10.0))
+                                            .color(theme::AMBER),
+                                    );
+                                }
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -4740,7 +5010,15 @@ impl App {
                                     if ui.button("Keep mine").clicked() {
                                         self.pending.push(Pending::AnswerMatch {
                                             id: question.id,
-                                            take: false,
+                                            answer: crate::identify::Answer::Mine,
+                                        });
+                                    }
+                                    if question.from_path.is_some()
+                                        && ui.button("Use the path").clicked()
+                                    {
+                                        self.pending.push(Pending::AnswerMatch {
+                                            id: question.id,
+                                            answer: crate::identify::Answer::Path,
                                         });
                                     }
                                     if ui
@@ -4756,7 +5034,7 @@ impl App {
                                     {
                                         self.pending.push(Pending::AnswerMatch {
                                             id: question.id,
-                                            take: true,
+                                            answer: crate::identify::Answer::Fingerprint,
                                         });
                                     }
                                 },
@@ -4770,13 +5048,18 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button("Use all").clicked() {
                         for question in &questions {
-                            self.pending.push(Pending::AnswerMatch { id: question.id, take: true });
+                            self.pending.push(Pending::AnswerMatch {
+                                id: question.id,
+                                answer: crate::identify::Answer::Fingerprint,
+                            });
                         }
                     }
                     if ui.button("Keep all of mine").clicked() {
                         for question in &questions {
-                            self.pending
-                                .push(Pending::AnswerMatch { id: question.id, take: false });
+                            self.pending.push(Pending::AnswerMatch {
+                                id: question.id,
+                                answer: crate::identify::Answer::Mine,
+                            });
                         }
                     }
                     ui.label(
