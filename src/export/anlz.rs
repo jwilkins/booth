@@ -22,6 +22,62 @@ use super::{BeatGrid, Cue, CueKind, SongStructure};
 /// zeroes.
 const FILE_HEADER_LEN: u32 = 0x1c;
 
+/// Where a track's analysis files go, worked out from where its audio went.
+///
+/// # Why it is a hash and not a number
+///
+/// Every track on a drive gets a directory of its own under
+/// `PIONEER/USBANLZ`, named `P{three hex}/{eight hex}`, and it looked for a
+/// long time as though the names could be anything as long as the database
+/// pointed at them. They cannot. A player computes this name itself, from the
+/// path of the audio file, and looks only there — so an analysis file the
+/// database points at perfectly and that sits under any other name is a file
+/// the player never opens.
+///
+/// That was this program's bug: it named these directories after the track id,
+/// wrote grids, waveforms, cues and phrases into them, and a CDJ-3000X showed
+/// none of it. Not slowly, not wrongly — it showed nothing at all and did not
+/// pause to analyse, because as far as the player was concerned the track was
+/// analysed and the analysis was simply missing.
+///
+/// The hash is `morizkraemer/fourfour`'s, disassembled out of rekordbox's own
+/// `CreateAnlzFileFolderPath`. Two of the three worked examples they publish
+/// reproduce exactly here; the third does not, which is recorded in
+/// `docs/onelibrary.md` §5.1 along with the rest of what is known.
+///
+/// The eight hex digits are the hash modulo a prime, so two tracks can land in
+/// one directory: about two hundred thousand of them exist, which a large
+/// library will fill often enough to matter. That is what the numbered files
+/// are for — `ANLZ0000`, `ANLZ0001` — and why the path section inside each
+/// file has to name the track it belongs to exactly.
+pub fn analysis_dir(on_drive: &str) -> String {
+    let mut hash: u32 = 0;
+    for unit in on_drive.encode_utf16() {
+        let unit = u32::from(unit);
+        hash = hash.wrapping_mul(0x5BC9).wrapping_add(unit);
+        hash = hash.wrapping_mul(0x93B5).wrapping_add(unit);
+    }
+    let hash = hash % 200_003;
+    // The first component is seven bits of the second, taken from positions
+    // nobody has explained.
+    let bucket = (hash & 0x01)
+        | ((hash >> 1) & 0x02)
+        | ((hash >> 4) & 0x04)
+        | ((hash >> 4) & 0x08)
+        | ((hash >> 5) & 0x10)
+        | ((hash >> 8) & 0x20)
+        | ((hash >> 10) & 0x40);
+    format!("/PIONEER/USBANLZ/P{bucket:03X}/{hash:08X}")
+}
+
+/// The three analysis files for one track, by their paths on the drive.
+///
+/// `number` is 0 unless something else already occupies the directory, which
+/// happens when two audio paths hash the same.
+pub fn analysis_paths(dir: &str, number: u32) -> [String; 3] {
+    ["DAT", "EXT", "2EX"].map(|ext| format!("{dir}/ANLZ{number:04}.{ext}"))
+}
+
 /// The three bytes that follow a cue's type in both cue formats. They are not
 /// padding: every file seen in the wild holds a big-endian 1000 there, and
 /// nobody knows why.
@@ -730,5 +786,60 @@ mod tests {
             vbr: None,
         };
         assert!(!codes(&inspect(&analysis.ext()).unwrap()).contains(&"PSSI"));
+    }
+
+    #[test]
+    fn the_analysis_directory_is_the_one_rekordbox_would_have_used() {
+        // Worked examples published from a disassembly of rekordbox's own
+        // path-naming, checked against the directory names on real drives. If
+        // this drifts, a player stops finding anything a drive was prepared
+        // with — silently, because it has no reason to look anywhere else.
+        assert_eq!(
+            analysis_dir("/Contents/Leo Portela/Bon Vibrant - Leo Portela.flac"),
+            "/PIONEER/USBANLZ/P00E/000281CE"
+        );
+        assert_eq!(
+            analysis_dir("/Contents/Daniela Cast/Jazzy - Daniela Cast.flac"),
+            "/PIONEER/USBANLZ/P00A/0000CC9C"
+        );
+    }
+
+    #[test]
+    fn every_directory_name_is_one_a_player_could_have_computed() {
+        // The first component is seven bits, so it never runs past P07F, and
+        // the second is a hash modulo a prime. A name outside that range is a
+        // name rekordbox would never write, which is the cheap version of the
+        // check above for paths nobody has published an answer for.
+        for name in ["/Contents/a.flac", "/Contents/Someone/A Long Title Goes Here.mp3", "/x"] {
+            let dir = analysis_dir(name);
+            let (bucket, hash) =
+                dir.trim_start_matches("/PIONEER/USBANLZ/P").split_once('/').unwrap();
+            assert!(u32::from_str_radix(bucket, 16).unwrap() <= 0x7F, "{dir}");
+            assert!(u32::from_str_radix(hash, 16).unwrap() < 200_003, "{dir}");
+            assert_eq!(bucket.len(), 3);
+            assert_eq!(hash.len(), 8);
+        }
+    }
+
+    #[test]
+    fn the_same_track_always_lands_in_the_same_place() {
+        // Which is what makes a second sync able to leave a track alone.
+        assert_eq!(analysis_dir("/Contents/a.flac"), analysis_dir("/Contents/a.flac"));
+        assert_ne!(analysis_dir("/Contents/a.flac"), analysis_dir("/Contents/b.flac"));
+    }
+
+    #[test]
+    fn a_directory_holds_more_than_one_track_by_numbering_the_files() {
+        let dir = analysis_dir("/Contents/a.flac");
+        assert_eq!(
+            analysis_paths(&dir, 0),
+            [
+                format!("{dir}/ANLZ0000.DAT"),
+                format!("{dir}/ANLZ0000.EXT"),
+                format!("{dir}/ANLZ0000.2EX")
+            ]
+        );
+        assert_eq!(analysis_paths(&dir, 1)[0], format!("{dir}/ANLZ0001.DAT"));
+        assert_eq!(analysis_paths(&dir, 12)[0], format!("{dir}/ANLZ0012.DAT"));
     }
 }

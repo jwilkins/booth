@@ -265,6 +265,25 @@ pub fn export(
     // What this run put on, to be handed back for the next one to carry.
     let mut made: Vec<(PathBuf, crate::export::pdb::Track)> = args.already.clone();
 
+    // Which analysis directories are already spoken for. The name comes from a
+    // hash of the audio path, so two tracks can want the same one; the second
+    // to arrive takes the next numbered file rather than overwriting the
+    // first. What is already on the drive counts, which is why this starts
+    // from the rows being carried.
+    let mut occupied: HashMap<String, u32> = HashMap::new();
+    for (_, row) in &args.already {
+        if let Some((dir, file)) = row.analyze_path.rsplit_once('/') {
+            let number = file
+                .trim_start_matches("ANLZ")
+                .split('.')
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0);
+            let next = occupied.entry(dir.to_string()).or_insert(0);
+            *next = (*next).max(number + 1);
+        }
+    }
+
     for (batch, chunk) in files.chunks(BATCH).enumerate() {
         let first_id = taken + (batch * BATCH) as u32 + 1;
         let prepared: Vec<Result<Prepared>> = chunk
@@ -282,7 +301,8 @@ pub fn export(
 
         for (path, result) in chunk.iter().zip(prepared) {
             match result {
-                Ok(prepared) => {
+                Ok(mut prepared) => {
+                    prepared.place(&mut occupied);
                     let Some(track) = &prepared.track else { continue };
                     lines.push(format!(
                         "{} -> {} ({:.2} BPM{}, {} beats, {} phrases, {} cues)",
@@ -410,6 +430,32 @@ impl Prepared {
 
     /// Put it on the drive, and read every analysis file back before calling it
     /// written.
+    /// Settle which numbered analysis file this track gets, now that it is
+    /// known what else is on the drive.
+    ///
+    /// Every track wants `ANLZ0000` in its own hashed directory, and usually
+    /// gets it. Two audio paths hashing alike is the exception this exists
+    /// for: the second one takes `ANLZ0001`, and the player tells them apart by
+    /// the path each file names inside itself.
+    fn place(&mut self, occupied: &mut HashMap<String, u32>) {
+        let Some(track) = &mut self.track else { return };
+        let Some(dir) = self
+            .analysis
+            .first()
+            .and_then(|(at, _)| at.rsplit_once('/'))
+            .map(|(dir, _)| dir.to_string())
+        else {
+            return;
+        };
+        let next = occupied.entry(dir.clone()).or_insert(0);
+        let names = anlz::analysis_paths(&dir, *next);
+        *next += 1;
+        for (slot, name) in self.analysis.iter_mut().zip(names.iter()) {
+            slot.0.clone_from(name);
+        }
+        track.analyze_path.clone_from(&names[0]);
+    }
+
     fn commit(&self, destination: &Destination, source: &Path) -> Result<()> {
         destination.copy_in(&self.on_drive, source)?;
         for (at, bytes) in &self.analysis {
@@ -429,13 +475,12 @@ impl Prepared {
 /// Write the OneLibrary database beside the legacy one, when there is a key
 /// for it.
 ///
-/// A drive without it is the drive this program has always written: every
-/// player up to and including the CDJ-3000 reads it, and the CDJ-3000X and the
-/// other newer players read nothing at all. A drive with it is untested on
-/// hardware, which the line it returns says.
+/// A drive without it is the drive this program used to write, which the
+/// CDJ-3000X and the other newer players read nothing at all of. A drive with
+/// it is one a CDJ-3000X has browsed.
 ///
-/// No key is not a failure. It is the ordinary case — the key is not this
-/// project's to ship — so this reports what was not written and why, and the
+/// No key is not a failure: a build can be made without one, so this reports
+/// what was not written and why, and the
 /// export carries on.
 fn write_onelibrary(
     args: &ExportArgs,
@@ -476,7 +521,7 @@ fn write_onelibrary(
         .context("the OneLibrary database did not read back off the drive")?;
     Ok(vec![format!(
         "wrote {} to {}: {} tables, {} tracks, {} playlists, verified — a CDJ-3000X browses \
-         these; whether it uses the analysis files is unproven",
+         these",
         onelibrary::DRIVE_PATH,
         destination.describe(),
         summary.tables,
@@ -546,11 +591,14 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
         bail!("{} characters is longer than a player will follow", on_drive.len());
     }
 
-    // rekordbox's own scheme for these two directory names is not understood;
-    // ours is derived from the track id, which keeps them unique and lets the
-    // path be reconstructed from the database that points at it.
-    let analyze_dir = format!("/PIONEER/USBANLZ/P{:03}/{id:08X}", id % 1000);
-    let analyze_path = format!("{analyze_dir}/ANLZ0000.DAT");
+    // Named the way rekordbox names it, which is not a courtesy: the player
+    // works this name out for itself from the audio path and looks nowhere
+    // else. See [`anlz::analysis_dir`]. A second track hashing to the same
+    // directory is given a numbered file instead, which is settled when the
+    // drive is written rather than here, because it depends on what else is
+    // going on.
+    let analyze_dir = anlz::analysis_dir(&on_drive);
+    let analyze_path = anlz::analysis_paths(&analyze_dir, 0)[0].clone();
 
     // A stem takes its parent's grid, cues, key and phrases. Its own would be
     // measured from audio with most of the track removed — a vocal with no
@@ -604,10 +652,11 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
         ..pdb::Track::default()
     };
 
+    let names = anlz::analysis_paths(&analyze_dir, 0);
     let analysis = vec![
-        (format!("{analyze_dir}/ANLZ0000.DAT"), files.dat()),
-        (format!("{analyze_dir}/ANLZ0000.EXT"), files.ext()),
-        (format!("{analyze_dir}/ANLZ0000.2EX"), files.two_ex()),
+        (names[0].clone(), files.dat()),
+        (names[1].clone(), files.ext()),
+        (names[2].clone(), files.two_ex()),
     ];
 
     Ok(Prepared {

@@ -6292,9 +6292,9 @@ impl App {
                             // sheet should not let the first half stand in for
                             // the second.
                             true => format!(
-                                "{} A CDJ-3000X has browsed a drive written this way. Whether \
-                                 it used the waveforms and grids, or measured its own, is \
-                                 still unproven.",
+                                "{} A CDJ-3000X browses a drive written this way. Its \
+                                 waveforms and grids have not been seen on a player since \
+                                 the naming they are found by was corrected.",
                                 theme::WARN
                             ),
                             false => format!(

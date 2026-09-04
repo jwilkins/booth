@@ -307,9 +307,24 @@ respect: the `PPTH` path must be null-terminated (two zero bytes, counted in
 the length) or the player rejects the file and writes its own `ANLZ0001.DAT`
 beside it; and a CDJ-3000 without an `.EXT` re-analyses on load.
 
-### 5.1 The directory names
+### 5.1 The directory names — settled
 
-This is the one place the sources disagree in a way that matters. rekordbox
+**A player computes this name itself and looks nowhere else.** That was an
+open question between the sources below until a CDJ-3000X (firmware 1.40) was
+handed a drive this project wrote with the analysis directories named after
+the track id: it browsed the library perfectly — playlists, titles, artists,
+key search, BPM in the track list — and on loading a track showed **no
+waveform, no beat grid, no phrases, no cues, and no BPM on the deck**, with no
+pause to analyse. Everything the database holds, nothing the analysis files
+hold, and no attempt to make up the difference. The files were on the drive and
+`analysisDataFilePath` pointed straight at them.
+
+So Deep Symmetry's reading — that a player follows the stored path — does not
+describe the CDJ-3000X, and fourfour's does. It also explains why
+`analysedBits` matters: told the track is analysed, the player does not
+re-measure, and simply shows nothing when the analysis is not where it expects.
+
+rekordbox
 names each track's analysis directory `P{3 hex digits}/{8 hex digits}` — real
 drives show `P00E/000281CE`, `P016/0000875E`, `P04A/000189B4`. fourfour
 disassembled `CreateAnlzFileFolderPath()` from the rekordbox binary and reports
@@ -330,14 +345,23 @@ vectors, and the eight-hex hash for two of them; the third gives
 probable and check it against a real export before relying on it. Beyond the naming, the sources disagree on whether it matters:
 
 - fourfour says the CDJ-3000 **recomputes** the directory from the audio path
-  and ignores the path stored in the database, and that a wrong directory means
-  the files are never found and the player analyses afresh.
+  and ignores the path stored in the database. Confirmed on a CDJ-3000X above,
+  except for the last part: it did not analyse afresh, it showed nothing.
 - Deep Symmetry's analysis says players use the path string in the database.
-- FableGear (`P{id // 2048:03}/{id:08X}`) and this project
-  (`P{id % 1000:03}/{id:08X}`, decimal) derive the names from the track id.
-  FableGear's drive played on a CDJ-3000 and dj-usb-tkit's on a CDJ-3000X, but
-  neither recorded whether the waveform came up from the files or from a
-  re-analysis, which is exactly the question.
+  Not on this player.
+- FableGear (`P{id // 2048:03}/{id:08X}`) derives the name from the track id,
+  as this project did until the test above. Neither FableGear's CDJ-3000 run
+  nor dj-usb-tkit's CDJ-3000X run recorded whether waveforms appeared, so
+  neither result says anything about their naming either way — and the first
+  observation of what actually happens suggests both are writing analysis
+  files no player opens.
+
+A consequence worth writing down: the eight hex digits are a hash modulo
+200003, so a library of a few thousand tracks will put two tracks in one
+directory. That is what the numbered files are for (`ANLZ0000`, `ANLZ0001`),
+and it means the path inside each file has to name its own track exactly —
+which is the likeliest reason a player validates `PPTH` at all, and why
+fourfour found that a mismatched one gets the file rejected.
 
 The safe course for a writer is to name the directories the way rekordbox does,
 which satisfies both theories.
@@ -398,7 +422,7 @@ reads can change with a firmware update.
 | **dj-usb-tkit** (Rust/Tauri, MIT) | Both databases from scratch (`usb_utils.rs`: DDL, 27 menu items, 22 categories, 17 sorts, 8 colours, 28 My Tags; `PRAGMA key` only; no `cue` rows, no `exportExt.pdb`, no `.2EX`) | **CDJ-3000X, firmware 1.31, 2026-09-02**: four scenarios pass — normal export, strict-parity repair, non-ASCII strings, and a fresh-initialised stick with more than 16 tracks ("accepted and playable"). CDJ-3000 3.20 also. Self-reported in the project's own test matrix; waveform and grid provenance not recorded. |
 | **FableGear** (Python, sqlcipher3) | `exportLibrary.db` only, from DDL and rows copied from a real export; `.DAT`/`.EXT` writers, no `.2EX`; `cue` rows written | **CDJ-3000, 2026-07-29**: a OneLibrary-only stick "loaded and played … without issues". Firmware not recorded. Not tested on a CDJ-3000X. |
 | **fourfour** pioneer-usb-writer (Rust) | Both databases, `.DAT`/`.EXT`, artwork; WAL then checkpoint; `analysedBits` 105, `contentLink` 0 | CDJ-3000, firmware 3.19: a dual-format drive works, and fourfour says that player reads OneLibrary but still needs the legacy `.EXT`. CDJ-3000X "from reference specs" only. |
-| **this project** (`src/export/onelibrary.rs`) | Both databases from one collection, all three ANLZ files, no `exportExt.pdb`, no artwork; `cue` left empty | **CDJ-3000X, September 2026**: playlists, track list and key search all read off the drive. Firmware not recorded. Whether the analysis files were used is not known — see §5.1, and note this writer's directory names are id-derived rather than rekordbox's |
+| **this project** (`src/export/onelibrary.rs`) | Both databases from one collection, all three ANLZ files, no `exportExt.pdb`, no artwork; `cue` left empty | **CDJ-3000X, firmware 1.40, September 2026**: playlists, track list and key search read; no waveform, grid, phrases, cues or deck BPM, because the analysis directories were named after the track id (§5.1 — since fixed, and untested since). The same drive on a **CDJ-3000, firmware 2.05**: the library was not seen at all, which is the legacy `export.pdb` being refused rather than anything to do with OneLibrary |
 | rbox (Rust, GPL-3.0) | Create and insert; no cue insert | None |
 | pyrekordbox `devicelib_plus` (git only; 0.4.4 on PyPI predates it) | Read and write | None |
 | rekordbox-explorer (JavaScript) | A playlist writer, deliberately unshipped: "we still have no CDJ to test against" | None |
@@ -463,15 +487,23 @@ says so.
 
 Against §2 to §5 what is left is:
 
-- **The analysis half is unproven.** A CDJ-3000X has browsed a drive this
-  wrote — playlists, track list and key search — so the database is right
-  enough to read. Nobody has yet reported whether a track loaded off one comes
-  up with its waveform and grid or is re-analysed, which is what the next two
-  entries decide.
+- **The analysis half has failed once and been fixed once.** A CDJ-3000X on
+  firmware 1.40 browsed a drive this wrote and showed nothing at all off the
+  analysis files, because they were in directories named after the track id
+  rather than the hash of the audio path (§5.1). The naming is now rekordbox's;
+  no drive written since has been in front of a player.
+- **A CDJ-3000 on firmware 2.05 does not see the library at all**, which is the
+  legacy `export.pdb` being refused rather than anything about OneLibrary — the
+  3000 never reads that database. This is the first time the legacy writer has
+  been tried on hardware, and it failed. `export.pdb` parses under two
+  independent parsers, so what is wrong is something a parser tolerates and a
+  player does not; fourfour's notes list several candidates found the same way,
+  and the page headers have since been rewritten to match all of them that are
+  published. The remaining named suspect is that the history tables must not be
+  empty, which every export this writes leaves empty and which cannot be
+  satisfied without knowing what a valid history row looks like.
 - No `exportExt.pdb`. rekordbox writes it; whether any player needs it is not
   established (dj-usb-tkit and FableGear omit it and passed).
-- Analysis directories are `P{id % 1000:03}/{id:08X}` in decimal, so they can
-  be `P999` where rekordbox never writes past `P07F`; see §5.1.
 - The `.2EX` carries `PWV7` then `PWV6` and no `PWVC`; rekordbox writes
   `PWV6`, `PWV7`, `PWVC`.
 - The `.EXT` carries a `PQTZ` grid where rekordbox writes `PQT2`.
@@ -536,17 +568,27 @@ Including this repository's own.
 
 ## 12. Open questions
 
-- Does a OneLibrary-only player use `analysisDataFilePath`, or recompute the
-  directory from the audio path? (§5.1.)
+Answered since this was written, and left here so the answers are findable:
+a CDJ-3000X **recomputes** the analysis directory and ignores
+`analysisDataFilePath` (§5.1), and it does **not** silently re-analyse a track
+whose analysis it cannot find — it shows nothing at all.
+
+Still open:
+
 - Does any player need `exportExt.pdb`, and what does a OneLibrary-only player
   do about My Tags without it — it has a `myTag` table of its own, which
   suggests not.
-- Which players require the `.2EX`, and whether `PWVC` matters.
+- Which players require the `.2EX`, and whether `PWVC` matters. This project
+  writes `PWV7` then `PWV6` and no `PWVC`, where rekordbox writes all three in
+  the other order; whether that is enough is the next thing a drive test would
+  say.
 - The real `fileType`, `analysedBits` and `contentLink` values, read from rows
   beside their files.
 - Whether the CDJ-3000 on 3.22 reads `exportLibrary.db` when `export.pdb` is
   absent (FableGear's result says something did).
-- Whether the CDJ-3000X re-analyses a hand-written drive's tracks, silently.
+- **Why a CDJ-3000 on firmware 2.05 refuses a legacy `export.pdb` this project
+  writes** — see §9. The candidates are all in fourfour's notes and none of
+  them has been isolated.
 - What `myTagMasterDBID` is for, and whether a player cares.
 - What AlphaTheta's "more flexible library loading" will be, and when.
 
