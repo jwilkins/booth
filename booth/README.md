@@ -472,6 +472,16 @@ with no tool in the middle.
 A drive is stored once per state: leaving it plugged in does nothing, writing
 to it and plugging it in again stores the new state beside the old one.
 
+What counts as a state is the drive's own files under `PIONEER` — their paths,
+sizes and modification times — and deliberately *not* the breadcrumbs an
+operating system leaves on a mounted volume. macOS writes `.DS_Store` and `._`
+companions on a stick as soon as anything looks at one, and rewrites them
+afterwards; counted as changes, they make a drive that is different every time
+it is looked at, and a drive copied every time it is looked at. A drive that
+changes on its own anyway is copied at most once every five minutes, and the
+log says which file will not hold still. A drive this program writes is never
+held back by that: a write is a real change and is stored at once.
+
 A track counts as the library's if a file there has the same name and length,
 which is true of everything on a drive this wrote. Where that fails the drive's
 file is hashed the way the duplicate finder hashes one — the audio alone, tags

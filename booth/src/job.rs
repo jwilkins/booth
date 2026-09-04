@@ -81,6 +81,10 @@ pub enum Job {
         root: PathBuf,
         /// What it calls itself, which becomes the folder the copies go in.
         drive: String,
+        /// The state it was found in, which is what the copy records having
+        /// stored. Decided by whoever asked for the copy, so that what is
+        /// stored is what was checked.
+        state: String,
         into: PathBuf,
         /// The library's files, for the drive's audio to be linked to rather
         /// than copied.
@@ -703,8 +707,9 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
         Job::Hash(tracks) => hash_all(&tracks, reporter),
         Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
-        Job::Keep { root, drive, into, known, foreign, library, key } => {
-            let kept = crate::backup::keep(&root, &into, &drive, &known, foreign, &library)?;
+        Job::Keep { root, drive, state, into, known, foreign, library, key } => {
+            let kept =
+                crate::backup::keep(&root, &into, &drive, &state, &known, foreign, &library)?;
             let _ = reporter.tx.send(Update::Kept(Box::new(kept)));
             (reporter.wake)();
 

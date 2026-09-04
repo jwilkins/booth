@@ -201,20 +201,49 @@ impl Backup {
     }
 }
 
-/// A summary of the drive's own files: their paths, sizes and modification
-/// times.
+/// Files an operating system writes on a drive of its own accord.
+///
+/// macOS leaves `.DS_Store` and `._` companions on a removable volume as soon
+/// as anything looks at one, and rewrites them afterwards without a person
+/// having touched the library. Counting those as a change to the drive makes a
+/// drive that has changed every time it is looked at — which is a drive copied
+/// again every time it is looked at. None of them is anything a player reads.
+fn is_noise(relative: &Path) -> bool {
+    relative.components().any(|part| {
+        let name = part.as_os_str().to_str().unwrap_or_default();
+        name.starts_with("._")
+            || matches!(
+                name,
+                ".DS_Store"
+                    | ".Spotlight-V100"
+                    | ".fseventsd"
+                    | ".TemporaryItems"
+                    | ".Trashes"
+                    | "Thumbs.db"
+                    | "desktop.ini"
+            )
+    })
+}
+
+/// The drive's own files, as `path:size:modified`, sorted.
 ///
 /// Enough to notice that a drive has been written to since it was last seen,
 /// and cheap enough to compute on every insertion — it reads no file contents.
 /// The audio is deliberately not part of it: a drive whose database changed is
 /// a drive worth storing again, and one whose audio changed has a changed
 /// database too.
-pub fn fingerprint(root: &Path) -> String {
-    use std::fmt::Write;
-
-    let Some(pioneer) = pioneer(root) else { return String::new() };
+///
+/// Kept rather than only hashed, so that a drive which keeps changing can be
+/// asked *what* changed. That answer is the difference between a bug report
+/// saying it loops and one saying which file it loops on.
+pub fn listing(root: &Path) -> Vec<String> {
+    let Some(pioneer) = pioneer(root) else { return Vec::new() };
     let mut lines: Vec<String> = Vec::new();
     for file in walk(&pioneer) {
+        let Ok(relative) = file.strip_prefix(&pioneer) else { continue };
+        if is_noise(relative) {
+            continue;
+        }
         let Ok(meta) = file.metadata() else { continue };
         let at = meta
             .modified()
@@ -222,13 +251,17 @@ pub fn fingerprint(root: &Path) -> String {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let name = file.strip_prefix(&pioneer).unwrap_or(&file).display();
-        lines.push(format!("{name}:{}:{at}", meta.len()));
+        lines.push(format!("{}:{}:{at}", relative.display(), meta.len()));
     }
     lines.sort();
+    lines
+}
 
-    // A short digest of that listing rather than the listing itself, because it
-    // is compared and stored rather than read.
+/// A short digest of a listing, because it is compared and stored rather than
+/// read.
+pub fn digest(lines: &[String]) -> String {
+    use std::fmt::Write;
+
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in lines.join("\n").bytes() {
         hash ^= u64::from(byte);
@@ -237,6 +270,32 @@ pub fn fingerprint(root: &Path) -> String {
     let mut out = String::new();
     let _ = write!(out, "{hash:016x}");
     out
+}
+
+/// What a drive's files come to, or nothing at all if it has none of its own.
+pub fn fingerprint(root: &Path) -> String {
+    let lines = listing(root);
+    match lines.is_empty() {
+        true => String::new(),
+        false => digest(&lines),
+    }
+}
+
+/// The files two listings disagree about, by name and at most a handful.
+///
+/// For saying out loud why a drive is being stored again.
+pub fn differences(before: &[String], after: &[String]) -> Vec<String> {
+    // Each line is `path:size:modified`, and a path may hold colons of its own,
+    // so the name is everything before the last two.
+    let name = |line: &String| line.rsplitn(3, ':').last().unwrap_or(line).to_string();
+    let old: std::collections::HashSet<&String> = before.iter().collect();
+    let new: std::collections::HashSet<&String> = after.iter().collect();
+
+    let mut names: Vec<String> = new.symmetric_difference(&old).map(|line| name(line)).collect();
+    names.sort();
+    names.dedup();
+    names.truncate(6);
+    names
 }
 
 /// Whether a backup of this exact drive state has already been taken.
@@ -257,10 +316,16 @@ pub fn already_kept(into: &Path, drive: &str, fingerprint: &str) -> bool {
 ///
 /// `library` is where music copied in goes, and is only read when `foreign` is
 /// [`OnForeign::Adopt`].
+///
+/// `state` is the fingerprint the drive was found in, passed in rather than
+/// measured here. A copy takes minutes, and measuring again at the end would
+/// store the drive under a state nobody decided to store — one that will not
+/// match the next look, so the same drive gets copied again, and again.
 pub fn keep(
     root: &Path,
     into: &Path,
     drive: &str,
+    state: &str,
     known: &[Known],
     foreign: OnForeign,
     library: &Path,
@@ -272,7 +337,7 @@ pub fn keep(
     let mut backup = Backup {
         drive: drive.to_string(),
         at,
-        fingerprint: fingerprint(root),
+        fingerprint: state.to_string(),
         ..Backup::default()
     };
 
@@ -570,7 +635,16 @@ mod tests {
         let (drive, known) = a_drive(&scratch);
         let (into, library) = into(&scratch);
 
-        let kept = keep(&drive, &into, "MY STICK", &known, OnForeign::Ignore, &library).unwrap();
+        let kept = keep(
+            &drive,
+            &into,
+            "MY STICK",
+            &fingerprint(&drive),
+            &known,
+            OnForeign::Ignore,
+            &library,
+        )
+        .unwrap();
         assert_eq!(kept.carried, 3, "the database, the other one, and the analysis");
         assert_eq!(kept.linked, 1);
         assert_eq!(kept.absent, 0);
@@ -594,7 +668,8 @@ mod tests {
         let scratch = Scratch::new("space");
         let (drive, known) = a_drive(&scratch);
         let (into, library) = into(&scratch);
-        keep(&drive, &into, "MY STICK", &known, OnForeign::Ignore, &library).unwrap();
+        keep(&drive, &into, "MY STICK", &fingerprint(&drive), &known, OnForeign::Ignore, &library)
+            .unwrap();
 
         let at = std::fs::read_dir(into.join("MY STICK")).unwrap().next().unwrap().unwrap().path();
         let track = at.join("Contents/Peverelist/Roll With The Punches.flac");
@@ -622,7 +697,16 @@ mod tests {
         let scratch = Scratch::new("foreign");
         let (drive, _) = a_drive(&scratch);
         let (backups, library) = into(&scratch);
-        let kept = keep(&drive, &backups, "THEIRS", &[], OnForeign::Ignore, &library).unwrap();
+        let kept = keep(
+            &drive,
+            &backups,
+            "THEIRS",
+            &fingerprint(&drive),
+            &[],
+            OnForeign::Ignore,
+            &library,
+        )
+        .unwrap();
 
         assert_eq!(kept.linked, 0);
         assert_eq!(kept.absent, 1);
@@ -662,9 +746,16 @@ mod tests {
             bytes: 1,
             audio_hash: musicai::hash::audio_sha256(&mine).unwrap(),
         }];
-        let kept =
-            keep(&scratch.path("drive"), &into, "THEIRS", &known, OnForeign::Ignore, &library_at)
-                .unwrap();
+        let kept = keep(
+            &scratch.path("drive"),
+            &into,
+            "THEIRS",
+            &fingerprint(&scratch.path("drive")),
+            &known,
+            OnForeign::Ignore,
+            &library_at,
+        )
+        .unwrap();
 
         assert_eq!(kept.linked, 1, "the same recording should be recognised: {kept:?}");
         assert_eq!(kept.absent, 0);
@@ -685,9 +776,16 @@ mod tests {
             bytes: 1,
             audio_hash: musicai::hash::audio_sha256(&mine).unwrap(),
         }];
-        let kept =
-            keep(&scratch.path("drive"), &into, "THEIRS", &known, OnForeign::Ignore, &library_at)
-                .unwrap();
+        let kept = keep(
+            &scratch.path("drive"),
+            &into,
+            "THEIRS",
+            &fingerprint(&scratch.path("drive")),
+            &known,
+            OnForeign::Ignore,
+            &library_at,
+        )
+        .unwrap();
         assert_eq!(kept.linked, 0);
         assert_eq!(kept.absent, 1);
     }
@@ -698,7 +796,9 @@ mod tests {
         let (into, library_at) = into(&scratch);
         let (drive, _) = a_drive(&scratch);
 
-        let kept = keep(&drive, &into, "THEIRS", &[], OnForeign::Keep, &library_at).unwrap();
+        let kept =
+            keep(&drive, &into, "THEIRS", &fingerprint(&drive), &[], OnForeign::Keep, &library_at)
+                .unwrap();
         assert_eq!(kept.copied, 1);
         assert_eq!(kept.absent, 0, "nothing is missing from a backup that copied it");
         assert!(kept.adopted.is_empty(), "the library is not touched");
@@ -722,7 +822,9 @@ mod tests {
         // is foreign as far as this call is concerned.
         std::fs::remove_dir_all(&library_at).unwrap();
 
-        let kept = keep(&drive, &into, "THEIRS", &[], OnForeign::Adopt, &library_at).unwrap();
+        let kept =
+            keep(&drive, &into, "THEIRS", &fingerprint(&drive), &[], OnForeign::Adopt, &library_at)
+                .unwrap();
         assert_eq!(kept.copied, 1);
         assert_eq!(kept.absent, 0);
 
@@ -740,7 +842,8 @@ mod tests {
         let (drive, _) = a_drive(&scratch);
         let already = scratch.file("library/Peverelist/Roll With The Punches.flac", b"mine");
 
-        keep(&drive, &into, "THEIRS", &[], OnForeign::Adopt, &library_at).unwrap();
+        keep(&drive, &into, "THEIRS", &fingerprint(&drive), &[], OnForeign::Adopt, &library_at)
+            .unwrap();
         assert_eq!(std::fs::read(&already).unwrap(), b"mine");
     }
 
@@ -750,7 +853,16 @@ mod tests {
         let (drive, known) = a_drive(&scratch);
         let (into, library) = into(&scratch);
 
-        let first = keep(&drive, &into, "MY STICK", &known, OnForeign::Ignore, &library).unwrap();
+        let first = keep(
+            &drive,
+            &into,
+            "MY STICK",
+            &fingerprint(&drive),
+            &known,
+            OnForeign::Ignore,
+            &library,
+        )
+        .unwrap();
         assert!(!first.fingerprint.is_empty());
         assert!(already_kept(&into, "MY STICK", &first.fingerprint));
 
@@ -758,6 +870,58 @@ mod tests {
         std::fs::write(drive.join("PIONEER/rekordbox/export.pdb"), b"a longer database").unwrap();
         assert_ne!(fingerprint(&drive), first.fingerprint);
         assert!(!already_kept(&into, "MY STICK", &fingerprint(&drive)));
+    }
+
+    #[test]
+    fn an_operating_systems_own_droppings_are_not_a_change_to_the_drive() {
+        // The bug this is here for: macOS writes .DS_Store and ._ companions
+        // on a mounted volume by itself, and rewrites them afterwards. Counted
+        // as changes, they make a drive that is different every time it is
+        // looked at, and a drive copied every time it is looked at.
+        let scratch = Scratch::new("noise");
+        let (drive, _) = a_drive(&scratch);
+        let before = fingerprint(&drive);
+
+        scratch.file("drive/PIONEER/.DS_Store", b"finder, remembering a window");
+        scratch.file("drive/PIONEER/rekordbox/._export.pdb", b"a resource fork");
+        scratch.file("drive/PIONEER/.Spotlight-V100/store.db", b"an index");
+        assert_eq!(fingerprint(&drive), before, "the drive did not change");
+
+        // And something that is the drive changing still counts.
+        scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a longer database");
+        assert_ne!(fingerprint(&drive), before);
+    }
+
+    #[test]
+    fn a_drive_that_changed_can_say_which_file_changed() {
+        let scratch = Scratch::new("differences");
+        let (drive, _) = a_drive(&scratch);
+        let before = listing(&drive);
+
+        scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a longer database");
+        scratch.file("drive/PIONEER/rekordbox/exportExt.pdb", b"a new one");
+        let after = listing(&drive);
+
+        let changed = differences(&before, &after);
+        assert!(changed.iter().any(|name| name.ends_with("export.pdb")), "{changed:?}");
+        assert!(changed.iter().any(|name| name.ends_with("exportExt.pdb")), "{changed:?}");
+    }
+
+    #[test]
+    fn what_a_copy_records_is_the_state_it_was_asked_to_copy() {
+        // Not the state at the end of the copy. A copy takes minutes, and a
+        // drive that changes during one would otherwise be recorded under a
+        // state nobody checked — which the next look would not match, so the
+        // same drive would be copied again, forever.
+        let scratch = Scratch::new("state");
+        let (into, library) = into(&scratch);
+        let (drive, known) = a_drive(&scratch);
+        let decided = fingerprint(&drive);
+
+        let kept =
+            keep(&drive, &into, "MY STICK", &decided, &known, OnForeign::Ignore, &library).unwrap();
+        assert_eq!(kept.fingerprint, decided);
+        assert!(already_kept(&into, "MY STICK", &decided), "the next look finds it and stops");
     }
 
     #[test]

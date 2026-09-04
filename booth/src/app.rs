@@ -97,6 +97,69 @@ const PREP_HEIGHT: f32 = wave::HEIGHT
 /// shorter than its own contents just clips them.
 const DOCK_HEIGHT: f32 = 24.0 + 4.0 + 16.0;
 
+/// What the last look at one drive found.
+struct Seen {
+    /// The digest of the files it had of its own.
+    fingerprint: String,
+    /// Those files, so a later look can say what changed rather than only that
+    /// something did.
+    listing: Vec<String>,
+    /// When that state was acted on.
+    at: std::time::Instant,
+    /// Whether the log has already said this drive will not settle. Said once
+    /// per state, because a line every four seconds is not a warning, it is a
+    /// second problem.
+    complained: bool,
+}
+
+/// How long a drive that changed on its own has to hold still before it is
+/// stored again.
+///
+/// Nothing here changes a mounted drive, but an operating system does — an
+/// index it decided to build, a folder view it decided to save — and a copy
+/// started for every one of those is a disk full of near-identical copies by
+/// morning. A drive this program writes is not held back by this: that path
+/// knows a real change happened, and says so.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Whether a drive found in this state is one to copy now.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Worth {
+    /// It is the state it was already stored in.
+    No,
+    /// A different state, but it changed again so soon after the last copy
+    /// that something other than a person is changing it.
+    NotYet,
+    Yes,
+}
+
+/// The decision that keeps a drive from being copied over and over.
+fn worth_keeping(seen: Option<&Seen>, state: &str) -> Worth {
+    match seen {
+        None => Worth::Yes,
+        Some(seen) if seen.fingerprint == state => Worth::No,
+        Some(seen) if seen.at.elapsed() < SETTLE => Worth::NotYet,
+        Some(_) => Worth::Yes,
+    }
+}
+
+/// What to call a drive: the name it is mounted under, or the label it gave
+/// when there is no mount point to read.
+///
+/// One rule, used by both the sweep and the write that just finished, because
+/// the name is the folder its copies live in and two names would mean two
+/// folders for one stick — and a copy stored under one name that the other
+/// never finds.
+fn drive_name(root: &std::path::Path, label: &str) -> String {
+    match root.file_name().and_then(|n| n.to_str()) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => match label.trim().is_empty() {
+            true => "drive".to_string(),
+            false => label.trim().to_string(),
+        },
+    }
+}
+
 /// Which of the fixed collection views is showing.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum View {
@@ -199,14 +262,14 @@ pub struct App {
     /// showing it is open.
     checked: Option<Checked>,
     /// When the mounted volumes were last looked through for a player's drive,
-    /// and which drive states have been copied already this run.
+    /// and what the last look at each found.
     ///
-    /// The set is a cheap guard in front of the one on disk: a stick left
+    /// The map is a cheap guard in front of the one on disk: a stick left
     /// plugged in comes past every few seconds, and reading a directory of
     /// backups each time to decide it is the same stick would be work for
     /// nothing.
     looked_for_drives: Option<std::time::Instant>,
-    kept_drives: std::collections::HashSet<String>,
+    kept_drives: std::collections::HashMap<String, Seen>,
     /// Kept files whose names a copier wrote, and the name each could go back
     /// to now that what it was copied from has gone. Offered, never done on its
     /// own: renaming somebody's file is not a tidy-up to spring on them.
@@ -521,7 +584,7 @@ impl App {
             duplicates: None,
             checked: None,
             looked_for_drives: None,
-            kept_drives: std::collections::HashSet::new(),
+            kept_drives: std::collections::HashMap::new(),
             renames: Vec::new(),
             panels_moved: false,
             pending_save: false,
@@ -1277,17 +1340,19 @@ impl App {
                     let (path, label, is_image) =
                         (drive.path.clone(), drive.label.clone(), drive.is_image);
                     if self.config.keep_drives && !is_image {
-                        let state = crate::backup::fingerprint(&path);
-                        let name = match label.is_empty() {
-                            true => path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("drive")
-                                .to_string(),
-                            false => label,
-                        };
-                        if !state.is_empty() && self.kept_drives.insert(format!("{name}:{state}")) {
-                            self.keep_drive(&path, &name);
+                        let listing = crate::backup::listing(&path);
+                        let state = crate::backup::digest(&listing);
+                        // The same name the sweep would give it, so that a
+                        // drive written here and found again later is one drive
+                        // with one folder of copies rather than two.
+                        let name = drive_name(&path, &label);
+                        let known =
+                            self.kept_drives.get(&name).map(|seen| seen.fingerprint.clone());
+                        // A write is a reason to store the drive whatever was
+                        // stored before, so this asks only whether it is the
+                        // same state — never how long ago the last copy was.
+                        if !listing.is_empty() && known.as_deref() != Some(state.as_str()) {
+                            self.keep_drive(&path, &name, &state, listing);
                         }
                     }
                 }
@@ -2186,19 +2251,60 @@ impl App {
             if !crate::backup::is_a_player_drive(&root) {
                 continue;
             }
-            let name = root.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-            let state = crate::backup::fingerprint(&root);
-            if state.is_empty() || !self.kept_drives.insert(format!("{name}:{state}")) {
+            let name = drive_name(&root, "");
+            let listing = crate::backup::listing(&root);
+            if listing.is_empty() {
                 continue;
             }
+            let state = crate::backup::digest(&listing);
+
+            match worth_keeping(self.kept_drives.get(&name), &state) {
+                Worth::No => continue,
+                Worth::NotYet => {
+                    // Something is changing this drive on its own. Say which
+                    // file, once, and leave it alone until it settles: copying
+                    // a drive every time an operating system touches it is how
+                    // a disk fills up overnight.
+                    if let Some(seen) = self.kept_drives.get_mut(&name) {
+                        if !seen.complained {
+                            seen.complained = true;
+                            let changed = crate::backup::differences(&seen.listing, &listing);
+                            crate::warn!(
+                                "{name} changed again right after it was copied ({}); \
+                                 leaving it be until it settles",
+                                changed.join(", ")
+                            );
+                        }
+                    }
+                    continue;
+                }
+                Worth::Yes => {}
+            }
+
             if crate::backup::already_kept(&self.config.backups_path, &name, &state) {
+                // Stored on a previous run. Remember it, so the directory of
+                // backups is not read again every few seconds for this answer.
+                self.remember_drive(&name, &state, listing);
                 continue;
             }
-            self.keep_drive(&root, &name);
+            self.keep_drive(&root, &name, &state, listing);
             // One at a time. The next one will be found on the next look, and a
             // queue of copies started at once would fight over the same disk.
             return;
         }
+    }
+
+    /// Note what a drive was found holding, without copying it.
+    fn remember_drive(&mut self, name: &str, state: &str, listing: Vec<String>) {
+        self.kept_drives.insert(
+            name.to_string(),
+            Seen {
+                fingerprint: state.to_string(),
+                listing,
+                at: std::time::Instant::now(),
+                complained: false,
+            },
+        );
     }
 
     /// Turn what a player recorded having played into playlists.
@@ -2292,7 +2398,13 @@ impl App {
     }
 
     /// Start copying one drive.
-    fn keep_drive(&mut self, root: &std::path::Path, name: &str) {
+    fn keep_drive(
+        &mut self,
+        root: &std::path::Path,
+        name: &str,
+        state: &str,
+        listing: Vec<String>,
+    ) {
         let known: Vec<crate::backup::Known> = self
             .library
             .tracks
@@ -2304,9 +2416,15 @@ impl App {
             })
             .collect();
         crate::info!("keeping a copy of {name}");
+        // Noted before the job rather than after it, so a copy that fails or is
+        // stopped still counts as this drive having been looked at: the state
+        // is what was decided on, and deciding it again next tick would start
+        // the same copy over.
+        self.remember_drive(name, state, listing);
         self.start(Job::Keep {
             root: root.to_path_buf(),
             drive: name.to_string(),
+            state: state.to_string(),
             into: self.config.backups_path.clone(),
             known,
             foreign: self.config.on_foreign,
@@ -6926,6 +7044,60 @@ fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
 mod tests {
     use super::*;
     use crate::library::CueMark;
+
+    /// What the sweep does with a drive it has seen before.
+    ///
+    /// The bug these are here for: a drive whose state kept coming out
+    /// different was copied every four seconds for as long as it stayed
+    /// plugged in, because the only thing standing between a changed state and
+    /// a copy was whether that exact state had been copied already.
+    mod keeping_drives {
+        use super::*;
+
+        fn seen(fingerprint: &str, ago: std::time::Duration) -> Seen {
+            Seen {
+                fingerprint: fingerprint.to_string(),
+                listing: vec!["rekordbox/export.pdb:1:2".to_string()],
+                at: std::time::Instant::now() - ago,
+                complained: false,
+            }
+        }
+
+        #[test]
+        fn a_drive_never_seen_before_is_copied() {
+            assert_eq!(worth_keeping(None, "abc"), Worth::Yes);
+        }
+
+        #[test]
+        fn the_same_drive_unchanged_is_left_alone() {
+            let before = seen("abc", std::time::Duration::from_secs(0));
+            assert_eq!(worth_keeping(Some(&before), "abc"), Worth::No);
+        }
+
+        #[test]
+        fn a_drive_that_changed_again_at_once_is_not_copied_again_at_once() {
+            let before = seen("abc", std::time::Duration::from_secs(1));
+            assert_eq!(worth_keeping(Some(&before), "def"), Worth::NotYet);
+        }
+
+        #[test]
+        fn a_drive_that_changed_long_after_being_copied_is_copied() {
+            let before = seen("abc", SETTLE + std::time::Duration::from_secs(1));
+            assert_eq!(worth_keeping(Some(&before), "def"), Worth::Yes);
+        }
+
+        #[test]
+        fn a_drive_is_called_the_same_thing_by_both_the_sweep_and_a_write() {
+            // Two names would mean two folders of copies for one stick, and a
+            // copy stored under one name that the other would never find.
+            let root = std::path::Path::new("/Volumes/MY STICK");
+            assert_eq!(drive_name(root, ""), "MY STICK");
+            assert_eq!(drive_name(root, "MY STICK"), drive_name(root, ""));
+            assert_eq!(drive_name(root, "something else"), "MY STICK");
+            assert_eq!(drive_name(std::path::Path::new("/"), "LABEL"), "LABEL");
+            assert_eq!(drive_name(std::path::Path::new("/"), ""), "drive");
+        }
+    }
 
     /// Driving the sidebar the way a person does: click, type, press a key,
     /// and see what the collection holds afterwards.
