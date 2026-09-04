@@ -157,6 +157,42 @@ renames somebody's records without them noticing. Questions collect into one
 sheet showing both sides and the score. Answering one changes the collection
 only — never a file, unless you have turned on the tag write-back.
 
+### What the path says
+
+A file's own path is evidence, and usually good evidence.
+`Peverelist/Tessellations/02 - Roll With The Punches.flac` names the artist,
+the release, the track number and the title, in a layout that has been the same
+since people started keeping music in folders. So it is read: at import, for
+the fields the tags leave empty, and at identification, where it does two
+things a fingerprint cannot.
+
+- **AcoustID has never heard of it.** Which is the normal state of affairs for
+  a white label, a promo, an edit, a bootleg — most of what is actually played.
+  There is no match to weigh, and a strongly structured path is then the best
+  evidence on the disk. It is taken, and the log says so.
+- **AcoustID says something else.** A fingerprint is about the audio and a path
+  is about what somebody filed it as, so a confident disagreement between them
+  is a question rather than something to settle by rule — an edit filed under
+  the original's name, or a fingerprint that landed on the wrong pressing. The
+  sheet shows both answers and a **Use the path** button beside **Use this**.
+
+A path is only acted on when it names both an artist and a title from
+somewhere that means one. Folders that are a filing system rather than a name —
+`Music`, `Downloads`, `FLAC`, `320`, `Various Artists`, `CD2` — are never taken
+for an artist, a hyphen inside a word stays inside it (`Re-Up`, `Jean-Michel`),
+a leading `02 - ` is a track number, and `(www.somewhere.com)` is trimmed off.
+Nothing read off a path ever overwrites what the file's own tags say.
+
+### Before writing tags into a file
+
+Tagging is the one thing here that writes to your files, so it has a check of
+its own: if a file's name has almost nothing in common with the names about to
+go into it, the write is held back and put to you first. `track04.mp3` about to
+become *Peverelist — Roll With The Punches* is the shape of a fingerprint that
+found the wrong record, and forty of those is a bad afternoon. A file named
+after the title alone passes — plenty are — and so does one whose name differs
+only in case and punctuation.
+
 Lookups are paced to what the two services ask for (three a second, and one a
 second respectively). That pacing is theirs and is not adjustable: getting
 somebody's address blocked would be real harm.
@@ -424,10 +460,20 @@ own — a real one, so it can go on a second screen and stay open beside the
 browser without taking anything from the collection. Filter by level, follow the
 tail or park it, clear, or copy everything shown.
 
+Every line starts with the date and time it happened — `20260904 21:14:03` —
+in UTC. A log is read next to things that have clocks of their own: a file's
+modification time, yesterday's log, somebody saying their drive stopped working
+about half nine. "412.008 seconds into some run" cannot be lined up with any of
+those. The window keeps the run's own elapsed clock beside it for the times you
+want to know how long something took.
+
 Everything also goes to `booth.log` in the data directory, and the previous
 run's is kept beside it as `booth.log.1` — the run worth reading is usually the
 one that just ended badly. `BOOTH_LOG=warn` turns it down; `off` turns it off.
-The default is everything.
+The default is everything, and everything means everything: which file was
+imported and what its path was taken to mean, what each drive state came out
+as and which file changed it, every track a check disagreed with, each session
+read off a drive, and the machine and version at the top of every run.
 
 ## Where things are kept
 

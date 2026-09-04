@@ -330,9 +330,11 @@ pub fn keep(
     foreign: OnForeign,
     library: &Path,
 ) -> Result<Backup> {
-    let at = now();
-    let dir = into.join(safe(drive)).join(stamp(at));
+    let at = crate::clock::now();
+    let dir = into.join(safe(drive)).join(crate::clock::folder(at));
     std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
+    crate::info!("copying {drive} ({}) into {}", root.display(), dir.display());
+    crate::debug!("{drive} is in state {state}, and music elsewhere is {foreign:?}");
 
     let mut backup = Backup {
         drive: drive.to_string(),
@@ -357,6 +359,11 @@ pub fn keep(
             backup.carried += 1;
             backup.bytes += file.metadata().map(|m| m.len()).unwrap_or(0);
         }
+        crate::debug!(
+            "carried {} of the drive's own files ({})",
+            backup.carried,
+            crate::sync::bytes(backup.bytes)
+        );
     }
 
     // The audio. Indexed both ways the library can be asked about a file, so
@@ -386,10 +393,15 @@ pub fn keep(
         // Music the library does not have.
         match foreign {
             OnForeign::Ignore => {
+                crate::debug!(
+                    "not in the library, and noted rather than kept: {}",
+                    relative.display()
+                );
                 backup.absent += 1;
                 backup.missing.push(relative.display().to_string());
             }
             OnForeign::Keep => {
+                crate::debug!("not in the library, and kept in the backup: {}", relative.display());
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -404,6 +416,7 @@ pub fn keep(
                 // the library uses. An existing file is left alone: this is
                 // somebody's music folder, not scratch space.
                 let at = library.join(relative);
+                crate::debug!("not in the library, and copied into it: {}", relative.display());
                 if let Some(parent) = at.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -423,6 +436,7 @@ pub fn keep(
     }
 
     std::fs::write(dir.join("backup.json"), serde_json::to_vec_pretty(&backup)?)?;
+    crate::info!("{drive}: {}", backup.summary());
     Ok(backup)
 }
 
@@ -507,38 +521,6 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     }
     found.sort();
     found
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// A folder name for a moment: sortable, and readable without a tool.
-fn stamp(seconds: u64) -> String {
-    // Days since the epoch to a date, by the civil-calendar algorithm, so that
-    // a backup folder says when it was taken without pulling in a calendar
-    // library for one line of output.
-    let days = (seconds / 86_400) as i64;
-    let seconds_today = seconds % 86_400;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}{:02}{:02}",
-        seconds_today / 3_600,
-        (seconds_today / 60) % 60,
-        seconds_today % 60
-    )
 }
 
 /// A name that is safe to make a folder out of.
@@ -952,9 +934,10 @@ mod tests {
 
     #[test]
     fn a_backup_folder_says_when_it_was_taken() {
-        assert_eq!(stamp(0), "1970-01-01 000000");
-        assert_eq!(stamp(1_756_944_000), "2025-09-04 000000");
+        use crate::clock::folder;
+        assert_eq!(folder(0), "1970-01-01 000000");
+        assert_eq!(folder(1_756_944_000), "2025-09-04 000000");
         // Sortable, which is what makes the newest one findable.
-        assert!(stamp(1_756_944_000) < stamp(1_756_944_001));
+        assert!(folder(1_756_944_000) < folder(1_756_944_001));
     }
 }

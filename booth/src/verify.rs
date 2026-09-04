@@ -149,6 +149,15 @@ pub fn check(track: &Track, deep: bool) -> Report {
     }
 
     troubles.sort_by_key(|trouble| trouble.rank());
+    match troubles.is_empty() {
+        true => crate::debug!("#{} is as the collection describes it", track.id),
+        false => crate::debug!(
+            "#{} {}: {}",
+            track.id,
+            track.path.display(),
+            troubles.iter().map(Trouble::what).collect::<Vec<_>>().join(", ")
+        ),
+    }
     Report { id: track.id, path: track.path.clone(), troubles, fresh: Some(Box::new(fresh)) }
 }
 
