@@ -58,14 +58,35 @@ impl Plan {
     }
 }
 
-/// What a sync would do to `drive`, given what is in its playlist now.
+/// Every track that should be on `drive`, in the order it goes on.
+///
+/// A track in two of the drive's playlists is one track on the drive, so this
+/// is a union that keeps first-seen order: the same file copied twice would be
+/// two rows on the player and twice the space.
+///
+/// The plan is a comparison against this, and the write has to put the same
+/// question to the collection — asking it twice in two places is how the two
+/// come to disagree about what the drive is supposed to hold.
+pub fn wanted(library: &Library, drive: &Drive) -> Vec<u32> {
+    let mut wanted: Vec<u32> = Vec::new();
+    for name in &drive.playlist_names() {
+        let Some(playlist) = library.playlists.iter().find(|p| p.name == *name) else { continue };
+        for id in &playlist.tracks {
+            if !wanted.contains(id) {
+                wanted.push(*id);
+            }
+        }
+    }
+    wanted
+}
+
+/// What a sync would do to `drive`, given what is in its playlists now.
+///
+/// A track in two of the drive's playlists is one track on the drive, so the
+/// wanted set is a union that keeps first-seen order: the same file copied
+/// twice would be two rows on the player and twice the space.
 pub fn plan(library: &Library, drive: &Drive) -> Plan {
-    let wanted: Vec<u32> = library
-        .playlists
-        .iter()
-        .find(|p| p.name == drive.playlist)
-        .map(|p| p.tracks.clone())
-        .unwrap_or_default();
+    let wanted = wanted(library, drive);
 
     let mut plan = Plan::default();
     for id in &wanted {
@@ -395,7 +416,11 @@ mod tests {
             playlist: "peak".into(),
             written: written
                 .iter()
-                .map(|id| Written { id: *id, prep: fingerprint(library.get(*id).unwrap()) })
+                .map(|id| Written {
+                    id: *id,
+                    prep: fingerprint(library.get(*id).unwrap()),
+                    row: None,
+                })
                 .collect(),
             ..Drive::default()
         }
@@ -493,6 +518,42 @@ mod tests {
         // to the player and must not mark the track for rewriting.
         library.get_mut(ids[0]).unwrap().bpm = 128.0001;
         assert_eq!(fingerprint(library.get(ids[0]).unwrap()), before);
+    }
+
+    #[test]
+    fn a_drive_plans_across_every_playlist_it_carries() {
+        let (mut library, ids) = library_with(4);
+        // Two lists that overlap: a track in both is one track on the drive.
+        library.playlists[0].tracks = vec![ids[0], ids[1]];
+        library.playlists.push(Playlist {
+            name: "warm".into(),
+            folder: "Sat".into(),
+            tracks: vec![ids[1], ids[2]],
+        });
+        let drive =
+            Drive { playlists: vec!["peak".into(), "warm".into()], ..drive_for(&library, &[]) };
+
+        let plan = plan(&library, &drive);
+        assert_eq!(plan.add, vec![ids[0], ids[1], ids[2]], "the union, in first-seen order");
+        assert_eq!(plan.add_bytes, 3 * 40 * 1024 * 1024, "the shared track is not paid for twice");
+        assert!(!plan.add.contains(&ids[3]), "a track in neither list stays off");
+    }
+
+    #[test]
+    fn taking_a_playlist_off_a_drive_marks_what_only_it_wanted_for_removal() {
+        let (mut library, ids) = library_with(2);
+        library.playlists[0].tracks = vec![ids[0]];
+        library.playlists.push(Playlist {
+            name: "warm".into(),
+            folder: String::new(),
+            tracks: vec![ids[1]],
+        });
+
+        // Both were written; now only one list is carried.
+        let drive = Drive { playlists: vec!["peak".into()], ..drive_for(&library, &ids) };
+        let plan = plan(&library, &drive);
+        assert_eq!(plan.remove, vec![ids[1]]);
+        assert!(plan.add.is_empty());
     }
 
     #[test]

@@ -22,6 +22,62 @@ use super::{BeatGrid, Cue, CueKind, SongStructure};
 /// zeroes.
 const FILE_HEADER_LEN: u32 = 0x1c;
 
+/// Where a track's analysis files go, worked out from where its audio went.
+///
+/// # Why it is a hash and not a number
+///
+/// Every track on a drive gets a directory of its own under
+/// `PIONEER/USBANLZ`, named `P{three hex}/{eight hex}`, and it looked for a
+/// long time as though the names could be anything as long as the database
+/// pointed at them. They cannot. A player computes this name itself, from the
+/// path of the audio file, and looks only there — so an analysis file the
+/// database points at perfectly and that sits under any other name is a file
+/// the player never opens.
+///
+/// That was this program's bug: it named these directories after the track id,
+/// wrote grids, waveforms, cues and phrases into them, and a CDJ-3000X showed
+/// none of it. Not slowly, not wrongly — it showed nothing at all and did not
+/// pause to analyse, because as far as the player was concerned the track was
+/// analysed and the analysis was simply missing.
+///
+/// The hash is `morizkraemer/fourfour`'s, disassembled out of rekordbox's own
+/// `CreateAnlzFileFolderPath`. Two of the three worked examples they publish
+/// reproduce exactly here; the third does not, which is recorded in
+/// `docs/onelibrary.md` §5.1 along with the rest of what is known.
+///
+/// The eight hex digits are the hash modulo a prime, so two tracks can land in
+/// one directory: about two hundred thousand of them exist, which a large
+/// library will fill often enough to matter. That is what the numbered files
+/// are for — `ANLZ0000`, `ANLZ0001` — and why the path section inside each
+/// file has to name the track it belongs to exactly.
+pub fn analysis_dir(on_drive: &str) -> String {
+    let mut hash: u32 = 0;
+    for unit in on_drive.encode_utf16() {
+        let unit = u32::from(unit);
+        hash = hash.wrapping_mul(0x5BC9).wrapping_add(unit);
+        hash = hash.wrapping_mul(0x93B5).wrapping_add(unit);
+    }
+    let hash = hash % 200_003;
+    // The first component is seven bits of the second, taken from positions
+    // nobody has explained.
+    let bucket = (hash & 0x01)
+        | ((hash >> 1) & 0x02)
+        | ((hash >> 4) & 0x04)
+        | ((hash >> 4) & 0x08)
+        | ((hash >> 5) & 0x10)
+        | ((hash >> 8) & 0x20)
+        | ((hash >> 10) & 0x40);
+    format!("/PIONEER/USBANLZ/P{bucket:03X}/{hash:08X}")
+}
+
+/// The three analysis files for one track, by their paths on the drive.
+///
+/// `number` is 0 unless something else already occupies the directory, which
+/// happens when two audio paths hash the same.
+pub fn analysis_paths(dir: &str, number: u32) -> [String; 3] {
+    ["DAT", "EXT", "2EX"].map(|ext| format!("{dir}/ANLZ{number:04}.{ext}"))
+}
+
 /// The three bytes that follow a cue's type in both cue formats. They are not
 /// padding: every file seen in the wild holds a big-endian 1000 there, and
 /// nobody knows why.
@@ -36,7 +92,7 @@ fn put_u32(out: &mut Vec<u8>, v: u32) {
 }
 
 fn put_pad(out: &mut Vec<u8>, n: usize) {
-    out.extend(std::iter::repeat(0u8).take(n));
+    out.extend(std::iter::repeat_n(0u8, n));
 }
 
 /// Start a section: its code, the length of its header, and a placeholder for
@@ -264,6 +320,28 @@ pub fn wave_3band_detail(data: &[u8]) -> Vec<u8> {
     entry_section(b"PWV7", 3, data, Some(0x0096_0000))
 }
 
+/// `PWVC` — the twenty bytes that close a real `.2EX`.
+///
+/// Three small numbers whose meaning nobody has published; a capture of a real
+/// export read them as something like `[88, 81, 127]`, which is the shape of a
+/// per-band average and is what this writes. It goes last, after both
+/// waveforms, so that a player which does not understand it has already read
+/// everything that matters.
+pub fn wave_3band_summary(bands: &[u8]) -> Vec<u8> {
+    let mut out = start(b"PWVC", 0x0e);
+    put_u16(&mut out, 0);
+    for band in 0..3 {
+        let mut total = 0u64;
+        let mut count = 0u64;
+        for entry in bands.chunks_exact(3) {
+            total += u64::from(entry[band]);
+            count += 1;
+        }
+        put_u16(&mut out, (total.checked_div(count).unwrap_or(0)) as u16);
+    }
+    finish(out)
+}
+
 fn entry_section(fourcc: &[u8; 4], entry_bytes: u32, data: &[u8], unknown: Option<u32>) -> Vec<u8> {
     let len_header = if unknown.is_some() { 0x18 } else { 0x14 };
     let mut out = start(fourcc, len_header);
@@ -363,11 +441,12 @@ impl Analysis<'_> {
     /// The `.DAT` file: what a player from 2009 onwards can read.
     pub fn dat(&self) -> Vec<u8> {
         // PVBR sits right after the path, as it does in a real export, and only
-        // in the .DAT — the .EXT and .2EX do not carry it.
+        // in the .DAT — the .EXT and .2EX do not carry it. A file with no
+        // variable bitrate to index still gets the section, as a table of
+        // zeroes: every real export has one, and a section a player expects and
+        // does not find is not a risk worth taking for 1.6 kB a track.
         let mut sections = vec![path(self.on_drive_path)];
-        if let Some(offsets) = self.vbr {
-            sections.push(vbr(offsets));
-        }
+        sections.push(vbr(self.vbr.unwrap_or(&[0; 401])));
         sections.extend([
             beat_grid(self.grid),
             wave_preview(&self.waveforms.preview),
@@ -385,6 +464,16 @@ impl Analysis<'_> {
     /// ones, so a player that reads `.EXT` but predates the nexus 2 cue format
     /// still finds cues.
     pub fn ext(&self) -> Vec<u8> {
+        // No beat grid here. rekordbox writes one — `PQT2`, a second, terser
+        // encoding of the same beats — and this used to write a copy of the
+        // `.DAT`'s `PQTZ` in its place, which is a section that does not belong
+        // in this file. A CDJ-3000X handed one drew the monochrome preview from
+        // the `.DAT` and none of the colour: everything after the wrong tag,
+        // which is exactly the colour waveforms and the phrases, went unread.
+        //
+        // `PQT2`'s layout is not published beyond "two bytes a beat", so
+        // nothing is written in its place rather than something invented. The
+        // grid the player uses is the `.DAT`'s, which it already reads.
         let mut sections = vec![
             path(self.on_drive_path),
             wave_detail(&self.waveforms.detail),
@@ -392,7 +481,6 @@ impl Analysis<'_> {
             cues(self.cues, true),
             cues_extended(self.cues, false),
             cues_extended(self.cues, true),
-            beat_grid(self.grid),
             wave_color_detail(&self.waveforms.color_detail),
             wave_color_preview(&self.waveforms.color_preview),
         ];
@@ -402,13 +490,17 @@ impl Analysis<'_> {
         file(&sections)
     }
 
-    /// The `.2EX` file: the CDJ-3000's three-band waveforms, detail first, as
-    /// rekordbox writes them.
+    /// The `.2EX` file: the CDJ-3000's three-band waveforms, and the summary
+    /// that closes one.
+    ///
+    /// Preview before detail, which is the order a real export writes them in
+    /// and the opposite of what this used to do.
     pub fn two_ex(&self) -> Vec<u8> {
         file(&[
             path(self.on_drive_path),
-            wave_3band_detail(&self.waveforms.band_detail),
             wave_3band_preview(&self.waveforms.band_preview),
+            wave_3band_detail(&self.waveforms.band_detail),
+            wave_3band_summary(&self.waveforms.band_preview),
         ])
     }
 }
@@ -683,15 +775,22 @@ mod tests {
             vbr: None,
         };
 
+        // Measured across some seven hundred tracks of two real rekordbox
+        // exports, and worth holding to exactly: a section in the wrong file,
+        // or in the wrong place in the right file, is not something a player
+        // reports. It draws what it managed to read and says nothing about the
+        // rest.
         assert_eq!(
             codes(&inspect(&analysis.dat()).unwrap()),
-            ["PPTH", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"]
+            ["PPTH", "PVBR", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"]
         );
         assert_eq!(
             codes(&inspect(&analysis.ext()).unwrap()),
-            ["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PQTZ", "PWV5", "PWV4", "PSSI"]
+            ["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PWV5", "PWV4", "PSSI"],
+            "rekordbox has a PQT2 between the cues and the colour waveforms; \
+             nothing goes there until its layout is known, and never a PQTZ"
         );
-        assert_eq!(codes(&inspect(&analysis.two_ex()).unwrap()), ["PPTH", "PWV7", "PWV6"]);
+        assert_eq!(codes(&inspect(&analysis.two_ex()).unwrap()), ["PPTH", "PWV6", "PWV7", "PWVC"]);
     }
 
     #[test]
@@ -730,5 +829,60 @@ mod tests {
             vbr: None,
         };
         assert!(!codes(&inspect(&analysis.ext()).unwrap()).contains(&"PSSI"));
+    }
+
+    #[test]
+    fn the_analysis_directory_is_the_one_rekordbox_would_have_used() {
+        // Worked examples published from a disassembly of rekordbox's own
+        // path-naming, checked against the directory names on real drives. If
+        // this drifts, a player stops finding anything a drive was prepared
+        // with — silently, because it has no reason to look anywhere else.
+        assert_eq!(
+            analysis_dir("/Contents/Leo Portela/Bon Vibrant - Leo Portela.flac"),
+            "/PIONEER/USBANLZ/P00E/000281CE"
+        );
+        assert_eq!(
+            analysis_dir("/Contents/Daniela Cast/Jazzy - Daniela Cast.flac"),
+            "/PIONEER/USBANLZ/P00A/0000CC9C"
+        );
+    }
+
+    #[test]
+    fn every_directory_name_is_one_a_player_could_have_computed() {
+        // The first component is seven bits, so it never runs past P07F, and
+        // the second is a hash modulo a prime. A name outside that range is a
+        // name rekordbox would never write, which is the cheap version of the
+        // check above for paths nobody has published an answer for.
+        for name in ["/Contents/a.flac", "/Contents/Someone/A Long Title Goes Here.mp3", "/x"] {
+            let dir = analysis_dir(name);
+            let (bucket, hash) =
+                dir.trim_start_matches("/PIONEER/USBANLZ/P").split_once('/').unwrap();
+            assert!(u32::from_str_radix(bucket, 16).unwrap() <= 0x7F, "{dir}");
+            assert!(u32::from_str_radix(hash, 16).unwrap() < 200_003, "{dir}");
+            assert_eq!(bucket.len(), 3);
+            assert_eq!(hash.len(), 8);
+        }
+    }
+
+    #[test]
+    fn the_same_track_always_lands_in_the_same_place() {
+        // Which is what makes a second sync able to leave a track alone.
+        assert_eq!(analysis_dir("/Contents/a.flac"), analysis_dir("/Contents/a.flac"));
+        assert_ne!(analysis_dir("/Contents/a.flac"), analysis_dir("/Contents/b.flac"));
+    }
+
+    #[test]
+    fn a_directory_holds_more_than_one_track_by_numbering_the_files() {
+        let dir = analysis_dir("/Contents/a.flac");
+        assert_eq!(
+            analysis_paths(&dir, 0),
+            [
+                format!("{dir}/ANLZ0000.DAT"),
+                format!("{dir}/ANLZ0000.EXT"),
+                format!("{dir}/ANLZ0000.2EX")
+            ]
+        );
+        assert_eq!(analysis_paths(&dir, 1)[0], format!("{dir}/ANLZ0001.DAT"));
+        assert_eq!(analysis_paths(&dir, 12)[0], format!("{dir}/ANLZ0012.DAT"));
     }
 }

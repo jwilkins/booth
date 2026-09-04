@@ -2,9 +2,9 @@
 name = "booth"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A DJ library that prepares tracks and writes drives Pioneer/AlphaTheta players can read"
-license = "MIT"
+license-file = "../LICENSE"
 
 [lib]
 name = "booth"
@@ -19,6 +19,10 @@ anyhow = "1"
 async-std = "1"
 cpal = "0.18"
 eframe = { version = "0.33", default-features = false, features = [
+    # On for the screen readers it is meant for, and because the UI tests drive
+    # the window through the same tree: `egui_kittest` finds a button by the
+    # name it announces, so a control it cannot see is one nothing can reach.
+    "accesskit",
     "default_fonts",
     "glow",
     "wayland",
@@ -35,6 +39,7 @@ rfd = { version = "0.15", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+trash = { version = "5.2.6", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # For statvfs, so the preflight's free-space check uses each platform's own
@@ -47,4 +52,10 @@ libc = "0.2"
 screenshot = ["eframe/__screenshot"]
 
 [dev-dependencies]
+accesskit = "0.21"
+# For the history tests only, which have to put rows into an encrypted database
+# the way a player does — the reader this crate uses opens one read-only, on
+# purpose. Same build as the one `musicai` already links.
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+egui_kittest = { version = "0.33", default-features = false }
 ttf-parser = "0.25.1"

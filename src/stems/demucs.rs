@@ -16,8 +16,9 @@
 //! on the way out, where it can be measured rather than clamped.
 
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -66,12 +67,32 @@ impl Config {
             work_dir,
         }
     }
+
+    /// How many progress bars a run will draw.
+    ///
+    /// The fine-tuned models are a bag of four — one per stem — and demucs
+    /// draws a bar for each, so a caller watching the raw percentage sees it
+    /// reach 100 four times. Anything else is one model and one bar.
+    ///
+    /// Getting this wrong costs a bar that moves at the wrong speed, not a
+    /// wrong answer: what is reported never goes backwards and never claims to
+    /// have finished.
+    pub fn passes(&self) -> u32 {
+        match self.model.ends_with("_ft") {
+            true => 4,
+            false => 1,
+        }
+    }
 }
 
-/// Separate `input` by invoking demucs.
+/// Separate `input` by invoking demucs, reporting progress as it goes.
 ///
 /// Takes the path rather than decoded audio because demucs reads files itself.
-pub fn separate(input: &Path, config: &Config) -> Result<StemSet> {
+///
+/// `on_progress` is called with a percentage, 0 to 99, as demucs works.
+/// Separation is minutes a track, which is long enough that a caller with no
+/// way to show how far along it is has nothing to show at all.
+pub fn separate(input: &Path, config: &Config, on_progress: &dyn Fn(u8)) -> Result<StemSet> {
     let input = input.canonicalize().with_context(|| format!("resolving {}", input.display()))?;
 
     std::fs::create_dir_all(&config.work_dir)
@@ -96,7 +117,13 @@ pub fn separate(input: &Path, config: &Config) -> Result<StemSet> {
     }
     command.arg(&input);
 
-    let output = command.output().map_err(|e| {
+    // Piped rather than inherited so that a GUI caller does not have demucs
+    // writing over its terminal, and so the progress bar can be read as it is
+    // drawn. stdout is discarded: demucs puts everything worth diagnosing on
+    // stderr, and buffering a stream nothing reads is how a child deadlocks.
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             anyhow!(
                 "could not run {:?}: demucs is not installed or not on PATH. \
@@ -109,17 +136,85 @@ pub fn separate(input: &Path, config: &Config) -> Result<StemSet> {
         }
     })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = match child.stderr.take() {
+        Some(stream) => read_progress(stream, config.passes(), on_progress),
+        None => String::new(),
+    };
+    let status = child.wait().map_err(|e| anyhow!("waiting for {:?}: {e}", config.program))?;
+
+    if !status.success() {
         let last = stderr.trim().lines().last().unwrap_or("no output");
         match diagnose(&stderr) {
-            Some(hint) => bail!("demucs exited with {}: {last}\n\n{hint}", output.status),
-            None => bail!("demucs exited with {}: {last}", output.status),
+            Some(hint) => bail!("demucs exited with {status}: {last}\n\n{hint}"),
+            None => bail!("demucs exited with {status}: {last}"),
         }
     }
 
     let stem_dir = locate_output(&config.work_dir, &config.model, &input)?;
     load_stems(&stem_dir)
+}
+
+/// Read demucs' stderr as it is written, reporting how far along it is, and
+/// return the whole of it for the error path.
+///
+/// Demucs draws a tqdm bar, which means carriage returns rather than newlines:
+/// reading by line would hand back nothing until the bar had finished. So this
+/// reads bytes as they arrive and breaks on either.
+///
+/// `passes` is how many bars to expect. Each runs to 100% and then the next
+/// begins, so a caller told the raw figure would watch it reset to zero
+/// several times and conclude the work had started over.
+fn read_progress(mut stream: impl Read, passes: u32, on_progress: &dyn Fn(u8)) -> String {
+    let mut whole = String::new();
+    let mut line = String::new();
+    let mut buffer = [0u8; 4096];
+    let mut finished_passes = 0u32;
+    let mut last = 0.0f32;
+    let mut reported = 0u8;
+
+    loop {
+        let read = match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let chunk = String::from_utf8_lossy(&buffer[..read]);
+        whole.push_str(&chunk);
+        for c in chunk.chars() {
+            if c != '\r' && c != '\n' {
+                line.push(c);
+                continue;
+            }
+            if let Some(percent) = percentage(&line) {
+                // A bar that has gone backwards is the next model in the bag
+                // starting, not this one losing ground.
+                if percent + 1.0 < last {
+                    finished_passes += 1;
+                }
+                last = percent;
+                let overall = (finished_passes as f32 + percent / 100.0) / passes.max(1) as f32;
+                // Never backwards, and never quite finished: the work is done
+                // when the process exits, not when the last bar fills.
+                let overall = (overall * 100.0).clamp(reported as f32, 99.0) as u8;
+                if overall > reported {
+                    reported = overall;
+                    on_progress(overall);
+                }
+            }
+            line.clear();
+        }
+    }
+    whole
+}
+
+/// The percentage at the head of a tqdm bar, if the line carries one.
+///
+/// tqdm writes ` 45%|####5     | 45.0/100.0 [...]`, so what is wanted is the
+/// run of digits immediately before the first `%`.
+fn percentage(line: &str) -> Option<f32> {
+    let at = line.find('%')?;
+    let start = line[..at].rfind(|c: char| !c.is_ascii_digit()).map_or(0, |i| i + 1);
+    let percent: f32 = line[start..at].parse().ok()?;
+    (percent <= 100.0).then_some(percent)
 }
 
 /// Recognise demucs failures whose cause is not obvious from the traceback,
@@ -206,6 +301,64 @@ fn read_stem(dir: &Path, name: &str) -> Result<Audio> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// A tqdm bar, drawn the way demucs draws one: carriage returns, no
+    /// newline until it is finished.
+    fn bar(percents: &[u32]) -> String {
+        percents
+            .iter()
+            .map(|p| format!("{p:3}%|##        | {p}.0/100.0 [00:01<00:09,  9.1seconds/s]\r"))
+            .collect()
+    }
+
+    fn watch(text: &str, passes: u32) -> (Vec<u8>, String) {
+        let seen = Mutex::new(Vec::new());
+        let whole = read_progress(text.as_bytes(), passes, &|p| seen.lock().unwrap().push(p));
+        (seen.into_inner().unwrap(), whole)
+    }
+
+    #[test]
+    fn reads_the_percentage_off_a_bar_that_never_ends_a_line() {
+        let (seen, whole) = watch(&bar(&[0, 25, 50, 75, 100]), 1);
+        assert_eq!(seen, vec![25, 50, 75, 99], "0 is not progress, and 100 is not finished");
+        assert!(whole.contains("9.1seconds/s"), "the text is kept for the error path");
+    }
+
+    #[test]
+    fn four_bars_of_a_fine_tuned_model_are_one_run() {
+        // htdemucs_ft is a bag of four models, so the raw percentage returns
+        // to zero three times. What the caller sees must not.
+        let mut text = String::new();
+        for _ in 0..4 {
+            text.push_str(&bar(&[0, 50, 100]));
+        }
+        let (seen, _) = watch(&text, 4);
+
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "went backwards: {seen:?}");
+        assert_eq!(seen.first(), Some(&12), "half of the first of four");
+        assert!(seen.last().is_some_and(|p| *p >= 87), "the last bar should be near the end");
+        assert!(
+            seen.iter().all(|p| *p < 100),
+            "demucs is done when it exits, not when a bar fills"
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_percentage_is_not_progress() {
+        let (seen, _) = watch("Separating track /music/a.flac\nSelected model is a bag of 4\n", 1);
+        assert!(seen.is_empty(), "{seen:?}");
+    }
+
+    #[test]
+    fn percentages_are_read_off_the_end_of_the_run_of_digits() {
+        assert_eq!(percentage("  7%|#  | 7.0/100.0"), Some(7.0));
+        assert_eq!(percentage("100%|###|"), Some(100.0));
+        assert_eq!(percentage("no bar here"), None);
+        // A stray % with nothing numeric before it is not a reading.
+        assert_eq!(percentage("100% done, 50% left"), Some(100.0));
+        assert_eq!(percentage("% "), None);
+    }
 
     #[test]
     fn explains_the_undeclared_numpy_dependency() {
@@ -247,7 +400,7 @@ mod tests {
         config.program = OsString::from("definitely-not-a-real-demucs-binary");
 
         // Any readable file will do; we never get as far as decoding it.
-        let err = separate(Path::new("Cargo.toml"), &config).unwrap_err();
+        let err = separate(Path::new("Cargo.toml"), &config, &|_| {}).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("--backend dsp"), "unhelpful error: {message}");
     }

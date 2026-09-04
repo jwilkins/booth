@@ -91,7 +91,7 @@ impl Table {
 /// The identifiers a player uses to link a track to its artist, album and so on
 /// are assigned by [`Database`]; this is the human-facing version, and names are
 /// interned into the right tables on the way out.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     /// The id a player reports when this track is loaded. Must be non-zero and
     /// unique within the drive.
@@ -183,7 +183,7 @@ const COLORS: [&str; 8] = ["Pink", "Red", "Orange", "Yellow", "Green", "Aqua", "
 /// The browse menu, as rekordbox writes it: the categories a player offers when
 /// you turn the encoder. The second value of each pair identifies the menu item
 /// to the player and is not simply the row number — the gaps are rekordbox's.
-const COLUMNS: [(u16, &str); 27] = [
+pub(crate) const COLUMNS: [(u16, &str); 27] = [
     (0x0080, "GENRE"),
     (0x0081, "ARTIST"),
     (0x0082, "ALBUM"),
@@ -368,19 +368,23 @@ impl Database {
             next_index += 1;
 
             if groups.is_empty() {
-                // The header page points at a page that is never read: with no
-                // rows, the table's last page is its first, so a reader stops
-                // before following the link.
-                pages.push(vec![0; PAGE_LEN]);
+                // A table with nothing in it still gets a page, and that page
+                // still has to be a page: written as zeroes it is not one, and
+                // a drive is refused whole rather than a table at a time. The
+                // header page remains the table's last, so a reader that
+                // follows the chain stops before reaching this.
+                pages.push(data_page(*table, next_index, past_end, 0, &[]));
                 next_index += 1;
                 table_refs.push((*table, first_page, first_page));
                 continue;
             }
 
+            let mut so_far = 0usize;
             for (i, group) in groups.iter().enumerate() {
                 let last = i + 1 == groups.len();
                 let next = if last { past_end } else { next_index + 1 };
-                pages.push(data_page(*table, next_index, next, group));
+                so_far += group.len();
+                pages.push(data_page(*table, next_index, next, so_far, group));
                 next_index += 1;
             }
             table_refs.push((*table, first_page, next_index - 1));
@@ -392,8 +396,17 @@ impl Database {
         put_u32(&mut header, PAGE_LEN as u32);
         put_u32(&mut header, Table::ALL.len() as u32);
         put_u32(&mut header, past_end); // next unused page
-        put_u32(&mut header, 0);
-        put_u32(&mut header, 1); // sequence: this database has been written once
+                                        // Five, in every export anyone has looked at, and nobody knows what of.
+        put_u32(&mut header, 5);
+        // Higher than any page's own sequence, which is the rule and not a
+        // formality: a file whose header does not lead its pages is the first
+        // way a growing library was found to stop being read at all.
+        let highest = pages
+            .iter()
+            .map(|page| u32::from_le_bytes(page[0x10..0x14].try_into().unwrap_or_default()))
+            .max()
+            .unwrap_or(0);
+        put_u32(&mut header, highest + 1);
         put_u32(&mut header, 0);
         for (table, first, last) in &table_refs {
             put_u32(&mut header, *table as u32);
@@ -489,21 +502,69 @@ fn index_size(rows: usize) -> usize {
     rows * 2 + groups * 4
 }
 
+/// Where a table's page sequence numbers start.
+///
+/// The sequence is a transaction counter of some kind: rekordbox writes
+/// `base + (rows so far - 1) * 5` on each data page, and the file's own header
+/// carries a number higher than any of them. The bases below were recovered by
+/// bisecting what a CDJ-3000 would accept; the tables not listed have never
+/// been reported, and take 1, which is what this program wrote for everything
+/// before any of this was known.
+fn sequence_base(table: Table) -> u32 {
+    match table {
+        Table::Tracks => 10,
+        Table::Artists => 7,
+        Table::Albums => 9,
+        Table::Colors => 8,
+        Table::PlaylistTree => 6,
+        Table::PlaylistEntries => 11,
+        // Not a formula at all: the browse menu is the same 27 rows on every
+        // drive, and its pages always say 3.
+        Table::Columns => 3,
+        _ => 1,
+    }
+}
+
 /// The row-less page every table starts with.
+///
+/// Marked 0x64, with both row-count fields saturated and a constant nobody has
+/// explained in the last field but one. Two tables — the tracks and the
+/// history — carry different values again, in a body that is otherwise empty:
+/// the reason is unknown, and a player that does not find them there refuses
+/// the whole database rather than the table.
 fn header_page(table: Table, index: u32, next: u32) -> Vec<u8> {
-    let mut page = page_header(table, index, next, 0, 0, 0, 0);
-    // rekordbox marks these pages 0x64, with both transaction fields saturated
-    // and a constant nobody has explained in the last field but one.
-    page[27] = 0x64;
-    page[32..34].copy_from_slice(&0x1fffu16.to_le_bytes());
-    page[34..36].copy_from_slice(&0x1fffu16.to_le_bytes());
-    page[36..38].copy_from_slice(&1004u16.to_le_bytes());
+    let special = matches!(table, Table::Tracks | Table::History);
+    let mut page = page_header(Fields {
+        table,
+        index,
+        next,
+        sequence: sequence_base(table),
+        rows: 0,
+        free: 0,
+        used: 0,
+        flags: 0x64,
+        unknown5: 0x1fff,
+        rows_large: 0x1fff,
+        unknown6: 1004,
+        unknown7: u16::from(special),
+    });
     page.resize(PAGE_LEN, 0);
+    let marker: u32 = 0x1fff_0000 | u32::from(special);
+    page[0x38..0x3c].copy_from_slice(&marker.to_le_bytes());
+    let after: u32 = match table {
+        Table::Tracks => 0x10,
+        Table::History => 0x140,
+        _ => 0,
+    };
+    page[0x3c..0x40].copy_from_slice(&after.to_le_bytes());
     page
 }
 
 /// A page of rows, with its index built backwards from the end.
-fn data_page(table: Table, index: u32, next: u32, rows: &[&RowData]) -> Vec<u8> {
+///
+/// `so_far` is how many rows of this table have been written including these,
+/// because the sequence number counts the table's rows rather than the page's.
+fn data_page(table: Table, index: u32, next: u32, so_far: usize, rows: &[&RowData]) -> Vec<u8> {
     let mut heap = Vec::new();
     let mut offsets = Vec::with_capacity(rows.len());
     for (row_index, row) in rows.iter().enumerate() {
@@ -520,8 +581,33 @@ fn data_page(table: Table, index: u32, next: u32, rows: &[&RowData]) -> Vec<u8> 
 
     let used = heap.len();
     let free = PAGE_LEN - PAGE_HEADER_LEN - used - index_size(rows.len());
-    let mut page = page_header(table, index, next, rows.len(), rows.len(), free, used);
-    page[27] = 0x24; // an ordinary data page with nothing deleted from it
+    // The browse menu's pages describe themselves differently from every other
+    // table's, and getting it the ordinary way round is one of the things a
+    // player refuses the whole database over.
+    let columns = matches!(table, Table::Columns);
+    let mut page = page_header(Fields {
+        table,
+        index,
+        next,
+        sequence: match columns {
+            true => sequence_base(table),
+            false => sequence_base(table) + (so_far.max(1) as u32 - 1) * 5,
+        },
+        rows: rows.len(),
+        free,
+        used,
+        flags: 0x24, // an ordinary data page with nothing deleted from it
+        unknown5: match columns {
+            true => rows.len() as u16,
+            false => 1,
+        },
+        rows_large: match columns {
+            true => 0,
+            false => rows.len().max(1) as u16 - 1,
+        },
+        unknown6: 0,
+        unknown7: 0,
+    });
     page.extend_from_slice(&heap);
     page.resize(PAGE_LEN, 0);
 
@@ -541,35 +627,52 @@ fn data_page(table: Table, index: u32, next: u32, rows: &[&RowData]) -> Vec<u8> 
     page
 }
 
-#[allow(clippy::too_many_arguments)]
-fn page_header(
+/// Everything a page says about itself before its rows.
+///
+/// Spelled out one field at a time rather than derived, because a parser and a
+/// player disagree about how much of this matters: a parser reads the row
+/// count and ignores the rest, and a player refuses a drive over a byte it did
+/// not expect. The values are `morizkraemer/fourfour`'s, found by bisecting
+/// what a CDJ-3000 would accept.
+struct Fields {
     table: Table,
     index: u32,
     next: u32,
-    row_offsets: usize,
-    rows_present: usize,
+    sequence: u32,
+    rows: usize,
     free: usize,
     used: usize,
-) -> Vec<u8> {
+    flags: u8,
+    unknown5: u16,
+    rows_large: u16,
+    unknown6: u16,
+    unknown7: u16,
+}
+
+fn page_header(f: Fields) -> Vec<u8> {
     let mut page = Vec::with_capacity(PAGE_LEN);
     put_u32(&mut page, 0);
-    put_u32(&mut page, index);
-    put_u32(&mut page, table as u32);
-    put_u32(&mut page, next);
-    put_u32(&mut page, 1); // sequence: written once
+    put_u32(&mut page, f.index);
+    put_u32(&mut page, f.table as u32);
+    put_u32(&mut page, f.next);
+    put_u32(&mut page, f.sequence);
     put_u32(&mut page, 0);
-    // Thirteen bits of "how many row slots exist" and eleven of "how many hold
-    // a row", packed little-endian across three bytes, with the page flags in
-    // the fourth.
-    let packed = (row_offsets as u32 & 0x1fff) | ((rows_present as u32 & 0x7ff) << 13);
-    page.extend_from_slice(&packed.to_le_bytes()[..3]);
-    page.push(0);
-    put_u16(&mut page, free as u16);
-    put_u16(&mut page, used as u16);
-    put_u16(&mut page, rows_present as u16);
-    put_u16(&mut page, 0);
-    put_u16(&mut page, 0);
-    put_u16(&mut page, 0);
+    page.push(f.rows.min(MAX_ROWS_PER_PAGE) as u8);
+    // Whatever this is, it is the row count modulo eight in the top three
+    // bits.
+    page.push(((f.rows % 8) * 0x20) as u8);
+    // How many groups the index at the end of the page holds — one per sixteen
+    // rows. The browse menu counts one more than it has.
+    page.push(
+        (f.rows.div_ceil(ROWS_PER_GROUP) + usize::from(matches!(f.table, Table::Columns))) as u8,
+    );
+    page.push(f.flags);
+    put_u16(&mut page, f.free as u16);
+    put_u16(&mut page, f.used as u16);
+    put_u16(&mut page, f.unknown5);
+    put_u16(&mut page, f.rows_large);
+    put_u16(&mut page, f.unknown6);
+    put_u16(&mut page, f.unknown7);
     debug_assert_eq!(page.len(), PAGE_HEADER_LEN);
     page
 }
@@ -886,6 +989,129 @@ mod tests {
     fn table(bytes: &[u8], want: Table) -> TableInfo {
         let name = format!("{want:?}");
         inspect(bytes).unwrap().into_iter().find(|t| t.table == name).unwrap()
+    }
+
+    /// Every page after the file header, as its own slice.
+    fn pages(bytes: &[u8]) -> Vec<&[u8]> {
+        bytes.chunks_exact(PAGE_LEN).skip(1).collect()
+    }
+
+    #[test]
+    fn the_file_header_leads_every_page_it_describes() {
+        // A player stops reading a database whose header sequence does not
+        // exceed its pages', and the way that fails is by growing: a small
+        // library works, and one big enough to push a page's sequence past the
+        // header's stops being seen at all.
+        let mut database = Database::new();
+        for id in 1..40u32 {
+            database.tracks.push(Track {
+                id,
+                title: format!("Track {id}"),
+                file_path: format!("/Contents/A/{id}.flac"),
+                ..Track::default()
+            });
+        }
+        database.playlists.push(Playlist::new(1, "All", (1..40).collect()));
+        let bytes = database.to_bytes().unwrap();
+
+        let header = u32::from_le_bytes(bytes[0x14..0x18].try_into().unwrap());
+        let highest = pages(&bytes)
+            .iter()
+            .map(|page| u32::from_le_bytes(page[0x10..0x14].try_into().unwrap()))
+            .max()
+            .unwrap();
+        assert!(header > highest, "header sequence {header} does not lead {highest}");
+        assert_eq!(u32::from_le_bytes(bytes[0x10..0x14].try_into().unwrap()), 5);
+    }
+
+    #[test]
+    fn a_table_with_no_rows_still_gets_a_page_that_is_a_page() {
+        // Written as zeroes it is not one: no page index, no table, no flags —
+        // and a player refuses the whole database over it rather than skipping
+        // the table.
+        let bytes = Database::new().to_bytes().unwrap();
+        for (n, page) in pages(&bytes).iter().enumerate() {
+            let index = u32::from_le_bytes(page[0x04..0x08].try_into().unwrap());
+            let flags = page[0x1b];
+            assert_eq!(index as usize, n + 1, "page {n} does not know its own index");
+            assert!(
+                flags == 0x24 || flags == 0x64,
+                "page {n} is neither a header page nor a data page: {flags:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_browse_menu_describes_its_pages_the_way_only_it_does() {
+        // The one table whose pages count themselves differently. Getting it
+        // the ordinary way round is a database a player will not open.
+        let bytes = Database::new().to_bytes().unwrap();
+        let page = pages(&bytes)
+            .into_iter()
+            .find(|page| page[0x08] == Table::Columns as u8 && page[0x1b] == 0x24 && page[0x18] > 0)
+            .expect("the browse menu has a data page");
+        assert_eq!(page[0x18], 27, "twenty-seven menu items");
+        assert_eq!(u16::from_le_bytes(page[0x20..0x22].try_into().unwrap()), 27);
+        assert_eq!(u16::from_le_bytes(page[0x22..0x24].try_into().unwrap()), 0);
+        assert_eq!(page[0x1a], 3, "two groups of sixteen, and one more besides");
+        assert_eq!(u32::from_le_bytes(page[0x10..0x14].try_into().unwrap()), 3);
+    }
+
+    #[test]
+    fn a_data_page_counts_its_rows_the_way_a_player_reads_them() {
+        let mut database = Database::new();
+        for id in 1..4u32 {
+            database.tracks.push(Track {
+                id,
+                title: format!("Track {id}"),
+                file_path: format!("/Contents/A/{id}.flac"),
+                ..Track::default()
+            });
+        }
+        let bytes = database.to_bytes().unwrap();
+        let page = pages(&bytes)
+            .into_iter()
+            .find(|page| page[0x08] == Table::Tracks as u8 && page[0x1b] == 0x24)
+            .expect("the tracks have a data page");
+        assert_eq!(page[0x18], 3);
+        assert_eq!(page[0x19], 3 * 0x20, "the row count modulo eight, in the top bits");
+        assert_eq!(page[0x1a], 1, "one group of sixteen holds three rows");
+        assert_eq!(u16::from_le_bytes(page[0x20..0x22].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(page[0x22..0x24].try_into().unwrap()), 2, "rows less one");
+        assert_eq!(
+            u32::from_le_bytes(page[0x10..0x14].try_into().unwrap()),
+            10 + 2 * 5,
+            "the tracks' sequence base, plus five a row after the first"
+        );
+    }
+
+    #[test]
+    fn the_tracks_and_the_history_say_something_of_their_own_on_their_header_pages() {
+        let bytes = Database::new().to_bytes().unwrap();
+        for (table, after) in [(Table::Tracks, 0x10u32), (Table::History, 0x140)] {
+            let page = pages(&bytes)
+                .into_iter()
+                .find(|page| page[0x08] == table as u8 && page[0x1b] == 0x64)
+                .unwrap_or_else(|| panic!("{table:?} has a header page"));
+            assert_eq!(u16::from_le_bytes(page[0x26..0x28].try_into().unwrap()), 1, "{table:?}");
+            assert_eq!(
+                u32::from_le_bytes(page[0x38..0x3c].try_into().unwrap()),
+                0x1fff_0001,
+                "{table:?}"
+            );
+            assert_eq!(
+                u32::from_le_bytes(page[0x3c..0x40].try_into().unwrap()),
+                after,
+                "{table:?}"
+            );
+        }
+        // And every other table's header page does not.
+        let page = pages(&bytes)
+            .into_iter()
+            .find(|page| page[0x08] == Table::Genres as u8 && page[0x1b] == 0x64)
+            .unwrap();
+        assert_eq!(u16::from_le_bytes(page[0x26..0x28].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(page[0x38..0x3c].try_into().unwrap()), 0x1fff_0000);
     }
 
     #[test]

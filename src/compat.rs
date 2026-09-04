@@ -63,9 +63,7 @@ impl Problem {
     pub fn convertible(&self) -> bool {
         match self {
             Problem::FloatSamples => true,
-            Problem::Format(extension) => {
-                crate::discover::SUPPORTED.contains(&extension.as_str())
-            }
+            Problem::Format(extension) => crate::discover::SUPPORTED.contains(&extension.as_str()),
             Problem::Protected | Problem::TooFast(_) => false,
         }
     }
@@ -77,7 +75,12 @@ impl Problem {
 /// `float_samples` and `sample_rate` come from the scan that already read the
 /// file's header, so this costs one small read for the MP4 case and nothing
 /// otherwise.
-pub fn problems(path: &Path, extension: &str, sample_rate: u32, float_samples: bool) -> Vec<Problem> {
+pub fn problems(
+    path: &Path,
+    extension: &str,
+    sample_rate: u32,
+    float_samples: bool,
+) -> Vec<Problem> {
     let mut found = Vec::new();
     let extension = extension.to_ascii_lowercase();
 

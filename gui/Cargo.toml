@@ -2,9 +2,9 @@
 name = "musicai-gui"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Window for musicai: loudness normalization, stem separation and tagging"
-license = "MIT"
+license-file = "../LICENSE"
 
 [[bin]]
 name = "musicai-gui"

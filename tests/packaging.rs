@@ -50,7 +50,7 @@ fn bundle(into: &Path, version: &str) -> PathBuf {
         "make-bundle.sh failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    into.join("musicai.app")
+    into.join("Booth.app")
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn the_bundle_has_everything_macos_looks_for() {
 
     // Launching the app runs Contents/MacOS/<CFBundleExecutable>, and Finder
     // needs the icon and PkgInfo where it expects them.
-    assert!(app.join("Contents/MacOS/musicai-gui").exists());
+    assert!(app.join("Contents/MacOS/booth").exists());
     assert!(app.join("Contents/MacOS/musicai").exists(), "the CLI should ride along");
     assert!(app.join("Contents/Resources/icon.icns").exists());
     assert!(app.join("Contents/Info.plist").exists());
@@ -75,7 +75,7 @@ fn the_binaries_are_executable() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for name in ["musicai-gui", "musicai"] {
+        for name in ["booth", "musicai"] {
             let mode = std::fs::metadata(app.join("Contents/MacOS").join(name))
                 .unwrap()
                 .permissions()
@@ -94,7 +94,7 @@ fn the_version_is_substituted_into_the_plist() {
     assert!(plist.contains("<string>9.9.9</string>"), "version not substituted");
     assert!(!plist.contains("__VERSION__"), "a placeholder survived into the bundle");
     // The executable named in the plist has to be the one that is there.
-    assert!(plist.contains("<string>musicai-gui</string>"));
+    assert!(plist.contains("<string>booth</string>"));
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn a_missing_binary_is_an_error_rather_than_a_broken_app() {
     let dir = Scratch::new("missing");
     let output = Command::new("bash")
         .arg(repo().join("scripts/make-bundle.sh"))
-        .args(["/nonexistent/musicai-gui", env!("CARGO_BIN_EXE_musicai")])
+        .args(["/nonexistent/booth", env!("CARGO_BIN_EXE_musicai")])
         .arg(&dir.0)
         .output()
         .unwrap();
@@ -128,7 +128,7 @@ fn a_missing_binary_is_an_error_rather_than_a_broken_app() {
         "unhelpful error: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!dir.0.join("musicai.app").exists(), "a half-built app was left behind");
+    assert!(!dir.0.join("Booth.app").exists(), "a half-built app was left behind");
 }
 
 #[test]

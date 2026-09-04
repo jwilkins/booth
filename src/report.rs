@@ -28,6 +28,13 @@ pub enum Event {
     Summary(String),
     /// A file finished, successfully or not.
     Progress { done: usize, total: usize },
+    /// How far through the file in hand the work has got, as a percentage.
+    ///
+    /// Separate from `Progress` because it is about one file rather than the
+    /// batch, and only worth sending for a step long enough that finishing the
+    /// file is not soon enough to hear about — stem separation is minutes a
+    /// track, which without this is a spinner that never moves.
+    Step { percent: u8 },
     /// A file that could not be processed. The batch carries on.
     Failed { path: PathBuf, message: String },
     /// The batch ended. `cancelled` means it stopped early on request.
@@ -92,6 +99,9 @@ impl Reporter for Stdio {
             Event::Finished { processed, failed, cancelled } if cancelled => {
                 eprintln!("stopped after {} of {processed} files", processed - failed);
             }
+            // A terminal already gets the child's own progress bar on its
+            // stderr; printing a second one over it would fight with it.
+            Event::Step { .. } => {}
             Event::Started { .. } | Event::Progress { .. } | Event::Finished { .. } => {}
         }
     }

@@ -8,14 +8,17 @@
 //!   Reading it is what [`master`] does, and it is how a library moves into
 //!   this program without being re-analysed from scratch.
 //! - **`exportLibrary.db`** is the OneLibrary database *on a USB drive*, which
-//!   is what a CDJ-3000X reads instead of `export.pdb`. [`onelibrary`] can open
-//!   one and describe it. That is all it can do, and the reason is in that
-//!   module.
+//!   is what a CDJ-3000X reads instead of `export.pdb`. [`onelibrary`] opens
+//!   one and describes it; [`crate::export::onelibrary`] writes one.
 //!
-//! Both are SQLCipher, and for both the key is fixed rather than derived from
-//! the machine or the licence — so neither is a cryptographic problem. What
-//! stands between this program and writing a drive a CDJ-3000X will play is
-//! the *schema*, which is not published for OneLibrary.
+//! Both are SQLCipher, and both are keyed the same way for everybody rather
+//! than per machine or per licence — so neither is a cryptographic problem,
+//! and neither is the schema: AlphaTheta publishes none, but OneLibrary's has
+//! been documented from real exports by other people (`docs/onelibrary.md`).
+//! **They are two different keys**, though, and each is useless on the other
+//! file, which is why [`resolve`] and [`onelibrary_key`] are separate and
+//! neither falls back to the other. What stands between this program and a
+//! drive a CDJ-3000X is *known* to play is hardware to prove it on.
 
 pub mod master;
 pub mod onelibrary;
@@ -24,27 +27,43 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-/// The key this build was compiled with, if any.
+/// The key `master.db` is encrypted with.
 ///
-/// Empty by default. The key is not this project's to publish, and the
-/// reference implementation everyone uses — `pyrekordbox` — deliberately ships
-/// without it and fetches it on demand for the same reason. Everything works
-/// without filling this in: see [`resolve`] for the two ways to supply one at
-/// runtime.
+/// Not a secret in any useful sense. rekordbox ships it inside its own binary
+/// on every machine that runs it, it is the same for every installation on
+/// earth, and it has been published for years — in the notes everyone working
+/// on these formats cites, in a repository that exists to document it, and in
+/// most of the libraries that read these files. Leaving it out protected
+/// nothing; it only meant that opening your own library took a detour through
+/// somebody else's Python package first.
 ///
-/// If you would rather have it baked into the binary, put it here. It is a
-/// 64-character hex string, and it is the same for every installation.
-pub const BUNDLED_KEY: &str = "";
+/// Sixty-four hex digits, and a different key from
+/// [`BUNDLED_ONELIBRARY_KEY`]. Blank it to build without one: [`resolve`]
+/// then falls back to `REKORDBOX_KEY`, and everything else still works.
+pub const BUNDLED_KEY: &str = "402fd482c38817c35ffa8ffb8c7d93143b749e7d315df7a81732a1ff43608497";
 
 /// Where to look for the key when none was passed in.
 pub const KEY_ENV: &str = "REKORDBOX_KEY";
 
+/// The key `exportLibrary.db` is encrypted with, on every drive there is.
+///
+/// Public on the same terms as [`BUNDLED_KEY`], and recovered the same two
+/// ways — by reading the rekordbox binary, and by watching it key the file.
+/// It is a different key, and one worth not confusing with that one: sixty-four
+/// characters of ordinary text rather than hex, because SQLCipher takes it as a
+/// passphrase and derives the real key from it. `docs/onelibrary.md` says where
+/// it came from and who else uses it.
+///
+/// Blank it to build a binary that writes legacy drives only.
+pub const BUNDLED_ONELIBRARY_KEY: &str =
+    "r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls";
+
 /// Work out which key to use.
 ///
-/// In order: what the caller was given, the environment, then whatever this
-/// build was compiled with. The error says what to do rather than that
-/// something went wrong, because "no key" is the normal first-run state and
-/// not a fault.
+/// In order: what the caller was given, the environment, then what this build
+/// carries. The first two exist because a key that was changed once can be
+/// changed again, and a program that cannot be told a new one is a program that
+/// stops working on the day that happens.
 pub fn resolve(supplied: Option<&str>) -> Result<String> {
     let candidates = [
         supplied.map(str::to_string),
@@ -59,8 +78,39 @@ pub fn resolve(supplied: Option<&str>) -> Result<String> {
     }
     bail!(
         "no rekordbox database key. rekordbox encrypts its library with SQLCipher, using a \
-         key that is the same on every installation. Put it in Settings, or set {KEY_ENV}. \
+         key that is the same on every installation; this build carries none. Put it in \
+         Settings, or set {KEY_ENV}. \
          `python -m pyrekordbox download-key` will fetch and print one."
+    )
+}
+
+/// The key for `exportLibrary.db`, if there is one to be had.
+///
+/// A **different key** from [`resolve`]'s. The two databases are both
+/// SQLCipher and both keyed the same way for everybody, and that is where the
+/// similarity stops: `master.db`'s key is sixty-four hex digits, OneLibrary's
+/// is sixty-four characters of ordinary text, and each is useless on the other
+/// file. So they get separate settings rather than one that would sometimes be
+/// wrong, and this returns nothing rather than falling back to the other one.
+///
+/// Nothing here fails when there is no key: a build with
+/// [`BUNDLED_ONELIBRARY_KEY`] blanked, and nothing in the environment, writes
+/// the legacy drive it always did and says so in a line rather than stopping.
+pub fn onelibrary_key(supplied: Option<&str>) -> Option<String> {
+    let candidates = [
+        supplied.map(str::to_string),
+        std::env::var(crate::export::onelibrary::KEY_ENV).ok(),
+        (!BUNDLED_ONELIBRARY_KEY.is_empty()).then(|| BUNDLED_ONELIBRARY_KEY.to_string()),
+    ];
+    candidates.into_iter().flatten().map(|key| key.trim().to_string()).find(|key| !key.is_empty())
+}
+
+/// What to say when there is no OneLibrary key, said once and in one place.
+pub fn no_onelibrary_key() -> String {
+    format!(
+        "no OneLibrary database written: the newer players read one, and this build carries no \
+         key to encrypt it with. Set {} to write one.",
+        crate::export::onelibrary::KEY_ENV
     )
 }
 
@@ -148,9 +198,11 @@ pub fn tables(connection: &rusqlite::Connection) -> Result<Vec<(String, i64)>> {
         // be anything but a real table name here; quoted anyway, because a
         // table called `Order` is a perfectly legal thing to be handed.
         let count = connection
-            .query_row(&format!("SELECT count(*) FROM \"{}\"", name.replace('"', "\"\"")), [], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row(
+                &format!("SELECT count(*) FROM \"{}\"", name.replace('"', "\"\"")),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
             .unwrap_or(-1);
         found.push((name, count));
     }
@@ -162,7 +214,8 @@ pub fn tables(connection: &rusqlite::Connection) -> Result<Vec<(String, i64)>> {
 pub fn columns(connection: &rusqlite::Connection, table: &str) -> Result<Vec<String>> {
     let mut statement =
         connection.prepare(&format!("PRAGMA table_info(\"{}\")", table.replace('"', "\"\"")))?;
-    let names = statement.query_map([], |row| row.get::<_, String>(1))?.collect::<Result<_, _>>()?;
+    let names =
+        statement.query_map([], |row| row.get::<_, String>(1))?.collect::<Result<_, _>>()?;
     Ok(names)
 }
 

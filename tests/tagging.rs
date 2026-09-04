@@ -510,7 +510,8 @@ fn an_m4a_keeps_what_is_already_there_when_asked_to() {
     let path = scratch.0.join("track.m4a");
     bare_mp4(&path);
 
-    let first = Metadata { artist: Some("Someone Who Was Here First".into()), ..Metadata::default() };
+    let first =
+        Metadata { artist: Some("Someone Who Was Here First".into()), ..Metadata::default() };
     write_tags(&path, &first, OnExisting::Overwrite, None).unwrap();
 
     let outcome = write_tags(&path, &metadata(), OnExisting::Keep, None).unwrap();

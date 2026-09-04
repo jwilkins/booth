@@ -185,7 +185,8 @@ fn recall(reference: &BTreeSet<String>, candidate: &BTreeSet<String>) -> f64 {
 fn separate_with_demucs(path: &Path, work_dir: &Path, demucs_bin: &str) -> StemSet {
     let mut config = demucs::Config::new(work_dir.to_path_buf());
     config.program = demucs_bin.into();
-    demucs::separate(path, &config).unwrap_or_else(|e| panic!("demucs separation failed: {e:#}"))
+    demucs::separate(path, &config, &|_| {})
+        .unwrap_or_else(|e| panic!("demucs separation failed: {e:#}"))
 }
 
 #[test]

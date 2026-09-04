@@ -13,7 +13,9 @@
 //! them. The binary is [`app::App`] and a `main` that shows it.
 
 pub mod app;
+pub mod backup;
 pub mod config;
+pub mod history;
 pub mod identify;
 pub mod job;
 pub mod library;
@@ -23,4 +25,5 @@ pub mod query;
 pub mod rows;
 pub mod sync;
 pub mod theme;
+pub mod verify;
 pub mod wave;

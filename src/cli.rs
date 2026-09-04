@@ -68,10 +68,11 @@ pub enum RekordboxCommand {
     /// Point it at `master.db` from a rekordbox installation, or at a mounted
     /// OneLibrary drive.
     Read(RekordboxArgs),
-    /// Describe the tables of a database, for a format nobody has published.
+    /// Describe the tables of a database, for a format its vendor has not
+    /// published.
     ///
-    /// This is how the OneLibrary schema gets learned. It reads; it does not
-    /// write a drive, and having the key does not make it able to.
+    /// This is how the OneLibrary schema in `docs/onelibrary.md` gets checked
+    /// against a drive. It reads; it does not write one.
     Schema(RekordboxArgs),
 }
 
@@ -405,12 +406,33 @@ pub struct ExportArgs {
     pub bpm: Option<f64>,
 
     /// Name of the playlist the exported tracks go into.
+    ///
+    /// Used when `playlists` is empty, which is the command line's case: one
+    /// list of everything named, because there is nothing on a command line
+    /// that says which file belongs to which playlist.
     #[arg(long, value_name = "NAME", default_value = "musicai")]
     pub playlist: String,
+
+    /// The playlist tree to write, when the caller has one.
+    ///
+    /// Not a command-line option, for the same reason `companions` is not: it
+    /// comes from a library that knows which track is in which list, and there
+    /// is no way to say it on one line.
+    #[arg(skip)]
+    pub playlists: Vec<PlaylistSpec>,
 
     /// Report what would be written without touching the drive.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// The key for the OneLibrary database the newer players read.
+    ///
+    /// Different from the one `rekordbox read` wants: that opens rekordbox's
+    /// own library, this encrypts a drive. Every drive uses the same one and
+    /// this build carries it, so there is nothing to pass here unless it has
+    /// changed. Defaults to `ONELIBRARY_KEY`, then to the built-in one.
+    #[arg(long, value_name = "KEY")]
+    pub onelibrary_key: Option<String>,
 
     /// Files that are stems of another track, as (stem, parent) pairs.
     ///
@@ -426,6 +448,33 @@ pub struct ExportArgs {
     /// came from which, and there is no way to say it on one line.
     #[arg(skip)]
     pub companions: Vec<(PathBuf, PathBuf)>,
+    /// Rows already on the drive that this run is not rewriting, each with the
+    /// file it was made from.
+    ///
+    /// A drive is written once and then added to. Preparing a track means
+    /// decoding it, so a second write is given only what changed — and a
+    /// database built from only that describes a drive that no longer exists,
+    /// with everything written before it gone from the player's browse. These
+    /// carry through unchanged, so the database always describes the whole
+    /// drive rather than the last thing done to it.
+    ///
+    /// Empty for a command-line export, where the files given are the drive.
+    #[arg(skip)]
+    pub already: Vec<(PathBuf, crate::export::pdb::Track)>,
+}
+
+/// One playlist to write onto a drive, named by the files that belong to it.
+///
+/// Paths rather than ids: the ids a drive uses are handed out during the
+/// export, as each file is prepared, so a caller has none to give. It does
+/// know which files it asked for, and that is enough to match on afterwards.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaylistSpec {
+    pub name: String,
+    /// The folder it sits in on the player, or empty for the top level.
+    pub folder: String,
+    /// The tracks, in play order.
+    pub tracks: Vec<PathBuf>,
 }
 
 /// How much work a separation is worth.

@@ -17,6 +17,11 @@ On Linux the audio output needs ALSA's headers at build time
 nothing extra. Without a working output device the window still opens and does
 everything else; the transport says `no audio out` instead.
 
+On macOS, `scripts/package-macos.sh` builds this window into `Booth.app` — a
+universal binary with the `musicai` command-line tool alongside it in the same
+bundle, and a disk image to install it from. See the packaging section of the
+[top-level README](../README.md#the-macos-app).
+
 ## One window
 
 There are no modes. The query bar is across the top, the collection down the
@@ -300,11 +305,10 @@ minutes of work a track, and a preference must not look like a delete.
 
 rekordbox keeps its library in `master.db`, a SQLCipher-encrypted SQLite file.
 The key is the same on every installation — it is not derived from your machine
-or your licence — so this is a matter of having it, not of breaking anything.
-**This build does not carry one.** Put it in Settings or set `REKORDBOX_KEY`;
-`python -m pyrekordbox download-key` prints one. There is a
-`BUNDLED_KEY` constant in `src/rekordbox/mod.rs` if you would rather compile it
-in.
+or your licence — and this build carries it, so importing a library is a matter
+of pointing at the file. The Settings field and `REKORDBOX_KEY` are there for
+the day AlphaTheta changes the key; the constant is `BUNDLED_KEY` in
+`src/rekordbox/mod.rs`, and blanking it builds a program that asks for one.
 
 Settings → **Import a rekordbox library** brings across tracks, playlists and
 their folders, beat grids, hot cues, keys, ratings, play counts and My Tags.
@@ -329,17 +333,35 @@ Importing the same library twice changes nothing the second time.
 ## OneLibrary, and what it would take
 
 `exportLibrary.db` is what a CDJ-3000X reads instead of `export.pdb`. It is
-SQLCipher too, and its key is fixed as well, so **the encryption is not what
-stands in the way**. The schema is: which tables a player reads, which columns
-it requires, and what state the rest of the drive has to be left in. None of
-that is published, and nobody has yet demonstrated an `exportLibrary.db`
-written from scratch that a CDJ-3000X will play.
+SQLCipher too, and its key is fixed as well, so the encryption is not what
+stands in the way — and neither, any more, is the schema. AlphaTheta has
+published nothing, but other people have taken the format apart in public:
+twenty-two tables, the DDL from a real export, the seed rows that draw the
+player's browse screen, the analysis files, which player reads which database.
+[`docs/onelibrary.md`](../docs/onelibrary.md) is that survey, with its sources
+and with the claims — including some of this project's own — that turned out to
+be wrong.
 
-So `musicai rekordbox schema <drive>` opens one and prints its tables, columns
-and row counts, and that is deliberately all it does. It is where the reverse
-engineering starts — the same position `export.pdb` was in before somebody did
-the work — and it is not player support. Support is demonstrated by a player
-playing a drive.
+What is missing is evidence rather than knowledge. Hand-written drives have
+been reported playing on a CDJ-3000X and on a CDJ-3000, by the projects that
+wrote them; nobody has published a test of a OneLibrary-only drive on a
+OneLibrary-only player, or checked whether the player used the grids and
+waveforms it was given or quietly measured its own. And writing the file means
+using a recovered key, which is a decision this project has not made.
+
+So a sync writes one: the same track list and the same playlist tree as
+`export.pdb`, from one source, so the two files on the drive cannot come apart.
+The key it is encrypted with is fixed for every drive there is and this build
+carries it, as it carries the one for rekordbox's own library — they are
+different keys, and both are in `src/rekordbox/mod.rs` with where they came
+from. The sheet says which databases a drive will carry before it writes them.
+
+**A CDJ-3000X has read one.** Playlists, track list and key search all came up
+off a drive this wrote, which is the first hardware evidence the database is
+right — and it is evidence about the database, not the drive. Whether the
+player used the analysis files it was given or measured its own on load is a
+separate question, still open, and the one where this program is most likely to
+be wrong.
 
 ## What a player will actually open
 
@@ -432,14 +454,85 @@ on disk, which is what makes it safe to rebuild from a rescan at any point. The
 two things that do touch files, copying music in and writing tags, are jobs you
 asked for, and neither ever moves or deletes an original.
 
+## Copies of every drive
+
+A stick is hours of work living on the cheapest thing in the booth. The audio
+on it is replaceable; the cues, the grids, the playlist order and the history a
+player wrote back after a gig are not, and they are a few files under
+`PIONEER`.
+
+So when a drive is written, or a prepared one is plugged in while this is
+running, those files are copied into `booth-drives` beside the library —
+databases, analysis, artwork, settings, the lot. The audio is **linked** to the
+library's own copy rather than copied, so a 64 GB stick costs a few megabytes
+and a directory entry per track. Each copy is a plain folder with a
+`backup.json` saying what was found, so getting one back onto a stick is a copy
+with no tool in the middle.
+
+A drive is stored once per state: leaving it plugged in does nothing, writing
+to it and plugging it in again stores the new state beside the old one.
+
+A track counts as the library's if a file there has the same name and length,
+which is true of everything on a drive this wrote. Where that fails the drive's
+file is hashed the way the duplicate finder hashes one — the audio alone, tags
+skipped — so somebody else's copy of a record you own is linked rather than
+stored again, however they named it.
+
+What is left is music the library genuinely has not got, and there are three
+things Settings can do with it:
+
+- **Note what was on it** (the default) — the databases and analysis are kept
+  and the music is named in the manifest, not stored. Costs nothing, and the
+  music is gone if the drive is.
+- **Copy it into the backup** — the copy holds the music too and can be put
+  back on a stick as it was. Costs whatever the drive holds that you do not.
+- **Copy it into the library** — the music lands under the library's own artist
+  folders and joins the collection, where it can be analysed and played. A file
+  already there is never written over.
+
+The default is the cheap one deliberately: plugging in a stranger's stick is
+not a decision to spend gigabytes.
+
+Nothing is archived yet. A whole drive cannot be, since a zip holds contents
+rather than links — but the copied half can: `PIONEER` could become one
+`PIONEER.zip` with the links beside it, which is the next step once there are
+enough of these to see what they cost. The log line after each one says how
+much was carried, which is the number that decides it.
+
+## What was played comes back
+
+A player writes a history to the stick it played from: every track it loaded,
+in the order it loaded them, one session a night. It is the only thing on a
+drive the collection cannot produce for itself, and it is the record of what was
+actually played rather than what was prepared — so when a drive is copied, its
+history is read back and becomes playlists.
+
+They land in a folder named after the drive, with each session under the name
+the player gave it, which is a date. Reading the same drive again replaces those
+playlists rather than making a second set. A track the drive played that the
+library does not have is left out and counted, rather than making a playlist
+with holes in it that look like tracks.
+
+Two limits worth knowing. The folder is `History/<drive>` — the collection's
+playlists have one level of folder, not two, so that is a name with a prefix
+rather than a folder inside a folder. And the history is read from the
+OneLibrary database, which is where a CDJ-3000X and every other newer player
+writes; a CDJ-3000 writes its history into `export.pdb` instead, and reading
+individual rows back out of that format is a parser this does not have yet. A
+drive played only on older hardware has a history nothing here can see.
+
 ## What it does not do yet
 
-- No player has read a drive this wrote. The format is validated against an
-  independent parser, which is not the same as validation against hardware.
-- **A CDJ-3000X cannot read a drive this writes.** It does not fall back to the
-  legacy format; it needs OneLibrary, whose schema is not published. Having its
-  encryption key — which is public — does not change that. `rekordbox schema`
-  can describe one rekordbox wrote, which is where that work would start.
+- **A CDJ-3000 cannot read a drive this writes.** The legacy `export.pdb` is
+  refused outright by one on firmware 2.05 — the file parses under two
+  independent parsers, so what is wrong is something a parser tolerates and a
+  player does not. Only the newer players work today.
+- Phrase data and the three-band waveform have not been seen on a player. The
+  colour waveform, beat grid and hot cues have; those two sit in parts of the
+  analysis files nobody has reported on yet.
+- The waveform colours are a judgement call rather than a match: what rekordbox
+  puts in those three bits for given audio is not published, and ours has never
+  been compared against a real export column by column.
 - Stem colouring needs the kit rendered first, which is minutes a track.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with

@@ -30,11 +30,17 @@ const TINY_COLUMNS: usize = 100;
 /// Columns in the colour and three-band previews.
 const WIDE_COLUMNS: usize = 1_200;
 
-/// Where the bands are split. A single-pole filter either side of each corner
-/// is a gentle slope, but these pictures are 31 pixels tall and three bytes
-/// wide — precision in the crossover is not what makes them readable.
+/// Where the bands are split.
+///
+/// These are picture-making corners rather than mixing ones. The upper one sits
+/// at 4 kHz, well above where a crossover would go in a filter you could hear,
+/// because the point is a legible colour: everything from a bassline to a vocal
+/// then lands in one band and reads as one colour, where a 2 kHz corner split
+/// the middle of the music between two bands and drew it in a washed-out
+/// yellow-white. Below 200 Hz reads blue, 200 Hz to about 1.5 kHz amber, and
+/// what is left whitens.
 const LOW_CORNER_HZ: f32 = 200.0;
-const HIGH_CORNER_HZ: f32 = 2_000.0;
+const HIGH_CORNER_HZ: f32 = 4_000.0;
 
 /// Every waveform a player might ask for, in the exact byte layout its section
 /// expects. See [`crate::export::anlz`] for which file each one belongs in.
@@ -101,13 +107,25 @@ fn detail_columns(duration_secs: f64) -> usize {
     ((duration_secs * DETAIL_PER_SECOND as f64).round() as usize).max(1)
 }
 
-/// The peak amplitude of each band within one column of the picture.
+/// One column of the picture: how tall it is, and what it is made of.
+///
+/// Two measurements of each band, because they answer different questions. The
+/// *peak* is how tall to draw the band, and a waveform drawn from anything else
+/// stops looking like the track. The *average* is what the column is made of,
+/// and it is what decides the colour: a kick drum's transient puts energy in
+/// every band at once, so a column coloured by peaks is a column coloured
+/// white, which is how this used to look on a player.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 struct Column {
     full: f32,
     low: f32,
     mid: f32,
     high: f32,
+    /// Sums of squares while measuring, root-mean-square afterwards.
+    low_rms: f32,
+    mid_rms: f32,
+    high_rms: f32,
+    samples: f32,
 }
 
 impl Column {
@@ -116,6 +134,9 @@ impl Column {
         self.low = self.low.max(other.low);
         self.mid = self.mid.max(other.mid);
         self.high = self.high.max(other.high);
+        self.low_rms = self.low_rms.max(other.low_rms);
+        self.mid_rms = self.mid_rms.max(other.mid_rms);
+        self.high_rms = self.high_rms.max(other.high_rms);
     }
 
     /// Five bits of height, three of whiteness — the encoding shared by the
@@ -149,16 +170,45 @@ impl Column {
 
     /// Six bytes: two of whiteness, then the energy in the bottom half of the
     /// range, then the low, mid and high bands.
+    ///
+    /// The three band bytes are what the browse list draws its little pictures
+    /// from, and a rekordbox-written drive draws them in strong oranges,
+    /// greens, magentas and blues. Writing each band's own loudness there gives
+    /// three large similar numbers for most music, which is a pale wash — so
+    /// each band is scaled by how much of the column it accounts for. The
+    /// loudest band keeps its full value, and the ones underneath it fall away,
+    /// which is what leaves a colour rather than a grey.
     fn color_preview_bytes(&self) -> [u8; 6] {
         let white = self.whiteness() * 36; // 0-7 spread across a byte
+        let (low, mid, high) = self.shares();
         [
             white,
             white,
             level(self.low.max(self.mid)),
-            level(self.low),
-            level(self.mid),
-            level(self.high),
+            level(self.low * low),
+            level(self.mid * mid),
+            level(self.high * high),
         ]
+    }
+
+    /// How much of this column each band accounts for, against the loudest of
+    /// them rather than against their sum.
+    ///
+    /// Against the sum the three always add to one, so the loudest band can
+    /// never reach the top of its range and every column comes out a shade of
+    /// grey. Against the peak, whatever dominates the column saturates —
+    /// squared, so that a band a third as loud as the leader tints the colour
+    /// instead of diluting it.
+    ///
+    /// From the averages rather than the peaks: a kick drum's transient is loud
+    /// in every band at once, so peaks would call almost every column white.
+    fn shares(&self) -> (f32, f32, f32) {
+        let peak = self.low_rms.max(self.mid_rms).max(self.high_rms);
+        if peak <= f32::EPSILON {
+            return (0.0, 0.0, 0.0);
+        }
+        let share = |band: f32| (band / peak) * (band / peak);
+        (share(self.low_rms), share(self.mid_rms), share(self.high_rms))
     }
 
     /// Three bytes, in the order the player wants them: mid, high, low. Drawn
@@ -168,13 +218,23 @@ impl Column {
     }
 
     /// The hue of a column, as three-bit components. Bass reads blue, the
-    /// mid-range reads amber, and treble washes everything towards white,
-    /// which is the palette a player draws in.
+    /// mid-range reads amber, treble washes towards white, and a column with
+    /// all three reads white, which is the palette a player draws in.
+    ///
+    /// Measured against the **loudest** band rather than against the sum of
+    /// them. Against the sum, the three shares add to one and the strongest
+    /// band can never reach the top of its three bits: a bass-heavy column and
+    /// a bright one come out different shades of the same grey, which is
+    /// exactly what a CDJ-3000X drew from this before. Against the peak, the
+    /// band that dominates the column saturates and the others fall away from
+    /// it — and squaring the ratios sharpens that, because a band 30% as loud
+    /// as the leader should tint the colour rather than dilute it.
     fn color(&self) -> (u8, u8, u8) {
-        let total = self.low + self.mid + self.high + f32::EPSILON;
-        let (low, mid, high) = (self.low / total, self.mid / total, self.high / total);
+        let (low, mid, high) = self.shares();
         let bit = |v: f32| (v * 7.0).round().clamp(0.0, 7.0) as u8;
-        (bit(mid + high), bit(mid * 0.7 + high), bit(low + high))
+        // Amber is red with about half its green; treble lifts all three
+        // towards white without quite reaching it on its own.
+        (bit(mid + high * 0.7), bit(mid * 0.5 + high * 0.8), bit(low + high * 0.7))
     }
 }
 
@@ -188,22 +248,31 @@ fn level(amplitude: f32) -> u8 {
     (amplitude.max(0.0).sqrt() * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-/// A single-pole low-pass, kept as its own state so the whole track can be
-/// filtered in one streaming pass.
-struct OnePole {
+/// A low-pass of two single poles in series, kept as its own state so the whole
+/// track can be filtered in one streaming pass.
+///
+/// Two poles rather than one because one is a 6 dB per octave slope, and a
+/// slope that gentle leaves a bass note plainly audible in the treble band an
+/// octave and a half up. The bands are still exactly complementary — they are
+/// differences of the same two filtered signals, whatever shape those have —
+/// so nothing is double-counted or lost between them.
+struct Slope {
     coefficient: f32,
-    state: f32,
+    first: f32,
+    second: f32,
 }
 
-impl OnePole {
+impl Slope {
     fn new(corner_hz: f32, sample_rate: u32) -> Self {
         let coefficient = (-2.0 * std::f32::consts::PI * corner_hz / sample_rate as f32).exp();
-        Self { coefficient, state: 0.0 }
+        Self { coefficient, first: 0.0, second: 0.0 }
     }
 
     fn next(&mut self, input: f32) -> f32 {
-        self.state = input * (1.0 - self.coefficient) + self.state * self.coefficient;
-        self.state
+        let open = 1.0 - self.coefficient;
+        self.first = input * open + self.first * self.coefficient;
+        self.second = self.first * open + self.second * self.coefficient;
+        self.second
     }
 }
 
@@ -215,8 +284,8 @@ fn measure(audio: &Audio) -> Vec<Column> {
 
     let channels = audio.channels() as f32;
     let frames = audio.frames();
-    let mut low_pass = OnePole::new(LOW_CORNER_HZ, audio.sample_rate);
-    let mut low_mid_pass = OnePole::new(HIGH_CORNER_HZ, audio.sample_rate);
+    let mut low_pass = Slope::new(LOW_CORNER_HZ, audio.sample_rate);
+    let mut low_mid_pass = Slope::new(HIGH_CORNER_HZ, audio.sample_rate);
     let last = columns.len() - 1;
 
     for i in 0..frames {
@@ -234,6 +303,19 @@ fn measure(audio: &Audio) -> Vec<Column> {
         c.low = c.low.max(low.abs());
         c.mid = c.mid.max(mid.abs());
         c.high = c.high.max(high.abs());
+        c.low_rms += low * low;
+        c.mid_rms += mid * mid;
+        c.high_rms += high * high;
+        c.samples += 1.0;
+    }
+
+    // Sums of squares become the root-mean-square they were being accumulated
+    // for, once it is known how many samples each column got.
+    for column in &mut columns {
+        let n = column.samples.max(1.0);
+        column.low_rms = (column.low_rms / n).sqrt();
+        column.mid_rms = (column.mid_rms / n).sqrt();
+        column.high_rms = (column.high_rms / n).sqrt();
     }
 
     columns
@@ -325,6 +407,99 @@ mod tests {
 
         let (mid, high, low) = band(10_000.0);
         assert!(high > low && high > mid, "10 kHz should be mostly high: {low} {mid} {high}");
+    }
+
+    /// The three-bit red, green and blue of the middle column of the scrolling
+    /// colour waveform.
+    fn hue(hz: f32) -> (u16, u16, u16) {
+        let w = analyze(&tone(hz, 1.0, 0.8));
+        let middle = (w.color_detail.len() / 4) * 2;
+        let packed = u16::from_be_bytes([w.color_detail[middle], w.color_detail[middle + 1]]);
+        ((packed >> 13) & 7, (packed >> 10) & 7, (packed >> 7) & 7)
+    }
+
+    /// The three band bytes of the middle column of the browse-list preview.
+    fn preview_hue(hz: f32) -> (u8, u8, u8) {
+        let w = analyze(&tone(hz, 1.0, 0.8));
+        let at = (w.color_preview.len() / 12) * 6;
+        (w.color_preview[at + 3], w.color_preview[at + 4], w.color_preview[at + 5])
+    }
+
+    #[test]
+    fn the_browse_preview_is_a_colour_rather_than_a_wash() {
+        // The picture beside each row in the browse list. A rekordbox drive
+        // draws these in strong oranges, greens and blues; writing each band's
+        // own loudness gave three large similar numbers and a pale wash, which
+        // is what a player showed.
+        let saturation = |(a, b, c): (u8, u8, u8)| {
+            let (top, bottom) = (a.max(b).max(c) as f32, a.min(b).min(c) as f32);
+            bottom / top.max(1.0)
+        };
+
+        let (low, mid, high) = preview_hue(60.0);
+        assert!(low > mid && mid > high, "bass column reads {low},{mid},{high}");
+        let (low, mid, high) = preview_hue(700.0);
+        assert!(mid > low && mid > high, "a mid column reads {low},{mid},{high}");
+        let (low, mid, high) = preview_hue(9_000.0);
+        assert!(high > low && high > mid, "a treble column reads {low},{mid},{high}");
+
+        for hz in [60.0, 700.0, 9_000.0] {
+            let washed = saturation(preview_hue(hz));
+            assert!(
+                washed < 0.35,
+                "{hz} Hz is a wash: the quietest band is {washed} of the loudest"
+            );
+        }
+    }
+
+    #[test]
+    fn a_column_takes_the_colour_of_whatever_is_loudest_in_it() {
+        // The complaint this answers is "it isn't as colourful as I'm used
+        // to": a player drew every column of a real track in much the same
+        // pale grey, because the shares were measured against their own sum
+        // and so could never reach the top of three bits.
+        let (r, g, b) = hue(60.0);
+        assert!(b > r && b > g, "bass should read blue, not {r},{g},{b}");
+        assert_eq!(b, 7, "and the loudest band in a column should saturate");
+
+        let (r, g, b) = hue(1_000.0);
+        assert!(r > b, "the mid-range should read amber, not {r},{g},{b}");
+        assert!(r > g, "amber is red with about half its green");
+        assert_eq!(r, 7);
+
+        let (r, g, b) = hue(9_000.0);
+        assert!(r >= 5 && g >= 5 && b >= 5, "treble should read near-white, not {r},{g},{b}");
+    }
+
+    #[test]
+    fn a_kick_does_not_paint_the_whole_track_white() {
+        // A transient has energy in every band at once, so a colour taken from
+        // peaks is white whatever the track is made of. The colour comes from
+        // the average instead, and this is the case that tells the two apart.
+        let rate = 44_100;
+        let mut plane = vec![0.0f32; rate];
+        for (i, sample) in plane.iter_mut().enumerate() {
+            let t = i as f32 / rate as f32;
+            let bass = (2.0 * std::f32::consts::PI * 55.0 * t).sin() * 0.7;
+            // A click every half second: broadband, brief, and loud.
+            let click = match i % (rate / 2) < 32 {
+                true => 0.9,
+                false => 0.0,
+            };
+            *sample = bass + click;
+        }
+        let w = analyze(&Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap());
+
+        // Most of this second is a bass note, and most of it should look like
+        // one.
+        let blue = w
+            .color_detail
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .filter(|packed| (packed >> 7) & 7 > (packed >> 13) & 7)
+            .count();
+        let columns = w.color_detail.len() / 2;
+        assert!(blue * 2 > columns, "only {blue} of {columns} columns read as bass");
     }
 
     #[test]

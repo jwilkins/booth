@@ -17,6 +17,49 @@ use crate::library::data_dir;
 /// stick is a track that will be missing the night it matters. The default is
 /// to take a copy, because the cost of being wrong in that direction is some
 /// disk, and the cost of being wrong in the other is an empty deck.
+/// What to do about music on a drive that the library has no copy of.
+///
+/// Only ever somebody else's drive: a drive this program wrote holds the
+/// library's own files, which are linked rather than copied. The question is
+/// what a copy of a stranger's stick should be — a record of what was on it, a
+/// complete thing that can be put back, or an invitation to keep the music.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OnForeign {
+    /// Name it in the manifest and store none of it.
+    #[default]
+    Ignore,
+    /// Copy it into the backup, so that copy is complete on its own.
+    Keep,
+    /// Copy it into the library and add it to the collection.
+    Adopt,
+}
+
+impl OnForeign {
+    pub const ALL: [OnForeign; 3] = [OnForeign::Ignore, OnForeign::Keep, OnForeign::Adopt];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OnForeign::Ignore => "Note what was on it",
+            OnForeign::Keep => "Copy it into the backup",
+            OnForeign::Adopt => "Copy it into the library",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            OnForeign::Ignore => {
+                "The drive's databases, cues and analysis are kept; its music is named in the                  manifest and not stored. Costs nothing, and the music is gone if the drive is."
+            }
+            OnForeign::Keep => {
+                "The backup holds the music too, so it can be put back on a stick as it was.                  Costs whatever the drive holds that you do not — gigabytes, for a stranger's."
+            }
+            OnForeign::Adopt => {
+                "The music is copied into the library and added to the collection, where it can                  be analysed and played like anything else. The same cost, and a browser with                  somebody else's records in it."
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnExternal {
     /// Copy it in, without asking.
@@ -272,6 +315,63 @@ pub struct Config {
     /// the same reason the library path is: it describes this machine.
     #[serde(default)]
     pub rekordbox_key: String,
+    /// The key the OneLibrary database on a drive is encrypted with.
+    ///
+    /// A different key from the one above, for a different file, and the two
+    /// are not interchangeable: that one opens rekordbox's library on this
+    /// computer, this one writes the database the newer players read off a
+    /// drive. Empty means fall back to `ONELIBRARY_KEY`, and then to writing
+    /// no such database at all.
+    #[serde(default)]
+    pub onelibrary_key: String,
+    /// Where copies of prepared drives go.
+    ///
+    /// A drive holds hours of work in the one place most likely to be dropped,
+    /// left in a booth, or simply to stop working. What goes here is the part
+    /// that cannot be made again — the databases, the analysis, the cues, the
+    /// play history — with the audio linked rather than copied, so keeping
+    /// every drive costs megabytes rather than gigabytes.
+    #[serde(default = "default_backups_path")]
+    pub backups_path: PathBuf,
+    /// Whether a drive is copied when it is written or plugged in.
+    #[serde(default = "yes")]
+    pub keep_drives: bool,
+    /// What to do about music on a drive that the library has no copy of.
+    #[serde(default)]
+    pub on_foreign: OnForeign,
+    /// How wide or tall each panel was left.
+    #[serde(default)]
+    pub panels: Panels,
+}
+
+/// The panel sizes, in points, as the window was last left.
+///
+/// A preference about this person's screen and how they like to work, which is
+/// what this file is for — and the one thing about a window that is genuinely
+/// annoying to set twice.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Panels {
+    pub collection: f32,
+    pub inspector: f32,
+    pub dock: f32,
+}
+
+impl Default for Panels {
+    fn default() -> Self {
+        Self { collection: 178.0, inspector: 210.0, dock: 44.0 }
+    }
+}
+
+impl Panels {
+    /// Whether `size` is far enough from what is stored to be worth writing.
+    ///
+    /// A drag arrives as a stream of sub-point changes, and a panel that
+    /// rewrote the settings file on each of them would write a hundred times
+    /// across one drag.
+    pub fn differs(before: f32, after: f32) -> bool {
+        (before - after).abs() >= 1.0
+    }
 }
 
 /// When a name in the collection is also written into the file's tag block.
@@ -330,6 +430,7 @@ impl Default for Config {
             stems_in: StemsIn::default(),
             on_external: OnExternal::default(),
             sort: crate::rows::Sort::default(),
+            panels: Panels::default(),
             paint: crate::wave::Paint::default(),
             length: Length::default(),
             stem_quality: Quality::default(),
@@ -340,8 +441,27 @@ impl Default for Config {
             autotag_score: 0.9,
             write_tags: WriteTags::default(),
             rekordbox_key: String::new(),
+            onelibrary_key: String::new(),
+            backups_path: default_backups_path(),
+            keep_drives: true,
+            on_foreign: OnForeign::default(),
         }
     }
+}
+
+/// Beside the library rather than under the data directory: these are copies
+/// of somebody's work, and a person should be able to find them, look inside
+/// one and copy it back onto a stick without this program's help.
+fn default_backups_path() -> PathBuf {
+    default_library_path()
+        .parent()
+        .map(|at| at.join("booth-drives"))
+        .unwrap_or_else(|| data_dir().join("drives"))
+}
+
+/// Serde needs a function to call for a default that is not `false`.
+fn yes() -> bool {
+    true
 }
 
 /// Under the home directory's music folder, not under the data directory.
@@ -392,6 +512,22 @@ impl Config {
     pub fn rekordbox_key(&self) -> Option<&str> {
         let key = self.rekordbox_key.trim();
         (!key.is_empty()).then_some(key)
+    }
+
+    /// The OneLibrary key from the settings, if one was put there.
+    pub fn onelibrary_key(&self) -> Option<&str> {
+        let key = self.onelibrary_key.trim();
+        (!key.is_empty()).then_some(key)
+    }
+
+    /// Whether a drive written now would carry the database the newer players
+    /// read.
+    ///
+    /// The settings first, then the environment — the same order the export
+    /// itself resolves it in, so what the sync sheet promises and what the
+    /// write does cannot come apart.
+    pub fn writes_onelibrary(&self) -> bool {
+        musicai::rekordbox::onelibrary_key(self.onelibrary_key()).is_some()
     }
 
     /// Where stems go and where to look for ones already rendered.

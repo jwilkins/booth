@@ -54,10 +54,46 @@ pub enum Job {
     /// Measure how loud each stem is across a track, for colouring its
     /// waveform by what is playing rather than by frequency.
     StemEnvelopes { id: u32, kit: StemKit },
+    /// Read the collection's files back and say where they and the collection
+    /// have come apart. `deep` reads every byte; without it, a stat and a tag
+    /// read per file.
+    Verify {
+        /// The records themselves, because the check is a comparison and the
+        /// stored side of it is what is being compared.
+        tracks: Vec<Track>,
+        deep: bool,
+        /// Walked for files no track points at. Empty to skip that half.
+        library: PathBuf,
+    },
+    /// Work out the two hashes for tracks that have none.
+    ///
+    /// Import does this as it goes, so this is for the tracks that were already
+    /// in the collection before it did — without it, a library built before
+    /// hashing existed can never be checked for copies at all.
+    Hash(Vec<(u32, PathBuf)>),
     /// Fingerprint tracks and ask AcoustID what they are.
     Identify { tracks: Vec<(u32, PathBuf)>, key: String },
     /// Write a drive.
     Sync { args: Box<ExportArgs>, files: Vec<PathBuf> },
+    /// Copy what a drive holds somewhere it will outlive the drive.
+    Keep {
+        /// The drive, mounted.
+        root: PathBuf,
+        /// What it calls itself, which becomes the folder the copies go in.
+        drive: String,
+        into: PathBuf,
+        /// The library's files, for the drive's audio to be linked to rather
+        /// than copied.
+        known: Vec<crate::backup::Known>,
+        /// What to do about music the library does not have.
+        foreign: crate::config::OnForeign,
+        /// Where music copied in goes, when that is what was asked for.
+        library: PathBuf,
+        /// The key the drive's OneLibrary database is encrypted with, for the
+        /// play history to be read out of it. Without one, only the files are
+        /// kept.
+        key: Option<String>,
+    },
 }
 
 impl Job {
@@ -72,9 +108,12 @@ impl Job {
             Job::Decode { .. } => "loading",
             Job::StemEnvelopes { .. } => "measuring stems",
             Job::Identify { .. } => "identifying",
+            Job::Hash(_) => "checking for copies",
+            Job::Verify { .. } => "checking the collection",
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Sync { .. } => "writing",
+            Job::Keep { .. } => "copying a drive",
         }
     }
 }
@@ -110,7 +149,10 @@ pub enum Update {
     /// A rekordbox library, read and ready to be merged in.
     Rekordbox(Box<musicai::rekordbox::master::Collection>),
     /// A file was re-encoded, and the collection should follow it.
-    Converted { id: u32, to: PathBuf },
+    Converted {
+        id: u32,
+        to: PathBuf,
+    },
     /// A file the import walked to, and the record read out of it.
     Imported(Box<Track>),
     /// One track, listened to.
@@ -119,6 +161,27 @@ pub enum Update {
     Decoded {
         id: u32,
         sound: Arc<crate::player::Sound>,
+    },
+    /// One track, read back and compared with what the collection says.
+    Verified(Box<crate::verify::Report>),
+    /// What the drive's database says after a write: each row and the file it
+    /// was made from.
+    Wrote(Vec<(PathBuf, musicai::export::pdb::Track)>),
+    /// Playable files in the library folder that no track points at.
+    Orphans(Vec<PathBuf>),
+    /// A drive was copied.
+    Kept(Box<crate::backup::Backup>),
+    /// What a player recorded having played, off a drive that is still mounted.
+    Played {
+        drive: String,
+        root: PathBuf,
+        sessions: Vec<crate::history::Session>,
+    },
+    /// The two hashes for one track that had none.
+    Hashed {
+        id: u32,
+        file: String,
+        audio: String,
     },
     /// What a fingerprint said a track is. Empty when nothing matched, which
     /// is itself worth recording so it is not asked again.
@@ -144,6 +207,10 @@ pub enum Update {
     Progress {
         done: usize,
         total: usize,
+    },
+    /// How far into the file in hand the running job has got.
+    Step {
+        percent: u8,
     },
     /// A line for the log, from a command that reports its own.
     Line(String),
@@ -194,7 +261,11 @@ pub struct Analyzed {
 /// for a WAV — the header field that says whether the samples are floats, which
 /// is the single most common way a file that plays on a laptop refuses to load
 /// in a booth.
-pub fn read_record(id: u32, path: &Path) -> Track {
+///
+/// `hashes` reads every byte, twice over. Import always wants that, since the
+/// file is open anyway and the answer is what makes copies findable later; a
+/// check that only wants the size and the tags should not pay for it.
+pub fn read_record(id: u32, path: &Path, hashes: bool) -> Track {
     let mut track = Track::placeholder(id);
     track.path = path.to_path_buf();
     track.format = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -219,6 +290,21 @@ pub fn read_record(id: u32, path: &Path) -> Track {
         .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_default();
     track.year = metadata.date.as_deref().and_then(|d| d.get(..4)?.parse().ok());
+
+    if !hashes {
+        return track;
+    }
+    // Both hashes at import, because both are a read of the file and the file
+    // is open anyway. A failure is not one: an unreadable file has bigger
+    // problems, and an empty hash simply never matches another.
+    match musicai::hash::file_sha256(path) {
+        Ok(hash) => track.file_hash = hash,
+        Err(e) => crate::debug!("no file hash for {}: {e:#}", path.display()),
+    }
+    match musicai::hash::audio_sha256(path) {
+        Ok(hash) => track.audio_hash = hash,
+        Err(e) => crate::debug!("no audio hash for {}: {e:#}", path.display()),
+    }
     track
 }
 
@@ -302,10 +388,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
     // five bars are a calibration of it, and a calibration is only as good as
     // the numbers somebody looked at.
     let intensity = analysis.intensity;
-    crate::debug!(
-        "#{id} peak onset density {intensity:.4} -> energy {}",
-        energy_from(intensity)
-    );
+    crate::debug!("#{id} peak onset density {intensity:.4} -> energy {}", energy_from(intensity));
 
     Ok(Analyzed {
         id,
@@ -529,6 +612,7 @@ impl Reporter for Channel {
         let update = match event {
             Event::Progress { done, total } => Update::Progress { done, total },
             Event::Started { total } => Update::Progress { done: 0, total },
+            Event::Step { percent } => Update::Step { percent },
             Event::Line(text) | Event::Heading(text) | Event::Summary(text) => Update::Line(text),
             Event::Failed { path, message } => Update::Failed { path, message },
             // The window keeps its own count of what finished; a command's
@@ -617,6 +701,38 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         }
         Job::Retag(tracks) => retag(&tracks, reporter),
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
+        Job::Hash(tracks) => hash_all(&tracks, reporter),
+        Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
+        Job::Keep { root, drive, into, known, foreign, library, key } => {
+            let kept = crate::backup::keep(&root, &into, &drive, &known, foreign, &library)?;
+            let _ = reporter.tx.send(Update::Kept(Box::new(kept)));
+            (reporter.wake)();
+
+            // The one thing on a drive the collection cannot make for itself.
+            // Read after the copy rather than before it, so that a history this
+            // fails to make sense of has still been stored.
+            if let Some(key) = key {
+                match crate::history::read(&root, &key) {
+                    Ok(sessions) if !sessions.is_empty() => {
+                        let played = sessions.iter().map(|s| s.played.len()).sum::<usize>();
+                        crate::info!(
+                            "{} read off {drive}, {}",
+                            crate::library::plural(sessions.len(), "session"),
+                            crate::library::plural(played, "track")
+                        );
+                        let _ = reporter.tx.send(Update::Played {
+                            drive: drive.clone(),
+                            root: root.clone(),
+                            sessions,
+                        });
+                        (reporter.wake)();
+                    }
+                    Ok(_) => {}
+                    Err(e) => crate::debug!("no history off {drive}: {e:#}"),
+                }
+            }
+            Ok(())
+        }
         Job::StemEnvelopes { id, kit } => {
             let envelopes = stem_envelopes(&kit)?;
             let _ = reporter.tx.send(Update::Envelopes { id, envelopes });
@@ -650,7 +766,12 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
                     .unwrap_or_default()
             );
             args.input = InputArgs { inputs: files, recursive: false };
-            musicai::commands::export(&args, reporter)
+            // The rows the drive ended up with, so the next write can carry
+            // them rather than preparing everything again.
+            let rows = musicai::commands::export(&args, reporter)?;
+            let _ = reporter.tx.send(Update::Wrote(rows));
+            (reporter.wake)();
+            Ok(())
         }
     }
 }
@@ -669,10 +790,93 @@ fn import(paths: &[PathBuf], recursive: bool, reporter: &Channel) -> anyhow::Res
         }
         // The id is filled in by the window, which owns the counter; zero here
         // means "not yet placed".
-        let _ = reporter.tx.send(Update::Imported(Box::new(read_record(0, path))));
+        let _ = reporter.tx.send(Update::Imported(Box::new(read_record(0, path, true))));
         let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
         (reporter.wake)();
     }
+    Ok(())
+}
+
+/// Read the collection's files back and report where they disagree with it.
+///
+/// In parallel, like the other passes that only read: each file is a stat, a
+/// tag read, and — when the check is thorough — every byte of it. The walk for
+/// files nobody knows about comes last, because it is one pass over the folder
+/// rather than one per track and there is no reason to make the per-file
+/// answers wait for it.
+fn verify_all(
+    tracks: &[Track],
+    deep: bool,
+    library: &Path,
+    reporter: &Channel,
+) -> anyhow::Result<()> {
+    use rayon::prelude::*;
+    use std::sync::atomic::AtomicUsize;
+
+    let total = tracks.len();
+    let done = AtomicUsize::new(0);
+
+    tracks.par_iter().for_each(|track| {
+        if reporter.cancelled() {
+            return;
+        }
+        let report = crate::verify::check(track, deep);
+        // Only what has something to say. A collection that is entirely in
+        // order should send nothing at all rather than one message per file
+        // saying so.
+        if !report.troubles.is_empty() {
+            let _ = reporter.tx.send(Update::Verified(Box::new(report)));
+        }
+        let now = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let _ = reporter.tx.send(Update::Progress { done: now, total });
+        (reporter.wake)();
+    });
+
+    if !reporter.cancelled() && !library.as_os_str().is_empty() {
+        let known: Vec<PathBuf> = tracks.iter().map(|track| track.path.clone()).collect();
+        let strays = crate::verify::orphans(library, &known);
+        if !strays.is_empty() {
+            let _ = reporter.tx.send(Update::Orphans(strays));
+            (reporter.wake)();
+        }
+    }
+    Ok(())
+}
+
+/// Hash tracks that have none, so they can be compared with the rest.
+///
+/// In parallel like analysis, and for the same reason: it is a read of every
+/// byte of every file and nothing else, so the only limit worth having is the
+/// disk's. Unlike analysis it does not decode, so a whole library is minutes
+/// rather than hours.
+fn hash_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<()> {
+    use rayon::prelude::*;
+    use std::sync::atomic::AtomicUsize;
+
+    let total = tracks.len();
+    let done = AtomicUsize::new(0);
+
+    tracks.par_iter().for_each(|(id, path)| {
+        if reporter.cancelled() {
+            return;
+        }
+        // A file that will not open is not a failure worth stopping for — it
+        // has bigger problems than being a copy, and an empty hash simply
+        // never matches another. Both are sent even so, so that a track is
+        // marked as looked at rather than asked about again every time.
+        let file = musicai::hash::file_sha256(path).unwrap_or_else(|e| {
+            crate::debug!("no file hash for {}: {e:#}", path.display());
+            String::new()
+        });
+        let audio = musicai::hash::audio_sha256(path).unwrap_or_else(|e| {
+            crate::debug!("no audio hash for {}: {e:#}", path.display());
+            String::new()
+        });
+        let _ = reporter.tx.send(Update::Hashed { id: *id, file, audio });
+        let now = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let _ = reporter.tx.send(Update::Progress { done: now, total });
+        (reporter.wake)();
+    });
     Ok(())
 }
 
@@ -769,12 +973,8 @@ fn convert(tracks: &[Convertible], reporter: &Channel) -> anyhow::Result<()> {
             // The names come with it. A converted file that arrives untitled
             // would look like a different record sitting next to the original.
             let metadata = musicai::tag::read_metadata(&track.path).unwrap_or_default();
-            let _ = musicai::tag::write_tags(
-                &to,
-                &metadata,
-                musicai::tag::OnExisting::Overwrite,
-                None,
-            );
+            let _ =
+                musicai::tag::write_tags(&to, &metadata, musicai::tag::OnExisting::Overwrite, None);
             Ok(to)
         })();
 
@@ -801,7 +1001,8 @@ fn unused_path(wanted: &Path) -> PathBuf {
         return wanted.to_path_buf();
     }
     let stem = wanted.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let extension = wanted.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let extension =
+        wanted.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
     let parent = wanted.parent().unwrap_or(Path::new("."));
     for n in 2..1_000 {
         let candidate = parent.join(format!("{stem} ({n}).{extension}"));
@@ -860,6 +1061,49 @@ fn non_empty(text: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// A reporter that counts the batch itself, over a command that only knows
+/// about the one file it was given.
+///
+/// Stem separation runs a track at a time so that a finished kit is usable
+/// immediately, which means the command underneath is started once per track
+/// and reports `1/1` every time. That is worse than no count at all: it looks
+/// like the work restarts. So its own batch events are dropped and the count
+/// comes from out here, where the length of the run is known.
+struct Batch<'a> {
+    inner: &'a Channel,
+    done: std::sync::atomic::AtomicUsize,
+    total: usize,
+}
+
+impl Batch<'_> {
+    /// Show the count before the track begins, rather than after it ends: on a
+    /// job of minutes a track, a counter that only moves on completion spends
+    /// most of its life a track behind.
+    fn starting(&self) {
+        let done = self.done.load(Ordering::Relaxed);
+        let _ = self.inner.tx.send(Update::Progress { done, total: self.total });
+        (self.inner.wake)();
+    }
+
+    fn finished_one(&self) {
+        self.done.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Reporter for Batch<'_> {
+    fn event(&self, event: Event) {
+        match event {
+            // The command's own idea of the batch, which is one file long.
+            Event::Started { .. } | Event::Progress { .. } | Event::Finished { .. } => {}
+            other => self.inner.event(other),
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.inner.cancelled()
+    }
+}
+
 fn separate(
     tracks: &[(u32, PathBuf)],
     stems_in: &crate::config::StemsLocation,
@@ -884,10 +1128,21 @@ fn separate(
     // One file at a time, so that a kit becomes available as soon as it is
     // rendered rather than at the end of the batch: a DJ waiting on stems for
     // one record should get that record back, not a progress bar.
+    //
+    // The count is kept here rather than left to the command, which is handed
+    // one file at a time and would report 1/1 over and over. `Batch` hides the
+    // command's own counting for the same reason, and lets its per-file
+    // percentage through, which is the part worth seeing on a job this long.
+    let batch = Batch {
+        inner: reporter,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        total: tracks.len(),
+    };
     for (id, path) in tracks {
         if reporter.cancelled() {
             break;
         }
+        batch.starting();
         args.input = InputArgs { inputs: vec![path.clone()], recursive: false };
         args.out_dir = stems_in.for_source(path);
         crate::info!(
@@ -902,7 +1157,7 @@ fn separate(
             });
             continue;
         }
-        match musicai::commands::stems_files(&args, std::slice::from_ref(path), reporter) {
+        match musicai::commands::stems_files(&args, std::slice::from_ref(path), &batch) {
             Ok(()) => {
                 let kit = find_stems(stems_in, path);
                 crate::debug!(
@@ -919,6 +1174,7 @@ fn separate(
                     .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
             }
         }
+        batch.finished_one();
         (reporter.wake)();
     }
     Ok(())
@@ -967,7 +1223,7 @@ mod tests {
         let path = dir.join("track.wav");
         write_beats(&path, 128.0, 4);
 
-        let track = read_record(7, &path);
+        let track = read_record(7, &path, true);
         assert_eq!(track.id, 7);
         assert_eq!(track.format, "wav");
         assert_eq!(track.title, "track", "the file name, until a tag says otherwise");
@@ -1005,9 +1261,9 @@ mod tests {
         std::fs::write(&float, &bytes).unwrap();
 
         assert!(is_float_wav(&float));
-        assert!(read_record(1, &float).float_samples);
+        assert!(read_record(1, &float, false).float_samples);
         // And it is exactly the kind of thing the sidebar counts.
-        assert!(read_record(1, &float).needs_attention().is_some());
+        assert!(read_record(1, &float, false).needs_attention().is_some());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

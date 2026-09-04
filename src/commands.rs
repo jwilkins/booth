@@ -1,7 +1,7 @@
 //! Implementations of the subcommands, and the pipeline that runs several of
 //! them over one set of files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -192,20 +192,100 @@ const MAX_DRIVE_PATH: usize = 255;
 /// megabytes here rather than the whole library's worth.
 const BATCH: usize = 16;
 
+/// Turn the playlists a caller asked for into the rows the database holds.
+///
+/// A folder is a playlist row with `is_folder` set, and the lists inside it
+/// point at it by id, which is how the players draw a tree. Folders are made
+/// in the order they are first mentioned so that the drive's order matches the
+/// one the caller sees.
+///
+/// Tracks that did not make it onto the drive are dropped from the lists that
+/// named them: the database refuses a playlist entry for a track it has no row
+/// for, and one unreadable file should cost that file rather than the export.
+/// An empty playlist is still written — a set that lost its only track is worth
+/// seeing on the player as empty rather than silently not being there.
+fn playlist_tree(
+    specs: &[crate::cli::PlaylistSpec],
+    ids_by_path: &HashMap<PathBuf, u32>,
+) -> Vec<pdb::Playlist> {
+    let mut rows: Vec<pdb::Playlist> = Vec::new();
+    let mut folder_ids: BTreeMap<&str, u32> = BTreeMap::new();
+    // Ids are handed out as rows are made, so a folder and the list inside it
+    // never collide.
+    let mut next_id = 1u32;
+
+    for spec in specs {
+        let parent = match spec.folder.is_empty() {
+            true => 0,
+            false => match folder_ids.get(spec.folder.as_str()) {
+                Some(id) => *id,
+                None => {
+                    let id = next_id;
+                    next_id += 1;
+                    folder_ids.insert(spec.folder.as_str(), id);
+                    rows.push(pdb::Playlist::folder(id, &spec.folder));
+                    id
+                }
+            },
+        };
+
+        let track_ids: Vec<u32> =
+            spec.tracks.iter().filter_map(|path| ids_by_path.get(path).copied()).collect();
+        let mut playlist = pdb::Playlist::new(next_id, &spec.name, track_ids);
+        playlist.parent_id = parent;
+        rows.push(playlist);
+        next_id += 1;
+    }
+    rows
+}
+
 /// Build a drive: the audio, the analysis files, and the database that indexes
 /// them.
-pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
+/// Returns the drive's rows and the files they were made from, so that a
+/// caller writing the same drive again can hand them back as `already` rather
+/// than preparing everything a second time.
+pub fn export(
+    args: &ExportArgs,
+    reporter: &dyn Reporter,
+) -> Result<Vec<(PathBuf, crate::export::pdb::Track)>> {
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
     let destination = if args.dry_run { None } else { Some(open_destination(args, &files)?) };
     let progress = Progress::new(reporter, files.len());
 
-    let mut tracks = Vec::new();
+    // What is already on the drive, carried through unchanged. Its ids are
+    // taken, and so are the analysis directories derived from them, so this
+    // run's ids start above the highest of them.
+    let mut tracks: Vec<pdb::Track> = args.already.iter().map(|(_, row)| row.clone()).collect();
     let mut failures = Vec::new();
     let mut lines = Vec::new();
+    let mut ids_by_path: HashMap<PathBuf, u32> =
+        args.already.iter().map(|(from, row)| (from.clone(), row.id)).collect();
     let analyses = Analyses::default();
+    let taken = tracks.iter().map(|row| row.id).max().unwrap_or(0);
+    // What this run put on, to be handed back for the next one to carry.
+    let mut made: Vec<(PathBuf, crate::export::pdb::Track)> = args.already.clone();
+
+    // Which analysis directories are already spoken for. The name comes from a
+    // hash of the audio path, so two tracks can want the same one; the second
+    // to arrive takes the next numbered file rather than overwriting the
+    // first. What is already on the drive counts, which is why this starts
+    // from the rows being carried.
+    let mut occupied: HashMap<String, u32> = HashMap::new();
+    for (_, row) in &args.already {
+        if let Some((dir, file)) = row.analyze_path.rsplit_once('/') {
+            let number = file
+                .trim_start_matches("ANLZ")
+                .split('.')
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0);
+            let next = occupied.entry(dir.to_string()).or_insert(0);
+            *next = (*next).max(number + 1);
+        }
+    }
 
     for (batch, chunk) in files.chunks(BATCH).enumerate() {
-        let first_id = (batch * BATCH) as u32 + 1;
+        let first_id = taken + (batch * BATCH) as u32 + 1;
         let prepared: Vec<Result<Prepared>> = chunk
             .par_iter()
             .enumerate()
@@ -221,7 +301,8 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
 
         for (path, result) in chunk.iter().zip(prepared) {
             match result {
-                Ok(prepared) => {
+                Ok(mut prepared) => {
+                    prepared.place(&mut occupied);
                     let Some(track) = &prepared.track else { continue };
                     lines.push(format!(
                         "{} -> {} ({:.2} BPM{}, {} beats, {} phrases, {} cues)",
@@ -237,16 +318,26 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
                         prepared.phrases,
                         prepared.cues
                     ));
-                    if let Some(destination) = &destination {
-                        match prepared.commit(destination, path) {
-                            Ok(()) => tracks.push(prepared.track.unwrap()),
+                    let landed = match &destination {
+                        Some(destination) => match prepared.commit(destination, path) {
+                            Ok(()) => Some(prepared.track.unwrap()),
                             Err(e) => {
                                 lines.pop();
                                 failures.push((path.clone(), e));
+                                None
                             }
-                        }
-                    } else {
-                        tracks.push(prepared.track.unwrap());
+                        },
+                        None => Some(prepared.track.unwrap()),
+                    };
+                    if let Some(track) = landed {
+                        // Which file became which drive id, so a playlist
+                        // given in paths can be written in ids. A file that
+                        // failed is absent here and drops out of every
+                        // playlist that named it, rather than leaving a row
+                        // pointing at a track the drive does not have.
+                        ids_by_path.insert(path.clone(), track.id);
+                        made.push((path.clone(), track.clone()));
+                        tracks.push(track);
                     }
                 }
                 Err(e) => failures.push((path.clone(), e)),
@@ -255,8 +346,13 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
     }
 
     if !tracks.is_empty() {
-        let playlist = pdb::Playlist::new(1, &args.playlist, tracks.iter().map(|t| t.id).collect());
-        let database = pdb::Database { tracks, playlists: vec![playlist] };
+        let playlists = match args.playlists.is_empty() {
+            true => {
+                vec![pdb::Playlist::new(1, &args.playlist, tracks.iter().map(|t| t.id).collect())]
+            }
+            false => playlist_tree(&args.playlists, &ids_by_path),
+        };
+        let database = pdb::Database { tracks, playlists };
         let bytes = database.to_bytes()?;
 
         match &destination {
@@ -281,6 +377,12 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
                 ));
             }
         }
+
+        // The same library again, in the format the newer players read. Both
+        // are built from the one `database` above, so the two files on the
+        // drive cannot disagree about what is on it — which is the failure
+        // that firmware 3.30 turned into a room full of DJs with no playlists.
+        lines.extend(write_onelibrary(args, &database, destination.as_ref())?);
     }
 
     if let Some(destination) = destination {
@@ -292,7 +394,8 @@ pub fn export(args: &ExportArgs, reporter: &dyn Reporter) -> Result<()> {
     }
     let mut outcome = Outcome::new(files.len(), failures);
     outcome.cancelled = reporter.cancelled();
-    outcome.report(reporter)
+    outcome.report(reporter)?;
+    Ok(made)
 }
 
 /// One track's worth of drive: the row that describes it, and the files that
@@ -327,6 +430,32 @@ impl Prepared {
 
     /// Put it on the drive, and read every analysis file back before calling it
     /// written.
+    /// Settle which numbered analysis file this track gets, now that it is
+    /// known what else is on the drive.
+    ///
+    /// Every track wants `ANLZ0000` in its own hashed directory, and usually
+    /// gets it. Two audio paths hashing alike is the exception this exists
+    /// for: the second one takes `ANLZ0001`, and the player tells them apart by
+    /// the path each file names inside itself.
+    fn place(&mut self, occupied: &mut HashMap<String, u32>) {
+        let Some(track) = &mut self.track else { return };
+        let Some(dir) = self
+            .analysis
+            .first()
+            .and_then(|(at, _)| at.rsplit_once('/'))
+            .map(|(dir, _)| dir.to_string())
+        else {
+            return;
+        };
+        let next = occupied.entry(dir.clone()).or_insert(0);
+        let names = anlz::analysis_paths(&dir, *next);
+        *next += 1;
+        for (slot, name) in self.analysis.iter_mut().zip(names.iter()) {
+            slot.0.clone_from(name);
+        }
+        track.analyze_path.clone_from(&names[0]);
+    }
+
     fn commit(&self, destination: &Destination, source: &Path) -> Result<()> {
         destination.copy_in(&self.on_drive, source)?;
         for (at, bytes) in &self.analysis {
@@ -343,6 +472,64 @@ impl Prepared {
 /// The size has to be settled before a byte is written, so it is estimated from
 /// the audio plus a couple of megabytes a track for the analysis. That is
 /// generous for anything under about half an hour long.
+/// Write the OneLibrary database beside the legacy one, when there is a key
+/// for it.
+///
+/// A drive without it is the drive this program used to write, which the
+/// CDJ-3000X and the other newer players read nothing at all of. A drive with
+/// it is one a CDJ-3000X has browsed.
+///
+/// No key is not a failure: a build can be made without one, so this reports
+/// what was not written and why, and the
+/// export carries on.
+fn write_onelibrary(
+    args: &ExportArgs,
+    database: &pdb::Database,
+    destination: Option<&Destination>,
+) -> Result<Vec<String>> {
+    use crate::export::onelibrary;
+
+    let Some(key) = crate::rekordbox::onelibrary_key(args.onelibrary_key.as_deref()) else {
+        return Ok(vec![crate::rekordbox::no_onelibrary_key()]);
+    };
+
+    // What the drive calls itself. An image is formatted with a label; a
+    // folder is only ever known by its name.
+    let device = match (&args.image, &args.drive) {
+        (Some(_), _) => args.label.clone(),
+        (None, Some(drive)) => {
+            drive.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string()
+        }
+        (None, None) => String::new(),
+    };
+
+    let bytes = onelibrary::to_bytes(database, &key, &device)
+        .context("building the OneLibrary database")?;
+    let Some(destination) = destination else {
+        return Ok(vec![format!(
+            "would write {}: {} tracks, {} bytes",
+            onelibrary::DRIVE_PATH,
+            database.tracks.len(),
+            bytes.len()
+        )]);
+    };
+
+    destination.write(onelibrary::DRIVE_PATH, &bytes)?;
+    // Off the drive again, keyed again, counted again — the same standard the
+    // legacy database is held to.
+    let summary = onelibrary::inspect(&destination.read(onelibrary::DRIVE_PATH)?, &key)
+        .context("the OneLibrary database did not read back off the drive")?;
+    Ok(vec![format!(
+        "wrote {} to {}: {} tables, {} tracks, {} playlists, verified — a CDJ-3000X browses \
+         these",
+        onelibrary::DRIVE_PATH,
+        destination.describe(),
+        summary.tables,
+        summary.tracks,
+        summary.playlists
+    )])
+}
+
 fn open_destination(args: &ExportArgs, files: &[PathBuf]) -> Result<Destination> {
     if let Some(root) = &args.drive {
         return Ok(Destination::Directory(root.clone()));
@@ -404,11 +591,14 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
         bail!("{} characters is longer than a player will follow", on_drive.len());
     }
 
-    // rekordbox's own scheme for these two directory names is not understood;
-    // ours is derived from the track id, which keeps them unique and lets the
-    // path be reconstructed from the database that points at it.
-    let analyze_dir = format!("/PIONEER/USBANLZ/P{:03}/{id:08X}", id % 1000);
-    let analyze_path = format!("{analyze_dir}/ANLZ0000.DAT");
+    // Named the way rekordbox names it, which is not a courtesy: the player
+    // works this name out for itself from the audio path and looks nowhere
+    // else. See [`anlz::analysis_dir`]. A second track hashing to the same
+    // directory is given a numbered file instead, which is settled when the
+    // drive is written rather than here, because it depends on what else is
+    // going on.
+    let analyze_dir = anlz::analysis_dir(&on_drive);
+    let analyze_path = anlz::analysis_paths(&analyze_dir, 0)[0].clone();
 
     // A stem takes its parent's grid, cues, key and phrases. Its own would be
     // measured from audio with most of the track removed — a vocal with no
@@ -462,10 +652,11 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
         ..pdb::Track::default()
     };
 
+    let names = anlz::analysis_paths(&analyze_dir, 0);
     let analysis = vec![
-        (format!("{analyze_dir}/ANLZ0000.DAT"), files.dat()),
-        (format!("{analyze_dir}/ANLZ0000.EXT"), files.ext()),
-        (format!("{analyze_dir}/ANLZ0000.2EX"), files.two_ex()),
+        (names[0].clone(), files.dat()),
+        (names[1].clone(), files.ext()),
+        (names[2].clone(), files.two_ex()),
     ];
 
     Ok(Prepared {
@@ -918,7 +1109,7 @@ pub fn stems_files(args: &StemsArgs, files: &[PathBuf], reporter: &dyn Reporter)
         if progress.cancelled() {
             break;
         }
-        match separate_one(path, args, &config, &encode, demucs_bin.as_deref()) {
+        match separate_one(path, args, &config, &encode, demucs_bin.as_deref(), reporter) {
             Ok(written) => {
                 for line in written {
                     reporter.event(Event::Line(line));
@@ -940,6 +1131,7 @@ fn separate_one(
     config: &dsp::Config,
     encode: &EncodeOptions,
     demucs_bin: Option<&std::ffi::OsStr>,
+    reporter: &dyn Reporter,
 ) -> Result<Vec<String>> {
     let track = path
         .file_stem()
@@ -977,7 +1169,11 @@ fn separate_one(
             demucs_config.shifts = args.shifts();
             demucs_config.overlap = args.demucs.demucs_overlap;
 
-            let result = demucs::separate(path, &demucs_config);
+            // Separating one track is minutes of work, so it reports from
+            // inside rather than only when it finishes.
+            let result = demucs::separate(path, &demucs_config, &|percent| {
+                reporter.event(Event::Step { percent })
+            });
             // Demucs' own output is an intermediate; the stems we write are the
             // deliverable. Clean up whether or not it succeeded.
             let _ = std::fs::remove_dir_all(&work_dir);
@@ -1475,9 +1671,8 @@ pub fn rekordbox(args: &crate::cli::RekordboxCommand, reporter: &dyn Reporter) -
     let tables = crate::rekordbox::tables(&connection)?;
     if !tables.iter().any(|(name, _)| name == "djmdContent") {
         reporter.event(Event::Summary(
-            "this is not a rekordbox master.db. If it is a OneLibrary drive, its schema is \
-             not published and nothing here can read it as a library yet — `rekordbox schema` \
-             will describe it."
+            "this is not a rekordbox master.db. If it is a OneLibrary drive, nothing here \
+             reads it as a library yet — `rekordbox schema` will describe its tables."
                 .into(),
         ));
         return Ok(());
@@ -1518,6 +1713,86 @@ pub fn rekordbox(args: &crate::cli::RekordboxCommand, reporter: &dyn Reporter) -
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn playlists_become_a_tree_of_folders_and_lists() {
+        use crate::cli::PlaylistSpec;
+
+        let ids: HashMap<PathBuf, u32> = [("/a.flac", 1u32), ("/b.flac", 2), ("/c.flac", 3)]
+            .into_iter()
+            .map(|(p, id)| (PathBuf::from(p), id))
+            .collect();
+        let specs = vec![
+            PlaylistSpec {
+                name: "warm".into(),
+                folder: "Sat 14/9".into(),
+                tracks: vec!["/a.flac".into(), "/b.flac".into()],
+            },
+            PlaylistSpec {
+                name: "peak".into(),
+                folder: "Sat 14/9".into(),
+                tracks: vec!["/c.flac".into()],
+            },
+            PlaylistSpec {
+                name: "promos".into(),
+                folder: String::new(),
+                tracks: vec!["/a.flac".into()],
+            },
+        ];
+
+        let rows = playlist_tree(&specs, &ids);
+        let folders: Vec<&pdb::Playlist> = rows.iter().filter(|r| r.is_folder).collect();
+        assert_eq!(folders.len(), 1, "one folder, named twice");
+        assert_eq!(folders[0].name, "Sat 14/9");
+
+        let by_name = |name: &str| rows.iter().find(|r| r.name == name).expect(name);
+        assert_eq!(by_name("warm").parent_id, folders[0].id);
+        assert_eq!(by_name("peak").parent_id, folders[0].id, "the second list joins the folder");
+        assert_eq!(by_name("promos").parent_id, 0, "the top level is not a folder");
+        assert_eq!(by_name("warm").track_ids, vec![1, 2]);
+
+        let mut ids: Vec<u32> = rows.iter().map(|r| r.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), rows.len(), "a folder and a list shared an id");
+    }
+
+    #[test]
+    fn a_track_that_did_not_reach_the_drive_leaves_the_playlist_that_named_it() {
+        use crate::cli::PlaylistSpec;
+
+        // The database refuses an entry for a track it has no row for, so one
+        // unreadable file has to cost that file rather than the whole export.
+        let ids: HashMap<PathBuf, u32> =
+            [(PathBuf::from("/good.flac"), 1u32)].into_iter().collect();
+        let specs = vec![PlaylistSpec {
+            name: "set".into(),
+            folder: String::new(),
+            tracks: vec!["/good.flac".into(), "/broken.wav".into()],
+        }];
+
+        let rows = playlist_tree(&specs, &ids);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].track_ids, vec![1], "the missing one is dropped, the list survives");
+    }
+
+    #[test]
+    fn a_playlist_whose_tracks_all_failed_is_still_written() {
+        use crate::cli::PlaylistSpec;
+
+        // Empty on the player is a truthful answer. Absent looks like the sync
+        // forgot it.
+        let rows = playlist_tree(
+            &[PlaylistSpec {
+                name: "set".into(),
+                folder: String::new(),
+                tracks: vec!["/x.wav".into()],
+            }],
+            &HashMap::new(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].track_ids.is_empty());
+    }
     use super::*;
 
     #[test]

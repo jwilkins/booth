@@ -1,0 +1,91 @@
+Booth Public Source License (BPSL)
+Version 1.0, Based on the Nmap Public Source License
+
+Copyright and License Notice
+
+The Booth software and associated documentation files are Copyright © 2026
+Jonathan Wilkins ("The Booth Project"). All rights reserved.
+
+Booth is distributed under the terms of this Booth Public Source License
+(BPSL). This license is based on the GNU General Public License version 2
+(GPLv2), but with important additional terms, conditions, clarifications, and
+exceptions designed to keep the software free for individual and community use
+while requiring commercial users to obtain a separate commercial license.
+
+Terms and Conditions for Copying, Distribution, and Modification
+
+0. Definitions
+
+* "The Program" refers to the Booth software, or any derivative work under
+  copyright law, meaning a work containing Booth or a portion of it, either
+  verbatim or with modifications.
+
+* "You" or "Licensee" refers to any individual or entity exercising rights
+  under this License.
+
+* "The Copyright Holder" refers to Jonathan Wilkins.
+
+1. Grant of Free Use & Source Availability
+
+Subject to the terms and conditions of this License, Jonathan Wilkins grants
+you a royalty-free, worldwide, non-exclusive license to:
+
+* Download, install, and execute the Program for personal, educational, or
+  internal organizational use.
+
+* Inspect the source code to evaluate security, quality, and functionality.
+
+2. Restrictions on Proprietary Redistribution (The Core Condition)
+
+You may not redistribute, embed, or use Booth within proprietary commercial
+hardware or software products (including traditional applications, appliances,
+and virtual machines) without securing a separate commercial OEM license from
+Jonathan Wilkins.
+
+The free distribution of Booth is strictly limited to open-source or
+non-commercial channels that fully comply with all terms of this License.
+
+3. Verbatim Copying and Distribution
+
+You may copy and distribute verbatim copies of the Program's source code as you
+receive it, in any medium, provided that you conspicuously and appropriately
+publish on each copy:
+
+* An appropriate copyright notice (Copyright © 2026 Jonathan Wilkins).
+
+* This complete license text and warranty disclaimer.
+
+* All notices that refer to this License and to the absence of any warranty.
+
+4. Modification and Derivative Works
+
+You may modify your copy of the Program and distribute such modifications under
+the terms of Section 1 and 3, provided that you also meet all of the following
+conditions:
+
+* You prominently mark the modified files with notices stating that you changed
+  them, along with the date of any change.
+
+* You license any derivative work under this same Booth Public Source License,
+  prohibiting the imposition of further restrictions on recipients.
+
+5. Community Contributions
+
+By submitting patches, code, or pull requests to Jonathan Wilkins or The Booth
+Project, you grant Jonathan Wilkins the unlimited, non-exclusive, irrevocable
+right to reuse, modify, distribute, and relicense your contributed code.
+
+6. Termination
+
+Your rights under this License will automatically terminate if you fail to
+comply with any of its terms. Upon termination, you must immediately cease all
+use and distribution of the Program.
+
+Disclaimer of Warranty
+
+THE PROGRAM IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING IN
+ANY WAY OUT OF THE USE OF THIS PROGRAM.

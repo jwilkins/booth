@@ -27,7 +27,7 @@ pub struct Query {
 /// One condition. Every term must hold for a track to be listed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Term {
-    /// Whether the term was written with a leading `-`.
+    /// Whether the term was written with a leading `-` or `!`.
     pub negated: bool,
     pub test: Test,
 }
@@ -47,6 +47,9 @@ pub enum Test {
     Added(Compare),
     Played(Played),
     Missing(Missing),
+    /// `has:stems` — the other way round from `missing:`, so that the common
+    /// question does not have to be asked backwards.
+    Has(Missing),
     OnDrive(String),
     InPlaylist(String),
     Format(String),
@@ -64,6 +67,10 @@ pub enum Test {
 pub enum Compare {
     Less(f64),
     Greater(f64),
+    /// `>=4`, which on a scale of five means four or five and `>4` does not.
+    AtLeast(f64),
+    /// `<=4`.
+    AtMost(f64),
     Between(f64, f64),
     /// Written as a bare number. Ranges rather than equality, because a tempo
     /// of 128 means 128 as printed, not 128.000000.
@@ -83,6 +90,10 @@ impl Compare {
         match self {
             Compare::Less(limit) => value < limit,
             Compare::Greater(limit) => value > limit,
+            // The same tolerance the other forms carry, so that `bpm:>=128`
+            // takes a grid that reads 128 and happens to sit at 127.99.
+            Compare::AtLeast(limit) => value > limit - TOLERANCE,
+            Compare::AtMost(limit) => value < limit + TOLERANCE,
             Compare::Between(low, high) => value > low - TOLERANCE && value < high + TOLERANCE,
             Compare::About(target) => (value - target).abs() < TOLERANCE,
         }
@@ -95,6 +106,13 @@ pub enum Played {
     Never,
     /// Played at some point within this many days.
     Within(f64),
+    /// Played, but not for this many days — the "what have I been neglecting"
+    /// question.
+    ///
+    /// A track that was never played is not one that was played a long time
+    /// ago, so this does not include them; `played:never` is that question and
+    /// keeping the two apart is what makes either of them mean anything.
+    NotFor(f64),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -124,6 +142,10 @@ pub enum DupeKey {
     Title,
     Artist,
     Duration,
+    /// Byte-identical files.
+    File,
+    /// The same encoded audio, whatever the tags say.
+    Audio,
 }
 
 impl DupeKey {
@@ -132,6 +154,8 @@ impl DupeKey {
             "title" => DupeKey::Title,
             "artist" => DupeKey::Artist,
             "length" | "duration" => DupeKey::Duration,
+            "file" | "bytes" => DupeKey::File,
+            "audio" | "sound" => DupeKey::Audio,
             _ => return None,
         })
     }
@@ -178,7 +202,10 @@ impl Query {
     pub fn parse(text: &str) -> Self {
         let mut query = Query::default();
         for (at, word) in words(text) {
-            let (negated, body_at) = match word.strip_prefix('-') {
+            // Either mark, because both are what people reach for: `-` is
+            // what search boxes use and `!` is what everything else does.
+            let stripped = word.strip_prefix('-').or_else(|| word.strip_prefix('!'));
+            let (negated, body_at) = match stripped {
                 Some(rest) if !rest.is_empty() => (true, at.start + 1..at.end),
                 _ => (false, at.clone()),
             };
@@ -238,15 +265,11 @@ impl Term {
             Test::Played(Played::Within(days)) => {
                 track.last_played.is_some_and(|at| days_since(at, context.now) <= *days)
             }
-            Test::Missing(what) => match what {
-                Missing::Grid => !track.has_grid,
-                Missing::Key => track.key.is_empty(),
-                // A stem is not missing its own stems; only a whole track can
-                // be waiting for a kit.
-                Missing::Stems => track.role == Role::Track && track.stems.is_empty(),
-                Missing::Tags => track.tags.is_empty(),
-                Missing::Cues => track.cues.is_empty(),
-            },
+            Test::Played(Played::NotFor(days)) => {
+                track.last_played.is_some_and(|at| days_since(at, context.now) > *days)
+            }
+            Test::Missing(what) => lacks(track, *what),
+            Test::Has(what) => !lacks(track, *what),
             Test::OnDrive(label) => context
                 .drives
                 .iter()
@@ -296,11 +319,102 @@ pub fn duplicate_ids(tracks: &[Track], keys: &[DupeKey]) -> Vec<u32> {
                 // To the second: two rips of the same track rarely differ by
                 // less, and two different tracks rarely agree that closely.
                 DupeKey::Duration => key.push_str(&format!("{}", track.duration_secs.round())),
+                DupeKey::File => key.push_str(&track.file_hash),
+                DupeKey::Audio => key.push_str(&track.audio_hash),
             }
+        }
+        // A track whose hash could not be read is not a duplicate of every
+        // other one that could not be read either.
+        let unhashed = keys.iter().any(|part| match part {
+            DupeKey::File => track.file_hash.is_empty(),
+            DupeKey::Audio => track.audio_hash.is_empty(),
+            _ => false,
+        });
+        if unhashed {
+            continue;
         }
         groups.entry(key).or_default().push(track.id);
     }
     groups.into_values().filter(|ids| ids.len() > 1).flatten().collect()
+}
+
+/// One line of the help: what to type, and what it does.
+pub struct Help {
+    pub example: &'static str,
+    pub means: &'static str,
+}
+
+/// What can be typed in the query bar, as the help shows it.
+///
+/// Every example here is parsed by a test, so the help cannot come to describe
+/// a grammar the parser does not have. A field that is renamed and not
+/// documented fails the build's tests rather than quietly lying to whoever
+/// reads this.
+pub const HELP: &[(&str, &[Help])] = &[
+    (
+        "Finding a record",
+        &[
+            Help { example: "peverelist", means: "artist, title or album contains it" },
+            Help { example: "\"roll with\"", means: "several words as one" },
+            Help { example: "format:flac", means: "by file type — also mp3, wav, m4a" },
+            Help { example: "bitrate:<256", means: "under 256 kbps" },
+        ],
+    ),
+    (
+        "Mixing",
+        &[
+            Help { example: "bpm:128", means: "around 128, as the grid reads" },
+            Help { example: "bpm:124-128", means: "anywhere in the range" },
+            Help { example: "key:8A", means: "that key exactly" },
+            Help { example: "key:~8A", means: "that key and everything that mixes with it" },
+            Help { example: "energy:>=4", means: "how much is going on, 1 to 5" },
+        ],
+    ),
+    (
+        "Preparation",
+        &[
+            Help { example: "has:stems", means: "a rendered kit — also grid, key, cues, tags" },
+            Help { example: "missing:stems", means: "the other way round" },
+            Help { example: "no:grid", means: "the same as missing:" },
+            Help { example: "!missing:cues", means: "not missing them, i.e. has them" },
+            Help { example: "-has:key", means: "`-` and `!` both mean not" },
+        ],
+    ),
+    (
+        "Where it lives",
+        &[
+            Help { example: "in:\"Sat 14/9\"", means: "in that playlist" },
+            Help { example: "in:drive:SANDISK", means: "written to that drive" },
+            Help { example: "tag:peak", means: "carries that tag" },
+            Help { example: "dupes:file", means: "byte-for-byte the same file" },
+            Help { example: "dupes:audio", means: "the same recording, whatever the tags say" },
+            Help { example: "dupes:title+artist", means: "shares both with another track" },
+        ],
+    ),
+    (
+        "History",
+        &[
+            Help { example: "added:<14d", means: "added in the last fortnight" },
+            Help { example: "played:never", means: "never played" },
+            Help { example: "played:>30d", means: "not for a month" },
+        ],
+    ),
+];
+
+/// Whether a track is without the thing named.
+///
+/// One function for both `missing:` and `has:`, so the pair cannot come to
+/// disagree about what counts as having stems.
+fn lacks(track: &Track, what: Missing) -> bool {
+    match what {
+        Missing::Grid => !track.has_grid,
+        Missing::Key => track.key.is_empty(),
+        // A stem is not missing its own stems; only a whole track can be
+        // waiting for a kit.
+        Missing::Stems => track.role == Role::Track && track.stems.is_empty(),
+        Missing::Tags => track.tags.is_empty(),
+        Missing::Cues => track.cues.is_empty(),
+    }
 }
 
 /// Whether two Camelot keys would mix.
@@ -391,12 +505,22 @@ fn parse_field(field: &str, value: &str) -> Test {
         "added" => compare(value).map(Test::Added).unwrap_or(Test::Invalid),
         "played" => match value {
             "never" => Test::Played(Played::Never),
-            other => match duration_days(other) {
-                Some(days) => Test::Played(Played::Within(days)),
-                None => Test::Invalid,
-            },
+            // `>30d` is "not for a month" and `<30d` is "within a month"; a
+            // bare `30d` is the second, because that is what it reads as.
+            other => {
+                let (make, rest): (fn(f64) -> Played, &str) = match other {
+                    _ if other.starts_with('>') => (Played::NotFor, &other[1..]),
+                    _ if other.starts_with('<') => (Played::Within, &other[1..]),
+                    _ => (Played::Within, other),
+                };
+                match duration_days(rest) {
+                    Some(days) => Test::Played(make(days)),
+                    None => Test::Invalid,
+                }
+            }
         },
-        "missing" => Missing::parse(value).map(Test::Missing).unwrap_or(Test::Invalid),
+        "missing" | "no" => Missing::parse(value).map(Test::Missing).unwrap_or(Test::Invalid),
+        "has" | "with" => Missing::parse(value).map(Test::Has).unwrap_or(Test::Invalid),
         "in" => match value.split_once(':') {
             Some(("drive", name)) if !name.is_empty() => Test::OnDrive(name.to_string()),
             Some(("playlist", name)) if !name.is_empty() => Test::InPlaylist(name.to_string()),
@@ -420,6 +544,14 @@ fn parse_field(field: &str, value: &str) -> Test {
 
 /// `<14d`, `>128`, `124-128` or `128`, in whatever the field's own unit is.
 fn compare(value: &str) -> Option<Compare> {
+    // The two-character forms first: `>=` starts with `>`, so testing the
+    // shorter one first would read `>=4` as "greater than nothing".
+    if let Some(rest) = value.strip_prefix(">=") {
+        return Some(Compare::AtLeast(number(rest)?));
+    }
+    if let Some(rest) = value.strip_prefix("<=") {
+        return Some(Compare::AtMost(number(rest)?));
+    }
     if let Some(rest) = value.strip_prefix('<') {
         return Some(Compare::Less(number(rest)?));
     }
@@ -459,6 +591,115 @@ fn duration_days(text: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn every_example_in_the_help_actually_parses() {
+        // The help is the only description of the grammar there is, so it has
+        // to be checked against the grammar rather than trusted. A field
+        // renamed without the help following fails here.
+        for (heading, lines) in HELP {
+            for help in *lines {
+                let query = Query::parse(help.example);
+                assert!(!query.terms.is_empty(), "{heading}: {:?} parsed to nothing", help.example);
+                assert!(
+                    query.terms.iter().all(|t| t.test != Test::Invalid),
+                    "{heading}: {:?} does not parse — {:?}",
+                    help.example,
+                    query.terms
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_bang_negates_as_well_as_a_dash() {
+        // Both, because both are what people reach for.
+        for text in ["-missing:stems", "!missing:stems"] {
+            let query = Query::parse(text);
+            assert_eq!(query.terms.len(), 1, "{text}");
+            assert!(query.terms[0].negated, "{text} was not read as a negation");
+            assert_eq!(query.terms[0].test, Test::Missing(Missing::Stems), "{text}");
+        }
+
+        // A lone mark is not a negation of nothing; it is a search for it.
+        assert!(!Query::parse("!").terms[0].negated);
+        assert!(!Query::parse("-").terms[0].negated);
+    }
+
+    #[test]
+    fn has_is_missing_the_other_way_round() {
+        let bare = track(1);
+        let with = {
+            let mut track = track(2);
+            track.stems.vocals = Some("/s/a-vocals.mp3".into());
+            track.stems.drums = Some("/s/a-drums.mp3".into());
+            track.stems.melody = Some("/s/a-melody.mp3".into());
+            track
+        };
+
+        assert!(matches("has:stems", &with));
+        assert!(!matches("has:stems", &bare));
+        assert!(matches("missing:stems", &bare));
+        assert!(!matches("missing:stems", &with));
+
+        // The two ways of asking the same question must agree.
+        for track in [&bare, &with] {
+            assert_eq!(
+                matches("has:stems", track),
+                matches("!missing:stems", track),
+                "has: and !missing: disagreed about #{}",
+                track.id
+            );
+        }
+    }
+
+    #[test]
+    fn at_least_and_at_most_include_the_number_written() {
+        // On a scale of five, `>=4` means four or five and `>4` means five.
+        // Both were documented; only the strict pair was implemented, and
+        // `energy:>=4` quietly matched nothing at all.
+        let mut four = track(1);
+        four.energy = 4;
+        let mut five = track(2);
+        five.energy = 5;
+        let mut three = track(3);
+        three.energy = 3;
+
+        assert!(matches("energy:>=4", &four), "the number written was excluded");
+        assert!(matches("energy:>=4", &five));
+        assert!(!matches("energy:>=4", &three));
+
+        assert!(!matches("energy:>4", &four), "the strict form still excludes it");
+        assert!(matches("energy:<=4", &four));
+        assert!(!matches("energy:<=4", &five));
+    }
+
+    #[test]
+    fn played_reads_both_directions_of_a_span() {
+        let day = 24.0 * 60.0 * 60.0;
+        let mut recent = track(1);
+        recent.last_played = Some(NOW - (5.0 * day) as u64);
+        let mut ages_ago = track(2);
+        ages_ago.last_played = Some(NOW - (90.0 * day) as u64);
+        let never = track(3);
+
+        assert!(matches("played:>30d", &ages_ago), "not for a month");
+        assert!(!matches("played:>30d", &recent));
+        assert!(matches("played:30d", &recent), "a bare span is within it");
+        assert!(matches("played:<30d", &recent));
+        assert!(!matches("played:<30d", &ages_ago));
+
+        // Never played is its own question, and answering it here would make
+        // both terms mean less.
+        assert!(!matches("played:>30d", &never), "never played is not played long ago");
+        assert!(matches("played:never", &never));
+    }
+
+    #[test]
+    fn no_is_another_word_for_missing() {
+        assert_eq!(Query::parse("no:grid").terms[0].test, Test::Missing(Missing::Grid));
+        assert_eq!(Query::parse("with:cues").terms[0].test, Test::Has(Missing::Cues));
+    }
     use super::*;
     use crate::library::StemKit;
 
@@ -640,7 +881,7 @@ mod tests {
         assert!(matches("missing:stems", &parent));
 
         let mut stem = track(2);
-        stem.role = Role::Acapella;
+        stem.role = Role::Vocals;
         stem.parent = Some(1);
         assert!(!matches("missing:stems", &stem), "a stem would always match, and drown the list");
     }

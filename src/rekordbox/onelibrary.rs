@@ -9,16 +9,24 @@
 //! cryptographic problem and never was.
 //!
 //! It is tempting to conclude from that that support for the newer players is
-//! a matter of having the key. It is not. What is missing is the **schema**:
-//! which tables a player reads, which columns it requires, what it does with a
-//! row it does not recognise, and what state the rest of the drive has to be
-//! left in. None of that is published, and nobody has yet shown an
-//! `exportLibrary.db` written from scratch that a CDJ-3000X will play.
+//! a matter of having the key. It is not, and it is not the schema either any
+//! more: AlphaTheta has published nothing, but the twenty-two tables, their
+//! DDL from a real export, and the rows a player's browse screen is drawn from
+//! have all been documented by other people. `docs/onelibrary.md` is that
+//! survey, with its sources.
 //!
-//! So this module reads and describes; it does not write. That is the honest
-//! shape of what is known, and it is the same position `export.pdb` was in
-//! before somebody did the work of learning it. Being able to open a drive
-//! that rekordbox wrote is how that work starts — which is what this is for.
+//! What is missing is evidence. No published test shows a drive carrying only
+//! a hand-written `exportLibrary.db` playing on a player that reads only
+//! OneLibrary, or records whether such a player used the grids and waveforms
+//! it was handed rather than measuring its own. And writing the file means
+//! using a key recovered from somebody else's binary, which is a decision this
+//! project has not made.
+//!
+//! So this module reads and describes. Writing one is
+//! [`crate::export::onelibrary`]'s job, under the drive key rather than this
+//! one;
+//! being able to open a drive that rekordbox wrote is how what that writes
+//! gets checked against what rekordbox writes.
 
 use std::path::{Path, PathBuf};
 
@@ -26,11 +34,8 @@ use anyhow::Result;
 
 /// Where rekordbox puts the OneLibrary database on a drive, in the order worth
 /// looking.
-const PLACES: [&str; 3] = [
-    "PIONEER/rekordbox/exportLibrary.db",
-    "PIONEER/exportLibrary.db",
-    "exportLibrary.db",
-];
+const PLACES: [&str; 3] =
+    ["PIONEER/rekordbox/exportLibrary.db", "PIONEER/exportLibrary.db", "exportLibrary.db"];
 
 /// Find the OneLibrary database on a mounted drive, if it has one.
 pub fn find(drive: &Path) -> Option<PathBuf> {

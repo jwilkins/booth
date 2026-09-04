@@ -25,7 +25,7 @@ fn run() -> Result<()> {
     match &cli.command {
         Some(Command::Analyze(args)) => commands::analyze(args, &reporter),
         Some(Command::Anlz(args)) => commands::anlz(args, &reporter),
-        Some(Command::Export(args)) => commands::export(args, &reporter),
+        Some(Command::Export(args)) => commands::export(args, &reporter).map(|_| ()),
         Some(Command::Normalize(args)) => commands::normalize(args, &reporter),
         Some(Command::Run(args)) => commands::run(args, &reporter),
         Some(Command::Stems(args)) => commands::stems(args, &reporter),

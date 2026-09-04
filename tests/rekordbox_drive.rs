@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use binrw::BinRead;
 use musicai::audio::encode::{write_file, Codec, EncodeOptions};
 use musicai::audio::Audio;
-use musicai::cli::{ExportArgs, InputArgs};
+use musicai::cli::{ExportArgs, InputArgs, PlaylistSpec};
 use musicai::commands;
 use musicai::export::image::DriveImage;
 use musicai::report::Collected;
@@ -93,8 +93,11 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         label: "REKORDBOX".to_string(),
         bpm: None,
         playlist: "Sat 14/9".to_string(),
+        playlists: Vec::new(),
         dry_run: false,
+        onelibrary_key: None,
         companions: Vec::new(),
+        already: Vec::new(),
     }
 }
 
@@ -230,6 +233,104 @@ fn the_playlist_holds_every_exported_track() {
     assert_eq!(rows("Tracks"), 3);
     assert_eq!(rows("PlaylistTree"), 1);
     assert_eq!(rows("PlaylistEntries"), 3);
+}
+
+/// The playlist tree as an independent parser reads it back: each row's name,
+/// whether it is a folder, and which folder it sits in.
+fn playlists_on(drive: &Path) -> Vec<(String, bool, u32, u32)> {
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let mut cursor = Cursor::new(&bytes);
+    let header = Header::read(&mut cursor).expect("rekordcrate could not read the database");
+
+    let table = header.tables.iter().find(|t| t.page_type == PageType::PlaylistTree).unwrap();
+    let pages = header
+        .read_pages(&mut cursor, binrw::Endian::Little, (&table.first_page, &table.last_page))
+        .unwrap();
+
+    let mut out = Vec::new();
+    for row in pages
+        .iter()
+        .filter(|p| p.has_data())
+        .flat_map(|p| p.row_groups.iter().flat_map(|g| g.present_rows()))
+    {
+        let Row::PlaylistTreeNode(node) = row else { continue };
+        // The parser keeps its fields private, so they are read back out of
+        // its own description of what it found. The markers carry their
+        // wrapper type: plain `id: ` also matches the tail of `parent_id: `,
+        // which is how the first version of this read every node as a child of
+        // the root and still passed three of its four assertions.
+        let described = format!("{node:?}");
+        let id_after = |marker: &str| -> u32 {
+            let at = described.find(marker).unwrap_or_else(|| panic!("no {marker} in {described}"))
+                + marker.len();
+            let rest = &described[at..];
+            rest[..rest.find(')').unwrap()].parse().unwrap()
+        };
+        let marker = "name: DeviceSQLString(\"";
+        let at = described.find(marker).unwrap() + marker.len();
+        let name = described[at..][..described[at..].find('"').unwrap()].to_string();
+        // Stored as a count rather than a flag: non-zero is a folder.
+        let is_folder = !described.contains("node_is_folder: 0");
+        out.push((
+            name,
+            is_folder,
+            id_after(", id: PlaylistTreeNodeId("),
+            id_after("parent_id: PlaylistTreeNodeId("),
+        ));
+    }
+    out
+}
+
+#[test]
+fn a_drive_carries_a_tree_of_playlists_and_folders() {
+    // What a player draws in its browse list. One list per set, filed under
+    // the night — which is the shape a DJ prepares in, and what a drive that
+    // could hold only one playlist made impossible.
+    let scratch = Scratch::new("tree");
+    let drive = scratch.path("USB");
+    let files: Vec<PathBuf> =
+        (1..=3).map(|i| write_song(&scratch, &format!("track{i}.flac"))).collect();
+
+    let mut args = args_for(files.clone());
+    args.drive = Some(drive.clone());
+    args.playlists = vec![
+        PlaylistSpec {
+            name: "warm".into(),
+            folder: "Sat 14/9".into(),
+            tracks: vec![files[0].clone(), files[1].clone()],
+        },
+        PlaylistSpec {
+            name: "peak".into(),
+            folder: "Sat 14/9".into(),
+            // Shared with "warm": one track can be in two sets.
+            tracks: vec![files[1].clone(), files[2].clone()],
+        },
+        PlaylistSpec {
+            name: "promos".into(),
+            folder: String::new(),
+            tracks: vec![files[0].clone()],
+        },
+    ];
+    musicai::commands::export(&args, &musicai::report::Collected::new()).unwrap();
+
+    let rows = playlists_on(&drive);
+    assert_eq!(rows.len(), 4, "a folder and three lists: {rows:?}");
+
+    let find = |name: &str| rows.iter().find(|r| r.0 == name).unwrap_or_else(|| panic!("{name}"));
+    let folder = find("Sat 14/9");
+    assert!(folder.1, "the folder is marked as one");
+    assert_eq!(find("warm").3, folder.2, "warm sits in the folder");
+    assert_eq!(find("peak").3, folder.2);
+    assert_eq!(find("promos").3, 0, "the top level is not a folder");
+    assert!(!find("warm").1, "a playlist is not a folder");
+
+    // Four entries, not three: the shared track appears in both lists, and is
+    // one track on the drive.
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let tables = musicai::export::pdb::inspect(&bytes).unwrap();
+    let rows_in = |name: &str| tables.iter().find(|t| t.table == name).unwrap().rows;
+    assert_eq!(rows_in("Tracks"), 3);
+    assert_eq!(rows_in("PlaylistEntries"), 5);
 }
 
 #[test]
@@ -476,4 +577,187 @@ fn which(program: &str) -> Result<PathBuf, ()> {
         .map(|dir| dir.join(program))
         .find(|candidate| candidate.is_file())
         .ok_or(())
+}
+
+/// The tracks a playlist holds, by their file paths on the drive.
+fn playlist_entries(drive: &Path) -> Vec<u32> {
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let mut cursor = Cursor::new(&bytes);
+    let header = Header::read(&mut cursor).unwrap();
+    let table = header.tables.iter().find(|t| t.page_type == PageType::PlaylistEntries).unwrap();
+    let pages = header
+        .read_pages(&mut cursor, binrw::Endian::Little, (&table.first_page, &table.last_page))
+        .unwrap();
+    let mut out = Vec::new();
+    for row in pages
+        .iter()
+        .filter(|p| p.has_data())
+        .flat_map(|p| p.row_groups.iter().flat_map(|g| g.present_rows()))
+    {
+        let Row::PlaylistEntry(entry) = row else { continue };
+        let described = format!("{entry:?}");
+        let marker = "track_id: TrackId(";
+        let at = described.find(marker).unwrap() + marker.len();
+        out.push(described[at..][..described[at..].find(')').unwrap()].parse().unwrap());
+    }
+    out
+}
+
+#[test]
+fn a_second_sync_keeps_what_the_first_one_wrote() {
+    // A drive is written once and then added to, week after week. If the
+    // second write describes only what it added, everything already on the
+    // drive stops existing as far as the player is concerned: the audio is
+    // still there and nothing browses to it.
+    let scratch = Scratch::new("incremental");
+    let drive = scratch.path("USB");
+    let first = write_song(&scratch, "first.flac");
+    let second = write_song(&scratch, "second.flac");
+
+    let mut args = ExportArgs { drive: Some(drive.clone()), ..args_for(vec![first.clone()]) };
+    args.playlists = vec![PlaylistSpec {
+        name: "Saturday".to_string(),
+        folder: String::new(),
+        tracks: vec![first.clone()],
+    }];
+    let after_first = commands::export(&args, &Collected::new()).expect("the first write failed");
+    assert_eq!(tracks_on(&drive).len(), 1, "the first write should put one track on");
+
+    // The second week: one new track, and a playlist that now names both.
+    let mut args = ExportArgs { drive: Some(drive.clone()), ..args_for(vec![second.clone()]) };
+    args.playlists = vec![PlaylistSpec {
+        name: "Saturday".to_string(),
+        folder: String::new(),
+        tracks: vec![first.clone(), second.clone()],
+    }];
+    args.already = after_first;
+    commands::export(&args, &Collected::new()).expect("the second write failed");
+
+    let on_drive = tracks_on(&drive);
+    assert_eq!(
+        on_drive.len(),
+        2,
+        "the drive's database lists {} tracks after adding one to a drive that had one: {on_drive:?}",
+        on_drive.len()
+    );
+    assert_eq!(
+        playlist_entries(&drive).len(),
+        2,
+        "the playlist on the drive does not hold both tracks"
+    );
+}
+
+/// A passphrase, not *the* passphrase. What is being checked here is that the
+/// database written to the drive is the database that comes back off it; the
+/// key that makes a drive a player will read is the one rekordbox uses, which
+/// this project does not ship.
+const ONELIBRARY_KEY: &str = "a-key-that-is-not-the-real-one";
+
+#[test]
+fn a_drive_written_with_a_key_carries_both_databases_and_they_agree() {
+    let scratch = Scratch::new("onelibrary");
+    let drive = scratch.path("drive");
+    let one = write_song(&scratch, "one.flac");
+    let two = write_song(&scratch, "two.flac");
+
+    let mut args =
+        ExportArgs { drive: Some(drive.clone()), ..args_for(vec![one.clone(), two.clone()]) };
+    args.onelibrary_key = Some(ONELIBRARY_KEY.to_string());
+    args.playlists = vec![PlaylistSpec {
+        name: "Saturday".to_string(),
+        folder: String::new(),
+        tracks: vec![one, two],
+    }];
+    let reporter = Collected::new();
+    commands::export(&args, &reporter).expect("export failed");
+
+    let at = drive.join("PIONEER/rekordbox/exportLibrary.db");
+    assert!(at.exists(), "no OneLibrary database was written: {:?}", reporter.lines());
+    let bytes = std::fs::read(&at).unwrap();
+    assert!(!bytes.starts_with(b"SQLite format 3"), "it should be encrypted");
+
+    let summary = musicai::export::onelibrary::inspect(&bytes, ONELIBRARY_KEY)
+        .expect("the drive's OneLibrary database would not open");
+    assert_eq!(summary.tables, 22);
+    assert_eq!(summary.playlists, 1);
+
+    // The point of writing both: a player that reads one and a player that
+    // reads the other are looking at the same drive.
+    let legacy = tracks_on(&drive);
+    assert_eq!(
+        summary.tracks as usize,
+        legacy.len(),
+        "the two databases disagree about how many tracks are on the drive"
+    );
+    assert_eq!(summary.entries as usize, playlist_entries(&drive).len());
+
+    // And the newer database points at files that are really there, the same
+    // check the legacy one gets.
+    let connection = musicai::rekordbox::open(&at, ONELIBRARY_KEY).unwrap();
+    let mut statement =
+        connection.prepare("SELECT path, analysisDataFilePath FROM content").unwrap();
+    let rows: Vec<(String, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    for (audio, analysis) in rows {
+        assert!(drive.join(audio.trim_start_matches('/')).exists(), "{audio} is not on the drive");
+        assert!(
+            drive.join(analysis.trim_start_matches('/')).exists(),
+            "{analysis} is not on the drive"
+        );
+        // Both databases name the same file for the same track.
+        assert!(
+            legacy.iter().any(|(_, path, anlz)| *path == audio && *anlz == analysis),
+            "{audio} is in one database and not the other"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_export_carries_both_databases_without_being_asked() {
+    // Nobody should have to know that there are two formats, or which player
+    // reads which, to walk out of the house with a drive that works. So the
+    // default is both, under the keys the build carries.
+    let scratch = Scratch::new("onelibrary-default");
+    let drive = scratch.path("drive");
+    let lines = export(vec![write_song(&scratch, "one.flac")], &drive);
+
+    assert!(drive.join("PIONEER/rekordbox/export.pdb").exists(), "the legacy database");
+    let at = drive.join("PIONEER/rekordbox/exportLibrary.db");
+    assert!(at.exists(), "the newer players' database: {lines:?}");
+
+    // Opened with the key the build carries, the same way a player would find
+    // it: nothing passed in, nothing in the environment.
+    let key = musicai::rekordbox::onelibrary_key(None).expect("this build carries a key");
+    let summary = musicai::export::onelibrary::inspect(&std::fs::read(&at).unwrap(), &key)
+        .expect("the drive's OneLibrary database would not open with the built-in key");
+    assert_eq!(summary.tables, 22);
+    assert_eq!(summary.tracks, 1);
+}
+
+#[test]
+fn the_two_keys_are_two_keys_and_neither_opens_the_other_file() {
+    use musicai::rekordbox::{BUNDLED_KEY, BUNDLED_ONELIBRARY_KEY};
+
+    // The mistake this guards against is using one for the other, which
+    // produces a perfectly valid file that no player and no rekordbox can
+    // read. They are told apart by shape: hex, and not hex.
+    assert_ne!(BUNDLED_KEY, BUNDLED_ONELIBRARY_KEY);
+    assert_eq!(BUNDLED_KEY.len(), 64);
+    assert_eq!(BUNDLED_ONELIBRARY_KEY.len(), 64);
+    assert!(BUNDLED_KEY.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(!BUNDLED_ONELIBRARY_KEY.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let scratch = Scratch::new("onelibrary-keys");
+    let drive = scratch.path("drive");
+    export(vec![write_song(&scratch, "one.flac")], &drive);
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/exportLibrary.db")).unwrap();
+    assert!(
+        musicai::export::onelibrary::inspect(&bytes, BUNDLED_KEY).is_err(),
+        "the library key must not open a drive"
+    );
+    assert!(musicai::export::onelibrary::inspect(&bytes, BUNDLED_ONELIBRARY_KEY).is_ok());
 }
