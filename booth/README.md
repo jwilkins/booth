@@ -518,16 +518,16 @@ drive played only on older hardware has a history nothing here can see.
 
 ## What it does not do yet
 
-- **The analysis half is unproven on hardware.** A CDJ-3000X has browsed a
-  drive this wrote — playlists, tracks, key search — so the OneLibrary database
-  is right enough to read. Nobody has yet watched a track load off one and
-  reported whether the waveform and beat grid came up instantly or the player
-  re-analysed. That is the open question, and this program's analysis directory
-  names are the likeliest reason for it to go the wrong way:
-  [`docs/onelibrary.md`](../docs/onelibrary.md) §5.1.
-- No player has read a legacy `export.pdb` this wrote either. That half is
-  validated against an independent parser, which is not the same as validation
-  against hardware.
+- **A CDJ-3000 cannot read a drive this writes.** The legacy `export.pdb` is
+  refused outright by one on firmware 2.05 — the file parses under two
+  independent parsers, so what is wrong is something a parser tolerates and a
+  player does not. Only the newer players work today.
+- Phrase data and the three-band waveform have not been seen on a player. The
+  colour waveform, beat grid and hot cues have; those two sit in parts of the
+  analysis files nobody has reported on yet.
+- The waveform colours are a judgement call rather than a match: what rekordbox
+  puts in those three bits for given audio is not published, and ours has never
+  been compared against a real export column by column.
 - Stem colouring needs the kit rendered first, which is minutes a track.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with
