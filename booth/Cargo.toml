@@ -2,7 +2,7 @@
 name = "booth"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A DJ library that prepares tracks and writes drives Pioneer/AlphaTheta players can read"
 license = "MIT"
 

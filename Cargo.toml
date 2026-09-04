@@ -3,8 +3,7 @@ members = ["booth", "gui"]
 
 # The windows live in their own crates so that eframe and its several hundred
 # dependencies stay out of the command-line tool entirely: `cargo build` still
-# builds just the CLI, and the CLI keeps its own (much lower) minimum Rust
-# version.
+# builds just the CLI.
 #
 # There are two of them because they are two different programs. `gui` is a
 # batch tool: pick files, pick a task, run it. `booth` is a library — it holds a
@@ -16,7 +15,7 @@ members = ["booth", "gui"]
 name = "musicai"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "Local audio toolkit: EBU R128 loudness normalization and stem separation for mp3/flac/wav"
 license = "MIT"
 
