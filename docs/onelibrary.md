@@ -489,7 +489,7 @@ between them.
 
 ## 9. What this project writes today, and the gap
 
-`musicai export` and the app's sync write a Device Library drive —
+`booth-cli export` and the app's sync write a Device Library drive —
 `export.pdb`, the three ANLZ files per track, audio under
 `/Contents/<Artist>/` — and a OneLibrary database beside it, built from the
 same track list and playlist tree so the two cannot disagree about what is on
@@ -541,18 +541,18 @@ Against §2 to §5 what is left is:
 - No artwork, so `image` is empty and every `image_id` is 0.
 - No My Tags beyond rekordbox's four empty groups, no history, no hot-cue
   banks: the collection has none of them to write.
-- `musicai rekordbox schema <drive>` opens an `exportLibrary.db` with a
+- `booth-cli rekordbox schema <drive>` opens an `exportLibrary.db` with a
   supplied key and prints its tables, columns and row counts, which is how the
   DDL above can be checked against any drive to hand.
 
 ## 10. What is left, in order
 
 0. **Compare what §9 writes against a real export**, table by table, with
-   `musicai rekordbox schema` on both. The category and sort rows are the
+   `booth-cli rekordbox schema` on both. The category and sort rows are the
    least attested part of the file, and a real export settles them.
 1. **Read a real export first.** The fixture in rekordcrate PR #269 (417
    tracks) or any drive a rekordbox 7.2.13+ wrote, opened with
-   `musicai rekordbox schema`, checks §4 and settles `fileType`,
+   `booth-cli rekordbox schema`, checks §4 and settles `fileType`,
    `analysedBits` and `contentLink` by looking at rows beside the files they
    describe.
 2. **Write the database from the same collection the pdb is written from**:

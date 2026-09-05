@@ -8,8 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
-use musicai::audio::encode::{write_file, Codec, EncodeOptions};
-use musicai::audio::Audio;
+use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_core::audio::Audio;
 
 use booth::library::{self, Library, Playlist, Track, Written};
 use booth::{query, sync};
@@ -66,7 +66,7 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
 
     // -- import: the collection learns the files exist
     let mut collection = Library::new();
-    let files = musicai::discover::collect(std::slice::from_ref(&music), true).unwrap();
+    let files = booth_core::discover::collect(std::slice::from_ref(&music), true).unwrap();
     assert_eq!(files.len(), 2);
     for path in &files {
         let id = collection.add(path);
@@ -130,21 +130,22 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
     assert_eq!(worst, sync::Level::Ok, "a clean collection should pass: {checks:#?}");
 
     // -- write it, through the same command the CLI uses
-    let mut args = musicai::cli::ExportArgs::defaults();
+    let mut args = booth_core::cli::ExportArgs::defaults();
     args.drive = Some(drive_path.clone());
     args.playlist = "tonight".into();
-    args.input = musicai::cli::InputArgs { inputs: files.clone(), recursive: false };
+    args.input = booth_core::cli::InputArgs { inputs: files.clone(), recursive: false };
     // Collected rather than Stdio: a passing test should be quiet, and a
     // failing one has the command's own account of what it did.
-    let reporter = musicai::report::Collected::new();
-    let first_write = musicai::commands::export(&args, &reporter).expect("the drive should write");
+    let reporter = booth_core::report::Collected::new();
+    let first_write =
+        booth_core::commands::export(&args, &reporter).expect("the drive should write");
 
     // -- and read it back the way a player would, with a parser that shares no
     //    code with the writer
     let database = drive_path.join("PIONEER/rekordbox/export.pdb");
     assert!(database.exists(), "no database was written");
     let bytes = std::fs::read(&database).unwrap();
-    let tables = musicai::export::pdb::inspect(&bytes).expect("the database should parse");
+    let tables = booth_core::export::pdb::inspect(&bytes).expect("the database should parse");
     let rows: usize = tables.iter().map(|t| t.rows).sum();
     assert!(rows > 0, "the database is empty");
     assert!(drive_path.join("Contents").exists(), "the audio did not land");
@@ -173,21 +174,21 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
     // -- a second write, given only what changed, still describes the whole
     //    drive. Building the database from the delta is how a drive written
     //    twice came to browse as though the first write never happened.
-    let mut second = musicai::cli::ExportArgs::defaults();
+    let mut second = booth_core::cli::ExportArgs::defaults();
     second.drive = Some(drive_path.clone());
     second.playlist = "tonight".into();
-    second.input = musicai::cli::InputArgs { inputs: vec![files[0].clone()], recursive: false };
-    second.playlists = vec![musicai::cli::PlaylistSpec {
+    second.input = booth_core::cli::InputArgs { inputs: vec![files[0].clone()], recursive: false };
+    second.playlists = vec![booth_core::cli::PlaylistSpec {
         name: "tonight".into(),
         folder: "Sat".into(),
         tracks: files.clone(),
     }];
     second.already = first_write.iter().filter(|(from, _)| *from != files[0]).cloned().collect();
-    musicai::commands::export(&second, &musicai::report::Collected::new())
+    booth_core::commands::export(&second, &booth_core::report::Collected::new())
         .expect("the second write should work");
 
     let bytes = std::fs::read(&database).unwrap();
-    let tables = musicai::export::pdb::inspect(&bytes).expect("the database should parse");
+    let tables = booth_core::export::pdb::inspect(&bytes).expect("the database should parse");
     let tracks = tables.iter().find(|t| t.table.contains("Track")).map(|t| t.rows).unwrap_or(0);
     assert_eq!(
         tracks, 2,
@@ -221,24 +222,27 @@ fn a_stem_takes_the_tracks_grid_rather_than_its_own() {
     write_file(&vocal, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
 
     // On its own the vocal has no beat to find — which is the point.
-    let alone = musicai::analysis::analyze(&musicai::audio::decode::decode_file(&vocal).unwrap());
+    let alone =
+        booth_core::analysis::analyze(&booth_core::audio::decode::decode_file(&vocal).unwrap());
     assert!(!alone.found_beats(), "the fixture is not a stem-like file");
 
     let drive = scratch.0.join("USB");
-    let mut args = musicai::cli::ExportArgs::defaults();
+    let mut args = booth_core::cli::ExportArgs::defaults();
     args.drive = Some(drive.clone());
     args.playlist = "tonight".into();
-    args.input =
-        musicai::cli::InputArgs { inputs: vec![parent.clone(), vocal.clone()], recursive: false };
+    args.input = booth_core::cli::InputArgs {
+        inputs: vec![parent.clone(), vocal.clone()],
+        recursive: false,
+    };
     args.companions = vec![(vocal.clone(), parent.clone())];
 
-    let reporter = musicai::report::Collected::new();
-    musicai::commands::export(&args, &reporter).expect("the drive should write");
+    let reporter = booth_core::report::Collected::new();
+    booth_core::commands::export(&args, &reporter).expect("the drive should write");
 
     // Both are on the drive: without the parent's grid, the stem would have
     // been refused for having no beat.
     let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
-    let tables = musicai::export::pdb::inspect(&bytes).unwrap();
+    let tables = booth_core::export::pdb::inspect(&bytes).unwrap();
     let rows: usize = tables.iter().map(|t| t.rows).sum();
     assert!(rows > 0);
 
@@ -351,7 +355,7 @@ fn booth_read_record(id: u32, path: &Path) -> Track {
     track.format = path.extension().unwrap().to_string_lossy().to_lowercase();
     track.bytes = std::fs::metadata(path).unwrap().len();
     track.title = path.file_stem().unwrap().to_string_lossy().into_owned();
-    let metadata = musicai::tag::read_metadata(path).unwrap_or_default();
+    let metadata = booth_core::tag::read_metadata(path).unwrap_or_default();
     track.artist = metadata.artist.unwrap_or_else(|| "Test Artist".into());
     track
 }
@@ -362,8 +366,8 @@ fn booth_analyze(
     _id: u32,
     path: &Path,
 ) -> (f64, bool, usize, f64, u32, Vec<library::CueMark>, Vec<library::Phrase>) {
-    let audio = musicai::audio::decode::decode_file(path).unwrap();
-    let analysis = musicai::analysis::analyze(&audio);
+    let audio = booth_core::audio::decode::decode_file(path).unwrap();
+    let analysis = booth_core::analysis::analyze(&audio);
     let beat_ms: Vec<u32> = analysis.grid.beats.iter().map(|b| b.time_ms).collect();
 
     let cues = analysis

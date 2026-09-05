@@ -3,7 +3,7 @@
 A DJ library that prepares tracks and writes the drives a Pioneer/AlphaTheta
 player reads. It is the interface described in
 [`docs/rekordbox-replacement-spec.md`](../docs/rekordbox-replacement-spec.md),
-built on the analysis and export code in the `musicai` crate next to it.
+built on the analysis and export code in the `booth-core` crate next to it.
 
 ```
 cargo run -p booth
@@ -18,7 +18,7 @@ nothing extra. Without a working output device the window still opens and does
 everything else; the transport says `no audio out` instead.
 
 On macOS, `scripts/package-macos.sh` builds this window into `Booth.app` — a
-universal binary with the `musicai` command-line tool alongside it in the same
+universal binary with the `booth-cli` command-line tool alongside it in the same
 bundle, and a disk image to install it from. See the packaging section of the
 [top-level README](../README.md#the-macos-app).
 
@@ -348,7 +348,7 @@ the day AlphaTheta changes the key; the constant is `BUNDLED_KEY` in
 
 Settings → **Import a rekordbox library** brings across tracks, playlists and
 their folders, beat grids, hot cues, keys, ratings, play counts and My Tags.
-On the command line, `musicai rekordbox read <path>` lists what is in one
+On the command line, `booth-cli rekordbox read <path>` lists what is in one
 without changing anything.
 
 **Nothing already here is overwritten.** Tracks are matched by file path —

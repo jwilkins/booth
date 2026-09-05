@@ -1,9 +1,9 @@
-# musicai
+# booth-core
 
-The engine: analysis, loudness, stems, tagging and the drive writer, with a command-line tool
-wrapped around it. [Booth](../../booth/README.md) is built on this crate, and the macOS app is
+The engine: analysis, loudness, stems, tagging and the drive writer, with the `booth-cli`
+command-line tool wrapped around it. [Booth](../../booth/README.md) is built on this crate, and the macOS app is
 Booth — see [the top-level README](../../README.md). This is the interface that came first, which
-is all the `proto/` in the path means.
+is all the `proto/` in the path — and the directory's old name — mean.
 
 It does three things on its own:
 
@@ -21,7 +21,7 @@ not yet.
 By default it does the first three, over everything you point it at:
 
 ```sh
-musicai ~/Music/album
+booth-cli ~/Music/album
 ```
 
 Everything runs on your machine, but two commands need something beyond the binary. `stems` drives
@@ -36,20 +36,20 @@ for flac, `hound` for wav) are built into the binary.
 ## Install
 
 ```sh
-cargo build --release -p musicai
-# binary at ./target/release/musicai
+cargo build --release -p booth-core
+# binary at ./target/release/booth-cli
 ```
 
-`-p musicai`, because a plain `cargo build` in this workspace builds Booth. Building this crate on
+`-p booth-core`, because a plain `cargo build` in this workspace builds Booth. Building this crate on
 its own pulls in none of a window toolkit, which is why it is a crate of its own.
 
 ## The default: all of it, over everything
 
-With no subcommand, `musicai` runs the whole pipeline over the files and folders you name. It is
-the same as `musicai run`, which is where the options live.
+With no subcommand, `booth-cli` runs the whole pipeline over the files and folders you name. It is
+the same as `booth-cli run`, which is where the options live.
 
 ```sh
-musicai ~/Music/album -r
+booth-cli ~/Music/album -r
 ```
 
 ```
@@ -93,7 +93,7 @@ you only want the other two, `--steps normalize,tag`.
 Report loudness and peaks without touching anything:
 
 ```sh
-musicai analyze ~/Music/album
+booth-cli analyze ~/Music/album
 ```
 
 ```
@@ -115,10 +115,10 @@ streaming services normalize to) with a **-1.0 dBTP** ceiling.
 
 ```sh
 # Write album/01 - opener-normalized.flac next to each input
-musicai normalize ~/Music/album
+booth-cli normalize ~/Music/album
 
 # Collect the results elsewhere, converting to mp3 on the way
-musicai normalize ~/Music/album -o ~/Music/normalized --format mp3 --bitrate 256
+booth-cli normalize ~/Music/album -o ~/Music/normalized --format mp3 --bitrate 256
 ```
 
 When the loudness target would push peaks past the ceiling, `--on-peak` decides what gives:
@@ -129,7 +129,7 @@ When the loudness target would push peaks past the ceiling, `--on-peak` decides 
   target, at the cost of reshaping peaks.
 
 ```sh
-musicai normalize ~/Music/album --target -16 --on-peak limit
+booth-cli normalize ~/Music/album --target -16 --on-peak limit
 ```
 
 Outputs never overwrite an existing file unless you pass `--force`, and `--dry-run` measures and
@@ -142,7 +142,7 @@ bit-for-bit identical, so this is the right choice for a lossy library — there
 generation loss. Defaults to the -18 LUFS reference the ReplayGain spec defines.
 
 ```sh
-musicai normalize ~/Music/album --mode replaygain --album
+booth-cli normalize ~/Music/album --mode replaygain --album
 ```
 
 `--album` additionally computes album gain, grouping files by the directory they sit in. Album
@@ -155,7 +155,7 @@ ReplayGain tag, so this mode rejects wav files and tells you to use `--mode reen
 ## Stems
 
 ```sh
-musicai stems ~/Music/track.flac
+booth-cli stems ~/Music/track.flac
 # -> stems/track-vocals.flac
 #    stems/track-melody.flac
 #    stems/track-drums.flac
@@ -179,7 +179,7 @@ than as an untitled file by an unknown artist. Three details are not a straight 
   the same thing are worse than useless in a library.
 - **ReplayGain tags are dropped.** They measure the loudness of the mix, and a stem is quieter
   than the mix it came from, so keeping them would have a player apply a figure taken from
-  different audio. Run `musicai normalize --mode replaygain` on the stems if you want correct
+  different audio. Run `booth-cli normalize --mode replaygain` on the stems if you want correct
   ones.
 - **A `STEM` tag** (a Vorbis comment, or an ID3 `TXXX` frame) records which stem the file is.
 
@@ -196,19 +196,19 @@ yourself:
 
 ```sh
 uv tool install demucs --with numpy     # or: pipx install demucs && pipx inject demucs numpy
-musicai stems track.flac
+booth-cli stems track.flac
 ```
 
 The `numpy` is not optional. Demucs 4.1.0 imports numpy but does not list it among its
 dependencies, and torch no longer pulls it in, so a plain `install demucs` produces something
-that dies on first run with `ModuleNotFoundError: No module named 'numpy'`. `musicai` recognises
+that dies on first run with `ModuleNotFoundError: No module named 'numpy'`. `booth-cli` recognises
 that failure and tells you how to fix it, and its own installer adds numpy on every route.
 
 `--demucs-bin`, `--demucs-model` and `--demucs-device` are there when you need them.
 
 #### Installing it for you (macOS)
 
-On macOS, if demucs is missing, `musicai` offers to install it rather than just complaining:
+On macOS, if demucs is missing, `booth-cli` offers to install it rather than just complaining:
 
 ```
 demucs is not installed. Install it now?
@@ -235,7 +235,7 @@ instructions instead of hanging on a prompt nobody can see. `--install-demucs` c
 | `yes` | Install without prompting — for scripts that have already decided |
 
 Elsewhere, and when neither installer is available, you get the instructions and nothing is run.
-A freshly pipx-installed demucs is not on the `PATH` this process inherited, so `musicai` looks in
+A freshly pipx-installed demucs is not on the `PATH` this process inherited, so `booth-cli` looks in
 pipx's own bin directory rather than telling you to open a new shell.
 
 Demucs produces four stems, so its `bass` and `other` are summed to make our `melody`. It is slow
@@ -267,7 +267,7 @@ it, and the residue of the voice is spread across every stem. On a real track it
 measures 7 dB quieter than demucs' with half the loudness range — the signature of a residue
 rather than an isolated voice.
 
-`musicai stems --help` lists its tuning knobs under "Built-in separator tuning". The defaults were
+`booth-cli stems --help` lists its tuning knobs under "Built-in separator tuning". The defaults were
 chosen by measuring how cleanly synthetic mixes were routed — see `tests/separation_quality.rs` —
 and are not the obvious values. Two in particular:
 
@@ -287,7 +287,7 @@ may exceed full scale even when the original never did. Two things happen so tha
 into clipping:
 
 - Demucs is asked for `--float32` output. Left to itself it writes 16-bit wav and clips the stem at
-  the source, before `musicai` ever sees it — audible on loud masters. Float carries the peaks
+  the source, before `booth-cli` ever sees it — audible on loud masters. Float carries the peaks
   through intact.
 - Before writing, the stems are pulled down together by a single gain so the loudest sample across
   all of them sits just under full scale. One shared gain rather than one per stem, so they stay in
@@ -318,7 +318,7 @@ Identify files by what they sound like, and write the resulting metadata into th
 
 ```sh
 export ACOUSTID_API_KEY=...        # free from https://acoustid.org/new-application
-musicai tag ~/Music/unsorted -r
+booth-cli tag ~/Music/unsorted -r
 ```
 
 ```
@@ -345,7 +345,7 @@ and the fact that you are looking a track up do.
 > API key, listed at <https://acoustid.org/my-applications>. The *user* API key in your account
 > preferences is a different thing, used only for submitting fingerprints back to AcoustID.
 > Both are short alphanumeric strings and the service rejects the wrong one with nothing more
-> than "invalid API key", so it is an easy mix-up; `musicai` spells out the difference if it
+> than "invalid API key", so it is an easy mix-up; `booth-cli` spells out the difference if it
 > happens. **MusicBrainz needs no key** — it is open for
 non-commercial use — but it does require a descriptive User-Agent and no more than one request
 per second, both of which this handles. That rate limit is why tagging a large library takes a
@@ -354,7 +354,7 @@ while: roughly one second per distinct track.
 Fingerprinting alone needs no key and no network:
 
 ```sh
-musicai tag ~/Music --print-fingerprint    # prints "<duration> <fingerprint>" per file
+booth-cli tag ~/Music --print-fingerprint    # prints "<duration> <fingerprint>" per file
 ```
 
 ### Existing tags
@@ -374,8 +374,8 @@ AcoustID returns candidates with a confidence score from 0 to 1. `--min-score` (
 sets the bar, and `--on-ambiguous` decides what happens to files that fall short:
 
 ```sh
-musicai tag ~/Music --min-score 0.9 --on-ambiguous skip   # cautious (skip is the default)
-musicai tag ~/Music --min-score 0.5 --on-ambiguous best   # tag everything, best guess wins
+booth-cli tag ~/Music --min-score 0.9 --on-ambiguous skip   # cautious (skip is the default)
+booth-cli tag ~/Music --min-score 0.5 --on-ambiguous best   # tag everything, best guess wins
 ```
 
 `--dry-run` looks everything up and reports what it would write without touching a file.
@@ -403,7 +403,7 @@ Only the tag blocks are rewritten; the audio is left byte-for-byte alone.
 Build a drive: the audio, the analysis, and the database that indexes them.
 
 ```sh
-musicai export ~/Music/set -r --playlist "Sat 14/9" -o /Volumes/USB
+booth-cli export ~/Music/set -r --playlist "Sat 14/9" -o /Volumes/USB
 ```
 
 ```
@@ -456,7 +456,7 @@ under QEMU and gives it a virtual USB slot. A drive written here can be handed s
 to it:
 
 ```sh
-musicai export ~/Music/set -r --image ~/rekordbox.img
+booth-cli export ~/Music/set -r --image ~/rekordbox.img
 ```
 
 then in the emulator, **USB → Attach virtual image** and pick `rekordbox.img`. The guest
@@ -560,7 +560,7 @@ Write the per-track analysis files a Pioneer / AlphaTheta player reads: the beat
 the cues, and the waveforms it draws.
 
 ```sh
-musicai anlz track.flac
+booth-cli anlz track.flac
 # -> track.DAT   track.EXT   track.2EX
 ```
 
@@ -611,7 +611,7 @@ browsed one; whether it used the analysis files is still unproven.
 ## Tests
 
 ```sh
-cargo test --release -p musicai
+cargo test --release -p booth-core
 ```
 
 Unit tests cover the STFT round trip, the median filters, the limiter's ceiling guarantee, the
@@ -650,7 +650,7 @@ stem and not from the others:
 
 ```sh
 pipx install demucs openai-whisper
-export MUSICAI_TEST_TRACK=/path/to/a-song-with-vocals.flac
+export BOOTH_TEST_TRACK=/path/to/a-song-with-vocals.flac
 cargo test --release --test stem_isolation -- --ignored --nocapture
 ```
 

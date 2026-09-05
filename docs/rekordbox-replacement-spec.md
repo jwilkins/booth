@@ -606,7 +606,7 @@ standalone. Rekordbox's own stems are consistently rated below djay, VirtualDJ a
 for vocal isolation, and it renders three stems where others render four or five. There
 is room to be better on quality *and* to be the only option on the hardware that matters.
 
-The whole rendering pipeline already exists in this repository: `musicai stems` drives
+The whole rendering pipeline already exists in this repository: `booth-cli stems` drives
 demucs, sums its four stems into three, writes them in the parent's format, and copies
 the parent's tags with the stem name appended to the title. What follows is what has to
 be added around it to make the output *play well in a booth*.
@@ -710,7 +710,7 @@ Engine DJ makes, on the hardware Engine DJ cannot touch.
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-Build on what is here. `musicai` is already a Rust workspace with a CLI crate and a
+Build on what is here. This is already a Rust workspace with a CLI crate and a
 separate `eframe` GUI crate, symphonia decoding, LAME/flacenc/hound encoding, chromaprint
 fingerprinting, `ebur128` loudness, a look-ahead limiter, an STFT, a rayon-parallel batch
 pipeline, and a job model in `gui/src/job.rs` that already runs long work off the UI
@@ -882,8 +882,8 @@ offline, and every decision visible.
   keys, reported as Camelot and classical with a confidence. `Key::parse` reads the
   notations a library stores, both for measuring against one and, later, for importing one.
 
-**Commands.** `musicai export` builds the drive, `musicai anlz` writes one track's
-analysis, and `musicai rekordbox read` and `rekordbox schema` open the two encrypted
+**Commands.** `booth-cli export` builds the drive, `booth-cli anlz` writes one track's
+analysis, and `booth-cli rekordbox read` and `rekordbox schema` open the two encrypted
 databases; the first two listen to the audio, and both read back what they wrote before
 reporting success. `--bpm` is an override rather than a requirement — and it overrides the *tempo*,
 not the grid, so the beats stay tracked against the audio.

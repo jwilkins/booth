@@ -7,9 +7,9 @@
 //! number on real music, which is what the spec's ANA-2 and ANA-4 ask for.
 //!
 //! ```sh
-//! cargo run --release --example eval -- ~/rekordbox.xml
+//! cargo run --release -p booth-core --example eval -- ~/rekordbox.xml
 //! # or, if the audio has moved since the XML was written:
-//! cargo run --release --example eval -- ~/rekordbox.xml --root ~/Music
+//! cargo run --release -p booth-core --example eval -- ~/rekordbox.xml --root ~/Music
 //! ```
 //!
 //! Nothing here is a test in the `cargo test` sense: it needs files that live
@@ -18,9 +18,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use musicai::analysis;
-use musicai::analysis::key::Key;
-use musicai::audio::decode::decode_file;
+use booth_core::analysis;
+use booth_core::analysis::key::Key;
+use booth_core::audio::decode::decode_file;
 
 /// One track's worth of what the library claims and what we found.
 struct Row {

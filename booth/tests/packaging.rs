@@ -29,6 +29,13 @@ impl Drop for Scratch {
 }
 
 /// The repository, which is the directory above this crate's own.
+/// A file to stand in for a built binary.
+fn stub(dir: &Path) -> PathBuf {
+    let at = dir.join("stub-binary");
+    std::fs::write(&at, b"#!/bin/sh\necho stub\n").expect("writing a stub binary");
+    at
+}
+
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -36,12 +43,17 @@ fn repo() -> PathBuf {
         .to_path_buf()
 }
 
-/// Run the bundler. The two binaries only have to exist and be copied, so this
-/// crate's own stands in for both: what is under test is the layout, and
-/// building a second crate to fill the other slot would only make the test
-/// slower.
+/// Run the bundler.
+///
+/// The binaries are stubs, and deliberately: `make-bundle.sh` copies whatever
+/// it is handed, so what is under test is the layout and nothing about the
+/// files themselves. Handing it the real ones meant copying most of a gigabyte
+/// of unstripped debug binary six times over to learn nothing — enough, on a
+/// small disk, to fail the test for having no room rather than for being
+/// wrong.
 fn bundle(into: &Path, version: &str) -> PathBuf {
-    let binary = env!("CARGO_BIN_EXE_booth");
+    let binary = stub(into);
+    let binary = binary.to_str().expect("a temp path is utf-8");
     let output = Command::new("bash")
         .arg(repo().join("scripts/make-bundle.sh"))
         .args([binary, binary])
@@ -66,7 +78,7 @@ fn the_bundle_has_everything_macos_looks_for() {
     // Launching the app runs Contents/MacOS/<CFBundleExecutable>, and Finder
     // needs the icon and PkgInfo where it expects them.
     assert!(app.join("Contents/MacOS/booth").exists());
-    assert!(app.join("Contents/MacOS/musicai").exists(), "the CLI should ride along");
+    assert!(app.join("Contents/MacOS/booth-cli").exists(), "the CLI should ride along");
     assert!(app.join("Contents/Resources/icon.icns").exists());
     assert!(app.join("Contents/Info.plist").exists());
     assert_eq!(std::fs::read_to_string(app.join("Contents/PkgInfo")).unwrap(), "APPL????");
@@ -80,7 +92,7 @@ fn the_binaries_are_executable() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for name in ["booth", "musicai"] {
+        for name in ["booth", "booth-cli"] {
             let mode = std::fs::metadata(app.join("Contents/MacOS").join(name))
                 .unwrap()
                 .permissions()
@@ -122,7 +134,7 @@ fn a_missing_binary_is_an_error_rather_than_a_broken_app() {
     let dir = Scratch::new("missing");
     let output = Command::new("bash")
         .arg(repo().join("scripts/make-bundle.sh"))
-        .args(["/nonexistent/booth", env!("CARGO_BIN_EXE_booth")])
+        .args(["/nonexistent/booth", stub(&dir.0).to_str().unwrap()])
         .arg(&dir.0)
         .output()
         .unwrap();
@@ -134,6 +146,87 @@ fn a_missing_binary_is_an_error_rather_than_a_broken_app() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!dir.0.join("Booth.app").exists(), "a half-built app was left behind");
+}
+
+/// Every `cargo build` in the packaging script names a package and a binary
+/// that this workspace actually has.
+///
+/// The bug this is here for: the script said `--bin musicai` with no `-p`, and
+/// a bare `--bin` resolves against the default member only — so the release
+/// build failed with "no bin target named `musicai` in default-run packages"
+/// on a Mac, having passed everything on Linux. The bundle tests could not see
+/// it, because they hand `make-bundle.sh` binaries that already exist. This
+/// reads the script instead.
+#[test]
+fn the_packaging_script_builds_things_that_exist() {
+    let script = std::fs::read_to_string(repo().join("scripts/package-macos.sh")).unwrap();
+    let known = binaries();
+
+    let mut checked = 0;
+    for line in script.lines().map(str::trim) {
+        if !line.starts_with("cargo build") {
+            continue;
+        }
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let after = |flag: &str| {
+            words.iter().position(|word| *word == flag).and_then(|at| words.get(at + 1)).copied()
+        };
+        let package = after("-p").unwrap_or_else(|| {
+            panic!("this names no package, so --bin has nothing to search: {line}")
+        });
+        let binary = after("--bin").unwrap_or_else(|| panic!("this names no binary: {line}"));
+        assert!(
+            known.contains(&(package.to_string(), binary.to_string())),
+            "{line}\nbuilds `{binary}` from `{package}`, which this workspace does not have: \
+             {known:?}"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "the script should build the app and the command-line tool");
+}
+
+/// Every (package, binary) pair in the workspace, read out of the manifests.
+fn binaries() -> Vec<(String, String)> {
+    let root = std::fs::read_to_string(repo().join("Cargo.toml")).unwrap();
+    let members: Vec<String> = root
+        .lines()
+        .find(|line| line.trim_start().starts_with("members ="))
+        .map(|line| line.split('"').skip(1).step_by(2).map(str::to_string).collect())
+        .expect("the workspace lists its members");
+
+    let mut found = Vec::new();
+    for member in members {
+        let manifest = std::fs::read_to_string(repo().join(&member).join("Cargo.toml")).unwrap();
+        let named = |section: &str| -> Vec<String> {
+            let mut names = Vec::new();
+            let mut inside = false;
+            for line in manifest.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    inside = line == section;
+                    continue;
+                }
+                if inside {
+                    if let Some(rest) = line.strip_prefix("name = ") {
+                        names.push(rest.trim_matches('"').to_string());
+                    }
+                }
+            }
+            names
+        };
+        let package = named("[package]").first().cloned().expect("a package has a name");
+        let bins = named("[[bin]]");
+        // No `[[bin]]` section means cargo's own default: one binary named
+        // after the package, built from src/main.rs.
+        let bins = match bins.is_empty() {
+            true if repo().join(&member).join("src/main.rs").exists() => vec![package.clone()],
+            _ => bins,
+        };
+        for bin in bins {
+            found.push((package.clone(), bin));
+        }
+    }
+    found
 }
 
 #[test]

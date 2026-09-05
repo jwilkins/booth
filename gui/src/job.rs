@@ -11,9 +11,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use musicai::cli::{AnalyzeArgs, NormalizeArgs, RunArgs, StemsArgs, Step, TagArgs};
-use musicai::commands::Pipeline;
-use musicai::report::{Event, Reporter};
+use booth_core::cli::{AnalyzeArgs, NormalizeArgs, RunArgs, StemsArgs, Step, TagArgs};
+use booth_core::commands::Pipeline;
+use booth_core::report::{Event, Reporter};
 
 /// The things this tool does: the whole pipeline, or any one part of it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -150,7 +150,7 @@ impl Settings {
     /// The command-line that would do the same thing, for the window to show.
     /// Seeing it makes the window scriptable: run it once, then copy the line.
     pub fn command_line(&self) -> String {
-        let mut parts = vec!["musicai".to_string(), self.task.subcommand().to_string()];
+        let mut parts = vec!["booth-cli".to_string(), self.task.subcommand().to_string()];
         parts.extend(self.arguments());
         parts.push(match self.files.len() {
             0 => "<no files>".to_string(),
@@ -188,7 +188,7 @@ impl Settings {
                 flag(&mut out, "recursive", self.recursive);
                 out.push(format!("--mode {}", value_name(a.mode)));
                 out.push(format!("--target {}", a.target_lufs()));
-                if a.mode == musicai::cli::NormalizeMode::Reencode {
+                if a.mode == booth_core::cli::NormalizeMode::Reencode {
                     out.push(format!("--ceiling {}", a.ceiling));
                     out.push(format!("--on-peak {}", value_name(a.on_peak)));
                 }
@@ -213,7 +213,7 @@ impl Settings {
                 } else {
                     out.push("--stem-cbr".to_string());
                 }
-                if a.only.len() != musicai::stems::Stem::ALL.len() {
+                if a.only.len() != booth_core::stems::Stem::ALL.len() {
                     let names: Vec<&str> = a.only.iter().map(|s| s.name()).collect();
                     out.push(format!("--only {}", names.join(",")));
                 }
@@ -238,19 +238,19 @@ impl Settings {
     fn with_inputs<T: WithInput + Clone>(&self, args: &T) -> T {
         let mut args = args.clone();
         *args.input_mut() =
-            musicai::cli::InputArgs { inputs: self.files.clone(), recursive: self.recursive };
+            booth_core::cli::InputArgs { inputs: self.files.clone(), recursive: self.recursive };
         args
     }
 
     /// Do what the window is set up to do. Runs on the worker thread.
     fn execute(&self, reporter: &dyn Reporter) -> anyhow::Result<()> {
-        use musicai::commands;
+        use booth_core::commands;
         match self.task {
             Task::Batch => {
                 // The pipeline is handed the full list up front, so it can say
                 // how much there is to do and walk a folder once rather than
                 // once per step.
-                let files = musicai::discover::collect(&self.files, self.recursive)?;
+                let files = booth_core::discover::collect(&self.files, self.recursive)?;
                 let normalize = self.with_inputs(&self.normalize);
                 let tag = self.with_inputs(&self.tag);
                 let stems = self.with_inputs(&self.stems);
@@ -276,13 +276,13 @@ impl Settings {
 /// Lets the window put its file selection into any task's arguments without a
 /// copy of the same lines per task.
 trait WithInput {
-    fn input_mut(&mut self) -> &mut musicai::cli::InputArgs;
+    fn input_mut(&mut self) -> &mut booth_core::cli::InputArgs;
 }
 
 macro_rules! with_input {
     ($type:ty) => {
         impl WithInput for $type {
-            fn input_mut(&mut self) -> &mut musicai::cli::InputArgs {
+            fn input_mut(&mut self) -> &mut booth_core::cli::InputArgs {
                 &mut self.input
             }
         }
@@ -413,7 +413,7 @@ impl Drop for Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use musicai::cli::NormalizeMode;
+    use booth_core::cli::NormalizeMode;
 
     fn noop_wake() -> Arc<dyn Fn() + Send + Sync> {
         Arc::new(|| {})
@@ -422,8 +422,8 @@ mod tests {
     /// A quiet wav file, which is enough for analyze and normalize to have
     /// something real to do.
     fn write_tone(path: &std::path::Path) {
-        use musicai::audio::encode::{write_file, Codec, EncodeOptions};
-        use musicai::audio::Audio;
+        use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+        use booth_core::audio::Audio;
 
         let sample_rate = 44_100;
         let samples: Vec<f32> = (0..sample_rate)
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(settings.normalize.ceiling, -1.0);
         assert_eq!(settings.normalize.bitrate, 192);
         assert_eq!(settings.tag.min_score, 0.8);
-        assert_eq!(settings.stems.only, musicai::stems::Stem::ALL.to_vec());
+        assert_eq!(settings.stems.only, booth_core::stems::Stem::ALL.to_vec());
         // The placeholder input never survives into the settings the user edits.
         assert!(settings.files.is_empty());
     }
@@ -504,7 +504,7 @@ mod tests {
         settings.add_files([PathBuf::from("/music/track.flac")]);
 
         let line = settings.command_line();
-        assert!(line.starts_with("musicai run "), "{line}");
+        assert!(line.starts_with("booth-cli run "), "{line}");
         assert!(!line.contains("--steps"), "all steps is the default: {line}");
 
         settings.steps.retain(|s| *s != Step::Stems);
@@ -522,7 +522,7 @@ mod tests {
         settings.add_files([dir.0.clone()]);
         // Keep it offline and off demucs: tagging is skipped without a key, and
         // the built-in separator needs nothing installed.
-        settings.stems.backend = musicai::stems::Backend::Dsp;
+        settings.stems.backend = booth_core::stems::Backend::Dsp;
         settings.stems.out_dir = dir.0.join("stems");
 
         let mut runner = Runner::start(&settings, noop_wake());
@@ -551,7 +551,7 @@ mod tests {
         assert!(matches!(updates.last(), Some(Update::Done(Ok(())))), "{updates:?}");
 
         // The separation really ran: the stems are on disk.
-        for stem in musicai::stems::Stem::ALL {
+        for stem in booth_core::stems::Stem::ALL {
             // mp3 whatever went in: a stem kit is three more files per track.
             let path = dir.0.join("stems").join(format!("track-{}.mp3", stem.name()));
             assert!(path.exists(), "missing {}", path.display());
@@ -611,14 +611,14 @@ mod tests {
     fn the_shown_command_line_matches_the_settings() {
         let mut settings = Settings { task: Task::Stems, ..Default::default() };
         settings.add_files([PathBuf::from("/music/track.flac")]);
-        settings.stems.only = vec![musicai::stems::Stem::Vocals];
+        settings.stems.only = vec![booth_core::stems::Stem::Vocals];
 
         let line = settings.command_line();
-        assert!(line.starts_with("musicai stems "), "{line}");
+        assert!(line.starts_with("booth-cli stems "), "{line}");
         assert!(line.contains("--only vocals"), "{line}");
         assert!(line.ends_with("/music/track.flac"), "{line}");
         // A full selection is the default, so it is not worth showing.
-        settings.stems.only = musicai::stems::Stem::ALL.to_vec();
+        settings.stems.only = booth_core::stems::Stem::ALL.to_vec();
         assert!(!settings.command_line().contains("--only"));
     }
 
@@ -691,7 +691,7 @@ mod tests {
         // Re-encode explicitly: the batch default is ReplayGain, which a wav
         // cannot carry, and that would fail or not depending on whether the
         // worker beat the cancel flag to the file.
-        settings.normalize.mode = musicai::cli::NormalizeMode::Reencode;
+        settings.normalize.mode = booth_core::cli::NormalizeMode::Reencode;
         settings.normalize.out_dir = Some(out.clone());
         settings.add_files([track]);
 

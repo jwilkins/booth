@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use musicai::tag::{acoustid, coverart, musicbrainz, Metadata};
+use booth_core::tag::{acoustid, coverart, musicbrainz, Metadata};
 
 /// Radiohead, "Creep". A long-established recording, unlikely to be merged
 /// away and so stable enough to assert against.
@@ -100,7 +100,7 @@ fn acoustid_accepts_a_fingerprint_we_generated() {
     // and track numbers. That cannot live here: it needs both an API key and a
     // real recording, and neither belongs in the repository.
     let audio = synthetic_audio(30);
-    let fingerprint = musicai::tag::fingerprint::fingerprint(&audio).unwrap();
+    let fingerprint = booth_core::tag::fingerprint::fingerprint(&audio).unwrap();
 
     let mut client = acoustid::Client::new(key, acoustid::DEFAULT_MIN_INTERVAL);
     let candidates =
@@ -111,7 +111,7 @@ fn acoustid_accepts_a_fingerprint_we_generated() {
 
 /// Real music would be better, but there is none in the repository, and this
 /// is enough to exercise the encoding.
-fn synthetic_audio(seconds: usize) -> musicai::audio::Audio {
+fn synthetic_audio(seconds: usize) -> booth_core::audio::Audio {
     let sample_rate = 44_100usize;
     let frames = sample_rate * seconds;
     let mut plane = Vec::with_capacity(frames);
@@ -125,5 +125,5 @@ fn synthetic_audio(seconds: usize) -> musicai::audio::Audio {
         }
         plane.push(v * 0.5);
     }
-    musicai::audio::Audio::new(sample_rate as u32, vec![plane.clone(), plane]).unwrap()
+    booth_core::audio::Audio::new(sample_rate as u32, vec![plane.clone(), plane]).unwrap()
 }

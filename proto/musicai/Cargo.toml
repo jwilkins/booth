@@ -1,10 +1,20 @@
 [package]
-name = "musicai"
+name = "booth-core"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Local audio toolkit: EBU R128 loudness normalization and stem separation for mp3/flac/wav"
 license-file = "../../LICENSE"
+
+# The directory keeps the old name: it is where this came from, and moving it
+# again would only churn every path in the last few commits for nothing.
+#
+# The binary is named rather than inherited, because a package called
+# `booth-core` would otherwise produce a command called `booth-core`, and what
+# somebody types is not the same question as what the crate is called.
+[[bin]]
+name = "booth-cli"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

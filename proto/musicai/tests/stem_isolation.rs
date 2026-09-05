@@ -12,9 +12,9 @@
 //!
 //! ```sh
 //! pipx install demucs openai-whisper          # or a shared venv
-//! export MUSICAI_TEST_TRACK=/path/to/song-with-vocals.flac
-//! export MUSICAI_DEMUCS_BIN=demucs            # optional, defaults to PATH
-//! export MUSICAI_WHISPER_BIN=whisper          # optional, defaults to PATH
+//! export BOOTH_TEST_TRACK=/path/to/song-with-vocals.flac
+//! export BOOTH_DEMUCS_BIN=demucs            # optional, defaults to PATH
+//! export BOOTH_WHISPER_BIN=whisper          # optional, defaults to PATH
 //! cargo test --release --test stem_isolation -- --ignored --nocapture
 //! ```
 
@@ -22,10 +22,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use musicai::audio::decode::decode_file;
-use musicai::audio::encode::{write_file, Codec, EncodeOptions};
-use musicai::audio::Audio;
-use musicai::stems::{demucs, Stem, StemSet};
+use booth_core::audio::decode::decode_file;
+use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_core::audio::Audio;
+use booth_core::stems::{demucs, Stem, StemSet};
 
 /// Seconds of the track to use. Long enough to contain several sung phrases,
 /// short enough that separating and transcribing it four times is bearable on
@@ -190,11 +190,11 @@ fn separate_with_demucs(path: &Path, work_dir: &Path, demucs_bin: &str) -> StemS
 }
 
 #[test]
-#[ignore = "needs demucs, whisper and MUSICAI_TEST_TRACK"]
+#[ignore = "needs demucs, whisper and BOOTH_TEST_TRACK"]
 fn lyrics_appear_only_in_the_vocal_stem() {
-    let track = require_env!("MUSICAI_TEST_TRACK");
-    let demucs_bin = tool("MUSICAI_DEMUCS_BIN", "demucs");
-    let whisper_bin = tool("MUSICAI_WHISPER_BIN", "whisper");
+    let track = require_env!("BOOTH_TEST_TRACK");
+    let demucs_bin = tool("BOOTH_DEMUCS_BIN", "demucs");
+    let whisper_bin = tool("BOOTH_WHISPER_BIN", "whisper");
 
     let dir = Scratch::new("lyrics");
     let encode = EncodeOptions { bit_depth: 16, ..Default::default() };
@@ -244,7 +244,7 @@ fn lyrics_appear_only_in_the_vocal_stem() {
     // measure against.
     assert!(
         vocals.len() >= 10,
-        "the vocal stem yielded only {} distinct words, so there is nothing to test; point          MUSICAI_TEST_TRACK at a track with clearly audible singing",
+        "the vocal stem yielded only {} distinct words, so there is nothing to test; point          BOOTH_TEST_TRACK at a track with clearly audible singing",
         vocals.len()
     );
 

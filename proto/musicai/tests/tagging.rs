@@ -6,10 +6,10 @@
 
 use std::path::PathBuf;
 
-use musicai::audio::decode::decode_file;
-use musicai::audio::encode::{write_file, Codec, EncodeOptions};
-use musicai::audio::Audio;
-use musicai::tag::{coverart::CoverArt, write_tags, Field, Metadata, OnExisting};
+use booth_core::audio::decode::decode_file;
+use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_core::audio::Audio;
+use booth_core::tag::{coverart::CoverArt, write_tags, Field, Metadata, OnExisting};
 
 struct Scratch(PathBuf);
 
@@ -75,7 +75,7 @@ fn cover() -> CoverArt {
     data.push(8); // bit depth
     data.push(2); // colour type: truecolour
     data.extend_from_slice(&[0; 512]);
-    musicai::tag::coverart::identify(data).expect("not recognised as an image")
+    booth_core::tag::coverart::identify(data).expect("not recognised as an image")
 }
 
 fn vorbis(path: &PathBuf, key: &str) -> Option<String> {
@@ -325,8 +325,8 @@ fn tag_like_a_library_file(path: &PathBuf) {
 
 #[test]
 fn stems_inherit_the_parents_tags_in_flac() {
-    use musicai::stems::Stem;
-    use musicai::tag::copy::copy_for_stem;
+    use booth_core::stems::Stem;
+    use booth_core::tag::copy::copy_for_stem;
 
     let dir = Scratch::new("copy-flac");
     let source = dir.track(Codec::Flac);
@@ -353,8 +353,8 @@ fn stems_inherit_the_parents_tags_in_flac() {
 
 #[test]
 fn replaygain_is_not_carried_over_to_a_stem() {
-    use musicai::stems::Stem;
-    use musicai::tag::copy::copy_for_stem;
+    use booth_core::stems::Stem;
+    use booth_core::tag::copy::copy_for_stem;
 
     let dir = Scratch::new("copy-no-rg");
     let source = dir.track(Codec::Flac);
@@ -374,9 +374,9 @@ fn replaygain_is_not_carried_over_to_a_stem() {
 
 #[test]
 fn stems_inherit_the_parents_tags_in_mp3() {
+    use booth_core::stems::Stem;
+    use booth_core::tag::copy::copy_for_stem;
     use id3::TagLike;
-    use musicai::stems::Stem;
-    use musicai::tag::copy::copy_for_stem;
 
     let dir = Scratch::new("copy-mp3");
     let source = dir.track(Codec::Mp3);
@@ -402,8 +402,8 @@ fn stems_inherit_the_parents_tags_in_mp3() {
 
 #[test]
 fn crossing_formats_carries_the_fields_both_dialects_share() {
-    use musicai::stems::Stem;
-    use musicai::tag::copy::copy_for_stem;
+    use booth_core::stems::Stem;
+    use booth_core::tag::copy::copy_for_stem;
 
     let dir = Scratch::new("copy-cross");
     let source = dir.track(Codec::Flac);
@@ -424,8 +424,8 @@ fn crossing_formats_carries_the_fields_both_dialects_share() {
 
 #[test]
 fn a_wav_stem_is_left_alone_rather_than_failing() {
-    use musicai::stems::Stem;
-    use musicai::tag::copy::copy_for_stem;
+    use booth_core::stems::Stem;
+    use booth_core::tag::copy::copy_for_stem;
 
     let dir = Scratch::new("copy-wav");
     let source = dir.track(Codec::Flac);
@@ -490,7 +490,7 @@ fn an_m4a_carries_tags_like_anything_else() {
     assert!(outcome.written.contains(&Field::Title));
     assert!(outcome.written.contains(&Field::RecordingMbid));
 
-    let read = musicai::tag::read_metadata(&path).unwrap();
+    let read = booth_core::tag::read_metadata(&path).unwrap();
     assert_eq!(read.title.as_deref(), Some("Creep"));
     assert_eq!(read.artist.as_deref(), Some("Radiohead"));
     assert_eq!(read.album.as_deref(), Some("Pablo Honey"));
@@ -518,7 +518,7 @@ fn an_m4a_keeps_what_is_already_there_when_asked_to() {
     assert!(outcome.written.contains(&Field::Title), "the blank was filled");
     assert!(!outcome.written.contains(&Field::Artist), "the artist was somebody's answer");
 
-    let read = musicai::tag::read_metadata(&path).unwrap();
+    let read = booth_core::tag::read_metadata(&path).unwrap();
     assert_eq!(read.artist.as_deref(), Some("Someone Who Was Here First"));
     assert_eq!(read.title.as_deref(), Some("Creep"));
 }

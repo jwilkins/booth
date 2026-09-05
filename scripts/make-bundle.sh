@@ -39,7 +39,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # rides along in the same bundle so that one download gives you both, and so the
 # two can never be different versions of each other.
 install -m 755 "$BOOTH_BIN" "$APP/Contents/MacOS/booth"
-install -m 755 "$CLI_BIN" "$APP/Contents/MacOS/musicai"
+install -m 755 "$CLI_BIN" "$APP/Contents/MacOS/booth-cli"
 
 install -m 644 "$RESOURCES/icon.icns" "$APP/Contents/Resources/icon.icns"
 

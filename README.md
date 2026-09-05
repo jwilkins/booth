@@ -40,20 +40,20 @@ with a free key.
 | | |
 |---|---|
 | [`booth/`](booth/README.md) | The library window. This is the program, and what `cargo build` builds. |
-| [`proto/musicai/`](proto/musicai/README.md) | The engine — analysis, loudness, stems, tagging, the drive writer — with a command-line tool around it. It came first; that is all `proto/` means. |
+| [`proto/musicai/`](proto/musicai/README.md) | `booth-core`: the engine — analysis, loudness, stems, tagging, the drive writer — with the `booth-cli` command around it. It came first, which is all `proto/` and the directory's old name mean. |
 | [`gui/`](gui) | The older batch window: pick files, pick a task, run it. |
 | [`docs/`](docs) | The [spec](docs/rekordbox-replacement-spec.md) this is built to, and [what is known](docs/onelibrary.md) about the format the newer players read. |
 
 ```sh
 cargo build --release              # Booth
-cargo build --release -p musicai   # the command-line tool
+cargo build --release -p booth-core # the command-line tool
 cargo build --release --workspace  # all of it
 ```
 
 ## The macOS app
 
 `scripts/package-macos.sh` builds **Booth.app**: the library window, universal for Apple silicon
-and Intel, with the `musicai` command-line tool inside the same bundle so one download is both.
+and Intel, with the `booth-cli` command-line tool inside the same bundle so one download is both.
 
 ### The batch window
 
@@ -87,12 +87,12 @@ architecture. That needs both targets installed:
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 ```
 
-The bundle carries **both** binaries — the app you launch and the `musicai` command-line tool, at
-`Booth.app/Contents/MacOS/musicai`. One download gives you both, and they can never be different
+The bundle carries **both** binaries — the app you launch and the `booth-cli` command-line tool, at
+`Booth.app/Contents/MacOS/booth-cli`. One download gives you both, and they can never be different
 versions of each other. Symlink it onto your `PATH` if you want it there:
 
 ```sh
-ln -s /Applications/Booth.app/Contents/MacOS/musicai /usr/local/bin/musicai
+ln -s /Applications/Booth.app/Contents/MacOS/booth-cli /usr/local/bin/booth-cli
 ```
 
 To run either window without packaging anything:
@@ -112,8 +112,8 @@ Gatekeeper stops it anywhere else until you right-click and choose *Open*. With 
 environment and the script does the rest:
 
 ```sh
-MUSICAI_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-MUSICAI_NOTARY_PROFILE=my-notary-profile \
+BOOTH_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+BOOTH_NOTARY_PROFILE=my-notary-profile \
     scripts/package-macos.sh
 ```
 

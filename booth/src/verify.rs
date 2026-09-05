@@ -171,7 +171,7 @@ pub fn orphans(library: &Path, known: &[PathBuf]) -> Vec<PathBuf> {
     if library.as_os_str().is_empty() || !library.is_dir() {
         return Vec::new();
     }
-    let Ok(found) = musicai::discover::collect(&[library.to_path_buf()], true) else {
+    let Ok(found) = booth_core::discover::collect(&[library.to_path_buf()], true) else {
         return Vec::new();
     };
     // Compared as the collection stores them, which is how they were written

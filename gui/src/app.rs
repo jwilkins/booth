@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use booth_core::report::Event;
 use eframe::egui::{self, Color32, RichText};
-use musicai::report::Event;
 
 use crate::job::{Runner, Settings, Task, Update};
 
@@ -86,7 +86,7 @@ impl App {
         // Lets the screenshot check open the app on a chosen tab. Compiled out
         // of any ordinary build.
         #[cfg(feature = "screenshot")]
-        if let Ok(name) = std::env::var("MUSICAI_GUI_TASK") {
+        if let Ok(name) = std::env::var("BOOTH_GUI_TASK") {
             if let Some(task) = Task::ALL.iter().find(|t| t.title().eq_ignore_ascii_case(&name)) {
                 app.settings.task = *task;
             }
@@ -434,7 +434,7 @@ impl App {
 // -- per-task options ------------------------------------------------------
 
 fn batch_options(ui: &mut egui::Ui, settings: &mut Settings) {
-    use musicai::cli::{NormalizeMode, Step};
+    use booth_core::cli::{NormalizeMode, Step};
 
     ui.heading("Batch");
     ui.label(
@@ -486,8 +486,16 @@ fn batch_options(ui: &mut egui::Ui, settings: &mut Settings) {
 
     ui.horizontal(|ui| {
         ui.label("Separator");
-        ui.selectable_value(&mut settings.stems.backend, musicai::stems::Backend::Demucs, "Demucs");
-        ui.selectable_value(&mut settings.stems.backend, musicai::stems::Backend::Dsp, "Built-in");
+        ui.selectable_value(
+            &mut settings.stems.backend,
+            booth_core::stems::Backend::Demucs,
+            "Demucs",
+        );
+        ui.selectable_value(
+            &mut settings.stems.backend,
+            booth_core::stems::Backend::Dsp,
+            "Built-in",
+        );
     });
 
     if settings.tag.acoustid_key.as_deref().unwrap_or_default().trim().is_empty()
@@ -517,8 +525,8 @@ fn analyze_options(ui: &mut egui::Ui, settings: &mut Settings) {
 }
 
 fn normalize_options(ui: &mut egui::Ui, settings: &mut Settings) {
-    use musicai::cli::NormalizeMode;
-    use musicai::normalize::PeakPolicy;
+    use booth_core::cli::NormalizeMode;
+    use booth_core::normalize::PeakPolicy;
 
     let args = &mut settings.normalize;
     ui.heading("Normalize");
@@ -587,7 +595,7 @@ fn normalize_options(ui: &mut egui::Ui, settings: &mut Settings) {
 }
 
 fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
-    use musicai::stems::{Backend, Stem};
+    use booth_core::stems::{Backend, Stem};
 
     let args = &mut settings.stems;
     ui.heading("Stems");
@@ -634,12 +642,12 @@ fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
     // stem is enormous for audio that plays under something else.
     ui.horizontal(|ui| {
         ui.label("Format");
-        for format in musicai::cli::StemFormat::ALL {
+        for format in booth_core::cli::StemFormat::ALL {
             ui.selectable_value(&mut args.format, format, format.name());
         }
     });
     match args.format {
-        musicai::cli::StemFormat::Mp3 => {
+        booth_core::cli::StemFormat::Mp3 => {
             let mut vbr = !args.stem_cbr;
             ui.horizontal(|ui| {
                 ui.checkbox(&mut vbr, "Variable bitrate");
@@ -653,7 +661,7 @@ fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
                 }
             });
         }
-        musicai::cli::StemFormat::Flac => {
+        booth_core::cli::StemFormat::Flac => {
             ui.horizontal(|ui| {
                 ui.label("Bit depth");
                 ui.add(egui::Slider::new(&mut args.bit_depth, 16..=24));
@@ -669,8 +677,8 @@ fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
 }
 
 fn tag_options(ui: &mut egui::Ui, settings: &mut Settings) {
-    use musicai::cli::OnAmbiguous;
-    use musicai::tag::OnExisting;
+    use booth_core::cli::OnAmbiguous;
+    use booth_core::tag::OnExisting;
 
     let args = &mut settings.tag;
     ui.heading("Tag");
@@ -714,11 +722,11 @@ fn tag_options(ui: &mut egui::Ui, settings: &mut Settings) {
 /// The format controls, which normalize and stems share.
 fn output_format(
     ui: &mut egui::Ui,
-    format: &mut Option<musicai::audio::encode::Codec>,
+    format: &mut Option<booth_core::audio::encode::Codec>,
     bit_depth: &mut u16,
     bitrate: &mut u32,
 ) {
-    use musicai::audio::encode::Codec;
+    use booth_core::audio::encode::Codec;
 
     ui.horizontal(|ui| {
         ui.label("Format");

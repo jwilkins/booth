@@ -456,7 +456,7 @@ pub fn owner<'a>(
     file: &Path,
 ) -> Option<&'a Known> {
     by_name.get(&(name, size)).copied().or_else(|| {
-        let hash = musicai::hash::audio_sha256(file).ok()?;
+        let hash = booth_core::hash::audio_sha256(file).ok()?;
         by_sound.get(hash.as_str()).copied()
     })
 }
@@ -699,8 +699,8 @@ mod tests {
     /// A real FLAC, so that the audio hash the duplicate finder uses can be
     /// taken of it. A made-up byte string has no audio stream to hash.
     fn a_flac(at: &Path, seed: f32) -> u64 {
-        use musicai::audio::encode::{write_file, Codec, EncodeOptions};
-        use musicai::audio::Audio;
+        use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+        use booth_core::audio::Audio;
 
         let plane: Vec<f32> = (0..8_000).map(|i| (i as f32 * seed / 800.0).sin() * 0.4).collect();
         let audio = Audio::new(8_000, vec![plane.clone(), plane]).unwrap();
@@ -726,7 +726,7 @@ mod tests {
             path: mine.clone(),
             // Deliberately wrong, so only the sound can match them.
             bytes: 1,
-            audio_hash: musicai::hash::audio_sha256(&mine).unwrap(),
+            audio_hash: booth_core::hash::audio_sha256(&mine).unwrap(),
         }];
         let kept = keep(
             &scratch.path("drive"),
@@ -756,7 +756,7 @@ mod tests {
         let known = vec![Known {
             path: mine.clone(),
             bytes: 1,
-            audio_hash: musicai::hash::audio_sha256(&mine).unwrap(),
+            audio_hash: booth_core::hash::audio_sha256(&mine).unwrap(),
         }];
         let kept = keep(
             &scratch.path("drive"),
