@@ -35,6 +35,18 @@ pub enum Trouble {
     Field { field: Field, stored: String, file: String },
     /// A stem kit lists a part that is not on disk.
     StemGone { part: &'static str },
+    /// The file's own name says this is something else.
+    ///
+    /// The only trouble here that is a question rather than a correction, and
+    /// the only one with two answers that might both be right: a file whose
+    /// names and whose name disagree is a fingerprint that landed on the wrong
+    /// record, or a file somebody renamed, or an edit filed under the
+    /// original's name. Which of those it is, only a person knows.
+    ///
+    /// Reported only when the path names both an artist and a title, because
+    /// without that there is nothing to offer in place of what is there and
+    /// the report would be a complaint about somebody's filing.
+    Unlike { stored: String, from_path: crate::guess::Guess },
 }
 
 impl Trouble {
@@ -46,7 +58,19 @@ impl Trouble {
             Trouble::Resized { .. } => 2,
             Trouble::StemGone { .. } => 3,
             Trouble::Field { .. } => 4,
+            Trouble::Unlike { .. } => 5,
         }
+    }
+
+    /// Whether this is a question for the user rather than something to put
+    /// right.
+    ///
+    /// Kept apart from [`Trouble::is_fixable`] because the two mean different
+    /// things to the sheet: a fixable trouble goes into "take the files' word",
+    /// which acts on every one of them at once, and a question must never be
+    /// swept up by a button somebody pressed to mean something else.
+    pub fn is_a_choice(&self) -> bool {
+        matches!(self, Trouble::Unlike { .. })
     }
 
     /// Whether this is something the collection can put right on its own.
@@ -56,7 +80,7 @@ impl Trouble {
     /// date. A missing file is not a disagreement to settle — there is nothing
     /// to read — and what to do about it is the user's call.
     pub fn is_fixable(&self) -> bool {
-        !matches!(self, Trouble::Missing)
+        !matches!(self, Trouble::Missing | Trouble::Unlike { .. })
     }
 
     pub fn what(&self) -> String {
@@ -70,6 +94,7 @@ impl Trouble {
             Trouble::Rewritten => "same size, different bytes".to_string(),
             Trouble::Field { field, .. } => format!("{} disagrees with the file", field.name()),
             Trouble::StemGone { part } => format!("the {part} stem is gone"),
+            Trouble::Unlike { .. } => "the file's own name says otherwise".to_string(),
         }
     }
 }
@@ -148,6 +173,23 @@ pub fn check(track: &Track, deep: bool) -> Report {
         }
     }
 
+    // And what the file is called, which is evidence of its own and the one
+    // thing here nobody has been comparing. A track named one thing in the
+    // collection and filed under another is worth a look either way round:
+    // the tags may be wrong, or the file may have been renamed since.
+    let named = format!("{} {}", track.artist.trim(), track.title.trim());
+    let file_name = track.path.file_name().unwrap_or_default().to_string_lossy();
+    let from_path = crate::guess::from_path(&track.path);
+    if !named.trim().is_empty()
+        && from_path.is_strong()
+        && !crate::guess::resembles(&file_name, &track.artist, &track.title)
+    {
+        troubles.push(Trouble::Unlike {
+            stored: format!("{} — {}", track.artist.trim(), track.title.trim()),
+            from_path,
+        });
+    }
+
     troubles.sort_by_key(|trouble| trouble.rank());
     match troubles.is_empty() {
         true => crate::debug!("#{} is as the collection describes it", track.id),
@@ -205,6 +247,91 @@ mod tests {
         let (dir, library, id) = a_file("clean", b"some audio");
         let report = check(library.get(id).unwrap(), false);
         assert!(report.troubles.is_empty(), "{:?}", report.troubles);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A real file at a chosen path, and the track that describes it.
+    fn a_file_named(name: &str, at: &str) -> (PathBuf, Library, u32) {
+        let dir = std::env::temp_dir().join(format!("booth-verify-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(at);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"some audio").unwrap();
+
+        let mut library = Library::new();
+        let id = library.add(&path);
+        let track = library.get_mut(id).unwrap();
+        track.bytes = 10;
+        (dir, library, id)
+    }
+
+    #[test]
+    fn a_file_filed_under_another_name_is_a_question_with_two_answers() {
+        let (dir, mut library, id) = a_file_named("unlike", "Batu/Marius/01 - Marius.flac");
+        {
+            let track = library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Roll With The Punches".into();
+        }
+        let report = check(library.get(id).unwrap(), false);
+
+        let found = report
+            .troubles
+            .iter()
+            .find_map(|trouble| match trouble {
+                Trouble::Unlike { stored, from_path } => Some((stored.clone(), from_path.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("nothing said the file name disagrees: {:?}", report.troubles)
+            });
+
+        assert_eq!(found.0, "Peverelist — Roll With The Punches");
+        assert_eq!(found.1.artist, "Batu");
+        assert_eq!(found.1.title, "Marius");
+
+        // A question, not a fault: it must never be swept up by the button
+        // that takes the files' word for everything at once.
+        let trouble = report.troubles.iter().find(|t| t.is_a_choice()).unwrap();
+        assert!(!trouble.is_fixable());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_named_after_what_it_holds_is_not_a_question() {
+        let (dir, mut library, id) =
+            a_file_named("alike", "Peverelist/Tessellations/02 - Roll With The Punches.flac");
+        {
+            let track = library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Roll With The Punches".into();
+        }
+        let report = check(library.get(id).unwrap(), false);
+        assert!(!report.troubles.iter().any(|t| t.is_a_choice()), "{:?}", report.troubles);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_whose_name_offers_nothing_is_not_a_question_either() {
+        // `track04.mp3` disagrees with everything, and has nothing to put in
+        // its place. Reporting it would be a complaint about somebody's filing
+        // rather than a difference they can settle.
+        let (dir, mut library, id) = a_file_named("bare", "Downloads/track04.flac");
+        {
+            let track = library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Roll With The Punches".into();
+        }
+        let report = check(library.get(id).unwrap(), false);
+        assert!(!report.troubles.iter().any(|t| t.is_a_choice()), "{:?}", report.troubles);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_track_with_no_names_of_its_own_has_nothing_to_disagree_with() {
+        let (dir, library, id) = a_file_named("unnamed", "Batu/Marius/01 - Marius.flac");
+        let report = check(library.get(id).unwrap(), false);
+        assert!(!report.troubles.iter().any(|t| t.is_a_choice()), "{:?}", report.troubles);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

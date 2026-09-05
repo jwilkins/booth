@@ -453,6 +453,36 @@ command: the database and every analysis file are read back off the drive by a
 parser that shares no code with the writer. Until that passes, the drive is not
 finished.
 
+## The collection against its files
+
+A collection is a set of claims about files other programs can also move,
+retag and delete. **Check** reads them back and says where the two have come
+apart: a file that is not where it should be, one that changed size, one
+rewritten at the same length (which only a thorough check can see, since it
+means reading every byte), a stem the kit lists and the disk has not got, and a
+tag that answers something the collection answers differently.
+
+Most of those are facts about the file, so the collection is simply out of date
+and *Take the files' word* brings it up to date in one go. Nothing there is
+written back to a file: a name goes into a file's tags through the tag
+write-back and nowhere else.
+
+One kind is not a fault, and is treated differently. **A file's own name is
+evidence too**, and when it says something else entirely — the collection has
+*Peverelist — Roll With The Punches*, the file is filed as
+`Batu/Marius/01 - Marius.flac` — there are two answers and both might be right.
+It could be a fingerprint that landed on the wrong record, a file somebody
+renamed, or an edit filed under the original's name; only a person knows which.
+So it is shown as a pair of radio buttons, the tags on one and the file name on
+the other, and nothing happens until you press the button that takes the ones
+you switched. It is never swept up by *Take the files' word*, which is a button
+somebody pressed to mean something else.
+
+That comparison is only made when the path names both an artist and a title.
+`Downloads/track04.flac` disagrees with everything and has nothing to offer in
+place of it, and reporting that would be a complaint about somebody's filing
+rather than a difference they can settle.
+
 ## The log
 
 The dock shows the last line. **LOG** opens the whole thing in a window of its

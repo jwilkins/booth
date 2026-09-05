@@ -384,6 +384,12 @@ enum Pending {
         id: u32,
         write: bool,
     },
+    /// Pick which of a track's two names is right: the tags, or the file's own
+    /// name. Recorded rather than acted on — the sheet's button applies them.
+    ChooseName {
+        id: u32,
+        from_path: bool,
+    },
     /// Move the deck to a position in a track, if that track is on it.
     SeekDeck {
         id: u32,
@@ -2068,6 +2074,10 @@ struct Checked {
     /// Whether it read every byte, which is what the wording turns on: a quick
     /// check finding nothing means less than a thorough one finding nothing.
     deep: bool,
+    /// Which answer has been picked for each track whose file name disagrees
+    /// with its names. Absent means the tags, which is the default: a choice
+    /// nobody has made is not a reason to change anything.
+    naming: std::collections::HashMap<u32, bool>,
 }
 
 /// One group of copies as the sheet is showing it this frame.
@@ -4285,6 +4295,11 @@ impl App {
                         touched = true;
                     }
                 }
+                Pending::ChooseName { id, from_path } => {
+                    if let Some(checked) = &mut self.checked {
+                        checked.naming.insert(id, from_path);
+                    }
+                }
                 Pending::TogglePlayback(id) => self.toggle_playback(id),
                 Pending::SeekDeck { id, time_ms } => {
                     if let Some(player) = &self.player {
@@ -5756,10 +5771,12 @@ impl App {
         let (running, deep, looked_at) = (checked.running, checked.deep, checked.looked_at);
         let reports = checked.troubles.clone();
         let orphans = checked.orphans.clone();
+        let naming = checked.naming.clone();
         let mut open = true;
         let mut fix: Vec<u32> = Vec::new();
         let mut forget: Vec<u32> = Vec::new();
         let mut adopt_strays = false;
+        let mut rename = false;
 
         let fixable: Vec<u32> = reports
             .iter()
@@ -5858,10 +5875,19 @@ impl App {
                                             ui.label(
                                                 RichText::new(trouble.what())
                                                     .size(theme::SMALL)
-                                                    .color(match trouble.is_fixable() {
-                                                        true => theme::AMBER,
-                                                        false => theme::ALERT,
-                                                    }),
+                                                    // A question is not a
+                                                    // fault, so it is not
+                                                    // coloured like one.
+                                                    .color(
+                                                        match (
+                                                            trouble.is_a_choice(),
+                                                            trouble.is_fixable(),
+                                                        ) {
+                                                            (true, _) => theme::TEXT,
+                                                            (_, true) => theme::AMBER,
+                                                            _ => theme::ALERT,
+                                                        },
+                                                    ),
                                             );
                                             // Both answers, where there are two
                                             // — a difference is not worth
@@ -5881,6 +5907,65 @@ impl App {
                                                 );
                                             }
                                         });
+                                        // The one trouble with two answers that
+                                        // might both be right, so it is picked
+                                        // between rather than corrected.
+                                        if let crate::verify::Trouble::Unlike {
+                                            stored,
+                                            from_path,
+                                        } = trouble
+                                        {
+                                            let taking =
+                                                naming.get(&report.id).copied().unwrap_or(false);
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add_space(10.0);
+                                                if ui
+                                                    .radio(!taking, "")
+                                                    .on_hover_text("Leave it as it is")
+                                                    .clicked()
+                                                {
+                                                    self.pending.push(Pending::ChooseName {
+                                                        id: report.id,
+                                                        from_path: false,
+                                                    });
+                                                }
+                                                ui.label(
+                                                    RichText::new(stored)
+                                                        .font(theme::mono(10.0))
+                                                        .color(theme::TEXT),
+                                                );
+                                                ui.label(
+                                                    RichText::new("the tags")
+                                                        .size(theme::SMALL)
+                                                        .color(theme::DIM),
+                                                );
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add_space(10.0);
+                                                if ui
+                                                    .radio(taking, "")
+                                                    .on_hover_text(
+                                                        "Take the names the file is filed under",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.pending.push(Pending::ChooseName {
+                                                        id: report.id,
+                                                        from_path: true,
+                                                    });
+                                                }
+                                                ui.label(
+                                                    RichText::new(from_path.describe())
+                                                        .font(theme::mono(10.0))
+                                                        .color(theme::TEXT),
+                                                );
+                                                ui.label(
+                                                    RichText::new("the file name")
+                                                        .size(theme::SMALL)
+                                                        .color(theme::DIM),
+                                                );
+                                            });
+                                        }
                                     }
                                 });
                             });
@@ -5986,6 +6071,29 @@ impl App {
                     {
                         adopt_strays = true;
                     }
+                    // Only when something has actually been picked. A button
+                    // that does nothing is worse than no button.
+                    let chosen = naming.values().filter(|from_path| **from_path).count();
+                    if chosen > 0
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!(
+                                        "Take the file name for {}",
+                                        plural(chosen, "track")
+                                    ))
+                                    .strong(),
+                                )
+                                .fill(theme::BOOTH_2),
+                            )
+                            .on_hover_text(
+                                "Only the ones set to the file name. Nothing is written to \
+                                 any file — this changes what the collection calls them",
+                            )
+                            .clicked()
+                    {
+                        rename = true;
+                    }
                 });
             });
 
@@ -6001,12 +6109,71 @@ impl App {
             self.rebuild();
             self.save();
         }
+        if rename {
+            self.take_the_names_off_the_files();
+        }
         if adopt_strays {
             self.import(orphans);
             self.checked = None;
         }
         if !open {
             self.checked = None;
+        }
+    }
+
+    /// Rename the tracks whose radio was set to the file's own name.
+    ///
+    /// The collection only: a name is written into a file by the tag write-back
+    /// and nowhere else, and a check that quietly rewrote somebody's tags would
+    /// be a check nobody could safely run.
+    fn take_the_names_off_the_files(&mut self) {
+        let Some(checked) = &self.checked else { return };
+        let chosen: Vec<(u32, crate::guess::Guess)> = checked
+            .troubles
+            .iter()
+            .filter(|report| checked.naming.get(&report.id).copied().unwrap_or(false))
+            .filter_map(|report| {
+                report.troubles.iter().find_map(|trouble| match trouble {
+                    crate::verify::Trouble::Unlike { from_path, .. } => {
+                        Some((report.id, from_path.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+
+        let mut renamed = 0usize;
+        for (id, from_path) in chosen {
+            let Some(track) = self.library.get_mut(id) else { continue };
+            crate::info!(
+                "#{id} renamed from its file: {} — {} becomes {}",
+                track.artist,
+                track.title,
+                from_path.describe()
+            );
+            if !from_path.artist.is_empty() {
+                track.artist.clone_from(&from_path.artist);
+            }
+            if !from_path.title.is_empty() {
+                track.title.clone_from(&from_path.title);
+            }
+            if track.album.trim().is_empty() && !from_path.album.is_empty() {
+                track.album.clone_from(&from_path.album);
+            }
+            // The names came off the path, not out of the file, so a later
+            // fingerprint is still allowed to correct them without asking.
+            track.from_tags = false;
+            renamed += 1;
+        }
+
+        if renamed > 0 {
+            self.note(
+                format!("{} renamed from their files", plural(renamed, "track")),
+                theme::TEXT,
+            );
+            self.checked = None;
+            self.rebuild();
+            self.save();
         }
     }
 
