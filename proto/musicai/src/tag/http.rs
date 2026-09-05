@@ -27,7 +27,7 @@ const MAX_RETRIES: u32 = 3;
 /// that the agent name a real application and a contact address.
 pub fn user_agent() -> String {
     format!(
-        "{}/{} ( https://github.com/jwilkins/musicai )",
+        "{}/{} ( https://github.com/jwilkins/booth )",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION")
     )
