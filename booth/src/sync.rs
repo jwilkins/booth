@@ -199,7 +199,7 @@ pub fn preflight(library: &Library, plan: &Plan, destination: &Path, is_image: b
 
     // -- formats a player cannot open
     let unplayable: Vec<&&Track> =
-        tracks.iter().filter(|t| !musicai::commands::is_playable(&t.format)).collect();
+        tracks.iter().filter(|t| !booth_core::commands::is_playable(&t.format)).collect();
     checks.push(match unplayable.len() {
         0 => Check {
             level: Level::Ok,
@@ -245,8 +245,8 @@ pub fn preflight(library: &Library, plan: &Plan, destination: &Path, is_image: b
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            musicai::commands::on_drive_path(&track.artist, &filename).len()
-                > musicai::commands::MAX_ON_DRIVE_PATH
+            booth_core::commands::on_drive_path(&track.artist, &filename).len()
+                > booth_core::commands::MAX_ON_DRIVE_PATH
         })
         .collect();
     checks.push(match long.len() {
@@ -254,7 +254,7 @@ pub fn preflight(library: &Library, plan: &Plan, destination: &Path, is_image: b
             level: Level::Ok,
             text: format!(
                 "all paths are under {} characters",
-                musicai::commands::MAX_ON_DRIVE_PATH
+                booth_core::commands::MAX_ON_DRIVE_PATH
             ),
         },
         n => Check {

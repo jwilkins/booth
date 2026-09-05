@@ -9,12 +9,12 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use binrw::BinRead;
-use musicai::audio::encode::{write_file, Codec, EncodeOptions};
-use musicai::audio::Audio;
-use musicai::cli::{ExportArgs, InputArgs, PlaylistSpec};
-use musicai::commands;
-use musicai::export::image::DriveImage;
-use musicai::report::Collected;
+use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_core::audio::Audio;
+use booth_core::cli::{ExportArgs, InputArgs, PlaylistSpec};
+use booth_core::commands;
+use booth_core::export::image::DriveImage;
+use booth_core::report::Collected;
 use rekordcrate::pdb::{Header, PageType, Row};
 
 const SAMPLE_RATE: u32 = 44_100;
@@ -193,7 +193,7 @@ fn the_analysis_on_the_drive_agrees_with_the_database() {
 
     let (_, file_path, analyze_path) = tracks_on(&drive).remove(0);
     let dat = drive.join(analyze_path.trim_start_matches('/'));
-    let sections = musicai::export::anlz::inspect(&std::fs::read(&dat).unwrap()).unwrap();
+    let sections = booth_core::export::anlz::inspect(&std::fs::read(&dat).unwrap()).unwrap();
 
     // rekordcrate cannot be the reader here: an exported drive carries a memory
     // cue at the start of every track, and that hits the cue-type disagreement
@@ -227,7 +227,7 @@ fn the_playlist_holds_every_exported_track() {
     export(inputs, &drive);
 
     let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
-    let tables = musicai::export::pdb::inspect(&bytes).unwrap();
+    let tables = booth_core::export::pdb::inspect(&bytes).unwrap();
     let rows = |name: &str| tables.iter().find(|t| t.table == name).unwrap().rows;
 
     assert_eq!(rows("Tracks"), 3);
@@ -311,7 +311,7 @@ fn a_drive_carries_a_tree_of_playlists_and_folders() {
             tracks: vec![files[0].clone()],
         },
     ];
-    musicai::commands::export(&args, &musicai::report::Collected::new()).unwrap();
+    booth_core::commands::export(&args, &booth_core::report::Collected::new()).unwrap();
 
     let rows = playlists_on(&drive);
     assert_eq!(rows.len(), 4, "a folder and three lists: {rows:?}");
@@ -327,7 +327,7 @@ fn a_drive_carries_a_tree_of_playlists_and_folders() {
     // Four entries, not three: the shared track appears in both lists, and is
     // one track on the drive.
     let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
-    let tables = musicai::export::pdb::inspect(&bytes).unwrap();
+    let tables = booth_core::export::pdb::inspect(&bytes).unwrap();
     let rows_in = |name: &str| tables.iter().find(|t| t.table == name).unwrap().rows;
     assert_eq!(rows_in("Tracks"), 3);
     assert_eq!(rows_in("PlaylistEntries"), 5);
@@ -359,7 +359,7 @@ fn a_long_enough_track_gets_its_phrases_onto_the_drive() {
 
     let (_, _, analyze_path) = tracks_on(&drive).remove(0);
     let ext = drive.join(analyze_path.trim_start_matches('/')).with_extension("EXT");
-    let sections = musicai::export::anlz::inspect(&std::fs::read(&ext).unwrap()).unwrap();
+    let sections = booth_core::export::anlz::inspect(&std::fs::read(&ext).unwrap()).unwrap();
 
     let phrases = sections
         .iter()
@@ -401,7 +401,7 @@ fn a_tonal_track_gets_its_key_into_the_database() {
     export(vec![path], &drive);
 
     let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
-    let tables = musicai::export::pdb::inspect(&bytes).unwrap();
+    let tables = booth_core::export::pdb::inspect(&bytes).unwrap();
     let keys = tables.iter().find(|t| t.table == "Keys").unwrap();
     // A tonal track leaves exactly one key in the table, whatever it turned
     // out to be; a keyless one would leave the table empty.
@@ -416,7 +416,7 @@ fn the_cues_on_the_drive_are_named_and_coloured() {
 
     let (_, _, analyze_path) = tracks_on(&drive).remove(0);
     let dat = drive.join(analyze_path.trim_start_matches('/'));
-    let sections = musicai::export::anlz::inspect(&std::fs::read(&dat).unwrap()).unwrap();
+    let sections = booth_core::export::anlz::inspect(&std::fs::read(&dat).unwrap()).unwrap();
 
     let hot = sections
         .iter()
@@ -511,7 +511,7 @@ fn the_database_in_an_image_is_the_one_a_player_would_walk() {
 
     let opened = DriveImage::open(&image).unwrap();
     let tables =
-        musicai::export::pdb::inspect(&opened.read("/PIONEER/rekordbox/export.pdb").unwrap())
+        booth_core::export::pdb::inspect(&opened.read("/PIONEER/rekordbox/export.pdb").unwrap())
             .unwrap();
     let rows = |name: &str| tables.iter().find(|t| t.table == name).unwrap().rows;
     assert_eq!(rows("Tracks"), 3);
@@ -676,7 +676,7 @@ fn a_drive_written_with_a_key_carries_both_databases_and_they_agree() {
     let bytes = std::fs::read(&at).unwrap();
     assert!(!bytes.starts_with(b"SQLite format 3"), "it should be encrypted");
 
-    let summary = musicai::export::onelibrary::inspect(&bytes, ONELIBRARY_KEY)
+    let summary = booth_core::export::onelibrary::inspect(&bytes, ONELIBRARY_KEY)
         .expect("the drive's OneLibrary database would not open");
     assert_eq!(summary.tables, 22);
     assert_eq!(summary.playlists, 1);
@@ -693,7 +693,7 @@ fn a_drive_written_with_a_key_carries_both_databases_and_they_agree() {
 
     // And the newer database points at files that are really there, the same
     // check the legacy one gets.
-    let connection = musicai::rekordbox::open(&at, ONELIBRARY_KEY).unwrap();
+    let connection = booth_core::rekordbox::open(&at, ONELIBRARY_KEY).unwrap();
     let mut statement =
         connection.prepare("SELECT path, analysisDataFilePath FROM content").unwrap();
     let rows: Vec<(String, String)> = statement
@@ -731,8 +731,8 @@ fn an_ordinary_export_carries_both_databases_without_being_asked() {
 
     // Opened with the key the build carries, the same way a player would find
     // it: nothing passed in, nothing in the environment.
-    let key = musicai::rekordbox::onelibrary_key(None).expect("this build carries a key");
-    let summary = musicai::export::onelibrary::inspect(&std::fs::read(&at).unwrap(), &key)
+    let key = booth_core::rekordbox::onelibrary_key(None).expect("this build carries a key");
+    let summary = booth_core::export::onelibrary::inspect(&std::fs::read(&at).unwrap(), &key)
         .expect("the drive's OneLibrary database would not open with the built-in key");
     assert_eq!(summary.tables, 22);
     assert_eq!(summary.tracks, 1);
@@ -740,7 +740,7 @@ fn an_ordinary_export_carries_both_databases_without_being_asked() {
 
 #[test]
 fn the_two_keys_are_two_keys_and_neither_opens_the_other_file() {
-    use musicai::rekordbox::{BUNDLED_KEY, BUNDLED_ONELIBRARY_KEY};
+    use booth_core::rekordbox::{BUNDLED_KEY, BUNDLED_ONELIBRARY_KEY};
 
     // The mistake this guards against is using one for the other, which
     // produces a perfectly valid file that no player and no rekordbox can
@@ -756,8 +756,8 @@ fn the_two_keys_are_two_keys_and_neither_opens_the_other_file() {
     export(vec![write_song(&scratch, "one.flac")], &drive);
     let bytes = std::fs::read(drive.join("PIONEER/rekordbox/exportLibrary.db")).unwrap();
     assert!(
-        musicai::export::onelibrary::inspect(&bytes, BUNDLED_KEY).is_err(),
+        booth_core::export::onelibrary::inspect(&bytes, BUNDLED_KEY).is_err(),
         "the library key must not open a drive"
     );
-    assert!(musicai::export::onelibrary::inspect(&bytes, BUNDLED_ONELIBRARY_KEY).is_ok());
+    assert!(booth_core::export::onelibrary::inspect(&bytes, BUNDLED_ONELIBRARY_KEY).is_ok());
 }

@@ -7,12 +7,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use musicai::audio::decode::decode_file;
-use musicai::audio::encode::{write_file, Codec, EncodeOptions};
-use musicai::audio::Audio;
-use musicai::loudness;
-use musicai::normalize::{self, PeakPolicy, Settings};
-use musicai::stems::{dsp, Stem};
+use booth_core::audio::decode::decode_file;
+use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_core::audio::Audio;
+use booth_core::loudness;
+use booth_core::normalize::{self, PeakPolicy, Settings};
+use booth_core::stems::{dsp, Stem};
 
 const SAMPLE_RATE: u32 = 44_100;
 const SECONDS: usize = 4;
@@ -101,7 +101,7 @@ fn write_song(dir: &Scratch, name: &str, codec: Codec, level: f32) -> PathBuf {
 }
 
 fn musicai() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_musicai"))
+    Command::new(env!("CARGO_BIN_EXE_booth-cli"))
 }
 
 #[test]

@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use booth::job::{Job, Runner, Update};
 use booth::player::{fill, Sound};
-use musicai::audio::encode::{write_file, Codec, EncodeOptions};
-use musicai::audio::Audio;
+use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_core::audio::Audio;
 
 struct Scratch(PathBuf);
 

@@ -187,10 +187,10 @@ pub enum Quality {
 impl Quality {
     pub const ALL: [Quality; 2] = [Quality::High, Quality::Standard];
 
-    pub fn to_cli(self) -> musicai::cli::StemQuality {
+    pub fn to_cli(self) -> booth_core::cli::StemQuality {
         match self {
-            Quality::High => musicai::cli::StemQuality::High,
-            Quality::Standard => musicai::cli::StemQuality::Standard,
+            Quality::High => booth_core::cli::StemQuality::High,
+            Quality::Standard => booth_core::cli::StemQuality::Standard,
         }
     }
 
@@ -413,11 +413,11 @@ impl WriteTags {
 
     /// What to do about a field the file already has a value for, or `None`
     /// when the file should not be touched at all.
-    pub fn on_existing(self) -> Option<musicai::tag::OnExisting> {
+    pub fn on_existing(self) -> Option<booth_core::tag::OnExisting> {
         match self {
             WriteTags::Never => None,
-            WriteTags::Fill => Some(musicai::tag::OnExisting::Keep),
-            WriteTags::Always => Some(musicai::tag::OnExisting::Overwrite),
+            WriteTags::Fill => Some(booth_core::tag::OnExisting::Keep),
+            WriteTags::Always => Some(booth_core::tag::OnExisting::Overwrite),
         }
     }
 }
@@ -527,7 +527,7 @@ impl Config {
     /// itself resolves it in, so what the sync sheet promises and what the
     /// write does cannot come apart.
     pub fn writes_onelibrary(&self) -> bool {
-        musicai::rekordbox::onelibrary_key(self.onelibrary_key()).is_some()
+        booth_core::rekordbox::onelibrary_key(self.onelibrary_key()).is_some()
     }
 
     /// Where stems go and where to look for ones already rendered.

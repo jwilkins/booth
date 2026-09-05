@@ -205,7 +205,7 @@ pub struct Track {
     /// See [`energy_from`].
     pub energy: u8,
     /// The measurement behind the meter: peak onset density, in the units
-    /// `musicai::analysis::peak_intensity` reports. Kept so that the rank can
+    /// `booth_core::analysis::peak_intensity` reports. Kept so that the rank can
     /// be argued with — five bars hide whether a track sat just under a
     /// threshold or nowhere near one.
     #[serde(default)]
@@ -330,7 +330,7 @@ impl Track {
     /// each would be worse than either. What comes across is what is *missing*.
     ///
     /// Returns whether anything changed.
-    pub fn fill_from(&mut self, from: &musicai::rekordbox::master::Track) -> bool {
+    pub fn fill_from(&mut self, from: &booth_core::rekordbox::master::Track) -> bool {
         let track = self;
         let mut touched = false;
         let fill = |into: &mut String, value: &str| {
@@ -456,21 +456,21 @@ impl Track {
     /// again, except for the one small header read that says whether an MP4 is
     /// a protected purchase — and that answer is kept on the record from the
     /// import, so this stays cheap enough to ask about every row.
-    pub fn incompatibility(&self) -> Option<musicai::compat::Problem> {
+    pub fn incompatibility(&self) -> Option<booth_core::compat::Problem> {
         if self.protected {
-            return Some(musicai::compat::Problem::Protected);
+            return Some(booth_core::compat::Problem::Protected);
         }
         // An empty format is a record nothing has looked at yet, not a file in
         // a format nothing opens. Reporting the first as the second would put
         // every freshly added track in the attention list.
-        if !self.format.is_empty() && !musicai::commands::is_playable(&self.format) {
-            return Some(musicai::compat::Problem::Format(self.format.clone()));
+        if !self.format.is_empty() && !booth_core::commands::is_playable(&self.format) {
+            return Some(booth_core::compat::Problem::Format(self.format.clone()));
         }
         if self.float_samples {
-            return Some(musicai::compat::Problem::FloatSamples);
+            return Some(booth_core::compat::Problem::FloatSamples);
         }
         if self.sample_rate > 96_000 {
-            return Some(musicai::compat::Problem::TooFast(self.sample_rate));
+            return Some(booth_core::compat::Problem::TooFast(self.sample_rate));
         }
         None
     }
@@ -482,7 +482,7 @@ impl Track {
 }
 
 /// Where one bar of the meter ends and the next begins, in the units
-/// `musicai::analysis::peak_intensity` reports: onset strength per bin per
+/// `booth_core::analysis::peak_intensity` reports: onset strength per bin per
 /// frame, over the loudest fifteen seconds of the track.
 ///
 /// This is a calibration table, not a formula. It is spaced roughly
@@ -702,7 +702,7 @@ pub struct Written {
     /// whose write failed. Those are written again rather than carried, which
     /// costs a decode and is always correct.
     #[serde(default)]
-    pub row: Option<musicai::export::pdb::Track>,
+    pub row: Option<booth_core::export::pdb::Track>,
 }
 
 /// A drive the collection has written to, and what was on it when it did.
@@ -1554,8 +1554,8 @@ mod tests {
         assert_eq!(companions[0].parent, Some(id));
     }
 
-    fn rekordbox_track() -> musicai::rekordbox::master::Track {
-        musicai::rekordbox::master::Track {
+    fn rekordbox_track() -> booth_core::rekordbox::master::Track {
+        booth_core::rekordbox::master::Track {
             id: "c1".into(),
             path: "/music/a.flac".into(),
             artist: "Peverelist".into(),
@@ -1569,7 +1569,7 @@ mod tests {
             comment: "peak".into(),
             play_count: 17,
             duration_secs: 372.0,
-            cues: vec![musicai::rekordbox::master::Cue {
+            cues: vec![booth_core::rekordbox::master::Cue {
                 letter: 1,
                 time_ms: 30_000,
                 label: "drop".into(),

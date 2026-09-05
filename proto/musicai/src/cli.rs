@@ -12,11 +12,11 @@ use crate::tag::OnExisting;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "musicai",
+    name = "booth-cli",
     version,
     about = "Loudness-normalize, tag and stem-separate mp3, flac and wav files, locally",
     // With no subcommand the arguments below are the `run` pipeline's, so
-    // `musicai ~/Music` does the lot. With one, they belong to it instead.
+    // `booth-cli ~/Music` does the lot. With one, they belong to it instead.
     args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true,
     max_term_width = 100
@@ -50,7 +50,7 @@ pub enum Command {
     /// Bring files to a consistent loudness.
     Normalize(NormalizeArgs),
     /// Normalize, tag and separate, in one pass. This is what running
-    /// `musicai` with no subcommand does.
+    /// `booth-cli` with no subcommand does.
     Run(RunArgs),
     /// Split files into vocals, melody and drums.
     Stems(StemsArgs),
@@ -221,7 +221,7 @@ macro_rules! defaults_from_clap {
             pub fn defaults() -> Self {
                 // Every subcommand needs at least one input path; callers
                 // replace this placeholder before anything runs.
-                match Cli::parse_from(["musicai", $subcommand, "<none>"]).command {
+                match Cli::parse_from(["booth-cli", $subcommand, "<none>"]).command {
                     Some(Command::$variant(args)) => args,
                     other => unreachable!("clap parsed {other:?} for {}", $subcommand),
                 }
@@ -262,7 +262,7 @@ impl ExportArgs {
     /// a placeholder drive, which is then cleared again: there is no default
     /// destination, and a caller that has not chosen one has not chosen one.
     pub fn defaults() -> Self {
-        match Cli::parse_from(["musicai", "export", "--drive", "<none>", "<none>"]).command {
+        match Cli::parse_from(["booth-cli", "export", "--drive", "<none>", "<none>"]).command {
             Some(Command::Export(mut args)) => {
                 args.drive = None;
                 args
@@ -410,7 +410,7 @@ pub struct ExportArgs {
     /// Used when `playlists` is empty, which is the command line's case: one
     /// list of everything named, because there is nothing on a command line
     /// that says which file belongs to which playlist.
-    #[arg(long, value_name = "NAME", default_value = "musicai")]
+    #[arg(long, value_name = "NAME", default_value = "Booth")]
     pub playlist: String,
 
     /// The playlist tree to write, when the caller has one.

@@ -7,10 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
-use musicai::audio::encode::{write_file, Codec, EncodeOptions};
-use musicai::audio::Audio;
-use musicai::hash::{audio_sha256, file_sha256};
-use musicai::tag::{Metadata, OnExisting};
+use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_core::audio::Audio;
+use booth_core::hash::{audio_sha256, file_sha256};
+use booth_core::tag::{Metadata, OnExisting};
 
 struct Scratch(PathBuf);
 
@@ -51,7 +51,7 @@ fn retag(path: &Path, artist: &str) {
         album: Some("Tones".to_string()),
         ..Default::default()
     };
-    musicai::tag::write_tags(path, &metadata, OnExisting::Overwrite, None).unwrap();
+    booth_core::tag::write_tags(path, &metadata, OnExisting::Overwrite, None).unwrap();
 }
 
 #[test]

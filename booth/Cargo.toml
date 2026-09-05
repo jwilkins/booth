@@ -28,7 +28,7 @@ eframe = { version = "0.33", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-musicai = { path = ".." }
+booth-core = { path = "../proto/musicai" }
 rayon = "1"
 # Native file pickers, on the same terms as the other window: the xdg-portal
 # backend needs no GTK development packages, and is async-only, so the dialogs

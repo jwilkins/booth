@@ -5,15 +5,15 @@
 #   scripts/package-macos.sh [--target-dir DIR]
 #
 # Produces dist/Booth.app and dist/booth-<version>.dmg. The app is the library
-# window; the `musicai` command-line tool rides along inside the same bundle.
+# window; the `booth-cli` command-line tool rides along inside the same bundle.
 #
 # Signing is optional and controlled by the environment:
 #
-#   MUSICAI_SIGN_IDENTITY   A Developer ID Application identity. Without it the
+#   BOOTH_SIGN_IDENTITY   A Developer ID Application identity. Without it the
 #                           app is ad-hoc signed, which is enough to run on the
 #                           machine that built it and not enough for anyone
 #                           else's.
-#   MUSICAI_NOTARY_PROFILE  A `notarytool` keychain profile. With it, the disk
+#   BOOTH_NOTARY_PROFILE  A `notarytool` keychain profile. With it, the disk
 #                           image is submitted for notarization and stapled, so
 #                           that Gatekeeper opens it without argument.
 #
@@ -41,14 +41,16 @@ for target in "${TARGETS[@]}"; do
 		echo "missing target $target; run: rustup target add $target" >&2
 		exit 1
 	fi
-	cargo build --release --target "$target" --bin musicai
-	cargo build --release --target "$target" --bin booth
+	# `-p`, because the default build is Booth alone and the command-line
+	# tool lives in another crate now.
+	cargo build --release --target "$target" -p booth-core --bin booth-cli
+	cargo build --release --target "$target" -p booth --bin booth
 done
 
 # One binary that runs natively on both Apple silicon and Intel. Users should
 # not have to know which one they have.
 mkdir -p "$DIST/universal"
-for binary in musicai booth; do
+for binary in booth-cli booth; do
 	inputs=()
 	for target in "${TARGETS[@]}"; do
 		inputs+=("$REPO/target/$target/release/$binary")
@@ -60,16 +62,16 @@ done
 echo "==> assembling the bundle"
 APP=$("$REPO/scripts/make-bundle.sh" \
 	"$DIST/universal/booth" \
-	"$DIST/universal/musicai" \
+	"$DIST/universal/booth-cli" \
 	"$DIST" \
 	"$VERSION")
 
 echo "==> signing"
-if [ -n "${MUSICAI_SIGN_IDENTITY:-}" ]; then
+if [ -n "${BOOTH_SIGN_IDENTITY:-}" ]; then
 	# The hardened runtime is what notarization requires. Nothing here loads
 	# plugins or JIT-compiles, so no entitlements are needed with it.
 	codesign --force --deep --options runtime --timestamp \
-		--sign "$MUSICAI_SIGN_IDENTITY" "$APP"
+		--sign "$BOOTH_SIGN_IDENTITY" "$APP"
 	codesign --verify --strict --verbose=2 "$APP"
 else
 	# Apple silicon refuses to run an unsigned binary at all, so even a local
@@ -95,9 +97,9 @@ hdiutil create \
 	"$DMG"
 rm -rf "$STAGE"
 
-if [ -n "${MUSICAI_NOTARY_PROFILE:-}" ]; then
+if [ -n "${BOOTH_NOTARY_PROFILE:-}" ]; then
 	echo "==> notarizing (this waits on Apple, and can take a few minutes)"
-	xcrun notarytool submit "$DMG" --keychain-profile "$MUSICAI_NOTARY_PROFILE" --wait
+	xcrun notarytool submit "$DMG" --keychain-profile "$BOOTH_NOTARY_PROFILE" --wait
 	# Stapling puts the ticket in the file, so the first launch works offline.
 	xcrun stapler staple "$DMG"
 	xcrun stapler validate "$DMG"

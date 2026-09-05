@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use musicai::cli::{Cli, Command};
-use musicai::commands;
+use booth_core::cli::{Cli, Command};
+use booth_core::commands;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("musicai: {error:#}");
+        eprintln!("booth-cli: {error:#}");
         std::process::exit(1);
     }
 }
@@ -21,7 +21,7 @@ fn run() -> Result<()> {
             .context("configuring the thread pool")?;
     }
 
-    let reporter = musicai::report::Stdio;
+    let reporter = booth_core::report::Stdio;
     match &cli.command {
         Some(Command::Analyze(args)) => commands::analyze(args, &reporter),
         Some(Command::Anlz(args)) => commands::anlz(args, &reporter),

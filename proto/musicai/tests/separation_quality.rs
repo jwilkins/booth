@@ -5,8 +5,8 @@
 //! vocal into the melody stem and chords into the drum stem. These tests pin
 //! the behaviour so that cannot come back unnoticed.
 
-use musicai::audio::Audio;
-use musicai::stems::dsp;
+use booth_core::audio::Audio;
+use booth_core::stems::dsp;
 
 const SAMPLE_RATE: u32 = 44_100;
 

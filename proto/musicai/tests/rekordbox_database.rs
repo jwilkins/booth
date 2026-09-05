@@ -8,7 +8,7 @@
 use std::io::Cursor;
 
 use binrw::BinRead;
-use musicai::export::pdb::{Database, Playlist, Track};
+use booth_core::export::pdb::{Database, Playlist, Track};
 use rekordcrate::pdb::{Header, PageType, Row};
 
 fn track(id: u32, title: &str, artist: &str) -> Track {

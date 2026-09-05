@@ -1,71 +1,27 @@
 [workspace]
-members = ["booth", "gui"]
+resolver = "2"
+members = ["booth", "gui", "proto/musicai"]
 
-# The windows live in their own crates so that eframe and its several hundred
-# dependencies stay out of the command-line tool entirely: `cargo build` still
-# builds just the CLI.
+# `cargo build` with nothing else said builds Booth, which is the program this
+# repository is for. Everything else is still one flag away: `--workspace` for
+# all of it, `-p musicai` for the command-line tool.
+default-members = ["booth"]
+
+# Three crates, because they are three different programs sharing one engine.
 #
-# There are two of them because they are two different programs. `gui` is a
-# batch tool: pick files, pick a task, run it. `booth` is a library — it holds a
-# collection, and the work it does is in service of what goes on a drive. The
-# second is not a tab of the first, and trying to make it one produces a worse
-# version of both.
-
-[package]
-name = "musicai"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
-description = "Local audio toolkit: EBU R128 loudness normalization and stem separation for mp3/flac/wav"
-license-file = "LICENSE"
-
-[dependencies]
-anyhow = "1"
-base64 = "0.23.0"
-clap = { version = "4", features = ["derive", "env"] }
-ebur128 = "0.1"
-fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
-flacenc = "0.5"
-hound = "3.5"
-id3 = "1"
-metaflac = "0.2"
-mp3lame-encoder = "0.2"
-mp4ameta = "0.13.0"
-# SQLCipher, for reading rekordbox's own encrypted libraries. Bundled and
-# vendored rather than linked against whatever is installed: the page format
-# and HMAC scheme are SQLCipher's, and using its own implementation is the
-# only way to be sure of reading them the way it wrote them.
-rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
-rayon = "1"
-realfft = "3.5"
-rusty-chromaprint = "0.3.0"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-symphonia = { version = "0.6", default-features = false, features = [
-    "mp3",
-    "flac",
-    "wav",
-    "pcm",
-    "id3v1",
-    "id3v2",
-    # Apple's containers and codecs: m4a is ISO-MP4 holding AAC or ALAC. A CDJ
-    # plays both, and a real library has a lot of them, so we decode them for
-    # analysis. Only decoding — the encoders stay LAME/flac/hound.
-    "isomp4",
-    "aac",
-    "alac",
-    "aiff",
-] }
-ureq = "3.2.1"
-walkdir = "2"
-sha2 = "0.10.9"
-
-[dev-dependencies]
-binrw = "0.14"
-# The integration tests read back the tags the ReplayGain mode writes.
-id3 = "1"
-metaflac = "0.2"
-rekordcrate = { version = "0.3.0", default-features = false }
+# `booth` is the library: it holds a collection, and the work it does is in
+# service of what goes on a drive. It is what the macOS app launches.
+#
+# `proto/musicai` is where the analysis, tagging and export code lives, with a
+# command-line tool wrapped around it. It came first, and everything above is
+# built on it — the name of its directory is about which interface came first,
+# not about the code being provisional.
+#
+# `gui` is the older batch window: pick files, pick a task, run it. It is not a
+# tab of Booth, and trying to make it one produces a worse version of both.
+#
+# The windows live apart from the engine so that eframe and its several hundred
+# dependencies stay out of the command-line tool entirely.
 
 [profile.release]
 opt-level = 3

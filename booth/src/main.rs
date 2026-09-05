@@ -13,10 +13,30 @@ fn main() -> eframe::Result<()> {
         env!("CARGO_PKG_VERSION"),
         booth::log::default_path().display()
     );
+    // The things a bug report needs and nobody thinks to ask for. Written
+    // every run, because the run that goes wrong is never the one somebody
+    // turned the logging up for first.
+    booth::info!(
+        "{} on {}, {} — everything below is UTC",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        booth::clock::stamp(booth::clock::now())
+    );
+    booth::info!("data in {}", booth::library::data_dir().display());
+    booth::debug!("logging at {} (BOOTH_LOG to change it)", booth::log::threshold());
+    if let Ok(at) = std::env::current_dir() {
+        booth::debug!("started in {}", at.display());
+    }
 
     // Anything named on the command line is imported at startup, which makes
     // the window usable from a shell and from a file manager's "open with".
     let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    if !files.is_empty() {
+        booth::info!("{} named on the command line", files.len());
+        for file in &files {
+            booth::debug!("  {}", file.display());
+        }
+    }
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

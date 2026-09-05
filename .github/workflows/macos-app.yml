@@ -1,13 +1,21 @@
 name: macOS app
 
-# Builds Booth.app and its disk image. Runs on demand, and on tags, because a
-# universal build is two compiles of everything and is not worth doing on every
-# push.
+# Builds Booth.app and its disk image, and attaches it to the release for the
+# tag. Runs on demand and on tags, because a universal build is two compiles of
+# everything and is not worth doing on every push.
+#
+# Both tag shapes, because `v1.0` and `1.0` are both things people tag, and a
+# release with no app attached because the tag was the wrong shape is a silent
+# failure — the workflow simply never runs, so there is nothing red to notice.
 on:
   workflow_dispatch:
   push:
     tags:
       - "v*"
+      - "[0-9]*"
+
+permissions:
+  contents: write
 
 jobs:
   package:
@@ -25,13 +33,13 @@ jobs:
 
       # Unsigned by design: signing needs a Developer ID certificate, which
       # belongs in this repository's secrets rather than in the workflow. Set
-      # MUSICAI_SIGN_IDENTITY and MUSICAI_NOTARY_PROFILE here once there is one.
+      # BOOTH_SIGN_IDENTITY and BOOTH_NOTARY_PROFILE here once there is one.
       - name: Check the app is put together properly
         run: |
           set -euo pipefail
           app=dist/Booth.app
           test -x "$app/Contents/MacOS/booth"
-          test -x "$app/Contents/MacOS/musicai"
+          test -x "$app/Contents/MacOS/booth-cli"
           test -f "$app/Contents/Resources/icon.icns"
           # What launching the app runs is the library window, not something
           # else in the bundle that happens to be there.
@@ -40,7 +48,7 @@ jobs:
           lipo -info "$app/Contents/MacOS/booth" | grep -q arm64
           lipo -info "$app/Contents/MacOS/booth" | grep -q x86_64
           # The command-line tool in the bundle actually runs.
-          "$app/Contents/MacOS/musicai" --version
+          "$app/Contents/MacOS/booth-cli" --version
           codesign --verify --deep --strict "$app"
 
       - uses: actions/upload-artifact@v4
@@ -48,3 +56,20 @@ jobs:
           name: booth-macos
           path: dist/*.dmg
           if-no-files-found: error
+
+      # An artifact expires and needs a GitHub login to fetch, which is no
+      # answer to "where do I get the app". The disk image goes on the release
+      # itself, where a link to it is a link anybody can follow.
+      - name: Attach the disk image to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # A tag pushed without a release made for it still gets one, so
+          # `git push --tags` is enough on its own.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" dist/*.dmg --clobber

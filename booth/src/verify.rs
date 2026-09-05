@@ -149,6 +149,15 @@ pub fn check(track: &Track, deep: bool) -> Report {
     }
 
     troubles.sort_by_key(|trouble| trouble.rank());
+    match troubles.is_empty() {
+        true => crate::debug!("#{} is as the collection describes it", track.id),
+        false => crate::debug!(
+            "#{} {}: {}",
+            track.id,
+            track.path.display(),
+            troubles.iter().map(Trouble::what).collect::<Vec<_>>().join(", ")
+        ),
+    }
     Report { id: track.id, path: track.path.clone(), troubles, fresh: Some(Box::new(fresh)) }
 }
 
@@ -162,7 +171,7 @@ pub fn orphans(library: &Path, known: &[PathBuf]) -> Vec<PathBuf> {
     if library.as_os_str().is_empty() || !library.is_dir() {
         return Vec::new();
     }
-    let Ok(found) = musicai::discover::collect(&[library.to_path_buf()], true) else {
+    let Ok(found) = booth_core::discover::collect(&[library.to_path_buf()], true) else {
         return Vec::new();
     };
     // Compared as the collection stores them, which is how they were written

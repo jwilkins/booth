@@ -11,9 +11,9 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use booth_core::cli::ExportArgs;
+use booth_core::stems::Backend;
 use eframe::egui::{self, Color32, RichText, Ui};
-use musicai::cli::ExportArgs;
-use musicai::stems::Backend;
 
 use crate::config::{Config, OnExternal};
 use crate::job::{self, Adoptable, Job, Retag, Runner, Update};
@@ -96,6 +96,69 @@ const PREP_HEIGHT: f32 = wave::HEIGHT
 /// Also its minimum, because that row is the dock's job and a panel dragged
 /// shorter than its own contents just clips them.
 const DOCK_HEIGHT: f32 = 24.0 + 4.0 + 16.0;
+
+/// What the last look at one drive found.
+struct Seen {
+    /// The digest of the files it had of its own.
+    fingerprint: String,
+    /// Those files, so a later look can say what changed rather than only that
+    /// something did.
+    listing: Vec<String>,
+    /// When that state was acted on.
+    at: std::time::Instant,
+    /// Whether the log has already said this drive will not settle. Said once
+    /// per state, because a line every four seconds is not a warning, it is a
+    /// second problem.
+    complained: bool,
+}
+
+/// How long a drive that changed on its own has to hold still before it is
+/// stored again.
+///
+/// Nothing here changes a mounted drive, but an operating system does — an
+/// index it decided to build, a folder view it decided to save — and a copy
+/// started for every one of those is a disk full of near-identical copies by
+/// morning. A drive this program writes is not held back by this: that path
+/// knows a real change happened, and says so.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Whether a drive found in this state is one to copy now.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Worth {
+    /// It is the state it was already stored in.
+    No,
+    /// A different state, but it changed again so soon after the last copy
+    /// that something other than a person is changing it.
+    NotYet,
+    Yes,
+}
+
+/// The decision that keeps a drive from being copied over and over.
+fn worth_keeping(seen: Option<&Seen>, state: &str) -> Worth {
+    match seen {
+        None => Worth::Yes,
+        Some(seen) if seen.fingerprint == state => Worth::No,
+        Some(seen) if seen.at.elapsed() < SETTLE => Worth::NotYet,
+        Some(_) => Worth::Yes,
+    }
+}
+
+/// What to call a drive: the name it is mounted under, or the label it gave
+/// when there is no mount point to read.
+///
+/// One rule, used by both the sweep and the write that just finished, because
+/// the name is the folder its copies live in and two names would mean two
+/// folders for one stick — and a copy stored under one name that the other
+/// never finds.
+fn drive_name(root: &std::path::Path, label: &str) -> String {
+    match root.file_name().and_then(|n| n.to_str()) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => match label.trim().is_empty() {
+            true => "drive".to_string(),
+            false => label.trim().to_string(),
+        },
+    }
+}
 
 /// Which of the fixed collection views is showing.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -199,14 +262,14 @@ pub struct App {
     /// showing it is open.
     checked: Option<Checked>,
     /// When the mounted volumes were last looked through for a player's drive,
-    /// and which drive states have been copied already this run.
+    /// and what the last look at each found.
     ///
-    /// The set is a cheap guard in front of the one on disk: a stick left
+    /// The map is a cheap guard in front of the one on disk: a stick left
     /// plugged in comes past every few seconds, and reading a directory of
     /// backups each time to decide it is the same stick would be work for
     /// nothing.
     looked_for_drives: Option<std::time::Instant>,
-    kept_drives: std::collections::HashSet<String>,
+    kept_drives: std::collections::HashMap<String, Seen>,
     /// Kept files whose names a copier wrote, and the name each could go back
     /// to now that what it was copied from has gone. Offered, never done on its
     /// own: renaming somebody's file is not a tidy-up to spring on them.
@@ -229,6 +292,9 @@ pub struct App {
     /// Files waiting to have their tags rewritten, collected so that
     /// identifying a crate is one tagging job rather than one per track.
     to_retag: Vec<Retag>,
+    /// Tag writes held back because the file's own name looks nothing like
+    /// what is about to be written into it. See [`App::write_tags`].
+    unlike: Vec<Retag>,
     /// Rows whose waveform has already been asked for once this run, so a
     /// measurement that cannot succeed is not attempted on every frame.
     remeasured: std::collections::HashSet<u32>,
@@ -306,10 +372,17 @@ enum Pending {
     TogglePlayback(u32),
     /// Change how the waveform is coloured.
     PaintAs(wave::Paint),
-    /// Take or refuse one fingerprint match.
+    /// Settle one question: the fingerprint's answer, the path's, or the one
+    /// the track already had.
     AnswerMatch {
         id: u32,
-        take: bool,
+        answer: crate::identify::Answer,
+    },
+    /// Write, or do not write, tags into a file whose name looks nothing like
+    /// them.
+    AnswerNaming {
+        id: u32,
+        write: bool,
     },
     /// Move the deck to a position in a track, if that track is on it.
     SeekDeck {
@@ -521,7 +594,7 @@ impl App {
             duplicates: None,
             checked: None,
             looked_for_drives: None,
-            kept_drives: std::collections::HashSet::new(),
+            kept_drives: std::collections::HashMap::new(),
             renames: Vec::new(),
             panels_moved: false,
             pending_save: false,
@@ -530,6 +603,7 @@ impl App {
             started: None,
             incompatible: Vec::new(),
             to_retag: Vec::new(),
+            unlike: Vec::new(),
             remeasured: std::collections::HashSet::new(),
             re_enveloped: std::collections::HashSet::new(),
             playhead_ms: None,
@@ -1032,7 +1106,7 @@ impl App {
     // -- rekordbox -------------------------------------------------------
 
     fn import_rekordbox(&mut self, path: PathBuf) {
-        let key = match musicai::rekordbox::resolve(self.config.rekordbox_key()) {
+        let key = match booth_core::rekordbox::resolve(self.config.rekordbox_key()) {
             Ok(key) => key,
             Err(e) => {
                 crate::warn!("{e:#}");
@@ -1056,7 +1130,10 @@ impl App {
     /// names on an untitled file, cues where there are none, the play count and
     /// the rating and the My Tags, which this program has no other way to know.
     /// Files rekordbox knows about that are not here yet are added.
-    fn merge_rekordbox(&mut self, collection: &musicai::rekordbox::master::Collection) -> String {
+    fn merge_rekordbox(
+        &mut self,
+        collection: &booth_core::rekordbox::master::Collection,
+    ) -> String {
         use std::collections::HashMap;
 
         let mut by_path: HashMap<PathBuf, u32> =
@@ -1112,7 +1189,7 @@ impl App {
     /// Bring the playlists across, keeping their folders.
     fn merge_rekordbox_playlists(
         &mut self,
-        collection: &musicai::rekordbox::master::Collection,
+        collection: &booth_core::rekordbox::master::Collection,
         ours: &std::collections::HashMap<String, u32>,
     ) -> usize {
         let mut brought = 0;
@@ -1277,17 +1354,19 @@ impl App {
                     let (path, label, is_image) =
                         (drive.path.clone(), drive.label.clone(), drive.is_image);
                     if self.config.keep_drives && !is_image {
-                        let state = crate::backup::fingerprint(&path);
-                        let name = match label.is_empty() {
-                            true => path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("drive")
-                                .to_string(),
-                            false => label,
-                        };
-                        if !state.is_empty() && self.kept_drives.insert(format!("{name}:{state}")) {
-                            self.keep_drive(&path, &name);
+                        let listing = crate::backup::listing(&path);
+                        let state = crate::backup::digest(&listing);
+                        // The same name the sweep would give it, so that a
+                        // drive written here and found again later is one drive
+                        // with one folder of copies rather than two.
+                        let name = drive_name(&path, &label);
+                        let known =
+                            self.kept_drives.get(&name).map(|seen| seen.fingerprint.clone());
+                        // A write is a reason to store the drive whatever was
+                        // stored before, so this asks only whether it is the
+                        // same state — never how long ago the last copy was.
+                        if !listing.is_empty() && known.as_deref() != Some(state.as_str()) {
+                            self.keep_drive(&path, &name, &state, listing);
                         }
                     }
                 }
@@ -1325,8 +1404,9 @@ impl App {
                     if let Some(track) = self.library.get_mut(id) {
                         track.identified = true;
                     }
-                    if let Some(found) = best {
-                        self.consider(id, found);
+                    match best {
+                        Some(found) => self.consider(id, found),
+                        None => self.consider_path(id),
                     }
                     changed = true;
                 }
@@ -1512,12 +1592,12 @@ impl App {
     /// companion is a turn of the encoder from the record it came from.
     /// Companions go in only when the drive carries them, and only the parts
     /// that were actually rendered.
-    fn drive_playlists(&self, drive: &Drive) -> Vec<musicai::cli::PlaylistSpec> {
+    fn drive_playlists(&self, drive: &Drive) -> Vec<booth_core::cli::PlaylistSpec> {
         drive
             .playlist_names()
             .iter()
             .filter_map(|name| self.library.playlists.iter().find(|p| p.name == *name))
-            .map(|playlist| musicai::cli::PlaylistSpec {
+            .map(|playlist| booth_core::cli::PlaylistSpec {
                 name: playlist.name.clone(),
                 folder: playlist.folder.clone(),
                 tracks: playlist
@@ -1548,7 +1628,7 @@ impl App {
         // volume to add to — so it is written in full. A drive is added to, so
         // only what changed is prepared and the rest of its database is
         // carried through from what the last write recorded.
-        let already: Vec<(PathBuf, musicai::export::pdb::Track)> = match drive.is_image {
+        let already: Vec<(PathBuf, booth_core::export::pdb::Track)> = match drive.is_image {
             true => Vec::new(),
             false => drive
                 .written
@@ -1906,6 +1986,7 @@ impl eframe::App for App {
             self.compatibility_sheet(ctx);
         }
         self.questions_sheet(ctx);
+        self.naming_sheet(ctx);
         if self.help {
             self.help_sheet(ctx);
         }
@@ -2186,19 +2267,60 @@ impl App {
             if !crate::backup::is_a_player_drive(&root) {
                 continue;
             }
-            let name = root.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-            let state = crate::backup::fingerprint(&root);
-            if state.is_empty() || !self.kept_drives.insert(format!("{name}:{state}")) {
+            let name = drive_name(&root, "");
+            let listing = crate::backup::listing(&root);
+            if listing.is_empty() {
                 continue;
             }
+            let state = crate::backup::digest(&listing);
+
+            match worth_keeping(self.kept_drives.get(&name), &state) {
+                Worth::No => continue,
+                Worth::NotYet => {
+                    // Something is changing this drive on its own. Say which
+                    // file, once, and leave it alone until it settles: copying
+                    // a drive every time an operating system touches it is how
+                    // a disk fills up overnight.
+                    if let Some(seen) = self.kept_drives.get_mut(&name) {
+                        if !seen.complained {
+                            seen.complained = true;
+                            let changed = crate::backup::differences(&seen.listing, &listing);
+                            crate::warn!(
+                                "{name} changed again right after it was copied ({}); \
+                                 leaving it be until it settles",
+                                changed.join(", ")
+                            );
+                        }
+                    }
+                    continue;
+                }
+                Worth::Yes => {}
+            }
+
             if crate::backup::already_kept(&self.config.backups_path, &name, &state) {
+                // Stored on a previous run. Remember it, so the directory of
+                // backups is not read again every few seconds for this answer.
+                self.remember_drive(&name, &state, listing);
                 continue;
             }
-            self.keep_drive(&root, &name);
+            self.keep_drive(&root, &name, &state, listing);
             // One at a time. The next one will be found on the next look, and a
             // queue of copies started at once would fight over the same disk.
             return;
         }
+    }
+
+    /// Note what a drive was found holding, without copying it.
+    fn remember_drive(&mut self, name: &str, state: &str, listing: Vec<String>) {
+        self.kept_drives.insert(
+            name.to_string(),
+            Seen {
+                fingerprint: state.to_string(),
+                listing,
+                at: std::time::Instant::now(),
+                complained: false,
+            },
+        );
     }
 
     /// Turn what a player recorded having played into playlists.
@@ -2292,7 +2414,13 @@ impl App {
     }
 
     /// Start copying one drive.
-    fn keep_drive(&mut self, root: &std::path::Path, name: &str) {
+    fn keep_drive(
+        &mut self,
+        root: &std::path::Path,
+        name: &str,
+        state: &str,
+        listing: Vec<String>,
+    ) {
         let known: Vec<crate::backup::Known> = self
             .library
             .tracks
@@ -2304,14 +2432,20 @@ impl App {
             })
             .collect();
         crate::info!("keeping a copy of {name}");
+        // Noted before the job rather than after it, so a copy that fails or is
+        // stopped still counts as this drive having been looked at: the state
+        // is what was decided on, and deciding it again next tick would start
+        // the same copy over.
+        self.remember_drive(name, state, listing);
         self.start(Job::Keep {
             root: root.to_path_buf(),
             drive: name.to_string(),
+            state: state.to_string(),
             into: self.config.backups_path.clone(),
             known,
             foreign: self.config.on_foreign,
             library: self.config.library_path.clone(),
-            key: musicai::rekordbox::onelibrary_key(self.config.onelibrary_key()),
+            key: booth_core::rekordbox::onelibrary_key(self.config.onelibrary_key()),
         });
     }
 
@@ -3749,7 +3883,7 @@ impl App {
             // and it is spelled out rather than implied, because it changes
             // somebody's files.
             let taggable =
-                musicai::tag::Metadata::default().get(musicai::tag::Field::Title).is_none()
+                booth_core::tag::Metadata::default().get(booth_core::tag::Field::Title).is_none()
                     && matches!(track.format.as_str(), "flac" | "mp3");
             if self.config.write_tags != crate::config::WriteTags::Never {
                 ui.label(
@@ -4074,7 +4208,9 @@ impl App {
                 }
                 Pending::CancelEdit => self.editing = None,
                 Pending::Resort => relist = true,
-                Pending::WriteTags(id) => self.write_tags(id, musicai::tag::OnExisting::Overwrite),
+                Pending::WriteTags(id) => {
+                    self.write_tags(id, booth_core::tag::OnExisting::Overwrite)
+                }
                 Pending::PlaceCue { id, letter, time_ms } => {
                     self.place_cue(id, letter, time_ms);
                     touched = true;
@@ -4086,18 +4222,65 @@ impl App {
                     }
                     crate::debug!("waveform coloured by {}", mode.label());
                 }
-                Pending::AnswerMatch { id, take } => {
+                Pending::AnswerMatch { id, answer } => {
                     if let Some(at) = self.questions.iter().position(|q| q.id == id) {
                         let question = self.questions.remove(at);
-                        if take {
-                            self.apply_match(id, &question.candidate);
-                        } else {
-                            crate::info!("#{id} kept its own name over the fingerprint");
-                            // Marked as answered, so the same question is not
-                            // asked again on the next pass.
-                            if let Some(track) = self.library.get_mut(id) {
-                                track.from_tags = true;
+                        match answer {
+                            crate::identify::Answer::Fingerprint => {
+                                crate::info!(
+                                    "#{id} took the fingerprint's answer: {}",
+                                    question.candidate.describe()
+                                );
+                                self.apply_match(id, &question.candidate);
                             }
+                            crate::identify::Answer::Path => {
+                                if let Some(from_path) = &question.from_path {
+                                    crate::info!(
+                                        "#{id} took the path's answer: {}",
+                                        from_path.describe()
+                                    );
+                                    self.apply_guess(id, from_path);
+                                }
+                                // Answered, so the fingerprint does not come
+                                // back with the same question.
+                                if let Some(track) = self.library.get_mut(id) {
+                                    track.from_tags = true;
+                                }
+                            }
+                            crate::identify::Answer::Mine => {
+                                crate::info!("#{id} kept its own name over the fingerprint");
+                                // Marked as answered, so the same question is
+                                // not asked again on the next pass.
+                                if let Some(track) = self.library.get_mut(id) {
+                                    track.from_tags = true;
+                                }
+                            }
+                        }
+                        touched = true;
+                    }
+                }
+                Pending::AnswerNaming { id, write } => {
+                    if let Some(at) = self.unlike.iter().position(|held| held.id == id) {
+                        let held = self.unlike.remove(at);
+                        match write {
+                            true => {
+                                crate::info!(
+                                    "{}: tagging it {} — {} anyway",
+                                    held.path.file_name().unwrap_or_default().to_string_lossy(),
+                                    held.artist,
+                                    held.title
+                                );
+                                // Straight past the check that held it up:
+                                // it has been answered, and asking again on
+                                // the way out would be the same question
+                                // forever.
+                                self.to_retag.push(held);
+                                self.flush_retags();
+                            }
+                            false => crate::info!(
+                                "{}: left as it is",
+                                held.path.file_name().unwrap_or_default().to_string_lossy()
+                            ),
                         }
                         touched = true;
                     }
@@ -4207,10 +4390,35 @@ impl App {
     }
 
     /// Decide what to do with one match, and do it.
+    ///
+    /// Two sources of evidence, not one: the fingerprint, and what the file's
+    /// own path says it is. They usually agree, and the interesting case is
+    /// when they do not — a fingerprint is about the audio and a path is about
+    /// what somebody filed it as, so a confident disagreement between them is
+    /// a question rather than something to settle by rule.
     fn consider(&mut self, id: u32, found: crate::identify::Match) {
         let Some(track) = self.library.get(id) else { return };
+        let from_path = crate::guess::from_path(&track.path);
         let decision = crate::identify::decide(track, &found, self.config.autotag_score);
-        crate::debug!("#{id} {} at {:.0}%: {decision:?}", found.describe(), found.score * 100.0);
+        let clash = crate::identify::conflicts(&found, &from_path);
+        crate::debug!(
+            "#{id} {} at {:.0}%: {decision:?}; the path says {}{}",
+            found.describe(),
+            found.score * 100.0,
+            from_path.describe(),
+            match clash {
+                true => ", which disagrees",
+                false => "",
+            }
+        );
+
+        // A disagreement with a strong path is asked about however confident
+        // the fingerprint is. Applying it silently is how a track ends up
+        // filed under a remix nobody has of a record they do have.
+        let decision = match clash {
+            true => crate::identify::Decision::Ask,
+            false => decision,
+        };
 
         match decision {
             crate::identify::Decision::Apply => self.apply_match(id, &found),
@@ -4223,6 +4431,7 @@ impl App {
                     },
                     source: crate::identify::source_of(track),
                     candidate: found,
+                    from_path: clash.then_some(from_path),
                 };
                 if !self.questions.iter().any(|q| q.id == id) {
                     self.questions.push(question);
@@ -4230,6 +4439,47 @@ impl App {
             }
             crate::identify::Decision::Reject => {}
         }
+    }
+
+    /// What to do about a track no fingerprint could name.
+    ///
+    /// The path is then the only evidence there is. A record that is not in
+    /// AcoustID — a white label, a promo, an edit, most of a DJ's crate — is
+    /// still filed under somebody's name in somebody's folder, and that beats
+    /// leaving it unnamed.
+    fn consider_path(&mut self, id: u32) {
+        let Some(track) = self.library.get(id) else { return };
+        let from_path = crate::guess::from_path(&track.path);
+        match crate::identify::decide_from_path(track, &from_path) {
+            crate::identify::Decision::Apply => {
+                crate::info!(
+                    "#{id} not in AcoustID; taking {} from the path",
+                    from_path.describe()
+                );
+                self.apply_guess(id, &from_path);
+            }
+            other => crate::debug!(
+                "#{id} not in AcoustID; the path says {} ({other:?})",
+                from_path.describe()
+            ),
+        }
+    }
+
+    /// Write what a path said into a track's record.
+    fn apply_guess(&mut self, id: u32, from_path: &crate::guess::Guess) {
+        let Some(track) = self.library.get_mut(id) else { return };
+        if !from_path.artist.trim().is_empty() {
+            track.artist = from_path.artist.clone();
+        }
+        if !from_path.title.trim().is_empty() {
+            track.title = from_path.title.clone();
+        }
+        if track.album.trim().is_empty() && !from_path.album.trim().is_empty() {
+            track.album = from_path.album.clone();
+        }
+        // Not `from_tags`: this came off a path, and a later fingerprint is
+        // still allowed to correct it without asking.
+        self.rebuild();
     }
 
     /// Write a match into a track's record.
@@ -4326,15 +4576,15 @@ impl App {
     /// now", so it overwrites; the write-back that rides behind a fingerprint
     /// lookup fills in blanks and leaves anything already there alone, because
     /// nobody asked it to have an opinion about a value they typed.
-    fn write_tags(&mut self, id: u32, on_existing: musicai::tag::OnExisting) {
+    fn write_tags(&mut self, id: u32, on_existing: booth_core::tag::OnExisting) {
         let Some(track) = self.library.get(id) else { return };
         // Asked of the writer rather than answered again here. This was a
         // second list of formats, and it had already fallen behind the first:
         // it still said FLAC and MP3 after the writer learned MP4, so an
         // identified `.m4a` was told it had nowhere to put a name that the
         // code underneath would have written.
-        match musicai::tag::tag_kind(&track.path) {
-            Some(musicai::tag::TagKind::None) => {
+        match booth_core::tag::tag_kind(&track.path) {
+            Some(booth_core::tag::TagKind::None) => {
                 self.note(format!("a .{} has nowhere to keep tags", track.format), theme::AMBER);
                 return;
             }
@@ -4355,7 +4605,8 @@ impl App {
         // per track, and one job per file would be forty "started tagging,
         // finished tagging" lines for what is one errand.
         self.to_retag.retain(|waiting| waiting.id != track.id);
-        self.to_retag.push(Retag {
+        self.unlike.retain(|waiting| waiting.id != track.id);
+        let write = Retag {
             id: track.id,
             path: track.path.clone(),
             artist: track.artist.clone(),
@@ -4363,7 +4614,24 @@ impl App {
             album: track.album.clone(),
             date: track.year.map(|year| year.to_string()),
             on_existing,
-        });
+        };
+
+        // A file whose own name has nothing in common with the names about to
+        // go into it is the shape of a mistake worth stopping for: a
+        // fingerprint that found the wrong record, or the wrong row acted on.
+        // Tagging is the one thing here that writes to somebody's files, and
+        // the wrong answer written into forty of them is a bad afternoon.
+        let file_name = track.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if crate::guess::resembles(&file_name, &write.artist, &write.title) {
+            self.to_retag.push(write);
+            return;
+        }
+        crate::warn!(
+            "{file_name} would be tagged {} — {}, which its name says nothing about; asking first",
+            write.artist,
+            write.title
+        );
+        self.unlike.push(write);
     }
 
     /// Start the tagging that has piled up, if any has.
@@ -4565,6 +4833,121 @@ impl App {
     /// One row per track: what it says now and where that came from, against
     /// what the audio was identified as and how sure that is. Both are shown in
     /// full, because the whole reason this is a question is that they disagree.
+    /// Files whose names say nothing about what is about to be written into
+    /// them.
+    ///
+    /// Not the same question as the match sheet, and deliberately a separate
+    /// one: that sheet is about what a track *is*, and answering it changes
+    /// only the collection. This one is about writing to somebody's files, and
+    /// the answer is spent immediately.
+    fn naming_sheet(&mut self, ctx: &egui::Context) {
+        let held = self.unlike.clone();
+        if held.is_empty() {
+            return;
+        }
+        let mut open = true;
+
+        egui::Window::new(format!("{} to check before tagging", plural(held.len(), "file")))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(760.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "These files are named nothing like the tags about to go into them.                          That is usually a fingerprint that found the wrong record — and                          tagging is the one thing here that writes to your files.",
+                    )
+                    .color(theme::DIM)
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for write in &held {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(format!("{} — {}", write.artist, write.title))
+                                        .color(theme::TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "file: {}",
+                                        write
+                                            .path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                    ))
+                                    .font(theme::mono(10.0))
+                                    .color(theme::AMBER),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Leave it").clicked() {
+                                        self.pending.push(Pending::AnswerNaming {
+                                            id: write.id,
+                                            write: false,
+                                        });
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Tag it anyway")
+                                                    .color(theme::BOOTH)
+                                                    .strong(),
+                                            )
+                                            .fill(theme::AMBER),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.pending.push(Pending::AnswerNaming {
+                                            id: write.id,
+                                            write: true,
+                                        });
+                                    }
+                                },
+                            );
+                        });
+                        ui.separator();
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Tag them all").clicked() {
+                        for write in &held {
+                            self.pending
+                                .push(Pending::AnswerNaming { id: write.id, write: true });
+                        }
+                    }
+                    if ui.button("Leave them all").clicked() {
+                        for write in &held {
+                            self.pending
+                                .push(Pending::AnswerNaming { id: write.id, write: false });
+                        }
+                    }
+                    ui.label(
+                        RichText::new("Leaving one alone changes nothing, here or on disk.")
+                            .color(theme::DIM)
+                            .size(theme::SMALL),
+                    );
+                });
+            });
+
+        // Closing the sheet is not an answer either way, so nothing is written
+        // and nothing is lost: the files stay in the queue.
+        if !open {
+            self.unlike.clear();
+            crate::info!("left the files whose names did not match as they are");
+        }
+    }
+
     fn questions_sheet(&mut self, ctx: &egui::Context) {
         let questions = self.questions.clone();
         if questions.is_empty() {
@@ -4615,6 +4998,16 @@ impl App {
                                     .font(theme::mono(10.0))
                                     .color(theme::DIM),
                                 );
+                                // Only when the path says something else. Two
+                                // answers that both look right is the case a
+                                // person is here to settle.
+                                if let Some(from_path) = &question.from_path {
+                                    ui.label(
+                                        RichText::new(format!("path: {}", from_path.describe()))
+                                            .font(theme::mono(10.0))
+                                            .color(theme::AMBER),
+                                    );
+                                }
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -4622,7 +5015,15 @@ impl App {
                                     if ui.button("Keep mine").clicked() {
                                         self.pending.push(Pending::AnswerMatch {
                                             id: question.id,
-                                            take: false,
+                                            answer: crate::identify::Answer::Mine,
+                                        });
+                                    }
+                                    if question.from_path.is_some()
+                                        && ui.button("Use the path").clicked()
+                                    {
+                                        self.pending.push(Pending::AnswerMatch {
+                                            id: question.id,
+                                            answer: crate::identify::Answer::Path,
                                         });
                                     }
                                     if ui
@@ -4638,7 +5039,7 @@ impl App {
                                     {
                                         self.pending.push(Pending::AnswerMatch {
                                             id: question.id,
-                                            take: true,
+                                            answer: crate::identify::Answer::Fingerprint,
                                         });
                                     }
                                 },
@@ -4652,13 +5053,18 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button("Use all").clicked() {
                         for question in &questions {
-                            self.pending.push(Pending::AnswerMatch { id: question.id, take: true });
+                            self.pending.push(Pending::AnswerMatch {
+                                id: question.id,
+                                answer: crate::identify::Answer::Fingerprint,
+                            });
                         }
                     }
                     if ui.button("Keep all of mine").clicked() {
                         for question in &questions {
-                            self.pending
-                                .push(Pending::AnswerMatch { id: question.id, take: false });
+                            self.pending.push(Pending::AnswerMatch {
+                                id: question.id,
+                                answer: crate::identify::Answer::Mine,
+                            });
                         }
                     }
                     ui.label(
@@ -6288,7 +6694,7 @@ impl App {
 
     /// What was just imported that a player will not open, and what to do.
     fn compatibility_sheet(&mut self, ctx: &egui::Context) {
-        let waiting: Vec<(u32, String, PathBuf, musicai::compat::Problem)> = self
+        let waiting: Vec<(u32, String, PathBuf, booth_core::compat::Problem)> = self
             .incompatible
             .iter()
             .filter_map(|id| self.library.get(*id))
@@ -6926,6 +7332,60 @@ fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
 mod tests {
     use super::*;
     use crate::library::CueMark;
+
+    /// What the sweep does with a drive it has seen before.
+    ///
+    /// The bug these are here for: a drive whose state kept coming out
+    /// different was copied every four seconds for as long as it stayed
+    /// plugged in, because the only thing standing between a changed state and
+    /// a copy was whether that exact state had been copied already.
+    mod keeping_drives {
+        use super::*;
+
+        fn seen(fingerprint: &str, ago: std::time::Duration) -> Seen {
+            Seen {
+                fingerprint: fingerprint.to_string(),
+                listing: vec!["rekordbox/export.pdb:1:2".to_string()],
+                at: std::time::Instant::now() - ago,
+                complained: false,
+            }
+        }
+
+        #[test]
+        fn a_drive_never_seen_before_is_copied() {
+            assert_eq!(worth_keeping(None, "abc"), Worth::Yes);
+        }
+
+        #[test]
+        fn the_same_drive_unchanged_is_left_alone() {
+            let before = seen("abc", std::time::Duration::from_secs(0));
+            assert_eq!(worth_keeping(Some(&before), "abc"), Worth::No);
+        }
+
+        #[test]
+        fn a_drive_that_changed_again_at_once_is_not_copied_again_at_once() {
+            let before = seen("abc", std::time::Duration::from_secs(1));
+            assert_eq!(worth_keeping(Some(&before), "def"), Worth::NotYet);
+        }
+
+        #[test]
+        fn a_drive_that_changed_long_after_being_copied_is_copied() {
+            let before = seen("abc", SETTLE + std::time::Duration::from_secs(1));
+            assert_eq!(worth_keeping(Some(&before), "def"), Worth::Yes);
+        }
+
+        #[test]
+        fn a_drive_is_called_the_same_thing_by_both_the_sweep_and_a_write() {
+            // Two names would mean two folders of copies for one stick, and a
+            // copy stored under one name that the other would never find.
+            let root = std::path::Path::new("/Volumes/MY STICK");
+            assert_eq!(drive_name(root, ""), "MY STICK");
+            assert_eq!(drive_name(root, "MY STICK"), drive_name(root, ""));
+            assert_eq!(drive_name(root, "something else"), "MY STICK");
+            assert_eq!(drive_name(std::path::Path::new("/"), "LABEL"), "LABEL");
+            assert_eq!(drive_name(std::path::Path::new("/"), ""), "drive");
+        }
+    }
 
     /// Driving the sidebar the way a person does: click, type, press a key,
     /// and see what the collection holds afterwards.
@@ -7721,7 +8181,7 @@ mod tests {
                 written: vec![crate::library::Written {
                     id,
                     prep: sync::fingerprint(app.library.get(id).unwrap()),
-                    row: Some(musicai::export::pdb::Track {
+                    row: Some(booth_core::export::pdb::Track {
                         id: 1,
                         file_path: "/Contents/Peverelist/Sirens.flac".into(),
                         ..Default::default()
@@ -7833,7 +8293,7 @@ mod tests {
 
             let mut app = app("retagged");
             let id = app.library.add(&path);
-            let audio = musicai::hash::audio_sha256(&path).unwrap();
+            let audio = booth_core::hash::audio_sha256(&path).unwrap();
             {
                 let track = app.library.get_mut(id).unwrap();
                 track.analyzed = true;

@@ -3,7 +3,7 @@
 A DJ library that prepares tracks and writes the drives a Pioneer/AlphaTheta
 player reads. It is the interface described in
 [`docs/rekordbox-replacement-spec.md`](../docs/rekordbox-replacement-spec.md),
-built on the analysis and export code in the `musicai` crate next to it.
+built on the analysis and export code in the `booth-core` crate next to it.
 
 ```
 cargo run -p booth
@@ -18,7 +18,7 @@ nothing extra. Without a working output device the window still opens and does
 everything else; the transport says `no audio out` instead.
 
 On macOS, `scripts/package-macos.sh` builds this window into `Booth.app` — a
-universal binary with the `musicai` command-line tool alongside it in the same
+universal binary with the `booth-cli` command-line tool alongside it in the same
 bundle, and a disk image to install it from. See the packaging section of the
 [top-level README](../README.md#the-macos-app).
 
@@ -156,6 +156,42 @@ The threshold is a slider in Settings, defaulting to 90%: being wrong here
 renames somebody's records without them noticing. Questions collect into one
 sheet showing both sides and the score. Answering one changes the collection
 only — never a file, unless you have turned on the tag write-back.
+
+### What the path says
+
+A file's own path is evidence, and usually good evidence.
+`Peverelist/Tessellations/02 - Roll With The Punches.flac` names the artist,
+the release, the track number and the title, in a layout that has been the same
+since people started keeping music in folders. So it is read: at import, for
+the fields the tags leave empty, and at identification, where it does two
+things a fingerprint cannot.
+
+- **AcoustID has never heard of it.** Which is the normal state of affairs for
+  a white label, a promo, an edit, a bootleg — most of what is actually played.
+  There is no match to weigh, and a strongly structured path is then the best
+  evidence on the disk. It is taken, and the log says so.
+- **AcoustID says something else.** A fingerprint is about the audio and a path
+  is about what somebody filed it as, so a confident disagreement between them
+  is a question rather than something to settle by rule — an edit filed under
+  the original's name, or a fingerprint that landed on the wrong pressing. The
+  sheet shows both answers and a **Use the path** button beside **Use this**.
+
+A path is only acted on when it names both an artist and a title from
+somewhere that means one. Folders that are a filing system rather than a name —
+`Music`, `Downloads`, `FLAC`, `320`, `Various Artists`, `CD2` — are never taken
+for an artist, a hyphen inside a word stays inside it (`Re-Up`, `Jean-Michel`),
+a leading `02 - ` is a track number, and `(www.somewhere.com)` is trimmed off.
+Nothing read off a path ever overwrites what the file's own tags say.
+
+### Before writing tags into a file
+
+Tagging is the one thing here that writes to your files, so it has a check of
+its own: if a file's name has almost nothing in common with the names about to
+go into it, the write is held back and put to you first. `track04.mp3` about to
+become *Peverelist — Roll With The Punches* is the shape of a fingerprint that
+found the wrong record, and forty of those is a bad afternoon. A file named
+after the title alone passes — plenty are — and so does one whose name differs
+only in case and punctuation.
 
 Lookups are paced to what the two services ask for (three a second, and one a
 second respectively). That pacing is theirs and is not adjustable: getting
@@ -308,11 +344,11 @@ The key is the same on every installation — it is not derived from your machin
 or your licence — and this build carries it, so importing a library is a matter
 of pointing at the file. The Settings field and `REKORDBOX_KEY` are there for
 the day AlphaTheta changes the key; the constant is `BUNDLED_KEY` in
-`src/rekordbox/mod.rs`, and blanking it builds a program that asks for one.
+`proto/musicai/src/rekordbox/mod.rs`, and blanking it builds a program that asks for one.
 
 Settings → **Import a rekordbox library** brings across tracks, playlists and
 their folders, beat grids, hot cues, keys, ratings, play counts and My Tags.
-On the command line, `musicai rekordbox read <path>` lists what is in one
+On the command line, `booth-cli rekordbox read <path>` lists what is in one
 without changing anything.
 
 **Nothing already here is overwritten.** Tracks are matched by file path —
@@ -353,7 +389,7 @@ So a sync writes one: the same track list and the same playlist tree as
 `export.pdb`, from one source, so the two files on the drive cannot come apart.
 The key it is encrypted with is fixed for every drive there is and this build
 carries it, as it carries the one for rekordbox's own library — they are
-different keys, and both are in `src/rekordbox/mod.rs` with where they came
+different keys, and both are in `proto/musicai/src/rekordbox/mod.rs` with where they came
 from. The sheet says which databases a drive will carry before it writes them.
 
 **A CDJ-3000X has read one.** Playlists, track list and key search all came up
@@ -424,10 +460,20 @@ own — a real one, so it can go on a second screen and stay open beside the
 browser without taking anything from the collection. Filter by level, follow the
 tail or park it, clear, or copy everything shown.
 
+Every line starts with the date and time it happened — `20260904 21:14:03` —
+in UTC. A log is read next to things that have clocks of their own: a file's
+modification time, yesterday's log, somebody saying their drive stopped working
+about half nine. "412.008 seconds into some run" cannot be lined up with any of
+those. The window keeps the run's own elapsed clock beside it for the times you
+want to know how long something took.
+
 Everything also goes to `booth.log` in the data directory, and the previous
 run's is kept beside it as `booth.log.1` — the run worth reading is usually the
 one that just ended badly. `BOOTH_LOG=warn` turns it down; `off` turns it off.
-The default is everything.
+The default is everything, and everything means everything: which file was
+imported and what its path was taken to mean, what each drive state came out
+as and which file changed it, every track a check disagreed with, each session
+read off a drive, and the machine and version at the top of every run.
 
 ## Where things are kept
 
@@ -471,6 +517,16 @@ with no tool in the middle.
 
 A drive is stored once per state: leaving it plugged in does nothing, writing
 to it and plugging it in again stores the new state beside the old one.
+
+What counts as a state is the drive's own files under `PIONEER` — their paths,
+sizes and modification times — and deliberately *not* the breadcrumbs an
+operating system leaves on a mounted volume. macOS writes `.DS_Store` and `._`
+companions on a stick as soon as anything looks at one, and rewrites them
+afterwards; counted as changes, they make a drive that is different every time
+it is looked at, and a drive copied every time it is looked at. A drive that
+changes on its own anyway is copied at most once every five minutes, and the
+log says which file will not hold still. A drive this program writes is never
+held back by that: a write is a real change and is stored at once.
 
 A track counts as the library's if a file there has the same name and length,
 which is true of everything on a drive this wrote. Where that fails the drive's
