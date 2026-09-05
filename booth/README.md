@@ -344,7 +344,7 @@ The key is the same on every installation — it is not derived from your machin
 or your licence — and this build carries it, so importing a library is a matter
 of pointing at the file. The Settings field and `REKORDBOX_KEY` are there for
 the day AlphaTheta changes the key; the constant is `BUNDLED_KEY` in
-`src/rekordbox/mod.rs`, and blanking it builds a program that asks for one.
+`proto/musicai/src/rekordbox/mod.rs`, and blanking it builds a program that asks for one.
 
 Settings → **Import a rekordbox library** brings across tracks, playlists and
 their folders, beat grids, hot cues, keys, ratings, play counts and My Tags.
@@ -389,7 +389,7 @@ So a sync writes one: the same track list and the same playlist tree as
 `export.pdb`, from one source, so the two files on the drive cannot come apart.
 The key it is encrypted with is fixed for every drive there is and this build
 carries it, as it carries the one for rekordbox's own library — they are
-different keys, and both are in `src/rekordbox/mod.rs` with where they came
+different keys, and both are in `proto/musicai/src/rekordbox/mod.rs` with where they came
 from. The sheet says which databases a drive will carry before it writes them.
 
 **A CDJ-3000X has read one.** Playlists, track list and key search all came up

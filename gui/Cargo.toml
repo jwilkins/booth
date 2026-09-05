@@ -20,7 +20,7 @@ eframe = { version = "0.33", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-musicai = { path = ".." }
+musicai = { path = "../proto/musicai" }
 rayon = "1"
 # Native file pickers. The xdg-portal backend is chosen so that a Linux build
 # needs no GTK development packages; macOS uses AppKit either way. It is

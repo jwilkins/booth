@@ -511,13 +511,13 @@ acceptance criterion is not a requirement, it is an aspiration, and belongs in �
 | # | Requirement | Done when |
 |---|---|---|
 | LIB-1 | The library is a single local SQLite database with a published schema, plus the audio files where the user already keeps them. | Schema is in `docs/schema.sql`; a third party can query the library with `sqlite3` and no other software. |
-| LIB-2 | Tracks are identified by content, not by path. | Moving or renaming a file does not orphan its cues; re-import matches on the existing acoustic fingerprint (`src/tag/fingerprint.rs`) before falling back to path. |
+| LIB-2 | Tracks are identified by content, not by path. | Moving or renaming a file does not orphan its cues; re-import matches on the existing acoustic fingerprint (`proto/musicai/src/tag/fingerprint.rs`) before falling back to path. |
 | LIB-3 | Import a folder tree without analysing it. | 50,000 files land in the library in under 60 s on an SSD, marked `missing:grid`, and are browsable immediately. |
 | LIB-4 | Arbitrary user tags with a flat namespace and autocomplete. | A track can carry any number of tags; `tag:` queries them; tags survive export to the players' My Tag equivalent where one exists. |
 | LIB-5 | Smart playlists are saved queries (§6.3), with no track-count ceiling. | A saved query over 100,000 tracks returns in under 200 ms and exports in full. |
 | LIB-6 | Duplicate detection by fingerprint, by tags, and by file. | `dupes:` surfaces groups. **Done**: every track carries a SHA-256 of the file and a second of the encoded audio with the tag blocks skipped, so the same rip tagged twice is recognised as one recording. `dupes:file` and `dupes:audio` query them, and the window offers to send the copies to the trash. A collection that predates the hashing can be read through from the same sheet. A tick means keep, and a group opens with exactly one ticked: the copy that knows the most about the record, and failing that the one whose name no copier wrote. What only the other copies know — album, year, tags, cues, playlists, the listening — is folded into it before they go, and the only thing asked about is a field two copies answer differently. Each file shows its own tags, and every file being kept shows the group's whole tag list as a set to be picked over — a group can keep two, since the same audio on an EP and on a compilation is two records. A kept `track_04 (1).flac` is then offered the plain name the file it replaced gave up. |
 | LIB-6a | The collection can be checked against the files it describes. | **Done**: `Check` in the prep strip reads the files of everything showing back and reports where the two have come apart — a file that is not there, one a different size, one rewritten at the same length (holding shift, which reads every byte), a tag the file answers differently, a stem kit naming a file that is gone, and playable files in the library folder no track points at. Fixes go one way only: the collection is brought up to date from the file, never the file from the collection. A track whose audio hash changed stops counting as analysed. |
-| LIB-7 | Metadata enrichment from AcoustID/MusicBrainz, opt-in and offline-capable. | Reuses `src/tag/` unchanged; `--on-existing keep` semantics are the default so hand-curated fields are never overwritten. |
+| LIB-7 | Metadata enrichment from AcoustID/MusicBrainz, opt-in and offline-capable. | Reuses `proto/musicai/src/tag/` unchanged; `--on-existing keep` semantics are the default so hand-curated fields are never overwritten. |
 | LIB-8 | The library is portable and syncable by ordinary means. | Closing the app leaves a consistent database file; copying the database plus the audio to another machine reproduces the library exactly, with no service involved. |
 | LIB-9 | Every destructive operation is undoable for the session and journalled beyond it. | Deleting a playlist, merging duplicates or clearing cues can be reverted from a visible history. |
 
@@ -531,7 +531,7 @@ acceptance criterion is not a requirement, it is an aspiration, and belongs in �
 | ANA-4 | Key detection with a documented algorithm and a confidence figure. | Camelot and classical notation; ≥85% exact and ≥95% within a relative/neighbour key on a public labelled set; confidence shown in the inspector. |
 | ANA-5 | Structure/phrase analysis producing intro / build / drop / break / outro with bar-accurate boundaries. | Exports as `PSSI` so the CDJ-3000 shows phrases on its waveform; boundaries are editable; disagreements are recorded for retraining. |
 | ANA-6 | Waveforms in every format the target players read. | `PWAV`, `PWV3`, `PWV4`, `PWV5` and the CDJ-3000's 3-band `PWV6`/`PWV7` are all generated and byte-verified against a rekordbox-produced reference for the same audio. |
-| ANA-7 | Loudness and true-peak per track and per playlist. | Reuses `src/loudness.rs` and `src/normalize/` — EBU R128 integrated loudness, LRA, dBTP, and ReplayGain 2.0 tags written without re-encoding. |
+| ANA-7 | Loudness and true-peak per track and per playlist. | Reuses `proto/musicai/src/loudness.rs` and `proto/musicai/src/normalize/` — EBU R128 integrated loudness, LRA, dBTP, and ReplayGain 2.0 tags written without re-encoding. |
 | ANA-8 | Analysis is incremental, parallel and interruptible. | Uses `rayon` as the existing pipeline does; killing the app mid-analysis loses at most the in-flight track; nothing half-written reaches the database. |
 | ANA-9 | Every analysis result records which version of which analyser produced it. | Upgrading the beatgrid model offers to re-run only tracks below the new version, and never touches a hand-edited grid. |
 
@@ -615,7 +615,7 @@ be added around it to make the output *play well in a booth*.
 
 Demucs is a masking separator. Every stem it emits has **the same sample rate, the same
 channel count and the same length as the input**, sample-for-sample — `StemSet` in
-`src/stems/mod.rs` guarantees it, and `remix()` in the test suite proves the three parts
+`proto/musicai/src/stems/mod.rs` guarantees it, and `remix()` in the test suite proves the three parts
 add back up to the original.
 
 That single property is what makes this cheap. The beatgrid, the phrase boundaries and
@@ -650,13 +650,13 @@ anything in a playlist marked for a gig".
 
 | # | Requirement | Done when |
 |---|---|---|
-| STEM-1 | Stems render offline, locally, in a background queue that survives quitting. | Queue state is in the library database; relaunching resumes; the UI never blocks. Reuses `src/stems/demucs.rs`. |
+| STEM-1 | Stems render offline, locally, in a background queue that survives quitting. | Queue state is in the library database; relaunching resumes; the UI never blocks. Reuses `proto/musicai/src/stems/demucs.rs`. |
 | STEM-2 | 4-stem separation (vocals / drums / bass / other), with the 3-stem sum kept as a preset. | `Stem` gains a `Bass` variant; the existing melody = bass + other summing becomes one of several documented recipes rather than the only one. **Not done**: demucs is asked for four and three are written, so a bass swap is not yet possible. |
 | STEM-3 | **Stems inherit the parent's grid, phrases, cues, loops, key and colour, unmodified.** | A rendered acapella exports with byte-identical `PQTZ` and `PCO2` sections to its parent; verified in a test. |
-| STEM-4 | **Stems are loudness-corrected by re-encoding, not by tagging.** | Players ignore ReplayGain, and a separated stem is both quieter than the mix on average and liable to peak above it. Each rendered stem gets EBU R128 gain applied to the samples with a −1.0 dBTP ceiling using `src/normalize/limiter.rs`, and the drive copy carries no ReplayGain tag at all. |
+| STEM-4 | **Stems are loudness-corrected by re-encoding, not by tagging.** | Players ignore ReplayGain, and a separated stem is both quieter than the mix on average and liable to peak above it. Each rendered stem gets EBU R128 gain applied to the samples with a −1.0 dBTP ceiling using `proto/musicai/src/normalize/limiter.rs`, and the drive copy carries no ReplayGain tag at all. |
 | STEM-5 | Clipping is impossible on the drive, not merely reported. | The existing "N samples clipped; the stem peaks above full scale" warning becomes an automatic attenuate-or-limit decision on the export copy, chosen by the same `--on-peak` policy the CLI already has. |
-| STEM-6 | Every rendered stem is quality-scored, and bad ones are flagged rather than shipped silently. | `tests/stem_isolation.rs`'s method — transcribe the mix and the stems, check the sung words come back from the vocal stem and not the others — runs as a per-track score. Below threshold, the kit lands in **Needs attention** with the reason. |
-| STEM-7 | Companions are named and tagged so a CDJ browse list stays usable. | Title becomes `Roll With The Punches (vocals)`; a `STEM` tag records the kind (already implemented in `src/tag/copy.rs`); companions carry the parent's colour and a distinct rating/colour convention; they are excluded from the main browser view by default and from any query unless `stem:` is named. |
+| STEM-6 | Every rendered stem is quality-scored, and bad ones are flagged rather than shipped silently. | `proto/musicai/tests/stem_isolation.rs`'s method — transcribe the mix and the stems, check the sung words come back from the vocal stem and not the others — runs as a per-track score. Below threshold, the kit lands in **Needs attention** with the reason. |
+| STEM-7 | Companions are named and tagged so a CDJ browse list stays usable. | Title becomes `Roll With The Punches (vocals)`; a `STEM` tag records the kind (already implemented in `proto/musicai/src/tag/copy.rs`); companions carry the parent's colour and a distinct rating/colour convention; they are excluded from the main browser view by default and from any query unless `stem:` is named. |
 | STEM-8 | On the drive, a kit is one playlist entry with its companions adjacent. | Companions sort immediately under their parent in the exported playlist, so the browse list on the player reads `track / (vocals) / (drums) / (melody)` and a companion is a turn of the encoder away, not a search. |
 | STEM-9 | Kits appear in the players' **Related Tracks**, where the format supports it. | Needs verification against the exported database schema (§13); if Related Tracks cannot be populated by a third-party writer, STEM-8's adjacency is the fallback and the feature ships without it. |
 | STEM-10 | Disk cost is shown before it is spent. | The sync sheet quotes stem bytes separately (see §6.5); the app recommends a companion format — FLAC for headroom, 320 kbps MP3 when the drive is tight — and separated stems compress substantially better than the mix they came from. |
@@ -820,12 +820,12 @@ played by a CDJ.
 |---|---|
 | Analysis — tempo, grid, downbeat, key, structure, cues (ANA-1..5) | Runs on real audio, seconds a track. No accuracy figures against a labelled set yet. |
 | Waveforms, all five packings including the 3-band (ANA-6) | Written and read back. Whether a player draws them, or re-analyses instead, is the open question of §4. |
-| Loudness and true peak (ANA-7) | Done, from the existing `src/loudness.rs`. |
+| Loudness and true peak (ANA-7) | Done, from the existing `proto/musicai/src/loudness.rs`. |
 | Drive writer — `export.pdb`, ANLZ, disk image (EXP-1) | Writes a track list and a playlist tree with folders; verified by an independent parser; **unverified on hardware**. |
 | OneLibrary writer — `exportLibrary.db` | Written from the same collection as the legacy database, read back off the drive and counted. No `exportExt.pdb`, no artwork. **A CDJ-3000X browses one** — playlists, track list, key search. Whether it uses the analysis files is unproven. |
 | Delta sync and preflight (EXP-2, SAFE-2) | Done, and the file checks run at import as well as at write. |
 | Medium checks (SAFE-3) | Free space and path length only. Filesystem type, folder depth and per-folder file counts are not checked. |
-| Compatibility target (EXP-3) | Not built. The rules are the CDJ-3000's, in `src/compat.rs`, and are not yet selectable. |
+| Compatibility target (EXP-3) | Not built. The rules are the CDJ-3000's, in `proto/musicai/src/compat.rs`, and are not yet selectable. |
 | Read-back verification (SAFE-1) | Done, by readers that share no code with the writers. |
 | Checking the collection (LIB-6a) | Done for everything a container answers without being decoded. Length, sample rate and channel count are not checked — that means decoding, which is what analysing already does. |
 | Duplicate detection (LIB-6) | Done by hash — the file's, and the audio's with tags skipped — folding what only a copy knows into the one kept, and asking only where two copies disagree. |
@@ -842,7 +842,7 @@ played by a CDJ.
 
 The rest of this section is what that consists of.
 
-**`src/export/`** — the drive.
+**`proto/musicai/src/export/`** — the drive.
 
 - **`anlz.rs`** — the per-track analysis files: `PPTH` paths, `PQTZ` beat grids, `PCOB`
   and `PCO2` cue lists with colours, comments and loops, all seven waveform sections, and
@@ -860,7 +860,7 @@ The rest of this section is what that consists of.
 - **`inspect()` in both** — readers written from the format documentation rather than
   from the writers, sharing no code with them: the beginnings of SAFE-1's verifier.
 
-**`src/analysis/`** — what goes on it. Signal processing, not a model: seconds a track,
+**`proto/musicai/src/analysis/`** — what goes on it. Signal processing, not a model: seconds a track,
 offline, and every decision visible.
 
 - **`features.rs`** — one pass over the audio producing spectral flux, band energies,
@@ -891,7 +891,7 @@ not the grid, so the beats stay tracked against the audio.
 **Cross-checks** against `rekordcrate`, an independent implementation of both formats,
 because our own reader agreeing with our own writer proves nothing.
 
-**`src/rekordbox/`** — the other library, INTEROP-1 and the first step of INTEROP-5.
+**`proto/musicai/src/rekordbox/`** — the other library, INTEROP-1 and the first step of INTEROP-5.
 
 - **`master.rs`** — rekordbox 6 and 7's own collection, which is a SQLite file encrypted
   with SQLCipher under a key that is fixed rather than derived from the machine or the
@@ -914,7 +914,7 @@ because our own reader agreeing with our own writer proves nothing.
   neither the encryption nor the schema is what stands in the way now, and §4 says what
   does.
 
-`tests/rekordbox_library.rs` and `tests/rekordbox_database.rs` build real SQLCipher
+`proto/musicai/tests/rekordbox_library.rs` and `proto/musicai/tests/rekordbox_database.rs` build real SQLCipher
 fixtures rather than mocking one: written encrypted, closed, and reopened through the path
 a real library takes — including that plain SQLite cannot read them and that a wrong key
 is refused.

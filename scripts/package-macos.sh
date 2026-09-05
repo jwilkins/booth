@@ -41,8 +41,10 @@ for target in "${TARGETS[@]}"; do
 		echo "missing target $target; run: rustup target add $target" >&2
 		exit 1
 	fi
-	cargo build --release --target "$target" --bin musicai
-	cargo build --release --target "$target" --bin booth
+	# `-p`, because the default build is Booth alone and the command-line
+	# tool lives in another crate now.
+	cargo build --release --target "$target" -p musicai --bin musicai
+	cargo build --release --target "$target" -p booth --bin booth
 done
 
 # One binary that runs natively on both Apple silicon and Intel. Users should

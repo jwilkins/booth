@@ -15,7 +15,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("musicai-pkg-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("booth-pkg-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
@@ -28,15 +28,20 @@ impl Drop for Scratch {
     }
 }
 
+/// The repository, which is the directory above this crate's own.
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("booth is in a workspace")
+        .to_path_buf()
 }
 
-/// Run the bundler. The two binaries only have to exist and be copied, so the
-/// command-line tool stands in for both; building the window's binary here
-/// would drag a window toolkit into a test about file layout.
+/// Run the bundler. The two binaries only have to exist and be copied, so this
+/// crate's own stands in for both: what is under test is the layout, and
+/// building a second crate to fill the other slot would only make the test
+/// slower.
 fn bundle(into: &Path, version: &str) -> PathBuf {
-    let binary = env!("CARGO_BIN_EXE_musicai");
+    let binary = env!("CARGO_BIN_EXE_booth");
     let output = Command::new("bash")
         .arg(repo().join("scripts/make-bundle.sh"))
         .args([binary, binary])
@@ -117,7 +122,7 @@ fn a_missing_binary_is_an_error_rather_than_a_broken_app() {
     let dir = Scratch::new("missing");
     let output = Command::new("bash")
         .arg(repo().join("scripts/make-bundle.sh"))
-        .args(["/nonexistent/booth", env!("CARGO_BIN_EXE_musicai")])
+        .args(["/nonexistent/booth", env!("CARGO_BIN_EXE_booth")])
         .arg(&dir.0)
         .output()
         .unwrap();
