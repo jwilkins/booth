@@ -761,3 +761,262 @@ fn the_two_keys_are_two_keys_and_neither_opens_the_other_file() {
     );
     assert!(booth_cli::export::onelibrary::inspect(&bytes, BUNDLED_ONELIBRARY_KEY).is_ok());
 }
+
+// -- stems -----------------------------------------------------------------
+
+/// Every artist name in the drive's database.
+///
+/// The tracks table stores an artist id rather than a name, so the names come
+/// out of their own table. Read the same way as the track rows: the parser's
+/// fields are private, so its own description of what it found is what there is
+/// to read.
+fn artists_on(drive: &Path) -> Vec<String> {
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let mut cursor = Cursor::new(&bytes);
+    let header = Header::read(&mut cursor).expect("rekordcrate could not read the database");
+
+    let table = header.tables.iter().find(|t| t.page_type == PageType::Artists).unwrap();
+    let pages = header
+        .read_pages(&mut cursor, binrw::Endian::Little, (&table.first_page, &table.last_page))
+        .unwrap();
+
+    let mut out = Vec::new();
+    for row in pages
+        .iter()
+        .filter(|p| p.has_data())
+        .flat_map(|p| p.row_groups.iter().flat_map(|g| g.present_rows()))
+    {
+        let Row::Artist(artist) = row else { continue };
+        let described = format!("{artist:?}");
+        let marker = "name: DeviceSQLString(\"";
+        let at = described.find(marker).unwrap_or_else(|| panic!("no name in {described}"))
+            + marker.len();
+        let rest = &described[at..];
+        out.push(rest[..rest.find('"').unwrap()].to_string());
+    }
+    out.sort();
+    out
+}
+
+/// A track with an artist tag on it, and three stems of it with none.
+///
+/// Wav on purpose: it is the format a separator writes by default and the one
+/// with nowhere to keep a tag, so a stem written as one arrives at the drive
+/// knowing nothing about where it came from. Everything the exporter files it
+/// under has to come from the pairing it is given.
+fn track_and_its_stems(scratch: &Scratch) -> (PathBuf, Vec<PathBuf>) {
+    let track = write_song(scratch, "Ohm Hourglass.flac");
+    booth_cli::tag::write_tags(
+        &track,
+        &booth_cli::tag::Metadata {
+            artist: Some("Bruce".to_string()),
+            title: Some("Ohm Hourglass".to_string()),
+            album: Some("Sonder Somatic".to_string()),
+            ..Default::default()
+        },
+        booth_cli::tag::OnExisting::Overwrite,
+        None,
+    )
+    .unwrap();
+
+    let stems = ["vocals", "drums", "melody"]
+        .iter()
+        .map(|part| {
+            let path = scratch.path(&format!("Ohm Hourglass-{part}.wav"));
+            write_file(&path, &song(10.0), Codec::Wav, &EncodeOptions::default()).unwrap();
+            path
+        })
+        .collect();
+    (track, stems)
+}
+
+#[test]
+fn a_stem_is_written_into_the_folder_its_track_is_in() {
+    let scratch = Scratch::new("stems-beside");
+    let drive = scratch.path("USB");
+    let (track, stems) = track_and_its_stems(&scratch);
+
+    let mut inputs = vec![track.clone()];
+    inputs.extend(stems.iter().cloned());
+    let args = ExportArgs {
+        drive: Some(drive.clone()),
+        companions: stems.iter().map(|stem| (stem.clone(), track.clone())).collect(),
+        ..args_for(inputs)
+    };
+    commands::export(&args, &Collected::new()).expect("export failed");
+
+    let paths: Vec<String> = tracks_on(&drive).into_iter().map(|(_, path, _)| path).collect();
+    assert_eq!(paths.len(), 4, "the track and its three stems: {paths:?}");
+
+    // The whole point: one folder, holding the record and everything cut from
+    // it. The stems carry no tags at all, so an exporter reading their own
+    // metadata would have filed them under "Unknown Artist" instead.
+    for path in &paths {
+        assert!(
+            path.starts_with("/Contents/Bruce/"),
+            "{path} is not in the folder its track is in"
+        );
+        assert!(drive.join(path.trim_start_matches('/')).exists(), "{path} was not written");
+    }
+    assert!(
+        !artists_on(&drive).contains(&"Unknown Artist".to_string()),
+        "a stem was filed under an artist of its own: {:?}",
+        artists_on(&drive)
+    );
+}
+
+/// The track ids of the drive's one playlist, in the order it plays.
+///
+/// Read off the entry index each row carries, which is the field the format
+/// orders a playlist by, rather than the order the rows happen to sit in the
+/// page — those are two different things, and only the first is the playlist.
+fn playlist_order(drive: &Path) -> Vec<u32> {
+    let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let mut cursor = Cursor::new(&bytes);
+    let header = Header::read(&mut cursor).unwrap();
+    let table = header.tables.iter().find(|t| t.page_type == PageType::PlaylistEntries).unwrap();
+    let pages = header
+        .read_pages(&mut cursor, binrw::Endian::Little, (&table.first_page, &table.last_page))
+        .unwrap();
+
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for row in pages
+        .iter()
+        .filter(|p| p.has_data())
+        .flat_map(|p| p.row_groups.iter().flat_map(|g| g.present_rows()))
+    {
+        let Row::PlaylistEntry(entry) = row else { continue };
+        let described = format!("{entry:?}");
+        let number = |name: &str| -> u32 {
+            let marker = format!("{name}: ");
+            let at = described.find(&marker).unwrap() + marker.len();
+            let rest = described[at..].trim_start_matches("TrackId(");
+            rest.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap()
+        };
+        out.push((number("entry_index"), number("track_id")));
+    }
+    out.sort();
+    out.into_iter().map(|(_, track)| track).collect()
+}
+
+#[test]
+fn a_stem_follows_its_track_in_the_playlist() {
+    let scratch = Scratch::new("stems-order");
+    let drive = scratch.path("USB");
+    let (track, stems) = track_and_its_stems(&scratch);
+    let other = write_song(&scratch, "Post Rave Wave.flac");
+
+    // The order the browser hands over: a track, then the stems cut from it,
+    // then the next track.
+    let mut order = vec![track.clone()];
+    order.extend(stems.iter().cloned());
+    order.push(other.clone());
+
+    let args = ExportArgs {
+        drive: Some(drive.clone()),
+        companions: stems.iter().map(|stem| (stem.clone(), track.clone())).collect(),
+        playlists: vec![PlaylistSpec {
+            name: "Sat 14/9".to_string(),
+            folder: String::new(),
+            tracks: order.clone(),
+        }],
+        ..args_for(order.clone())
+    };
+    commands::export(&args, &Collected::new()).expect("export failed");
+
+    // The playlist, resolved back to the files its rows were made from. A
+    // companion is a turn of the encoder from the record it came from, not
+    // something at the end of the list.
+    let by_id: std::collections::HashMap<u32, String> =
+        tracks_on(&drive).into_iter().map(|(id, path, _)| (id, path)).collect();
+    let played: Vec<&str> = playlist_order(&drive)
+        .iter()
+        .map(|id| by_id.get(id).expect("a playlist entry with no track row").as_str())
+        .collect();
+    assert_eq!(
+        played,
+        vec![
+            "/Contents/Bruce/Ohm Hourglass.flac",
+            "/Contents/Bruce/Ohm Hourglass-vocals.wav",
+            "/Contents/Bruce/Ohm Hourglass-drums.wav",
+            "/Contents/Bruce/Ohm Hourglass-melody.wav",
+            "/Contents/Unknown Artist/Post Rave Wave.flac",
+        ],
+        "the stems did not follow their track"
+    );
+}
+
+#[test]
+fn a_second_sync_carries_the_stem_rows_rather_than_making_them_again() {
+    // A drive is written once and then added to. A stem is three minutes of
+    // decoding and analysis like any other file, and there are three of them
+    // per record, so a second write that re-prepared every stem on the drive
+    // would cost the whole drive to add one track to it.
+    let scratch = Scratch::new("stems-carried");
+    let drive = scratch.path("USB");
+    let (track, stems) = track_and_its_stems(&scratch);
+
+    let mut first = vec![track.clone()];
+    first.extend(stems.iter().cloned());
+    let companions: Vec<(PathBuf, PathBuf)> =
+        stems.iter().map(|stem| (stem.clone(), track.clone())).collect();
+    let spec = |tracks: Vec<PathBuf>| {
+        vec![PlaylistSpec { name: "Sat 14/9".to_string(), folder: String::new(), tracks }]
+    };
+
+    let args = ExportArgs {
+        drive: Some(drive.clone()),
+        companions: companions.clone(),
+        playlists: spec(first.clone()),
+        ..args_for(first.clone())
+    };
+    let made = commands::export(&args, &Collected::new()).expect("the first write failed");
+    assert_eq!(made.len(), 4, "the first write should put the track and its kit on");
+
+    // The second week: one track added, and nothing else given to the exporter
+    // — the four rows from the first write are handed back instead.
+    let other = write_song(&scratch, "Post Rave Wave.flac");
+    let mut order = first.clone();
+    order.push(other.clone());
+    let args = ExportArgs {
+        drive: Some(drive.clone()),
+        companions,
+        playlists: spec(order.clone()),
+        already: made,
+        ..args_for(vec![other.clone()])
+    };
+    let reporter = Collected::new();
+    commands::export(&args, &reporter).expect("the second write failed");
+
+    // Nothing about the stems was decoded again: a prepared file gets a line
+    // naming what it became, and only the new track has one.
+    let prepared: Vec<String> =
+        reporter.lines().into_iter().filter(|line| line.contains(" -> ")).collect();
+    assert_eq!(prepared.len(), 1, "something was prepared twice: {prepared:?}");
+    assert!(prepared[0].contains("Post Rave Wave"), "{}", prepared[0]);
+
+    // And the drive still describes everything on it, in the order it plays.
+    let by_id: std::collections::HashMap<u32, String> =
+        tracks_on(&drive).into_iter().map(|(id, path, _)| (id, path)).collect();
+    assert_eq!(by_id.len(), 5, "the drive lost rows it was holding: {by_id:?}");
+    let played: Vec<&str> = playlist_order(&drive)
+        .iter()
+        .map(|id| by_id.get(id).expect("a playlist entry with no track row").as_str())
+        .collect();
+    assert_eq!(
+        played,
+        vec![
+            "/Contents/Bruce/Ohm Hourglass.flac",
+            "/Contents/Bruce/Ohm Hourglass-vocals.wav",
+            "/Contents/Bruce/Ohm Hourglass-drums.wav",
+            "/Contents/Bruce/Ohm Hourglass-melody.wav",
+            "/Contents/Unknown Artist/Post Rave Wave.flac",
+        ],
+        "the carried stems did not keep their place in the playlist"
+    );
+
+    // The audio the first write put on is still where its rows say it is.
+    for path in by_id.values() {
+        assert!(drive.join(path.trim_start_matches('/')).exists(), "{path} is not on the drive");
+    }
+}

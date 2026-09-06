@@ -127,6 +127,15 @@ impl StemKit {
         }
     }
 
+    /// Whether `path` is one of the parts this kit names.
+    ///
+    /// Asked when a drive's record is matched back against the collection: a
+    /// re-rendered kit is a different set of files, and a row kept for a stem
+    /// the kit no longer names would describe a drive that has moved on.
+    pub fn has(&self, path: &Path) -> bool {
+        self.each().into_iter().any(|(_, part)| part.is_some_and(|part| part == path))
+    }
+
     /// The parts, in the order their rows hang under the parent, so that the
     /// browser and the drive's browse list agree about what comes second.
     pub fn each(&self) -> [(&'static str, Option<&PathBuf>); 3] {
@@ -687,7 +696,7 @@ pub struct SavedQuery {
 /// The fingerprint is what makes an update distinguishable from an addition
 /// without re-reading the drive: it summarises the prep the player will see, so
 /// a moved cue marks the track for rewriting and a play count does not.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Written {
     pub id: u32,
     pub prep: u64,
@@ -703,6 +712,20 @@ pub struct Written {
     /// costs a decode and is always correct.
     #[serde(default)]
     pub row: Option<booth_cli::export::pdb::Track>,
+    /// The rows this track's stems have in that database, each with the file it
+    /// was made from.
+    ///
+    /// Kept for the same reason as `row`, and only alongside one: a stem takes
+    /// its parent's grid, cues, key and phrases, so a parent being written
+    /// again is a stem being written again, and a stem row is only still true
+    /// while the parent's is.
+    ///
+    /// Empty for a drive written before this was recorded, for one that does
+    /// not carry stems, and for a stem whose write failed — each of which
+    /// means preparing them again, which costs three decodes and is always
+    /// correct.
+    #[serde(default)]
+    pub stems: Vec<(PathBuf, booth_cli::export::pdb::Track)>,
 }
 
 /// A drive the collection has written to, and what was on it when it did.
@@ -1518,8 +1541,8 @@ mod tests {
         library.drives.push(Drive {
             label: "USB".into(),
             written: vec![
-                Written { id, prep: 0, row: None },
-                Written { id: other, prep: 0, row: None },
+                Written { id, prep: 0, ..Written::default() },
+                Written { id: other, prep: 0, ..Written::default() },
             ],
             ..Drive::default()
         });

@@ -652,7 +652,7 @@ impl App {
                 .map(|track| crate::library::Written {
                     id: track.id,
                     prep: crate::sync::fingerprint(track),
-                    row: None,
+                    ..Default::default()
                 })
                 .collect();
             if let Some(drive) = app.library.drives.first_mut() {
@@ -1339,12 +1339,30 @@ impl App {
                     // have in common — its ids are the drive's, not ours.
                     let Some(drive) = self.library.drives.get_mut(self.drive) else { continue };
                     for (from, row) in rows {
-                        let Some(track) = self.library.tracks.iter().find(|t| t.path == from)
+                        // A row is a track's or one of its stems'. The drive's
+                        // database does not tell them apart — a stem is a track
+                        // to a player — so the collection is what says which,
+                        // and a stem's row is kept under the parent it hangs
+                        // from rather than beside it.
+                        if let Some(track) = self.library.tracks.iter().find(|t| t.path == from) {
+                            if let Some(written) =
+                                drive.written.iter_mut().find(|w| w.id == track.id)
+                            {
+                                written.row = Some(row);
+                            }
+                            continue;
+                        }
+                        let Some(parent) = self.library.tracks.iter().find(|t| t.stems.has(&from))
                         else {
                             continue;
                         };
-                        if let Some(written) = drive.written.iter_mut().find(|w| w.id == track.id) {
-                            written.row = Some(row);
+                        let Some(written) = drive.written.iter_mut().find(|w| w.id == parent.id)
+                        else {
+                            continue;
+                        };
+                        match written.stems.iter_mut().find(|(path, _)| *path == from) {
+                            Some(slot) => slot.1 = row,
+                            None => written.stems.push((from, row)),
                         }
                     }
                     changed = true;
@@ -1627,45 +1645,22 @@ impl App {
         // playlists, which is what the plan was worked out against.
         let wanted: Vec<u32> = sync::wanted(&self.library, &drive);
 
-        // An image is made from nothing every time — there is no previous
-        // volume to add to — so it is written in full. A drive is added to, so
-        // only what changed is prepared and the rest of its database is
-        // carried through from what the last write recorded.
-        let already: Vec<(PathBuf, booth_cli::export::pdb::Track)> = match drive.is_image {
-            true => Vec::new(),
-            false => drive
-                .written
-                .iter()
-                .filter(|written| wanted.contains(&written.id))
-                .filter(|written| !self.plan.writes().contains(&written.id))
-                .filter_map(|written| {
-                    let track = self.library.get(written.id)?;
-                    Some((track.path.clone(), written.row.clone()?))
-                })
-                .collect(),
-        };
-        // A row that was never recorded — an older collection, or a write that
-        // failed — cannot be carried, so its file is prepared again.
-        let carried: Vec<u32> = already
-            .iter()
-            .filter_map(|(path, _)| self.library.tracks.iter().find(|t| t.path == *path))
-            .map(|track| track.id)
-            .collect();
-        let preparing: Vec<u32> = match drive.is_image {
-            true => wanted.clone(),
-            false => wanted.iter().copied().filter(|id| !carried.contains(id)).collect(),
-        };
-
-        let files: Vec<PathBuf> = preparing
-            .iter()
-            .filter_map(|id| self.library.get(*id))
-            .map(|track| track.path.clone())
-            .chain(self.plan.stems.iter().cloned())
-            .collect();
+        // What is carried through from the last write and what has to be made
+        // again — the rule for both, including how a stem follows its parent,
+        // is in `sync::carry`.
+        let carry = sync::carry(&self.library, &drive, &self.plan);
 
         // Which stem came from which track, so each one takes its parent's
-        // grid, cues, key and phrases rather than being listened to alone.
-        let companions: Vec<(PathBuf, PathBuf)> = preparing
+        // grid, cues, key and phrases rather than being listened to alone, and
+        // lands in its parent's folder rather than one worked out from its own
+        // tags.
+        //
+        // Drawn from everything the drive is to hold, not from what is being
+        // prepared: a stem goes on beside a track that is already there and
+        // being carried, and a pairing missing here is a stem given its own
+        // grid and its own folder — the two failures this list exists to
+        // prevent.
+        let companions: Vec<(PathBuf, PathBuf)> = wanted
             .iter()
             .filter_map(|id| self.library.get(*id))
             .flat_map(|track| {
@@ -1681,7 +1676,7 @@ impl App {
         // Nothing to prepare is not nothing to do: a playlist that gained a
         // track already on the drive, or lost one, changes the database and
         // not a single audio file.
-        if files.is_empty() && already.is_empty() {
+        if carry.files.is_empty() && carry.already.is_empty() {
             self.note("nothing to write", theme::DIM);
             return;
         }
@@ -1695,7 +1690,7 @@ impl App {
         }
         args.playlists = self.drive_playlists(&drive);
         args.companions = companions;
-        args.already = already;
+        args.already = carry.already;
         args.onelibrary_key = self.config.onelibrary_key().map(str::to_string);
 
         // The drive's record is everything that should be on it once this is
@@ -1709,10 +1704,24 @@ impl App {
         let written: Vec<Written> = wanted
             .iter()
             .filter_map(|id| self.library.get(*id))
-            .map(|track| Written {
-                id: track.id,
-                prep: sync::fingerprint(track),
-                row: drive.written.iter().find(|w| w.id == track.id).and_then(|w| w.row.clone()),
+            .map(|track| {
+                let before = drive.written.iter().find(|w| w.id == track.id);
+                Written {
+                    id: track.id,
+                    prep: sync::fingerprint(track),
+                    row: before.and_then(|w| w.row.clone()),
+                    // Kept only where the parent's row is: a stem being
+                    // written again gets its row back from what the write
+                    // reports, and one whose kit has been re-rendered names a
+                    // file that is no longer part of it.
+                    stems: match carry.carried.contains(&track.id) {
+                        true => before
+                            .map(|w| w.stems.iter().filter(|(p, _)| track.stems.has(p)))
+                            .map(|kept| kept.cloned().collect())
+                            .unwrap_or_default(),
+                        false => Vec::new(),
+                    },
+                }
             })
             .collect();
         if let Some(drive) = self.library.drives.get_mut(self.drive) {
@@ -1721,7 +1730,7 @@ impl App {
         }
 
         self.sheet = false;
-        self.start(Job::Sync { args: Box::new(args), files });
+        self.start(Job::Sync { args: Box::new(args), files: carry.files });
         self.replan();
     }
 
@@ -7070,6 +7079,10 @@ impl App {
 
         let mut open = true;
         let mut forget = false;
+        // Toggled here rather than applied in place: the sheet is drawing a
+        // clone of the drive, and the plan under it was worked out before this
+        // frame. Read back after the window closes, so one change redraws once.
+        let mut with_stems = drive.with_stems;
         egui::Window::new(format!("SYNC → {}", drive.label))
             .open(&mut open)
             .collapsible(false)
@@ -7158,12 +7171,24 @@ impl App {
                     sheet_line(
                         ui,
                         "Stems",
-                        &match self.plan.stems.len() {
-                            0 => "none".to_string(),
-                            n => format!("{n} files"),
+                        &match with_stems {
+                            false => "not carried".to_string(),
+                            true => match self.plan.stems.len() {
+                                0 => "none rendered".to_string(),
+                                n => format!("{n} files"),
+                            },
                         },
                         &sync::bytes(self.plan.stem_bytes),
                     );
+                    ui.horizontal(|ui| {
+                        ui.add_space(74.0);
+                        ui.checkbox(&mut with_stems, "Carry stems").on_hover_text(
+                            "Put each track's vocals, drums and melody on the drive beside it, \
+                             in the same folder and next to it in the playlist. Only tracks \
+                             with a kit rendered are affected; it is roughly three times the \
+                             space, and the same again in analysis.",
+                        );
+                    });
 
                     ui.add_space(12.0);
                     for check in &checks {
@@ -7249,6 +7274,16 @@ impl App {
                     });
                 });
             });
+        if with_stems != drive.with_stems {
+            if let Some(drive) = self.library.drives.get_mut(self.drive) {
+                drive.with_stems = with_stems;
+            }
+            // The plan changes by three files a track, and so does the space
+            // check under it. Both are on screen, so both are redone now rather
+            // than on whatever happens next.
+            self.replan();
+            self.save();
+        }
         if forget {
             self.forget_drive_contents();
         }
@@ -8302,7 +8337,7 @@ mod tests {
                 written: vec![crate::library::Written {
                     id,
                     prep: sync::fingerprint(app.library.get(id).unwrap()),
-                    row: None,
+                    ..Default::default()
                 }],
                 ..Default::default()
             });
@@ -8350,6 +8385,7 @@ mod tests {
                         file_path: "/Contents/Peverelist/Sirens.flac".into(),
                         ..Default::default()
                     }),
+                    ..Default::default()
                 }],
                 ..Default::default()
             });

@@ -443,6 +443,30 @@ was last written to it, so a moved cue shows as *changed* rather than as a
 re-add. Play counts and tags do not count as changes: they are not things the
 player will see.
 
+**Carry stems** puts each track's vocals, drums and melody on the drive with
+it. They go in the same folder as the record they were cut from — filed under
+its artist, not their own, which is what keeps them together when the stems are
+wavs and have nowhere to keep a tag — and they follow it in the playlist, so
+the browse list reads track, vocals, drums, melody and a companion is a turn of
+the encoder away from the record it belongs to. Each one takes its parent's
+grid, cues, key and phrases rather than being listened to alone: a vocal with
+no drums under it would produce a grid of its own, and a hot cue that does not
+line up with the one on the track is worse than no cue at all. Only tracks with
+a whole kit rendered are affected. It is about three times the audio, and the
+same again in analysis — a stem is a row on the player, with a waveform and a
+grid of its own on the drive.
+
+A drive is written once and then added to, so the second write is given only
+what changed: the rest of the database is carried through from what the last
+write recorded, rather than every track being decoded again. A stem is carried
+on the same terms as the track it came from and never on its own — it takes the
+parent's grid and cues, so a track whose prep changed is three stems whose
+analysis is now wrong, and they go on again with it. Anything that cannot be
+carried — a collection written before its rows were kept, a kit re-rendered to
+another format, a write that failed — is simply prepared afresh, which costs a
+decode and is always right. **Write it all again** drops the record entirely,
+for a drive something else has been at.
+
 The sheet lists what would happen, then the preflight — every check on it is a
 state that looks fine in a file browser and fails in a booth: 32-bit float
 WAVs, sample rates above 96 kHz, paths longer than a player will follow, formats

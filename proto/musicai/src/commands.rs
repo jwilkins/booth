@@ -581,12 +581,36 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
     }
     let metadata = crate::tag::read_metadata(path).unwrap_or_default();
 
+    // The track this file was cut from, when it is a stem of one, and what that
+    // track is filed under. Read once: it decides both where the stem lands and
+    // what its row says, and those two must not be worked out separately.
+    let parent = args.companions.iter().find(|(stem, _)| stem == path).map(|(_, parent)| parent);
+    let parent_tags = parent.map(|parent| crate::tag::read_metadata(parent).unwrap_or_default());
+
     let filename = path
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow::anyhow!("{} has no usable file name", path.display()))?;
-    let artist = metadata.artist.clone().unwrap_or_else(|| "Unknown Artist".to_string());
-    let on_drive = on_drive_path(&artist, filename);
+    // A stem with no name of its own takes its parent's, which is not a
+    // nicety: a wav has nowhere to keep tags and `--no-tags` asks for none, and
+    // either way the alternative is a row reading "Unknown Artist" next to the
+    // record it was cut from.
+    let artist = metadata
+        .artist
+        .clone()
+        .or_else(|| parent_tags.as_ref().and_then(|tags| tags.artist.clone()))
+        .unwrap_or_else(|| UNKNOWN_ARTIST.to_string());
+    // Where it goes. A stem is filed with its parent — in the parent's folder,
+    // worked out from the parent's tags rather than its own — so that the four
+    // files of a record sit together on the drive however the stems were
+    // written. Deriving it from the stem's tags instead only lands it beside
+    // the parent when those tags happen to match, which is not something to
+    // stake the layout of a drive on.
+    let folder = match &parent_tags {
+        Some(tags) => tags.artist.clone().unwrap_or_else(|| UNKNOWN_ARTIST.to_string()),
+        None => artist.clone(),
+    };
+    let on_drive = on_drive_path(&folder, filename);
     if on_drive.len() > MAX_DRIVE_PATH {
         bail!("{} characters is longer than a player will follow", on_drive.len());
     }
@@ -604,8 +628,8 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
     // measured from audio with most of the track removed — a vocal with no
     // drums under it — and a cue that does not line up with the one on the
     // parent is worse than no cue at all.
-    let listened = match args.companions.iter().find(|(stem, _)| stem == path) {
-        Some((_, parent)) => analyses.of(parent, args.bpm).with_context(|| {
+    let listened = match parent {
+        Some(parent) => analyses.of(parent, args.bpm).with_context(|| {
             format!("analysing {} for its stem {}", parent.display(), path.display())
         })?,
         None => analyses.of(path, args.bpm)?,
@@ -632,7 +656,11 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
         id,
         title: metadata.title.clone().unwrap_or_else(|| stem_of(filename)),
         artist,
-        album: metadata.album.clone().unwrap_or_default(),
+        album: metadata
+            .album
+            .clone()
+            .or_else(|| parent_tags.as_ref().and_then(|tags| tags.album.clone()))
+            .unwrap_or_default(),
         key: listened.camelot(),
         file_path: on_drive.clone(),
         analyze_path,
@@ -671,12 +699,20 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
     })
 }
 
+/// The name a file is filed under when it carries no artist of its own.
+pub const UNKNOWN_ARTIST: &str = "Unknown Artist";
+
 /// Where a track's audio lands on the drive.
 ///
 /// Public because anything that wants to warn about a path before it is written
 /// has to be able to work out the same path the writer will use. A preflight
 /// that reimplements this rule is a preflight that will eventually disagree
 /// with it, and pass a drive the writer then refuses.
+///
+/// A stem is filed under the artist of the track it came from rather than its
+/// own, so a caller checking a stem's path should pass the parent's name here —
+/// which is what puts the stem in the same folder as the record it was cut
+/// from. See `prepare`.
 pub fn on_drive_path(artist: &str, filename: &str) -> String {
     format!("/Contents/{}/{}", safe_component(artist), filename)
 }

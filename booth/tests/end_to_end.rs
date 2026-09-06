@@ -154,7 +154,7 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
     let written: Vec<Written> = collection
         .tracks
         .iter()
-        .map(|track| Written { id: track.id, prep: sync::fingerprint(track), row: None })
+        .map(|track| Written { id: track.id, prep: sync::fingerprint(track), ..Written::default() })
         .collect();
     collection.drives[0].written = written;
     assert!(sync::plan(&collection, &collection.drives[0]).is_empty());
