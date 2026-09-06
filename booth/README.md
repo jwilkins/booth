@@ -296,6 +296,32 @@ stems. Zooming stops where the picture runs out: past about one stored column
 per two pixels it would be stretching rather than revealing, and a staircase
 drawn confidently invites placing a cue against an edge that is not there.
 
+## How tall the waveform draws
+
+The picture is scaled against the track's own loudest content before anything
+is drawn, so it says how a record is put together rather than how hot it was
+mastered. Without that a modern master is a solid block: the height curve ran
+out of room near the top and a drop, a build and a breakdown all drew at full
+height, which is a waveform with the arrangement taken out of it.
+
+The reference is the 95th percentile of the preview rather than the maximum —
+one clap that clips sets the maximum on a great many records, and scaling to it
+spends the top of the display on a moment nobody is looking for. The loudest
+twentieth of the track reaches the top and everything else is drawn against it.
+A very quiet transfer is lifted, up to thirty decibels, which is more than any
+real recording needs and short of what it takes to make a noise floor look like
+music.
+
+One gain for the whole track and every band in it: the height of a column says
+how loud that moment is, and the ratios between the bands are what the colour
+is made of, so scaling them apart would wreck both. The consequence to know is
+that the picture no longer says anything about how loud one record is against
+another — it is about the shape of the one you are looking at. The loudness
+figures in the columns are what answers the other question.
+
+The same measurement makes the pictures on the drive, so what is on screen
+while prepping is what will be on the CDJ's screen.
+
 ## Colouring the waveform
 
 Three modes, on the right of the cue row, remembered between runs:

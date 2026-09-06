@@ -242,6 +242,25 @@ const MY_TAG_GROUPS: [(i64, &str); 4] =
 /// nobody has established what the bits mean.
 const ANALYSED: i64 = 105;
 
+/// The environment variable that overrides it, for finding out what the bits
+/// mean on hardware.
+pub const ANALYSED_BITS_VAR: &str = "BOOTH_ANALYSED_BITS";
+
+/// What to write in each track's `analysedBits`.
+///
+/// Settable because it is the one field on a content row that is both
+/// undetermined and known to change what a player does with the analysis
+/// files: told a track is analysed, a CDJ does not re-measure it, and simply
+/// shows nothing where an analysis it will not read would have gone. A drive
+/// takes minutes to write and the only way to learn what a bit means is to try
+/// it on a deck, so this can be changed without a rebuild — by
+/// `--analysed-bits` on the command line, or by `BOOTH_ANALYSED_BITS` for the
+/// window, which has no control for it and should not grow one for a number
+/// nobody has established the meaning of.
+pub fn analysed_bits(asked: Option<i64>) -> i64 {
+    asked.or_else(|| std::env::var(ANALYSED_BITS_VAR).ok()?.trim().parse().ok()).unwrap_or(ANALYSED)
+}
+
 /// Whether this looks like the key for the *other* encrypted rekordbox
 /// database.
 ///
@@ -261,7 +280,12 @@ pub fn is_the_other_key(key: &str) -> bool {
 /// place and reads it back — which also means the drive never sees a
 /// half-written database, and that a FAT image gets the same bytes a folder
 /// does.
-pub fn to_bytes(database: &Database, key: &str, device_name: &str) -> Result<Vec<u8>> {
+pub fn to_bytes(
+    database: &Database,
+    key: &str,
+    device_name: &str,
+    analysed_bits: i64,
+) -> Result<Vec<u8>> {
     if key.trim().is_empty() {
         bail!("no OneLibrary key");
     }
@@ -286,7 +310,7 @@ pub fn to_bytes(database: &Database, key: &str, device_name: &str) -> Result<Vec
         // same end state with nothing to forget.
         connection.execute_batch("PRAGMA journal_mode = DELETE").context("journal mode")?;
         connection.execute_batch(SCHEMA).context("creating the tables")?;
-        fill(&connection, database, device_name)?;
+        fill(&connection, database, device_name, analysed_bits)?;
     }
 
     let bytes = std::fs::read(&scratch.path)
@@ -295,7 +319,12 @@ pub fn to_bytes(database: &Database, key: &str, device_name: &str) -> Result<Vec
 }
 
 /// Everything that goes in the file, in one transaction.
-fn fill(connection: &Connection, database: &Database, device_name: &str) -> Result<()> {
+fn fill(
+    connection: &Connection,
+    database: &Database,
+    device_name: &str,
+    analysed_bits: i64,
+) -> Result<()> {
     let today: String = connection.query_row("SELECT date('now')", [], |row| row.get(0))?;
 
     connection.execute_batch("BEGIN")?;
@@ -345,10 +374,13 @@ fn fill(connection: &Connection, database: &Database, device_name: &str) -> Resu
             connection,
             track,
             &today,
-            artists.get(&track.artist).unwrap_or(0),
-            albums.get(&track.album).unwrap_or(0),
-            genres.get(&track.genre).unwrap_or(0),
-            labels.get(&track.label).unwrap_or(0),
+            Links {
+                artist_id: artists.get(&track.artist).unwrap_or(0),
+                album_id: albums.get(&track.album).unwrap_or(0),
+                genre_id: genres.get(&track.genre).unwrap_or(0),
+                label_id: labels.get(&track.label).unwrap_or(0),
+            },
+            analysed_bits,
         )?;
     }
 
@@ -382,17 +414,28 @@ fn fill(connection: &Connection, database: &Database, device_name: &str) -> Resu
     Ok(())
 }
 
+/// The rows a track's own row points at, already interned.
+///
+/// Together rather than as four more arguments: they are one thing — where
+/// this track sits among the names the database keeps once each — and passing
+/// them separately is four chances to hand `album_id` the genre.
+struct Links {
+    artist_id: i64,
+    album_id: i64,
+    genre_id: i64,
+    label_id: i64,
+}
+
 /// One track's row. Forty-six columns, in the order a real export declares
 /// them.
 fn insert_track(
     connection: &Connection,
     track: &Track,
     today: &str,
-    artist_id: i64,
-    album_id: i64,
-    genre_id: i64,
-    label_id: i64,
+    links: Links,
+    analysed_bits: i64,
 ) -> Result<()> {
+    let Links { artist_id, album_id, genre_id, label_id } = links;
     let added = match track.date_added.is_empty() {
         true => today,
         false => track.date_added.as_str(),
@@ -439,7 +482,7 @@ fn insert_track(
             track.sample_rate,
             track.play_count,
             track.analyze_path,
-            ANALYSED,
+            analysed_bits,
         ],
     )?;
     Ok(())
@@ -680,7 +723,7 @@ mod tests {
 
     #[test]
     fn what_was_written_reads_back_through_a_reader_that_shares_no_code_with_it() {
-        let bytes = to_bytes(&a_database(), KEY, "TESTSTICK").unwrap();
+        let bytes = to_bytes(&a_database(), KEY, "TESTSTICK", ANALYSED).unwrap();
         let summary = inspect(&bytes, KEY).unwrap();
         assert_eq!(summary.tables, 22, "a real export has twenty-two tables");
         assert_eq!(summary.tracks, 2);
@@ -690,7 +733,7 @@ mod tests {
 
     #[test]
     fn it_is_encrypted_rather_than_a_sqlite_file_with_a_password_on_it() {
-        let bytes = to_bytes(&a_database(), KEY, "TESTSTICK").unwrap();
+        let bytes = to_bytes(&a_database(), KEY, "TESTSTICK", ANALYSED).unwrap();
         assert!(!bytes.starts_with(b"SQLite format 3"), "the header is not in the clear");
         assert!(inspect(&bytes, "some-other-key").is_err(), "another key must not open it");
         assert!(
@@ -701,7 +744,7 @@ mod tests {
 
     #[test]
     fn a_track_row_says_what_the_track_says() {
-        let bytes = to_bytes(&a_database(), KEY, "TESTSTICK").unwrap();
+        let bytes = to_bytes(&a_database(), KEY, "TESTSTICK", ANALYSED).unwrap();
         let scratch = Scratch::new().unwrap();
         std::fs::write(&scratch.path, &bytes).unwrap();
         let connection = crate::rekordbox::open(&scratch.path, KEY).unwrap();
@@ -758,7 +801,7 @@ mod tests {
         // Both databases describe the same menu to the same players. If these
         // two ever disagree it is because somebody changed one of them, which
         // is exactly the thing worth failing a build over.
-        let bytes = to_bytes(&a_database(), KEY, "TESTSTICK").unwrap();
+        let bytes = to_bytes(&a_database(), KEY, "TESTSTICK", ANALYSED).unwrap();
         let scratch = Scratch::new().unwrap();
         std::fs::write(&scratch.path, &bytes).unwrap();
         let connection = crate::rekordbox::open(&scratch.path, KEY).unwrap();
@@ -799,7 +842,7 @@ mod tests {
         assert!(is_the_other_key(hex));
         assert!(!is_the_other_key(crate::rekordbox::BUNDLED_ONELIBRARY_KEY));
         assert!(!is_the_other_key(KEY));
-        let refused = to_bytes(&a_database(), hex, "TESTSTICK").unwrap_err().to_string();
+        let refused = to_bytes(&a_database(), hex, "TESTSTICK", ANALYSED).unwrap_err().to_string();
         assert!(refused.contains("master.db key"), "{refused}");
     }
 
@@ -819,7 +862,7 @@ mod tests {
         let mut database = a_database();
         database.tracks[1].artist = "PEVERELIST".into();
         database.tracks[1].genre = String::new();
-        let bytes = to_bytes(&database, KEY, "TESTSTICK").unwrap();
+        let bytes = to_bytes(&database, KEY, "TESTSTICK", ANALYSED).unwrap();
         let scratch = Scratch::new().unwrap();
         std::fs::write(&scratch.path, &bytes).unwrap();
         let connection = crate::rekordbox::open(&scratch.path, KEY).unwrap();
@@ -838,7 +881,7 @@ mod tests {
 
     #[test]
     fn the_drive_says_how_many_tracks_are_on_it() {
-        let bytes = to_bytes(&a_database(), KEY, "MYSTICK").unwrap();
+        let bytes = to_bytes(&a_database(), KEY, "MYSTICK", ANALYSED).unwrap();
         let scratch = Scratch::new().unwrap();
         std::fs::write(&scratch.path, &bytes).unwrap();
         let connection = crate::rekordbox::open(&scratch.path, KEY).unwrap();
@@ -868,7 +911,7 @@ mod tests {
                 },
             ],
         };
-        let bytes = to_bytes(&database, KEY, "TESTSTICK").unwrap();
+        let bytes = to_bytes(&database, KEY, "TESTSTICK", ANALYSED).unwrap();
         let scratch = Scratch::new().unwrap();
         std::fs::write(&scratch.path, &bytes).unwrap();
         let connection = crate::rekordbox::open(&scratch.path, KEY).unwrap();
@@ -889,8 +932,8 @@ mod tests {
 
     #[test]
     fn writing_without_a_key_writes_nothing() {
-        assert!(to_bytes(&a_database(), "", "TESTSTICK").is_err());
-        assert!(to_bytes(&a_database(), "   ", "TESTSTICK").is_err());
+        assert!(to_bytes(&a_database(), "", "TESTSTICK", ANALYSED).is_err());
+        assert!(to_bytes(&a_database(), "   ", "TESTSTICK", ANALYSED).is_err());
     }
 
     #[test]

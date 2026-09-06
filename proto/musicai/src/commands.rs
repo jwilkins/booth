@@ -587,9 +587,11 @@ fn write_onelibrary(
         (None, None) => String::new(),
     };
 
+    let analysed = onelibrary::analysed_bits(args.analysed_bits);
     let building = std::time::Instant::now();
-    let bytes = onelibrary::to_bytes(database, &key, &device)
+    let bytes = onelibrary::to_bytes(database, &key, &device, analysed)
         .context("building the OneLibrary database")?;
+    report::detail(reporter, format!("every track is marked analysedBits {analysed}"));
     report::detail(
         reporter,
         format!(

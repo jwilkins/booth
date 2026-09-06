@@ -14,10 +14,10 @@
 //!
 //! What the exact heights should be is not documented — the format notes say
 //! only that "there is some scaling involved", and that nobody has yet matched
-//! rekordbox exactly. The curve below is a square root, which keeps quiet
-//! passages visible without flattening loud ones, and it is one of the things
-//! to compare against a rekordbox-produced reference once there is hardware to
-//! check against.
+//! rekordbox exactly. What is here is a per-track gain and a shaping curve; see
+//! [`reference_gain`] and [`SHAPE`] for what each is for. It is one of the
+//! things to compare against a rekordbox-produced reference once there is
+//! hardware to check against.
 
 use crate::audio::Audio;
 
@@ -98,9 +98,73 @@ impl WaveformData {
 /// band within each column. Memory does not grow with the length of the track
 /// beyond the columns themselves — a ten-minute track costs about 360 kB of
 /// measurements, not a second copy of the audio.
+///
+/// Then the whole track is scaled against its own loudest content, before any
+/// of the pictures are encoded, so every picture derived from it agrees.
 pub fn analyze(audio: &Audio) -> WaveformData {
-    let columns = measure(audio);
+    let mut columns = measure(audio);
+    let gain = reference_gain(&summarise(&columns, WIDE_COLUMNS));
+    for column in &mut columns {
+        column.scale(gain);
+    }
     WaveformData::from_columns(&columns)
+}
+
+/// The fraction of the track that is allowed to reach full height.
+///
+/// The maximum would be the obvious reference and is the wrong one: one clap
+/// that clips sets it on a great many records, and scaling the picture to that
+/// spends the top of the display on a moment nobody is reading the waveform to
+/// find. At the 95th percentile the loudest twentieth of the track pins the
+/// top and everything else is drawn against it.
+const REFERENCE_QUANTILE: f32 = 0.95;
+
+/// The most a quiet track's picture is lifted, as a gain.
+///
+/// A quiet transfer should be drawn as though it were not, which is the whole
+/// point of normalising. But a track that is mostly silence has a reference
+/// level made of its own noise floor, and without a limit that noise is drawn
+/// as a full-height block. Thirty decibels is more than any real recording
+/// needs and well short of what it takes to make hiss look like music.
+const MAX_GAIN: f32 = 32.0;
+
+/// How the normalised amplitude is bent before it becomes a height.
+///
+/// Straight through, the quiet parts of a dynamic record are drawn so low as to
+/// be a flat line; a square root — what this used to do, with no normalising in
+/// front of it — lifts them so far that a loud record has no room left and its
+/// drop, its build and its breakdown all draw at full height, which is a
+/// picture with the arrangement taken out of it. Between the two, and nearer
+/// the straight line: a −16 dB passage still draws at about a quarter height,
+/// and the parts of a track that differ still look different.
+const SHAPE: f32 = 0.7;
+
+/// The gain that puts the track's reference level at full height.
+///
+/// One gain for the whole track and every band in it, rather than one per band
+/// or per column. The height of a column is what says how loud that moment is,
+/// and the ratios between the bands are what the colour is made of — scaling
+/// them apart would destroy both, and leave a picture in which every moment
+/// looks equally loud.
+///
+/// Measured at preview resolution rather than on the raw columns, because a
+/// preview column is the peak of about twenty-six of those and so sits well
+/// above a typical one. Referenced against the raw columns the previews come
+/// out hot and a fifth of them flatten against the top, which is the fault
+/// this is here to fix rather than move.
+fn reference_gain(columns: &[Column]) -> f32 {
+    let mut peaks: Vec<f32> =
+        columns.iter().map(|c| c.low.max(c.mid).max(c.high)).filter(|a| *a > 0.0).collect();
+    if peaks.is_empty() {
+        return 1.0;
+    }
+    peaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let at = ((peaks.len() as f32 - 1.0) * REFERENCE_QUANTILE).round() as usize;
+    let reference = peaks[at.min(peaks.len() - 1)];
+    if reference <= f32::EPSILON {
+        return 1.0;
+    }
+    (1.0 / reference).min(MAX_GAIN)
 }
 
 fn detail_columns(duration_secs: f64) -> usize {
@@ -129,6 +193,22 @@ struct Column {
 }
 
 impl Column {
+    /// Scale every measurement by one gain, so nothing about the column's
+    /// proportions changes — only how tall it is drawn.
+    fn scale(&mut self, gain: f32) {
+        for value in [
+            &mut self.full,
+            &mut self.low,
+            &mut self.mid,
+            &mut self.high,
+            &mut self.low_rms,
+            &mut self.mid_rms,
+            &mut self.high_rms,
+        ] {
+            *value *= gain;
+        }
+    }
+
     fn merge(&mut self, other: &Column) {
         self.full = self.full.max(other.full);
         self.low = self.low.max(other.low);
@@ -238,14 +318,16 @@ impl Column {
     }
 }
 
-/// Amplitude to an `n`-step height. The square root keeps a −20 dB passage
-/// visible rather than collapsing it onto the baseline.
+/// Amplitude to an `n`-step height, once the track has been scaled against its
+/// own reference level. See [`SHAPE`] for the curve and why it is not a square
+/// root any more.
 fn height(amplitude: f32, max: u8) -> u8 {
-    (amplitude.max(0.0).sqrt() * max as f32).round().clamp(0.0, max as f32) as u8
+    let shaped = amplitude.clamp(0.0, 1.0).powf(SHAPE);
+    (shaped * max as f32).round().clamp(0.0, max as f32) as u8
 }
 
 fn level(amplitude: f32) -> u8 {
-    (amplitude.max(0.0).sqrt() * 255.0).round().clamp(0.0, 255.0) as u8
+    height(amplitude, 255)
 }
 
 /// A low-pass of two single poles in series, kept as its own state so the whole
@@ -377,17 +459,67 @@ mod tests {
         assert_eq!(w, WaveformData::silent(1.0));
     }
 
+    /// Two stretches of one track, so the comparison is the one the picture is
+    /// read for: not how loud the record is, but which part of it is louder.
+    fn loud_then_quiet() -> Audio {
+        let loud = tone(1_000.0, 1.0, 0.9);
+        let quiet = tone(1_000.0, 1.0, 0.1);
+        let planes: Vec<Vec<f32>> = loud
+            .planes
+            .iter()
+            .zip(&quiet.planes)
+            .map(|(a, b)| a.iter().chain(b.iter()).copied().collect())
+            .collect();
+        Audio::new(loud.sample_rate, planes).unwrap()
+    }
+
     #[test]
-    fn a_loud_tone_is_taller_than_a_quiet_one() {
-        let loud = analyze(&tone(1_000.0, 1.0, 0.9));
-        let quiet = analyze(&tone(1_000.0, 1.0, 0.1));
-        let tallest = |w: &WaveformData| w.preview.iter().map(|b| b & 0x1f).max().unwrap();
+    fn a_loud_passage_is_taller_than_a_quiet_one() {
+        let w = analyze(&loud_then_quiet());
+        let half = w.preview.len() / 2;
+        let tallest = |part: &[u8]| part.iter().map(|b| b & 0x1f).max().unwrap();
         assert!(
-            tallest(&loud) > tallest(&quiet),
+            tallest(&w.preview[..half]) > tallest(&w.preview[half..]),
             "loud {} quiet {}",
-            tallest(&loud),
-            tallest(&quiet)
+            tallest(&w.preview[..half]),
+            tallest(&w.preview[half..])
         );
+    }
+
+    #[test]
+    fn a_quiet_record_is_drawn_at_the_same_size_as_a_loud_one() {
+        // The picture is scaled against the track's own loudest content, so it
+        // says how a record is put together rather than how hot it was
+        // mastered. Two takes of the same thing at different levels are the
+        // same arrangement and draw the same.
+        let quiet: Vec<Vec<f32>> = loud_then_quiet()
+            .planes
+            .iter()
+            .map(|plane| plane.iter().map(|s| s * 0.05).collect())
+            .collect();
+        let quiet = analyze(&Audio::new(44_100, quiet).unwrap());
+        let loud = analyze(&loud_then_quiet());
+
+        let tallest = |w: &WaveformData| w.preview.iter().map(|b| b & 0x1f).max().unwrap();
+        assert_eq!(tallest(&quiet), tallest(&loud), "a quiet transfer was drawn as a quiet track");
+    }
+
+    #[test]
+    fn a_loud_record_still_shows_its_arrangement() {
+        // The failure this is here for: with no normalising and a square-root
+        // curve, everything on a modern master drew at full height, and a drop,
+        // a build and a breakdown became the same picture.
+        let w = analyze(&loud_then_quiet());
+        let half = w.preview.len() / 2;
+        let median = |part: &[u8]| {
+            let mut heights: Vec<u8> = part.iter().map(|b| b & 0x1f).collect();
+            heights.sort_unstable();
+            heights[heights.len() / 2]
+        };
+        let (loud, quiet) = (median(&w.preview[..half]), median(&w.preview[half..]));
+        // A passage 19 dB down should look plainly different, not a shade
+        // shorter: at least a third of the height between them.
+        assert!(loud as i32 - quiet as i32 >= 10, "loud {loud} quiet {quiet} of 31");
     }
 
     #[test]

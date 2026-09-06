@@ -464,6 +464,13 @@ redirecting stdout still captures only results:
 A stem says whose grid it took rather than reporting one of its own, which is the thing
 about a companion that cannot be seen from the file it became.
 
+`--analysed-bits N` sets what each track's `analysedBits` says in the OneLibrary database.
+It defaults to 105, which is what a drive that played on a CDJ-3000 carried, and it is
+settable because it is the one field on a content row that is both undetermined and known
+to change what a player does with the analysis files: told a track is analysed, a CDJ does
+not re-measure it and shows nothing where an analysis it will not read would have gone.
+`BOOTH_ANALYSED_BITS` does the same for the window.
+
 **What is missing before this plays in a club:** none of it has been tried on real
 hardware. It has been checked against an independent parser, which is not the same thing.
 

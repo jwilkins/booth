@@ -96,6 +96,7 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         playlists: Vec::new(),
         dry_run: false,
         onelibrary_key: None,
+        analysed_bits: None,
         companions: Vec::new(),
         already: Vec::new(),
     }

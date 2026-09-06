@@ -443,6 +443,20 @@ pub struct ExportArgs {
     #[arg(long, value_name = "KEY")]
     pub onelibrary_key: Option<String>,
 
+    /// What to write in each track's `analysedBits` in the OneLibrary database.
+    ///
+    /// The one field on a content row that is both undetermined and known to
+    /// change what a player does with the analysis files. Told a track is
+    /// analysed, a CDJ does not re-measure it and shows nothing where an
+    /// analysis it will not read would have gone — so a bit that is wrong is a
+    /// picture that is missing rather than an error anybody sees.
+    ///
+    /// Defaults to 105, which is what a drive that played on a CDJ-3000
+    /// carried. Settable because the only way to learn what a bit means is to
+    /// try it on a deck. `BOOTH_ANALYSED_BITS` does the same for the window.
+    #[arg(long, value_name = "N")]
+    pub analysed_bits: Option<i64>,
+
     /// Files that are stems of another track, as (stem, parent) pairs.
     ///
     /// A stem is the same audio with parts removed, so it has the same tempo,
