@@ -123,6 +123,80 @@ pub fn plan(library: &Library, drive: &Drive) -> Plan {
     plan
 }
 
+/// What the next write hands the exporter: the rows it can carry rather than
+/// make again, and the files it has to prepare.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Carry {
+    /// Rows already on the drive, each with the file it was made from. Handed
+    /// straight to the exporter, which builds its database from these and what
+    /// this run adds — so the database describes the whole drive rather than
+    /// the last thing done to it.
+    pub already: Vec<(PathBuf, booth_cli::export::pdb::Track)>,
+    /// The tracks whose rows are being carried, so the drive's record can keep
+    /// what it already knew about them.
+    pub carried: Vec<u32>,
+    /// Every file the exporter has to prepare: the tracks being written, then
+    /// the stems going on with them.
+    pub files: Vec<PathBuf>,
+}
+
+/// Work out what the next write to `drive` carries and what it prepares.
+///
+/// A drive is written once and then added to. Preparing a track means decoding
+/// it, so the second write is given only what changed and the rest of the
+/// database is carried through from what the last write recorded.
+///
+/// A stem carries on the same terms as its parent and never on its own. It
+/// takes the parent's grid, cues, key and phrases rather than being listened to
+/// alone, so a parent whose prep changed is a stem whose analysis is now wrong
+/// — and carrying the stem's row while rewriting the parent's would put a row
+/// on the drive describing a grid that is no longer there.
+///
+/// An image is made from nothing every time: there is no previous volume to add
+/// to, so it carries nothing and prepares everything.
+pub fn carry(library: &Library, drive: &Drive, plan: &Plan) -> Carry {
+    let wanted = wanted(library, drive);
+    let rewriting = plan.writes();
+
+    let mut out = Carry::default();
+    if !drive.is_image {
+        for written in &drive.written {
+            if !wanted.contains(&written.id) || rewriting.contains(&written.id) {
+                continue;
+            }
+            // A row that was never recorded — an older collection, or a write
+            // that failed — cannot be carried, so its file is prepared again.
+            let (Some(track), Some(row)) = (library.get(written.id), written.row.clone()) else {
+                continue;
+            };
+            out.already.push((track.path.clone(), row));
+            out.carried.push(track.id);
+            if !drive.with_stems {
+                continue;
+            }
+            for (path, row) in &written.stems {
+                if track.stems.has(path) {
+                    out.already.push((path.clone(), row.clone()));
+                }
+            }
+        }
+    }
+
+    out.files = wanted
+        .iter()
+        .filter(|id| !out.carried.contains(id))
+        .filter_map(|id| library.get(*id))
+        .map(|track| track.path.clone())
+        .chain(
+            plan.stems
+                .iter()
+                .filter(|(_, path)| !out.already.iter().any(|(carried, _)| carried == path))
+                .map(|(_, path)| path.clone()),
+        )
+        .collect();
+    out
+}
+
 /// A short account of what is different about a track's prep.
 ///
 /// Deliberately vague about *which* cue moved: the sheet's job is to say that
@@ -434,7 +508,7 @@ mod tests {
                 .map(|id| Written {
                     id: *id,
                     prep: fingerprint(library.get(*id).unwrap()),
-                    row: None,
+                    ..Written::default()
                 })
                 .collect(),
             ..Drive::default()
@@ -622,6 +696,161 @@ mod tests {
         // its own on the drive. A drive carrying them needs four times the room
         // for analysis, not the same amount.
         assert_eq!(carrying, bare * 4, "a stem was not given room to be analysed");
+    }
+
+    /// Give a track a whole kit, named the way the renderer names one.
+    fn give_stems(library: &mut Library, id: u32) {
+        let track = library.get_mut(id).unwrap();
+        let name = track.path.file_stem().unwrap().to_string_lossy().into_owned();
+        track.stems.vocals = Some(PathBuf::from(format!("/stems/{name}-vocals.wav")));
+        track.stems.drums = Some(PathBuf::from(format!("/stems/{name}-drums.wav")));
+        track.stems.melody = Some(PathBuf::from(format!("/stems/{name}-melody.wav")));
+    }
+
+    /// A drive that has been written, with a row recorded for each track on it
+    /// and — when it carries them — one for each stem that went on with it.
+    fn written_drive(library: &Library, ids: &[u32], with_stems: bool) -> Drive {
+        let mut next = 0u32;
+        let mut row = || {
+            next += 1;
+            booth_cli::export::pdb::Track { id: next, ..Default::default() }
+        };
+        let mut written = Vec::new();
+        for id in ids {
+            let track = library.get(*id).unwrap();
+            let parent = row();
+            let mut stems = Vec::new();
+            if with_stems {
+                for (_, path) in track.stems.each() {
+                    let Some(path) = path else { continue };
+                    stems.push((path.clone(), row()));
+                }
+            }
+            written.push(Written { id: *id, prep: fingerprint(track), row: Some(parent), stems });
+        }
+        Drive { with_stems, written, ..drive_for(library, &[]) }
+    }
+
+    #[test]
+    fn a_carried_track_brings_its_stem_rows_with_it() {
+        let (mut library, ids) = library_with(2);
+        for id in &ids {
+            give_stems(&mut library, *id);
+        }
+        // The first track is on the drive with its kit; the second is new.
+        let drive = written_drive(&library, &ids[..1], true);
+        let carry = carry(&library, &drive, &plan(&library, &drive));
+
+        assert_eq!(carry.carried, vec![ids[0]]);
+        assert_eq!(carry.already.len(), 4, "the track and its three stems: {:?}", carry.already);
+
+        // Not one of the four is decoded a second time.
+        let first = library.get(ids[0]).unwrap();
+        assert!(!carry.files.contains(&first.path), "the track was prepared again");
+        for (part, path) in first.stems.each() {
+            assert!(!carry.files.contains(path.unwrap()), "{part} was prepared again");
+        }
+        assert_eq!(carry.files.len(), 4, "only the new track and its kit: {:?}", carry.files);
+    }
+
+    #[test]
+    fn a_track_written_again_takes_its_stems_with_it() {
+        let (mut library, ids) = library_with(1);
+        give_stems(&mut library, ids[0]);
+        let drive = written_drive(&library, &ids, true);
+
+        // A cue moves. A stem takes its cues from its parent, so a parent whose
+        // prep changed is three stems whose analysis is now wrong — carrying
+        // their rows would leave the drive describing a grid that is not there.
+        library.get_mut(ids[0]).unwrap().cues.push(CueMark {
+            letter: 1,
+            time_ms: 32_000,
+            label: "drop".into(),
+            color: [0, 0, 0],
+        });
+
+        let plan = plan(&library, &drive);
+        assert_eq!(plan.update.len(), 1, "the track should read as changed");
+        let carry = carry(&library, &drive, &plan);
+        assert!(carry.already.is_empty(), "nothing can be carried: {:?}", carry.already);
+        assert_eq!(carry.files.len(), 4, "the track and all three stems go again");
+    }
+
+    #[test]
+    fn a_stem_the_kit_no_longer_names_is_not_carried() {
+        let (mut library, ids) = library_with(1);
+        give_stems(&mut library, ids[0]);
+        let drive = written_drive(&library, &ids, true);
+
+        // One part re-rendered to another format: the same sound, a different
+        // file, and a row that now describes something not on the drive.
+        let again = PathBuf::from("/stems/track0-vocals.mp3");
+        library.get_mut(ids[0]).unwrap().stems.vocals = Some(again.clone());
+
+        let carry = carry(&library, &drive, &plan(&library, &drive));
+        assert_eq!(
+            carry.already.len(),
+            3,
+            "the track and the two parts still named: {:?}",
+            carry.already
+        );
+        assert_eq!(carry.files, vec![again], "only the re-rendered part is made again");
+    }
+
+    #[test]
+    fn a_drive_that_no_longer_carries_stems_carries_none_of_their_rows() {
+        let (mut library, ids) = library_with(1);
+        give_stems(&mut library, ids[0]);
+        let drive = Drive { with_stems: false, ..written_drive(&library, &ids, true) };
+
+        let carry = carry(&library, &drive, &plan(&library, &drive));
+        assert_eq!(carry.already.len(), 1, "only the track's own row: {:?}", carry.already);
+        assert!(carry.files.is_empty(), "{:?}", carry.files);
+    }
+
+    #[test]
+    fn an_image_carries_nothing_and_prepares_everything() {
+        let (mut library, ids) = library_with(1);
+        give_stems(&mut library, ids[0]);
+        let drive = Drive { is_image: true, ..written_drive(&library, &ids, true) };
+
+        // An image is made from nothing every time: there is no previous volume
+        // to add to, so a row recorded against one cannot be carried into it.
+        let carry = carry(&library, &drive, &plan(&library, &drive));
+        assert!(carry.already.is_empty() && carry.carried.is_empty());
+        assert_eq!(carry.files.len(), 4);
+    }
+
+    #[test]
+    fn a_collection_written_before_stem_rows_were_kept_makes_them_again() {
+        let (mut library, ids) = library_with(1);
+        give_stems(&mut library, ids[0]);
+        let mut drive = written_drive(&library, &ids, true);
+        // What an older build recorded: the track's row and nothing about its
+        // stems. The track still carries; the stems are prepared afresh.
+        drive.written[0].stems.clear();
+
+        let kept = carry(&library, &drive, &plan(&library, &drive));
+        assert_eq!(kept.already.len(), 1, "{:?}", kept.already);
+        assert_eq!(kept.files.len(), 3, "its stems are made again: {:?}", kept.files);
+
+        // And a stem row cannot be carried without its parent's, because the
+        // parent is then what is being written again.
+        drive.written[0].row = None;
+        let rowless = carry(&library, &drive, &plan(&library, &drive));
+        assert!(rowless.already.is_empty());
+        assert_eq!(rowless.files.len(), 4);
+    }
+
+    #[test]
+    fn a_record_from_an_older_build_reads_without_its_stems() {
+        // The collection on disk is JSON, and one written before stems were
+        // recorded has no such field. It has to load as a track with none
+        // rather than fail the whole collection.
+        let older = r#"{"id": 7, "prep": 12345, "row": null}"#;
+        let written: Written = serde_json::from_str(older).expect("an older record should load");
+        assert_eq!(written.id, 7);
+        assert!(written.stems.is_empty());
     }
 
     #[test]

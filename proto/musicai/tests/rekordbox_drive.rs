@@ -945,3 +945,78 @@ fn a_stem_follows_its_track_in_the_playlist() {
         "the stems did not follow their track"
     );
 }
+
+#[test]
+fn a_second_sync_carries_the_stem_rows_rather_than_making_them_again() {
+    // A drive is written once and then added to. A stem is three minutes of
+    // decoding and analysis like any other file, and there are three of them
+    // per record, so a second write that re-prepared every stem on the drive
+    // would cost the whole drive to add one track to it.
+    let scratch = Scratch::new("stems-carried");
+    let drive = scratch.path("USB");
+    let (track, stems) = track_and_its_stems(&scratch);
+
+    let mut first = vec![track.clone()];
+    first.extend(stems.iter().cloned());
+    let companions: Vec<(PathBuf, PathBuf)> =
+        stems.iter().map(|stem| (stem.clone(), track.clone())).collect();
+    let spec = |tracks: Vec<PathBuf>| {
+        vec![PlaylistSpec { name: "Sat 14/9".to_string(), folder: String::new(), tracks }]
+    };
+
+    let args = ExportArgs {
+        drive: Some(drive.clone()),
+        companions: companions.clone(),
+        playlists: spec(first.clone()),
+        ..args_for(first.clone())
+    };
+    let made = commands::export(&args, &Collected::new()).expect("the first write failed");
+    assert_eq!(made.len(), 4, "the first write should put the track and its kit on");
+
+    // The second week: one track added, and nothing else given to the exporter
+    // — the four rows from the first write are handed back instead.
+    let other = write_song(&scratch, "Post Rave Wave.flac");
+    let mut order = first.clone();
+    order.push(other.clone());
+    let args = ExportArgs {
+        drive: Some(drive.clone()),
+        companions,
+        playlists: spec(order.clone()),
+        already: made,
+        ..args_for(vec![other.clone()])
+    };
+    let reporter = Collected::new();
+    commands::export(&args, &reporter).expect("the second write failed");
+
+    // Nothing about the stems was decoded again: a prepared file gets a line
+    // naming what it became, and only the new track has one.
+    let prepared: Vec<String> =
+        reporter.lines().into_iter().filter(|line| line.contains(" -> ")).collect();
+    assert_eq!(prepared.len(), 1, "something was prepared twice: {prepared:?}");
+    assert!(prepared[0].contains("Post Rave Wave"), "{}", prepared[0]);
+
+    // And the drive still describes everything on it, in the order it plays.
+    let by_id: std::collections::HashMap<u32, String> =
+        tracks_on(&drive).into_iter().map(|(id, path, _)| (id, path)).collect();
+    assert_eq!(by_id.len(), 5, "the drive lost rows it was holding: {by_id:?}");
+    let played: Vec<&str> = playlist_order(&drive)
+        .iter()
+        .map(|id| by_id.get(id).expect("a playlist entry with no track row").as_str())
+        .collect();
+    assert_eq!(
+        played,
+        vec![
+            "/Contents/Bruce/Ohm Hourglass.flac",
+            "/Contents/Bruce/Ohm Hourglass-vocals.wav",
+            "/Contents/Bruce/Ohm Hourglass-drums.wav",
+            "/Contents/Bruce/Ohm Hourglass-melody.wav",
+            "/Contents/Unknown Artist/Post Rave Wave.flac",
+        ],
+        "the carried stems did not keep their place in the playlist"
+    );
+
+    // The audio the first write put on is still where its rows say it is.
+    for path in by_id.values() {
+        assert!(drive.join(path.trim_start_matches('/')).exists(), "{path} is not on the drive");
+    }
+}
