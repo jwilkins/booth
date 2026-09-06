@@ -106,7 +106,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// `20260904 21:14:03 info text`, the shape the file and the window both
+    /// `2026-09-04T21:14:03Z info text`, the shape the file and the window both
     /// use.
     pub fn line(&self) -> String {
         format!("{} {} {}", self.stamp(), self.level.tag(), self.text)
@@ -358,11 +358,11 @@ mod tests {
         // time or with what somebody says happened at half past nine.
         let entry =
             Entry { at: 1_788_556_443, at_ms: 12_345, level: Level::Info, text: "started".into() };
-        assert_eq!(entry.line(), "20260904 21:14:03 info started");
+        assert_eq!(entry.line(), "2026-09-04T21:14:03Z info started");
         assert_eq!(entry.elapsed(), "     12.345", "and the run's own clock is still there");
 
         let entry = Entry { at: 1_788_556_443, at_ms: 7, level: Level::Error, text: "no".into() };
-        assert_eq!(entry.line(), "20260904 21:14:03 err  no");
+        assert_eq!(entry.line(), "2026-09-04T21:14:03Z err  no");
     }
 
     #[test]

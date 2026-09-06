@@ -180,12 +180,12 @@ impl Backup {
     /// The line the log shows.
     pub fn summary(&self) -> String {
         let mut parts = vec![format!(
-            "{} of the drive's own files ({})",
-            self.carried,
+            "{} of the drive's own ({})",
+            crate::library::plural(self.carried, "file"),
             crate::sync::bytes(self.bytes)
         )];
         if self.linked > 0 {
-            parts.push(format!("{} tracks linked", self.linked));
+            parts.push(format!("{} linked", crate::library::plural(self.linked, "track")));
         }
         if self.copied > 0 {
             parts.push(format!(
@@ -330,11 +330,17 @@ pub fn keep(
     foreign: OnForeign,
     library: &Path,
 ) -> Result<Backup> {
+    let began = std::time::Instant::now();
     let at = crate::clock::now();
     let dir = into.join(safe(drive)).join(crate::clock::folder(at));
     std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
     crate::info!("copying {drive} ({}) into {}", root.display(), dir.display());
     crate::debug!("{drive} is in state {state}, and music elsewhere is {foreign:?}");
+    crate::debug!(
+        "the library has {} to link against, and its own folder is {}",
+        crate::library::plural(known.len(), "track"),
+        library.display()
+    );
 
     let mut backup = Backup {
         drive: drive.to_string(),
@@ -347,7 +353,9 @@ pub fn keep(
     // again, and it is small enough that copying it is not worth being clever
     // about.
     if let Some(pioneer) = pioneer(root) {
+        let carrying = std::time::Instant::now();
         let name = pioneer.file_name().unwrap_or_default();
+        crate::debug!("carrying the drive's own files from {}", pioneer.display());
         for file in walk(&pioneer) {
             let Ok(relative) = file.strip_prefix(&pioneer) else { continue };
             let to = dir.join(name).join(relative);
@@ -356,21 +364,37 @@ pub fn keep(
             }
             std::fs::copy(&file, &to)
                 .with_context(|| format!("copying {} off the drive", file.display()))?;
+            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            // Named one at a time: this is the part of a drive that cannot be
+            // made again, so which of them arrived is worth being able to
+            // check afterwards.
+            crate::debug!("  carried {} ({})", relative.display(), crate::sync::bytes(size));
             backup.carried += 1;
-            backup.bytes += file.metadata().map(|m| m.len()).unwrap_or(0);
+            backup.bytes += size;
         }
         crate::debug!(
-            "carried {} of the drive's own files ({})",
-            backup.carried,
-            crate::sync::bytes(backup.bytes)
+            "carried {} of the drive's own ({}) in {:.1}s",
+            crate::library::plural(backup.carried, "file"),
+            crate::sync::bytes(backup.bytes),
+            carrying.elapsed().as_secs_f64()
         );
+    } else {
+        crate::debug!("no PIONEER folder on {drive}: nothing of the drive's own to carry");
     }
 
     // The audio. Indexed both ways the library can be asked about a file, so
     // each lookup is a hash of the drive's file at worst rather than a walk of
     // the library.
+    let indexing = std::time::Instant::now();
     let (by_name, by_sound) = index(known);
+    crate::debug!(
+        "indexed the library in {:.1}s: {} by name, {} by sound",
+        indexing.elapsed().as_secs_f64(),
+        by_name.len(),
+        by_sound.len()
+    );
 
+    let audio = std::time::Instant::now();
     let contents = root.join(CONTENTS);
     for file in walk(&contents) {
         let Ok(relative) = file.strip_prefix(&contents) else { continue };
@@ -384,9 +408,23 @@ pub fn keep(
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            if link(&track.path, &to).is_ok() {
-                backup.linked += 1;
-                continue;
+            match link(&track.path, &to) {
+                Ok(()) => {
+                    // A link rather than a copy is why a backup of a 60 GB
+                    // drive takes seconds and no space. Which file it pointed
+                    // at is the thing to check when one later turns out wrong.
+                    crate::debug!("  linked {} to {}", relative.display(), track.path.display());
+                    backup.linked += 1;
+                    continue;
+                }
+                // Not a failure: the library and the backup can be on
+                // different filesystems, where nothing can link across. The
+                // file is treated as one the library has not got, and copied.
+                Err(e) => crate::debug!(
+                    "  could not link {} to {}: {e} — copying it instead",
+                    relative.display(),
+                    track.path.display()
+                ),
             }
         }
 
@@ -401,7 +439,11 @@ pub fn keep(
                 backup.missing.push(relative.display().to_string());
             }
             OnForeign::Keep => {
-                crate::debug!("not in the library, and kept in the backup: {}", relative.display());
+                crate::debug!(
+                    "not in the library, and kept in the backup: {} ({})",
+                    relative.display(),
+                    crate::sync::bytes(size)
+                );
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -416,7 +458,12 @@ pub fn keep(
                 // the library uses. An existing file is left alone: this is
                 // somebody's music folder, not scratch space.
                 let at = library.join(relative);
-                crate::debug!("not in the library, and copied into it: {}", relative.display());
+                crate::debug!(
+                    "not in the library, and copied into it: {} ({}) -> {}",
+                    relative.display(),
+                    crate::sync::bytes(size),
+                    at.display()
+                );
                 if let Some(parent) = at.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -435,8 +482,20 @@ pub fn keep(
         }
     }
 
-    std::fs::write(dir.join("backup.json"), serde_json::to_vec_pretty(&backup)?)?;
-    crate::info!("{drive}: {}", backup.summary());
+    crate::debug!(
+        "walked the drive's audio in {:.1}s: {} linked, {} copied ({}), {} noted as absent",
+        audio.elapsed().as_secs_f64(),
+        crate::library::plural(backup.linked, "track"),
+        backup.copied,
+        crate::sync::bytes(backup.copied_bytes),
+        backup.absent
+    );
+
+    let manifest = dir.join("backup.json");
+    std::fs::write(&manifest, serde_json::to_vec_pretty(&backup)?)
+        .with_context(|| format!("writing {}", manifest.display()))?;
+    crate::debug!("wrote {}", manifest.display());
+    crate::info!("{drive}: {} in {:.1}s", backup.summary(), began.elapsed().as_secs_f64());
     Ok(backup)
 }
 
@@ -919,9 +978,15 @@ mod tests {
         let backup =
             Backup { carried: 12, bytes: 3_000_000, linked: 40, absent: 2, ..Backup::default() };
         let said = backup.summary();
-        assert!(said.contains("12 of the drive's own files"), "{said}");
+        assert!(said.contains("12 files of the drive's own"), "{said}");
         assert!(said.contains("40 tracks linked"), "{said}");
         assert!(said.contains("2 not in the library"), "{said}");
+
+        // And one of a thing is one of it, because a line reading "1 tracks"
+        // is a line that looks unread.
+        let one = Backup { carried: 1, linked: 1, ..Backup::default() };
+        assert!(one.summary().contains("1 file of the drive's own"), "{}", one.summary());
+        assert!(one.summary().contains("1 track linked"), "{}", one.summary());
     }
 
     #[test]

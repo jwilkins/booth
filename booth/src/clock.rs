@@ -1,7 +1,7 @@
 //! Turning a moment into text.
 //!
 //! Two callers want the same arithmetic in different shapes: the log wants
-//! `20260904 21:14:03` on every line, and a backup wants a folder name that
+//! `2026-09-04T21:14:03Z` on every line, and a backup wants a folder name that
 //! sorts and reads. Neither is worth a calendar library — this is one function
 //! and a pair of formats — but two copies of a civil-calendar conversion would
 //! be two chances to get a leap year wrong.
@@ -59,11 +59,17 @@ pub fn parts(seconds: u64) -> Parts {
     }
 }
 
-/// `20260904 21:14:03` — what every log line starts with.
+/// `2026-09-04T21:14:03Z` — what every log line starts with.
+///
+/// ISO 8601, with the `Z` that says which zone it is in. A log gets read
+/// alongside things that keep their own clocks — a file's modification time,
+/// somebody's account of when their drive stopped working — and a stamp
+/// anything can parse is what lets those be lined up without a person doing
+/// the conversion in their head.
 pub fn stamp(seconds: u64) -> String {
     let at = parts(seconds);
     format!(
-        "{:04}{:02}{:02} {:02}:{:02}:{:02}",
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         at.year, at.month, at.day, at.hour, at.minute, at.second
     )
 }
@@ -84,22 +90,22 @@ mod tests {
 
     #[test]
     fn the_epoch_is_where_it_should_be() {
-        assert_eq!(stamp(0), "19700101 00:00:00");
+        assert_eq!(stamp(0), "1970-01-01T00:00:00Z");
         assert_eq!(folder(0), "1970-01-01 000000");
     }
 
     #[test]
     fn a_known_moment_comes_out_right() {
         // 2026-09-04T21:14:03Z, checked against `date -u -d @1788556443`.
-        assert_eq!(stamp(1_788_556_443), "20260904 21:14:03");
+        assert_eq!(stamp(1_788_556_443), "2026-09-04T21:14:03Z");
     }
 
     #[test]
     fn a_leap_day_is_a_day() {
         // 2024-02-29T00:00:00Z.
-        assert_eq!(stamp(1_709_164_800), "20240229 00:00:00");
+        assert_eq!(stamp(1_709_164_800), "2024-02-29T00:00:00Z");
         // And the day after it is the first of March.
-        assert_eq!(stamp(1_709_164_800 + 86_400), "20240301 00:00:00");
+        assert_eq!(stamp(1_709_164_800 + 86_400), "2024-03-01T00:00:00Z");
     }
 
     #[test]
@@ -107,13 +113,13 @@ mod tests {
         // 2100-02-28T00:00:00Z, then the next day, which is March in a
         // calendar that knows 2100 is not a leap year.
         let feb_28 = 4_107_456_000;
-        assert_eq!(stamp(feb_28), "21000228 00:00:00");
-        assert_eq!(stamp(feb_28 + 86_400), "21000301 00:00:00");
+        assert_eq!(stamp(feb_28), "2100-02-28T00:00:00Z");
+        assert_eq!(stamp(feb_28 + 86_400), "2100-03-01T00:00:00Z");
     }
 
     #[test]
     fn the_time_of_day_is_carried_through() {
-        assert_eq!(stamp(86_399), "19700101 23:59:59");
+        assert_eq!(stamp(86_399), "1970-01-01T23:59:59Z");
         assert_eq!(parts(3_723).hour, 1);
         assert_eq!(parts(3_723).minute, 2);
         assert_eq!(parts(3_723).second, 3);

@@ -2447,7 +2447,12 @@ impl App {
                 audio_hash: track.audio_hash.clone(),
             })
             .collect();
-        crate::info!("keeping a copy of {name}");
+        crate::info!("keeping a copy of {name} from {}", root.display());
+        crate::debug!(
+            "in state {state}, {} files on it, into {}",
+            listing.len(),
+            self.config.backups_path.display()
+        );
         // Noted before the job rather than after it, so a copy that fails or is
         // stopped still counts as this drive having been looked at: the state
         // is what was decided on, and deciding it again next tick would start

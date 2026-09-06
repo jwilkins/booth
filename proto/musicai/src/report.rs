@@ -22,6 +22,15 @@ pub enum Event {
     Heading(String),
     /// One line of ordinary output, usually about one file.
     Line(String),
+    /// A step inside the work, for somebody trying to find out what went
+    /// wrong: which file was copied where, how long it took, what was read back
+    /// to check it.
+    ///
+    /// Apart from `Line` because it is not a result — nobody reads it when the
+    /// run goes well — and a drive write emits several of these per file. The
+    /// terminal keeps them for `--verbose`, and a window with a log puts them
+    /// at its most detailed level.
+    Detail(String),
     /// A closing note about the batch as a whole. Kept apart from `Line`
     /// because it is commentary rather than a result, and the terminal sends it
     /// to stderr so that redirecting stdout still captures only the results.
@@ -83,13 +92,29 @@ impl<'a> Progress<'a> {
 
 /// The terminal: lines to stdout, failures to stderr, progress ignored because
 /// the lines themselves already show it arriving.
-pub struct Stdio;
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Stdio {
+    /// Whether to print the step-by-step detail. Off by default: a drive write
+    /// emits several lines per file, and the run that wants them is the one
+    /// that already went wrong.
+    pub verbose: bool,
+}
+
+impl Stdio {
+    pub fn new(verbose: bool) -> Self {
+        Self { verbose }
+    }
+}
 
 impl Reporter for Stdio {
     fn event(&self, event: Event) {
         match event {
             Event::Heading(text) | Event::Line(text) => println!("{text}"),
             Event::Summary(text) => eprintln!("{text}"),
+            // Commentary, like the summary and the stage headers, so
+            // redirecting stdout still captures only the results.
+            Event::Detail(text) if self.verbose => eprintln!("  {text}"),
+            Event::Detail(_) => {}
             // A stage header is commentary about the run, not a result, so it
             // goes to stderr with the rest of the commentary.
             Event::Stage { name, index, of } => eprintln!("== {index}/{of} {name} =="),
@@ -134,6 +159,17 @@ impl Collected {
             .collect()
     }
 
+    /// Just the step-by-step detail, in order.
+    pub fn details(&self) -> Vec<String> {
+        self.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Detail(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Ask the batch to stop.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
@@ -148,6 +184,30 @@ impl Reporter for Collected {
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
+}
+
+/// "1 track", "2 tracks", "3 copies".
+///
+/// Output that says "1 tracks" reads like nobody checked, and every front end
+/// counts the same things, so this lives with the reporting rather than in any
+/// one of them.
+pub fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        return format!("1 {noun}");
+    }
+    // A noun ending in a consonant and a y takes -ies, which is the difference
+    // between "3 copies" and "3 copys". Everything else here takes -s.
+    let vowel = |c: char| "aeiou".contains(c);
+    match noun.strip_suffix('y').filter(|stem| stem.chars().next_back().is_some_and(|c| !vowel(c)))
+    {
+        Some(stem) => format!("{count} {stem}ies"),
+        None => format!("{count} {noun}s"),
+    }
+}
+
+/// Say what a step just did. See [`Event::Detail`] for who reads these.
+pub(crate) fn detail(reporter: &dyn Reporter, text: impl Into<String>) {
+    reporter.event(Event::Detail(text.into()));
 }
 
 /// Report a file that failed. A batch keeps going after one bad file, so this
@@ -169,6 +229,28 @@ mod tests {
 
         assert_eq!(reporter.lines(), vec!["first", "second"]);
         assert_eq!(reporter.events().len(), 3);
+    }
+
+    #[test]
+    fn counting_things_reads_like_somebody_checked() {
+        assert_eq!(plural(1, "track"), "1 track");
+        assert_eq!(plural(2, "track"), "2 tracks");
+        assert_eq!(plural(3, "copy"), "3 copies", "not \"copys\"");
+        assert_eq!(plural(1, "copy"), "1 copy");
+        // A vowel before the y keeps the plain -s: days, not daies.
+        assert_eq!(plural(2, "day"), "2 days");
+    }
+
+    #[test]
+    fn detail_is_kept_apart_from_the_results() {
+        // A caller redirecting the results somewhere must not find the account
+        // of how they were arrived at mixed in with them.
+        let reporter = Collected::new();
+        reporter.event(Event::Line("one.flac -> /Contents/Bruce/one.flac".into()));
+        reporter.event(Event::Detail("one.flac: copied 4096 bytes in 2 ms".into()));
+
+        assert_eq!(reporter.lines(), vec!["one.flac -> /Contents/Bruce/one.flac"]);
+        assert_eq!(reporter.details(), vec!["one.flac: copied 4096 bytes in 2 ms"]);
     }
 
     #[test]

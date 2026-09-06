@@ -37,6 +37,15 @@ pub struct Cli {
     /// Worker threads. Defaults to one per core.
     #[arg(long, short = 'j', global = true, value_name = "N")]
     pub jobs: Option<usize>,
+
+    /// Say what each step is doing, on stderr.
+    ///
+    /// Which file went where, how long it took, and what was read back to
+    /// check it. A drive write is several of these lines per file, so it is
+    /// off unless asked for — and the run that wants them is the one that has
+    /// already gone wrong.
+    #[arg(long, short = 'v', global = true)]
+    pub verbose: bool,
 }
 
 #[derive(Subcommand, Debug)]

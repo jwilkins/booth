@@ -514,12 +514,13 @@ own — a real one, so it can go on a second screen and stay open beside the
 browser without taking anything from the collection. Filter by level, follow the
 tail or park it, clear, or copy everything shown.
 
-Every line starts with the date and time it happened — `20260904 21:14:03` —
-in UTC. A log is read next to things that have clocks of their own: a file's
-modification time, yesterday's log, somebody saying their drive stopped working
-about half nine. "412.008 seconds into some run" cannot be lined up with any of
-those. The window keeps the run's own elapsed clock beside it for the times you
-want to know how long something took.
+Every line starts with the date and time it happened, as ISO 8601 in UTC —
+`2026-09-04T21:14:03Z`. A log is read next to things that have clocks of their
+own: a file's modification time, yesterday's log, somebody saying their drive
+stopped working about half nine. "412.008 seconds into some run" cannot be
+lined up with any of those, and a stamp anything can parse means nobody has to
+do the conversion in their head. The window keeps the run's own elapsed clock
+beside it for the times you want to know how long something took.
 
 Everything also goes to `booth.log` in the data directory, and the previous
 run's is kept beside it as `booth.log.1` — the run worth reading is usually the
@@ -528,6 +529,29 @@ The default is everything, and everything means everything: which file was
 imported and what its path was taken to mean, what each drive state came out
 as and which file changed it, every track a check disagreed with, each session
 read off a drive, and the machine and version at the top of every run.
+
+Two things get written down in more detail than the rest, because they are the
+two that take minutes and are hard to see into afterwards.
+
+**A drive write** says where it is going and what it opened, and then, for each
+file: what it decoded and how long that took, where on the drive it is going
+and how much of the length a player will follow that uses, what its grid and
+cues came out as — or, for a stem, whose grid it took — how many bytes were
+copied and how long the copy took, and the analysis files written and read
+straight back. Then the database: built, written, read back off the drive and
+walked, in both formats, each timed. And a closing line with the whole run's
+time and what ended up on the drive.
+
+**A copy of a drive** says what the library had to match against, each of the
+drive's own files as it is carried, each audio file as it is linked to the
+library's copy and which file that was — or why it could not be linked, which
+is usually a backup on another filesystem — and each one copied or noted
+because the library has not got it. Then the time each phase took.
+
+That is a few lines per file, so it sits at the log's most detailed level and
+`BOOTH_LOG=info` turns it off without losing the results. In the command-line
+tool the same detail is `-v`, on stderr, so redirecting the results still
+captures only results.
 
 ## Where things are kept
 

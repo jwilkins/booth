@@ -21,7 +21,7 @@ fn run() -> Result<()> {
             .context("configuring the thread pool")?;
     }
 
-    let reporter = booth_cli::report::Stdio;
+    let reporter = booth_cli::report::Stdio::new(cli.verbose);
     match &cli.command {
         Some(Command::Analyze(args)) => commands::analyze(args, &reporter),
         Some(Command::Anlz(args)) => commands::anlz(args, &reporter),
