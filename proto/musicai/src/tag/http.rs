@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn user_agent_names_the_app_and_a_contact() {
         let agent = user_agent();
-        assert!(agent.starts_with("booth-core/"), "{agent}");
+        assert!(agent.starts_with("booth-cli/"), "{agent}");
         // MusicBrainz requires a contact URL or address in parentheses.
         assert!(agent.contains("( https://"), "{agent}");
     }

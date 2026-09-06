@@ -11,8 +11,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use booth_core::cli::ExportArgs;
-use booth_core::stems::Backend;
+use booth_cli::cli::ExportArgs;
+use booth_cli::stems::Backend;
 use eframe::egui::{self, Color32, RichText, Ui};
 
 use crate::config::{Config, OnExternal};
@@ -383,6 +383,12 @@ enum Pending {
     AnswerNaming {
         id: u32,
         write: bool,
+    },
+    /// Pick which of a track's two names is right: the tags, or the file's own
+    /// name. Recorded rather than acted on — the sheet's button applies them.
+    ChooseName {
+        id: u32,
+        from_path: bool,
     },
     /// Move the deck to a position in a track, if that track is on it.
     SeekDeck {
@@ -1106,7 +1112,7 @@ impl App {
     // -- rekordbox -------------------------------------------------------
 
     fn import_rekordbox(&mut self, path: PathBuf) {
-        let key = match booth_core::rekordbox::resolve(self.config.rekordbox_key()) {
+        let key = match booth_cli::rekordbox::resolve(self.config.rekordbox_key()) {
             Ok(key) => key,
             Err(e) => {
                 crate::warn!("{e:#}");
@@ -1130,10 +1136,7 @@ impl App {
     /// names on an untitled file, cues where there are none, the play count and
     /// the rating and the My Tags, which this program has no other way to know.
     /// Files rekordbox knows about that are not here yet are added.
-    fn merge_rekordbox(
-        &mut self,
-        collection: &booth_core::rekordbox::master::Collection,
-    ) -> String {
+    fn merge_rekordbox(&mut self, collection: &booth_cli::rekordbox::master::Collection) -> String {
         use std::collections::HashMap;
 
         let mut by_path: HashMap<PathBuf, u32> =
@@ -1189,7 +1192,7 @@ impl App {
     /// Bring the playlists across, keeping their folders.
     fn merge_rekordbox_playlists(
         &mut self,
-        collection: &booth_core::rekordbox::master::Collection,
+        collection: &booth_cli::rekordbox::master::Collection,
         ours: &std::collections::HashMap<String, u32>,
     ) -> usize {
         let mut brought = 0;
@@ -1592,12 +1595,12 @@ impl App {
     /// companion is a turn of the encoder from the record it came from.
     /// Companions go in only when the drive carries them, and only the parts
     /// that were actually rendered.
-    fn drive_playlists(&self, drive: &Drive) -> Vec<booth_core::cli::PlaylistSpec> {
+    fn drive_playlists(&self, drive: &Drive) -> Vec<booth_cli::cli::PlaylistSpec> {
         drive
             .playlist_names()
             .iter()
             .filter_map(|name| self.library.playlists.iter().find(|p| p.name == *name))
-            .map(|playlist| booth_core::cli::PlaylistSpec {
+            .map(|playlist| booth_cli::cli::PlaylistSpec {
                 name: playlist.name.clone(),
                 folder: playlist.folder.clone(),
                 tracks: playlist
@@ -1628,7 +1631,7 @@ impl App {
         // volume to add to — so it is written in full. A drive is added to, so
         // only what changed is prepared and the rest of its database is
         // carried through from what the last write recorded.
-        let already: Vec<(PathBuf, booth_core::export::pdb::Track)> = match drive.is_image {
+        let already: Vec<(PathBuf, booth_cli::export::pdb::Track)> = match drive.is_image {
             true => Vec::new(),
             false => drive
                 .written
@@ -2068,6 +2071,10 @@ struct Checked {
     /// Whether it read every byte, which is what the wording turns on: a quick
     /// check finding nothing means less than a thorough one finding nothing.
     deep: bool,
+    /// Which answer has been picked for each track whose file name disagrees
+    /// with its names. Absent means the tags, which is the default: a choice
+    /// nobody has made is not a reason to change anything.
+    naming: std::collections::HashMap<u32, bool>,
 }
 
 /// One group of copies as the sheet is showing it this frame.
@@ -2445,7 +2452,7 @@ impl App {
             known,
             foreign: self.config.on_foreign,
             library: self.config.library_path.clone(),
-            key: booth_core::rekordbox::onelibrary_key(self.config.onelibrary_key()),
+            key: booth_cli::rekordbox::onelibrary_key(self.config.onelibrary_key()),
         });
     }
 
@@ -3883,7 +3890,7 @@ impl App {
             // and it is spelled out rather than implied, because it changes
             // somebody's files.
             let taggable =
-                booth_core::tag::Metadata::default().get(booth_core::tag::Field::Title).is_none()
+                booth_cli::tag::Metadata::default().get(booth_cli::tag::Field::Title).is_none()
                     && matches!(track.format.as_str(), "flac" | "mp3");
             if self.config.write_tags != crate::config::WriteTags::Never {
                 ui.label(
@@ -4209,7 +4216,7 @@ impl App {
                 Pending::CancelEdit => self.editing = None,
                 Pending::Resort => relist = true,
                 Pending::WriteTags(id) => {
-                    self.write_tags(id, booth_core::tag::OnExisting::Overwrite)
+                    self.write_tags(id, booth_cli::tag::OnExisting::Overwrite)
                 }
                 Pending::PlaceCue { id, letter, time_ms } => {
                     self.place_cue(id, letter, time_ms);
@@ -4283,6 +4290,11 @@ impl App {
                             ),
                         }
                         touched = true;
+                    }
+                }
+                Pending::ChooseName { id, from_path } => {
+                    if let Some(checked) = &mut self.checked {
+                        checked.naming.insert(id, from_path);
                     }
                 }
                 Pending::TogglePlayback(id) => self.toggle_playback(id),
@@ -4576,15 +4588,15 @@ impl App {
     /// now", so it overwrites; the write-back that rides behind a fingerprint
     /// lookup fills in blanks and leaves anything already there alone, because
     /// nobody asked it to have an opinion about a value they typed.
-    fn write_tags(&mut self, id: u32, on_existing: booth_core::tag::OnExisting) {
+    fn write_tags(&mut self, id: u32, on_existing: booth_cli::tag::OnExisting) {
         let Some(track) = self.library.get(id) else { return };
         // Asked of the writer rather than answered again here. This was a
         // second list of formats, and it had already fallen behind the first:
         // it still said FLAC and MP3 after the writer learned MP4, so an
         // identified `.m4a` was told it had nowhere to put a name that the
         // code underneath would have written.
-        match booth_core::tag::tag_kind(&track.path) {
-            Some(booth_core::tag::TagKind::None) => {
+        match booth_cli::tag::tag_kind(&track.path) {
+            Some(booth_cli::tag::TagKind::None) => {
                 self.note(format!("a .{} has nowhere to keep tags", track.format), theme::AMBER);
                 return;
             }
@@ -5756,10 +5768,12 @@ impl App {
         let (running, deep, looked_at) = (checked.running, checked.deep, checked.looked_at);
         let reports = checked.troubles.clone();
         let orphans = checked.orphans.clone();
+        let naming = checked.naming.clone();
         let mut open = true;
         let mut fix: Vec<u32> = Vec::new();
         let mut forget: Vec<u32> = Vec::new();
         let mut adopt_strays = false;
+        let mut rename = false;
 
         let fixable: Vec<u32> = reports
             .iter()
@@ -5858,10 +5872,19 @@ impl App {
                                             ui.label(
                                                 RichText::new(trouble.what())
                                                     .size(theme::SMALL)
-                                                    .color(match trouble.is_fixable() {
-                                                        true => theme::AMBER,
-                                                        false => theme::ALERT,
-                                                    }),
+                                                    // A question is not a
+                                                    // fault, so it is not
+                                                    // coloured like one.
+                                                    .color(
+                                                        match (
+                                                            trouble.is_a_choice(),
+                                                            trouble.is_fixable(),
+                                                        ) {
+                                                            (true, _) => theme::TEXT,
+                                                            (_, true) => theme::AMBER,
+                                                            _ => theme::ALERT,
+                                                        },
+                                                    ),
                                             );
                                             // Both answers, where there are two
                                             // — a difference is not worth
@@ -5881,6 +5904,65 @@ impl App {
                                                 );
                                             }
                                         });
+                                        // The one trouble with two answers that
+                                        // might both be right, so it is picked
+                                        // between rather than corrected.
+                                        if let crate::verify::Trouble::Unlike {
+                                            stored,
+                                            from_path,
+                                        } = trouble
+                                        {
+                                            let taking =
+                                                naming.get(&report.id).copied().unwrap_or(false);
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add_space(10.0);
+                                                if ui
+                                                    .radio(!taking, "")
+                                                    .on_hover_text("Leave it as it is")
+                                                    .clicked()
+                                                {
+                                                    self.pending.push(Pending::ChooseName {
+                                                        id: report.id,
+                                                        from_path: false,
+                                                    });
+                                                }
+                                                ui.label(
+                                                    RichText::new(stored)
+                                                        .font(theme::mono(10.0))
+                                                        .color(theme::TEXT),
+                                                );
+                                                ui.label(
+                                                    RichText::new("the tags")
+                                                        .size(theme::SMALL)
+                                                        .color(theme::DIM),
+                                                );
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add_space(10.0);
+                                                if ui
+                                                    .radio(taking, "")
+                                                    .on_hover_text(
+                                                        "Take the names the file is filed under",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.pending.push(Pending::ChooseName {
+                                                        id: report.id,
+                                                        from_path: true,
+                                                    });
+                                                }
+                                                ui.label(
+                                                    RichText::new(from_path.describe())
+                                                        .font(theme::mono(10.0))
+                                                        .color(theme::TEXT),
+                                                );
+                                                ui.label(
+                                                    RichText::new("the file name")
+                                                        .size(theme::SMALL)
+                                                        .color(theme::DIM),
+                                                );
+                                            });
+                                        }
                                     }
                                 });
                             });
@@ -5986,6 +6068,29 @@ impl App {
                     {
                         adopt_strays = true;
                     }
+                    // Only when something has actually been picked. A button
+                    // that does nothing is worse than no button.
+                    let chosen = naming.values().filter(|from_path| **from_path).count();
+                    if chosen > 0
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!(
+                                        "Take the file name for {}",
+                                        plural(chosen, "track")
+                                    ))
+                                    .strong(),
+                                )
+                                .fill(theme::BOOTH_2),
+                            )
+                            .on_hover_text(
+                                "Only the ones set to the file name. Nothing is written to \
+                                 any file — this changes what the collection calls them",
+                            )
+                            .clicked()
+                    {
+                        rename = true;
+                    }
                 });
             });
 
@@ -6001,12 +6106,71 @@ impl App {
             self.rebuild();
             self.save();
         }
+        if rename {
+            self.take_the_names_off_the_files();
+        }
         if adopt_strays {
             self.import(orphans);
             self.checked = None;
         }
         if !open {
             self.checked = None;
+        }
+    }
+
+    /// Rename the tracks whose radio was set to the file's own name.
+    ///
+    /// The collection only: a name is written into a file by the tag write-back
+    /// and nowhere else, and a check that quietly rewrote somebody's tags would
+    /// be a check nobody could safely run.
+    fn take_the_names_off_the_files(&mut self) {
+        let Some(checked) = &self.checked else { return };
+        let chosen: Vec<(u32, crate::guess::Guess)> = checked
+            .troubles
+            .iter()
+            .filter(|report| checked.naming.get(&report.id).copied().unwrap_or(false))
+            .filter_map(|report| {
+                report.troubles.iter().find_map(|trouble| match trouble {
+                    crate::verify::Trouble::Unlike { from_path, .. } => {
+                        Some((report.id, from_path.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+
+        let mut renamed = 0usize;
+        for (id, from_path) in chosen {
+            let Some(track) = self.library.get_mut(id) else { continue };
+            crate::info!(
+                "#{id} renamed from its file: {} — {} becomes {}",
+                track.artist,
+                track.title,
+                from_path.describe()
+            );
+            if !from_path.artist.is_empty() {
+                track.artist.clone_from(&from_path.artist);
+            }
+            if !from_path.title.is_empty() {
+                track.title.clone_from(&from_path.title);
+            }
+            if track.album.trim().is_empty() && !from_path.album.is_empty() {
+                track.album.clone_from(&from_path.album);
+            }
+            // The names came off the path, not out of the file, so a later
+            // fingerprint is still allowed to correct them without asking.
+            track.from_tags = false;
+            renamed += 1;
+        }
+
+        if renamed > 0 {
+            self.note(
+                format!("{} renamed from their files", plural(renamed, "track")),
+                theme::TEXT,
+            );
+            self.checked = None;
+            self.rebuild();
+            self.save();
         }
     }
 
@@ -6694,7 +6858,7 @@ impl App {
 
     /// What was just imported that a player will not open, and what to do.
     fn compatibility_sheet(&mut self, ctx: &egui::Context) {
-        let waiting: Vec<(u32, String, PathBuf, booth_core::compat::Problem)> = self
+        let waiting: Vec<(u32, String, PathBuf, booth_cli::compat::Problem)> = self
             .incompatible
             .iter()
             .filter_map(|id| self.library.get(*id))
@@ -8181,7 +8345,7 @@ mod tests {
                 written: vec![crate::library::Written {
                     id,
                     prep: sync::fingerprint(app.library.get(id).unwrap()),
-                    row: Some(booth_core::export::pdb::Track {
+                    row: Some(booth_cli::export::pdb::Track {
                         id: 1,
                         file_path: "/Contents/Peverelist/Sirens.flac".into(),
                         ..Default::default()
@@ -8293,7 +8457,7 @@ mod tests {
 
             let mut app = app("retagged");
             let id = app.library.add(&path);
-            let audio = booth_core::hash::audio_sha256(&path).unwrap();
+            let audio = booth_cli::hash::audio_sha256(&path).unwrap();
             {
                 let track = app.library.get_mut(id).unwrap();
                 track.analyzed = true;

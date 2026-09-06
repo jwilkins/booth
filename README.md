@@ -40,13 +40,13 @@ with a free key.
 | | |
 |---|---|
 | [`booth/`](booth/README.md) | The library window. This is the program, and what `cargo build` builds. |
-| [`proto/musicai/`](proto/musicai/README.md) | `booth-core`: the engine — analysis, loudness, stems, tagging, the drive writer — with the `booth-cli` command around it. It came first, which is all `proto/` and the directory's old name mean. |
-| [`gui/`](gui) | The older batch window: pick files, pick a task, run it. |
+| [`proto/musicai/`](proto/musicai/README.md) | `booth-cli`: the engine — analysis, loudness, stems, tagging, the drive writer — and the command of the same name around it. It came first, which is all `proto/` and the directory's old name mean. |
+| [`gui/`](gui) | `booth-gui`, the older batch window: pick files, pick a task, run it. |
 | [`docs/`](docs) | The [spec](docs/rekordbox-replacement-spec.md) this is built to, and [what is known](docs/onelibrary.md) about the format the newer players read. |
 
 ```sh
 cargo build --release              # Booth
-cargo build --release -p booth-core # the command-line tool
+cargo build --release -p booth-cli  # the command-line tool
 cargo build --release --workspace  # all of it
 ```
 
@@ -57,7 +57,7 @@ and Intel, with the `booth-cli` command-line tool inside the same bundle so one 
 
 ### The batch window
 
-There is a second, older window — `musicai-gui` — which is the command-line tool's jobs one at a
+There is a second, older window — `booth-gui` — which is the command-line tool's jobs one at a
 time. Pick a task along the top, drop files on the left, set the options in the middle, press the
 button. Results appear in the log at the bottom as they arrive, and a long job can be stopped
 without leaving a half-written file behind.
@@ -69,7 +69,7 @@ every control. The step being run is shown next to the progress bar as the run m
 Stems default to `~/Music/musicai-stems` rather than the command line's relative `stems`, because
 an app launched from the Finder has no useful working directory.
 
-It is not in the bundle: run it with `cargo run -p musicai-gui`.
+It is not in the bundle: run it with `cargo run -p booth-gui`.
 
 ![The batch window, on the Batch tab](docs/screenshot.png)
 
@@ -99,7 +99,7 @@ To run either window without packaging anything:
 
 ```sh
 cargo run -p booth --release        # the library
-cargo run -p musicai-gui --release  # the batch tool
+cargo run -p booth-gui --release    # the batch tool
 ```
 
 Files named on the command line are imported by Booth at startup, and start out selected in the
@@ -117,7 +117,15 @@ BOOTH_NOTARY_PROFILE=my-notary-profile \
     scripts/package-macos.sh
 ```
 
-`.github/workflows/macos-app.yml` builds the same thing on a macOS runner, on a tag or on demand.
+`.github/workflows/macos-app.yml` builds the same thing on a macOS runner and puts the disk image
+on the release, three ways in: a release published from GitHub's own web interface, a tag pushed
+from a shell (`v1.0` and `1.0` both count), or by hand from the Actions tab, where naming a tag
+attaches the build to a release that is already out. That last one is the only way to fix a
+release after the fact, since a tag that already exists is never pushed again.
+
+The disk image and the bundle take their version from the tag rather than from `Cargo.toml`, so
+two releases are two files you can tell apart. A tag macOS would not accept as a version — a `-rc1`
+on the end, say — falls back to the manifest rather than building something that will not launch.
 
 ### What the batch window is, and is not
 

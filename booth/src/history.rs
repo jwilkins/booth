@@ -57,12 +57,12 @@ impl Played {
 /// An empty list means the drive has no OneLibrary history, which is not the
 /// same as it having no history — see the module note.
 pub fn read(root: &Path, key: &str) -> Result<Vec<Session>> {
-    let Some(at) = booth_core::rekordbox::onelibrary::find(root) else {
+    let Some(at) = booth_cli::rekordbox::onelibrary::find(root) else {
         crate::debug!("{} has no OneLibrary database, so no history this can read", root.display());
         return Ok(Vec::new());
     };
     crate::debug!("reading the play history out of {}", at.display());
-    let connection = booth_core::rekordbox::open(&at, key)
+    let connection = booth_cli::rekordbox::open(&at, key)
         .with_context(|| format!("opening {} to read its history", at.display()))?;
 
     // The sessions themselves. `attribute` marks a folder rather than a list,
@@ -139,8 +139,8 @@ mod tests {
     /// Written here rather than fetched, because what is being tested is that
     /// the right rows come back out of the shape a player leaves behind.
     fn a_drive_with_history(dir: &Path, key: &str) -> PathBuf {
-        use booth_core::export::onelibrary;
-        use booth_core::export::pdb::{Database, Track};
+        use booth_cli::export::onelibrary;
+        use booth_cli::export::pdb::{Database, Track};
 
         let tracks: Vec<Track> = (1..=3)
             .map(|id| Track {

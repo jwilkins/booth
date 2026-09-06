@@ -226,8 +226,8 @@ fn a_tag_is_the_collections_business_and_not_the_drives() {
 /// same reader the import uses, so a write the importer cannot see is a failure.
 #[test]
 fn writing_tags_puts_the_collections_names_into_the_file() {
-    use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
-    use booth_core::audio::Audio;
+    use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+    use booth_cli::audio::Audio;
 
     let scratch = Scratch::new("retag");
     let path = scratch.0.join("track.flac");
@@ -246,13 +246,13 @@ fn writing_tags_puts_the_collections_names_into_the_file() {
         title: "Roll With The Punches".into(),
         album: "Livity Sound".into(),
         date: Some("2019".into()),
-        on_existing: booth_core::tag::OnExisting::Overwrite,
+        on_existing: booth_cli::tag::OnExisting::Overwrite,
     }]);
     let mut runner = Runner::start(job, Arc::new(|| {}));
     runner.join();
     assert!(matches!(runner.drain().last(), Some(Update::Done(Ok(())))));
 
-    let read = booth_core::tag::read_metadata(&path).unwrap();
+    let read = booth_cli::tag::read_metadata(&path).unwrap();
     assert_eq!(read.artist.as_deref(), Some("Peverelist"));
     assert_eq!(read.title.as_deref(), Some("Roll With The Punches"));
     assert_eq!(read.album.as_deref(), Some("Livity Sound"));
@@ -262,8 +262,8 @@ fn writing_tags_puts_the_collections_names_into_the_file() {
 /// A WAV has nowhere to put them, and says so rather than appearing to work.
 #[test]
 fn a_format_with_no_tag_block_reports_that_it_has_none() {
-    use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
-    use booth_core::audio::Audio;
+    use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+    use booth_cli::audio::Audio;
 
     let scratch = Scratch::new("retag-wav");
     let path = scratch.0.join("track.wav");
@@ -278,7 +278,7 @@ fn a_format_with_no_tag_block_reports_that_it_has_none() {
         title: "Y".into(),
         album: String::new(),
         date: None,
-        on_existing: booth_core::tag::OnExisting::Overwrite,
+        on_existing: booth_cli::tag::OnExisting::Overwrite,
     }]);
     let mut runner = Runner::start(job, Arc::new(|| {}));
     runner.join();
@@ -298,8 +298,8 @@ fn a_format_with_no_tag_block_reports_that_it_has_none() {
 /// renaming records somebody had already tagged by hand.
 #[test]
 fn filling_in_blanks_does_not_overwrite_what_is_already_tagged() {
-    use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
-    use booth_core::audio::Audio;
+    use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+    use booth_cli::audio::Audio;
 
     let scratch = Scratch::new("retag-fill");
     let path = scratch.0.join("track.flac");
@@ -312,11 +312,11 @@ fn filling_in_blanks_does_not_overwrite_what_is_already_tagged() {
     write_file(&path, &audio, Codec::Flac, &EncodeOptions::default()).unwrap();
 
     // The file already claims an artist, and has no album at all.
-    let existing = booth_core::tag::Metadata {
+    let existing = booth_cli::tag::Metadata {
         artist: Some("Someone Who Was Here First".into()),
         ..Default::default()
     };
-    booth_core::tag::write_tags(&path, &existing, booth_core::tag::OnExisting::Overwrite, None)
+    booth_cli::tag::write_tags(&path, &existing, booth_cli::tag::OnExisting::Overwrite, None)
         .unwrap();
 
     let job = Job::Retag(vec![booth::job::Retag {
@@ -326,13 +326,13 @@ fn filling_in_blanks_does_not_overwrite_what_is_already_tagged() {
         title: "Roll With The Punches".into(),
         album: "Livity Sound".into(),
         date: None,
-        on_existing: booth_core::tag::OnExisting::Keep,
+        on_existing: booth_cli::tag::OnExisting::Keep,
     }]);
     let mut runner = Runner::start(job, Arc::new(|| {}));
     runner.join();
     assert!(matches!(runner.drain().last(), Some(Update::Done(Ok(())))));
 
-    let read = booth_core::tag::read_metadata(&path).unwrap();
+    let read = booth_cli::tag::read_metadata(&path).unwrap();
     assert_eq!(
         read.artist.as_deref(),
         Some("Someone Who Was Here First"),
@@ -347,8 +347,8 @@ fn filling_in_blanks_does_not_overwrite_what_is_already_tagged() {
 /// out wrong must leave the thing it was made from behind.
 #[test]
 fn converting_a_file_leaves_the_original_alone() {
-    use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
-    use booth_core::audio::Audio;
+    use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+    use booth_cli::audio::Audio;
 
     let scratch = Scratch::new("convert");
     let path = scratch.0.join("Sirens.wav");
@@ -380,7 +380,7 @@ fn converting_a_file_leaves_the_original_alone() {
     assert_eq!(std::fs::metadata(&path).unwrap().len(), before, "nor rewritten");
 
     // And it decodes to the same music.
-    let back = booth_core::audio::decode::decode_file(&to).unwrap();
+    let back = booth_cli::audio::decode::decode_file(&to).unwrap();
     assert_eq!(back.sample_rate, 44_100);
     assert_eq!(back.channels(), 2);
     assert!((back.duration_secs() - 1.0).abs() < 0.05, "{}", back.duration_secs());
@@ -389,8 +389,8 @@ fn converting_a_file_leaves_the_original_alone() {
 /// Converting twice must not overwrite the first result.
 #[test]
 fn a_second_conversion_does_not_land_on_the_first() {
-    use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
-    use booth_core::audio::Audio;
+    use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+    use booth_cli::audio::Audio;
 
     let scratch = Scratch::new("convert-twice");
     let path = scratch.0.join("Vessel.wav");
