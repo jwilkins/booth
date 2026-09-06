@@ -19,8 +19,11 @@ pub struct Plan {
     pub update: Vec<(u32, String)>,
     /// Tracks on the drive that are no longer in the playlist.
     pub remove: Vec<u32>,
-    /// Stem files that would go on with them.
-    pub stems: Vec<PathBuf>,
+    /// Stem files that would go on with them, each with the track it came
+    /// from. The parent is kept because a stem is filed under its parent's
+    /// artist — the checks below have to ask the same question the writer
+    /// does, and the stem's own tags are not what it answers with.
+    pub stems: Vec<(u32, PathBuf)>,
     pub add_bytes: u64,
     pub stem_bytes: u64,
 }
@@ -107,7 +110,7 @@ pub fn plan(library: &Library, drive: &Drive) -> Plan {
             for (_, path) in track.stems.each() {
                 let Some(path) = path else { continue };
                 plan.stem_bytes += std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                plan.stems.push(path.clone());
+                plan.stems.push((*id, path.clone()));
             }
         }
     }
@@ -237,19 +240,20 @@ pub fn preflight(library: &Library, plan: &Plan, destination: &Path, is_image: b
     });
 
     // -- path lengths, worked out with the writer's own rule
-    let long: Vec<&&Track> = tracks
-        .iter()
-        .filter(|track| {
-            let filename = track
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            booth_cli::commands::on_drive_path(&track.artist, &filename).len()
-                > booth_cli::commands::MAX_ON_DRIVE_PATH
-        })
-        .collect();
-    checks.push(match long.len() {
+    //
+    // Stems are measured too, and against their parent's artist, because that
+    // is the folder the writer puts them in. They are the ones this catches:
+    // a stem's name is its parent's plus "-vocals", so a track whose path fits
+    // can have three companions whose paths do not.
+    let long = tracks.iter().filter(|track| too_long(&track.artist, &track.path)).count()
+        + plan
+            .stems
+            .iter()
+            .filter(|(parent, path)| {
+                library.get(*parent).is_some_and(|track| too_long(&track.artist, path))
+            })
+            .count();
+    checks.push(match long {
         0 => Check {
             level: Level::Ok,
             text: format!(
@@ -276,6 +280,14 @@ pub fn preflight(library: &Library, plan: &Plan, destination: &Path, is_image: b
 
     checks.push(space(plan, destination, is_image));
     checks
+}
+
+/// Whether a file would land on a path a player will not follow, asked with the
+/// writer's own rule so that the two cannot come to disagree.
+fn too_long(artist: &str, path: &Path) -> bool {
+    let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    booth_cli::commands::on_drive_path(artist, &filename).len()
+        > booth_cli::commands::MAX_ON_DRIVE_PATH
 }
 
 /// Whether what is being written will fit.
@@ -305,11 +317,14 @@ fn space(plan: &Plan, destination: &Path, is_image: bool) -> Check {
     }
 }
 
-/// Room for the analysis files, which are written per track and are not part of
+/// Room for the analysis files, which are written per file and are not part of
 /// any file's size on disk. Two megabytes each is generous for anything under
 /// about half an hour long — the same allowance the writer sizes an image with.
+///
+/// Stems count. Each one is a row on the player with its own grid, waveform and
+/// cues, so a drive carrying them needs four times this, not one.
 fn analysis_allowance(plan: &Plan) -> u64 {
-    plan.writes().len() as u64 * 2 * 1024 * 1024
+    (plan.writes().len() + plan.stems.len()) as u64 * 2 * 1024 * 1024
 }
 
 /// Free bytes on the filesystem holding `path`, if it can be found out.
@@ -569,6 +584,44 @@ mod tests {
 
         drive.with_stems = true;
         assert_eq!(plan(&library, &drive).stems.len(), 3);
+    }
+
+    #[test]
+    fn a_stem_whose_path_is_too_long_is_caught_before_the_write() {
+        let (mut library, ids) = library_with(1);
+        // The track's own path is short. Its stem's is not: a stem is named
+        // after its parent plus the part it is, so a track that fits can carry
+        // three companions that do not, and the folder the length is measured
+        // against is the parent's.
+        library.get_mut(ids[0]).unwrap().stems.vocals =
+            Some(PathBuf::from(format!("/stems/{}-vocals.wav", "B".repeat(240))));
+
+        let drive = Drive { with_stems: true, ..drive_for(&library, &[]) };
+        let plan = plan(&library, &drive);
+        let checks = preflight(&library, &plan, Path::new("/tmp"), false);
+        assert!(
+            checks.iter().any(|c| c.level == Level::Bad && c.text.contains("longer")),
+            "a stem the writer will refuse passed the preflight: {checks:#?}"
+        );
+    }
+
+    #[test]
+    fn the_room_left_for_analysis_counts_the_stems_as_well() {
+        let (mut library, ids) = library_with(1);
+        let track = library.get_mut(ids[0]).unwrap();
+        track.stems.vocals = Some("/stems/a-vocals.wav".into());
+        track.stems.drums = Some("/stems/a-drums.wav".into());
+        track.stems.melody = Some("/stems/a-melody.wav".into());
+
+        let bare = analysis_allowance(&plan(&library, &drive_for(&library, &[])));
+        let carrying = analysis_allowance(&plan(
+            &library,
+            &Drive { with_stems: true, ..drive_for(&library, &[]) },
+        ));
+        // Each stem is a row on the player, with a grid, a waveform and cues of
+        // its own on the drive. A drive carrying them needs four times the room
+        // for analysis, not the same amount.
+        assert_eq!(carrying, bare * 4, "a stem was not given room to be analysed");
     }
 
     #[test]

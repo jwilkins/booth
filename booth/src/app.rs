@@ -1660,12 +1660,20 @@ impl App {
             .iter()
             .filter_map(|id| self.library.get(*id))
             .map(|track| track.path.clone())
-            .chain(self.plan.stems.iter().cloned())
+            .chain(self.plan.stems.iter().map(|(_, path)| path.clone()))
             .collect();
 
         // Which stem came from which track, so each one takes its parent's
-        // grid, cues, key and phrases rather than being listened to alone.
-        let companions: Vec<(PathBuf, PathBuf)> = preparing
+        // grid, cues, key and phrases rather than being listened to alone, and
+        // lands in its parent's folder rather than one worked out from its own
+        // tags.
+        //
+        // Drawn from everything the drive is to hold, not from what is being
+        // prepared: a stem goes on beside a track that is already there and
+        // being carried, and a pairing missing here is a stem given its own
+        // grid and its own folder — the two failures this list exists to
+        // prevent.
+        let companions: Vec<(PathBuf, PathBuf)> = wanted
             .iter()
             .filter_map(|id| self.library.get(*id))
             .flat_map(|track| {
@@ -7070,6 +7078,10 @@ impl App {
 
         let mut open = true;
         let mut forget = false;
+        // Toggled here rather than applied in place: the sheet is drawing a
+        // clone of the drive, and the plan under it was worked out before this
+        // frame. Read back after the window closes, so one change redraws once.
+        let mut with_stems = drive.with_stems;
         egui::Window::new(format!("SYNC → {}", drive.label))
             .open(&mut open)
             .collapsible(false)
@@ -7158,12 +7170,24 @@ impl App {
                     sheet_line(
                         ui,
                         "Stems",
-                        &match self.plan.stems.len() {
-                            0 => "none".to_string(),
-                            n => format!("{n} files"),
+                        &match with_stems {
+                            false => "not carried".to_string(),
+                            true => match self.plan.stems.len() {
+                                0 => "none rendered".to_string(),
+                                n => format!("{n} files"),
+                            },
                         },
                         &sync::bytes(self.plan.stem_bytes),
                     );
+                    ui.horizontal(|ui| {
+                        ui.add_space(74.0);
+                        ui.checkbox(&mut with_stems, "Carry stems").on_hover_text(
+                            "Put each track's vocals, drums and melody on the drive beside it, \
+                             in the same folder and next to it in the playlist. Only tracks \
+                             with a kit rendered are affected; it is roughly three times the \
+                             space, and the same again in analysis.",
+                        );
+                    });
 
                     ui.add_space(12.0);
                     for check in &checks {
@@ -7249,6 +7273,16 @@ impl App {
                     });
                 });
             });
+        if with_stems != drive.with_stems {
+            if let Some(drive) = self.library.drives.get_mut(self.drive) {
+                drive.with_stems = with_stems;
+            }
+            // The plan changes by three files a track, and so does the space
+            // check under it. Both are on screen, so both are redone now rather
+            // than on whatever happens next.
+            self.replan();
+            self.save();
+        }
         if forget {
             self.forget_drive_contents();
         }

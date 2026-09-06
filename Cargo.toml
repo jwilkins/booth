@@ -4,7 +4,7 @@ members = ["booth", "gui", "proto/musicai"]
 
 # `cargo build` with nothing else said builds Booth, which is the program this
 # repository is for. Everything else is still one flag away: `--workspace` for
-# all of it, `-p musicai` for the command-line tool.
+# all of it, `-p booth-cli` for the command-line tool.
 default-members = ["booth"]
 
 # Three crates, because they are three different programs sharing one engine.
