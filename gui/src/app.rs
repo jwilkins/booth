@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use booth_core::report::Event;
+use booth_cli::report::Event;
 use eframe::egui::{self, Color32, RichText};
 
 use crate::job::{Runner, Settings, Task, Update};
@@ -434,7 +434,7 @@ impl App {
 // -- per-task options ------------------------------------------------------
 
 fn batch_options(ui: &mut egui::Ui, settings: &mut Settings) {
-    use booth_core::cli::{NormalizeMode, Step};
+    use booth_cli::cli::{NormalizeMode, Step};
 
     ui.heading("Batch");
     ui.label(
@@ -488,12 +488,12 @@ fn batch_options(ui: &mut egui::Ui, settings: &mut Settings) {
         ui.label("Separator");
         ui.selectable_value(
             &mut settings.stems.backend,
-            booth_core::stems::Backend::Demucs,
+            booth_cli::stems::Backend::Demucs,
             "Demucs",
         );
         ui.selectable_value(
             &mut settings.stems.backend,
-            booth_core::stems::Backend::Dsp,
+            booth_cli::stems::Backend::Dsp,
             "Built-in",
         );
     });
@@ -525,8 +525,8 @@ fn analyze_options(ui: &mut egui::Ui, settings: &mut Settings) {
 }
 
 fn normalize_options(ui: &mut egui::Ui, settings: &mut Settings) {
-    use booth_core::cli::NormalizeMode;
-    use booth_core::normalize::PeakPolicy;
+    use booth_cli::cli::NormalizeMode;
+    use booth_cli::normalize::PeakPolicy;
 
     let args = &mut settings.normalize;
     ui.heading("Normalize");
@@ -595,7 +595,7 @@ fn normalize_options(ui: &mut egui::Ui, settings: &mut Settings) {
 }
 
 fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
-    use booth_core::stems::{Backend, Stem};
+    use booth_cli::stems::{Backend, Stem};
 
     let args = &mut settings.stems;
     ui.heading("Stems");
@@ -642,12 +642,12 @@ fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
     // stem is enormous for audio that plays under something else.
     ui.horizontal(|ui| {
         ui.label("Format");
-        for format in booth_core::cli::StemFormat::ALL {
+        for format in booth_cli::cli::StemFormat::ALL {
             ui.selectable_value(&mut args.format, format, format.name());
         }
     });
     match args.format {
-        booth_core::cli::StemFormat::Mp3 => {
+        booth_cli::cli::StemFormat::Mp3 => {
             let mut vbr = !args.stem_cbr;
             ui.horizontal(|ui| {
                 ui.checkbox(&mut vbr, "Variable bitrate");
@@ -661,7 +661,7 @@ fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
                 }
             });
         }
-        booth_core::cli::StemFormat::Flac => {
+        booth_cli::cli::StemFormat::Flac => {
             ui.horizontal(|ui| {
                 ui.label("Bit depth");
                 ui.add(egui::Slider::new(&mut args.bit_depth, 16..=24));
@@ -677,8 +677,8 @@ fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
 }
 
 fn tag_options(ui: &mut egui::Ui, settings: &mut Settings) {
-    use booth_core::cli::OnAmbiguous;
-    use booth_core::tag::OnExisting;
+    use booth_cli::cli::OnAmbiguous;
+    use booth_cli::tag::OnExisting;
 
     let args = &mut settings.tag;
     ui.heading("Tag");
@@ -722,11 +722,11 @@ fn tag_options(ui: &mut egui::Ui, settings: &mut Settings) {
 /// The format controls, which normalize and stems share.
 fn output_format(
     ui: &mut egui::Ui,
-    format: &mut Option<booth_core::audio::encode::Codec>,
+    format: &mut Option<booth_cli::audio::encode::Codec>,
     bit_depth: &mut u16,
     bitrate: &mut u32,
 ) {
-    use booth_core::audio::encode::Codec;
+    use booth_cli::audio::encode::Codec;
 
     ui.horizontal(|ui| {
         ui.label("Format");

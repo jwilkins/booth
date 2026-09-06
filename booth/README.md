@@ -3,7 +3,7 @@
 A DJ library that prepares tracks and writes the drives a Pioneer/AlphaTheta
 player reads. It is the interface described in
 [`docs/rekordbox-replacement-spec.md`](../docs/rekordbox-replacement-spec.md),
-built on the analysis and export code in the `booth-core` crate next to it.
+built on the analysis and export code in the `booth-cli` crate next to it.
 
 ```
 cargo run -p booth

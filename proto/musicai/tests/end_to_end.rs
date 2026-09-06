@@ -7,12 +7,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use booth_core::audio::decode::decode_file;
-use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
-use booth_core::audio::Audio;
-use booth_core::loudness;
-use booth_core::normalize::{self, PeakPolicy, Settings};
-use booth_core::stems::{dsp, Stem};
+use booth_cli::audio::decode::decode_file;
+use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_cli::audio::Audio;
+use booth_cli::loudness;
+use booth_cli::normalize::{self, PeakPolicy, Settings};
+use booth_cli::stems::{dsp, Stem};
 
 const SAMPLE_RATE: u32 = 44_100;
 const SECONDS: usize = 4;

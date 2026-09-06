@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use booth_core::audio::Audio;
+use booth_cli::audio::Audio;
 
 /// Decoded audio, interleaved, ready to be fed to a device.
 ///

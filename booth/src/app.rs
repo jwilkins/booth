@@ -11,8 +11,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use booth_core::cli::ExportArgs;
-use booth_core::stems::Backend;
+use booth_cli::cli::ExportArgs;
+use booth_cli::stems::Backend;
 use eframe::egui::{self, Color32, RichText, Ui};
 
 use crate::config::{Config, OnExternal};
@@ -1112,7 +1112,7 @@ impl App {
     // -- rekordbox -------------------------------------------------------
 
     fn import_rekordbox(&mut self, path: PathBuf) {
-        let key = match booth_core::rekordbox::resolve(self.config.rekordbox_key()) {
+        let key = match booth_cli::rekordbox::resolve(self.config.rekordbox_key()) {
             Ok(key) => key,
             Err(e) => {
                 crate::warn!("{e:#}");
@@ -1136,10 +1136,7 @@ impl App {
     /// names on an untitled file, cues where there are none, the play count and
     /// the rating and the My Tags, which this program has no other way to know.
     /// Files rekordbox knows about that are not here yet are added.
-    fn merge_rekordbox(
-        &mut self,
-        collection: &booth_core::rekordbox::master::Collection,
-    ) -> String {
+    fn merge_rekordbox(&mut self, collection: &booth_cli::rekordbox::master::Collection) -> String {
         use std::collections::HashMap;
 
         let mut by_path: HashMap<PathBuf, u32> =
@@ -1195,7 +1192,7 @@ impl App {
     /// Bring the playlists across, keeping their folders.
     fn merge_rekordbox_playlists(
         &mut self,
-        collection: &booth_core::rekordbox::master::Collection,
+        collection: &booth_cli::rekordbox::master::Collection,
         ours: &std::collections::HashMap<String, u32>,
     ) -> usize {
         let mut brought = 0;
@@ -1598,12 +1595,12 @@ impl App {
     /// companion is a turn of the encoder from the record it came from.
     /// Companions go in only when the drive carries them, and only the parts
     /// that were actually rendered.
-    fn drive_playlists(&self, drive: &Drive) -> Vec<booth_core::cli::PlaylistSpec> {
+    fn drive_playlists(&self, drive: &Drive) -> Vec<booth_cli::cli::PlaylistSpec> {
         drive
             .playlist_names()
             .iter()
             .filter_map(|name| self.library.playlists.iter().find(|p| p.name == *name))
-            .map(|playlist| booth_core::cli::PlaylistSpec {
+            .map(|playlist| booth_cli::cli::PlaylistSpec {
                 name: playlist.name.clone(),
                 folder: playlist.folder.clone(),
                 tracks: playlist
@@ -1634,7 +1631,7 @@ impl App {
         // volume to add to — so it is written in full. A drive is added to, so
         // only what changed is prepared and the rest of its database is
         // carried through from what the last write recorded.
-        let already: Vec<(PathBuf, booth_core::export::pdb::Track)> = match drive.is_image {
+        let already: Vec<(PathBuf, booth_cli::export::pdb::Track)> = match drive.is_image {
             true => Vec::new(),
             false => drive
                 .written
@@ -2455,7 +2452,7 @@ impl App {
             known,
             foreign: self.config.on_foreign,
             library: self.config.library_path.clone(),
-            key: booth_core::rekordbox::onelibrary_key(self.config.onelibrary_key()),
+            key: booth_cli::rekordbox::onelibrary_key(self.config.onelibrary_key()),
         });
     }
 
@@ -3893,7 +3890,7 @@ impl App {
             // and it is spelled out rather than implied, because it changes
             // somebody's files.
             let taggable =
-                booth_core::tag::Metadata::default().get(booth_core::tag::Field::Title).is_none()
+                booth_cli::tag::Metadata::default().get(booth_cli::tag::Field::Title).is_none()
                     && matches!(track.format.as_str(), "flac" | "mp3");
             if self.config.write_tags != crate::config::WriteTags::Never {
                 ui.label(
@@ -4219,7 +4216,7 @@ impl App {
                 Pending::CancelEdit => self.editing = None,
                 Pending::Resort => relist = true,
                 Pending::WriteTags(id) => {
-                    self.write_tags(id, booth_core::tag::OnExisting::Overwrite)
+                    self.write_tags(id, booth_cli::tag::OnExisting::Overwrite)
                 }
                 Pending::PlaceCue { id, letter, time_ms } => {
                     self.place_cue(id, letter, time_ms);
@@ -4591,15 +4588,15 @@ impl App {
     /// now", so it overwrites; the write-back that rides behind a fingerprint
     /// lookup fills in blanks and leaves anything already there alone, because
     /// nobody asked it to have an opinion about a value they typed.
-    fn write_tags(&mut self, id: u32, on_existing: booth_core::tag::OnExisting) {
+    fn write_tags(&mut self, id: u32, on_existing: booth_cli::tag::OnExisting) {
         let Some(track) = self.library.get(id) else { return };
         // Asked of the writer rather than answered again here. This was a
         // second list of formats, and it had already fallen behind the first:
         // it still said FLAC and MP3 after the writer learned MP4, so an
         // identified `.m4a` was told it had nowhere to put a name that the
         // code underneath would have written.
-        match booth_core::tag::tag_kind(&track.path) {
-            Some(booth_core::tag::TagKind::None) => {
+        match booth_cli::tag::tag_kind(&track.path) {
+            Some(booth_cli::tag::TagKind::None) => {
                 self.note(format!("a .{} has nowhere to keep tags", track.format), theme::AMBER);
                 return;
             }
@@ -6861,7 +6858,7 @@ impl App {
 
     /// What was just imported that a player will not open, and what to do.
     fn compatibility_sheet(&mut self, ctx: &egui::Context) {
-        let waiting: Vec<(u32, String, PathBuf, booth_core::compat::Problem)> = self
+        let waiting: Vec<(u32, String, PathBuf, booth_cli::compat::Problem)> = self
             .incompatible
             .iter()
             .filter_map(|id| self.library.get(*id))
@@ -8348,7 +8345,7 @@ mod tests {
                 written: vec![crate::library::Written {
                     id,
                     prep: sync::fingerprint(app.library.get(id).unwrap()),
-                    row: Some(booth_core::export::pdb::Track {
+                    row: Some(booth_cli::export::pdb::Track {
                         id: 1,
                         file_path: "/Contents/Peverelist/Sirens.flac".into(),
                         ..Default::default()
@@ -8460,7 +8457,7 @@ mod tests {
 
             let mut app = app("retagged");
             let id = app.library.add(&path);
-            let audio = booth_core::hash::audio_sha256(&path).unwrap();
+            let audio = booth_cli::hash::audio_sha256(&path).unwrap();
             {
                 let track = app.library.get_mut(id).unwrap();
                 track.analyzed = true;

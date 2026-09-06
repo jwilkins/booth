@@ -12,11 +12,11 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use booth_core::analysis;
-use booth_core::audio::decode::decode_file;
-use booth_core::cli::{ExportArgs, InputArgs, StemsArgs};
-use booth_core::report::{Event, Reporter};
-use booth_core::stems::{Backend, Stem};
+use booth_cli::analysis;
+use booth_cli::audio::decode::decode_file;
+use booth_cli::cli::{ExportArgs, InputArgs, StemsArgs};
+use booth_cli::report::{Event, Reporter};
+use booth_cli::stems::{Backend, Stem};
 
 use crate::config::{self, Config};
 use crate::library::{energy_from, CueMark, Phrase, StemKit, Track};
@@ -42,7 +42,7 @@ pub enum Job {
         tracks: Vec<(u32, PathBuf)>,
         stems_in: crate::config::StemsLocation,
         backend: Backend,
-        quality: booth_core::cli::StemQuality,
+        quality: booth_cli::cli::StemQuality,
     },
     /// Decode one track into memory so it can be auditioned.
     Decode {
@@ -146,13 +146,13 @@ pub struct Retag {
     pub album: String,
     pub date: Option<String>,
     /// What to do about a field the file already has a value for.
-    pub on_existing: booth_core::tag::OnExisting,
+    pub on_existing: booth_cli::tag::OnExisting,
 }
 
 /// Something the worker found out.
 pub enum Update {
     /// A rekordbox library, read and ready to be merged in.
-    Rekordbox(Box<booth_core::rekordbox::master::Collection>),
+    Rekordbox(Box<booth_cli::rekordbox::master::Collection>),
     /// A file was re-encoded, and the collection should follow it.
     Converted {
         id: u32,
@@ -171,7 +171,7 @@ pub enum Update {
     Verified(Box<crate::verify::Report>),
     /// What the drive's database says after a write: each row and the file it
     /// was made from.
-    Wrote(Vec<(PathBuf, booth_core::export::pdb::Track)>),
+    Wrote(Vec<(PathBuf, booth_cli::export::pdb::Track)>),
     /// Playable files in the library folder that no track points at.
     Orphans(Vec<PathBuf>),
     /// A drive was copied.
@@ -280,9 +280,9 @@ pub fn read_record(id: u32, path: &Path, hashes: bool) -> Track {
     // protected purchase plays in the shop that sold it and nowhere else, and
     // finding that out when it is added beats finding out in a booth.
     track.protected = matches!(track.format.as_str(), "m4a" | "m4b" | "m4p" | "mp4" | "aac")
-        && booth_core::audio::mp4::is_protected(path);
+        && booth_cli::audio::mp4::is_protected(path);
 
-    let metadata = booth_core::tag::read_metadata(path).unwrap_or_default();
+    let metadata = booth_cli::tag::read_metadata(path).unwrap_or_default();
     let tagged_title = metadata.title.filter(|t| !t.trim().is_empty());
     let tagged_artist = metadata.artist.filter(|a| !a.trim().is_empty());
     // Both, not either: a file with an artist and no title has not been tagged
@@ -302,11 +302,11 @@ pub fn read_record(id: u32, path: &Path, hashes: bool) -> Track {
     // Both hashes at import, because both are a read of the file and the file
     // is open anyway. A failure is not one: an unreadable file has bigger
     // problems, and an empty hash simply never matches another.
-    match booth_core::hash::file_sha256(path) {
+    match booth_cli::hash::file_sha256(path) {
         Ok(hash) => track.file_hash = hash,
         Err(e) => crate::debug!("no file hash for {}: {e:#}", path.display()),
     }
-    match booth_core::hash::audio_sha256(path) {
+    match booth_cli::hash::audio_sha256(path) {
         Ok(hash) => track.audio_hash = hash,
         Err(e) => crate::debug!("no audio hash for {}: {e:#}", path.display()),
     }
@@ -393,8 +393,8 @@ fn is_float_wav(path: &Path) -> bool {
 pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
     let audio = decode_file(path)?;
     let analysis = analysis::analyze(&audio);
-    let waveform = booth_core::export::waveform::analyze(&audio);
-    let loudness = booth_core::loudness::measure(&audio).ok();
+    let waveform = booth_cli::export::waveform::analyze(&audio);
+    let loudness = booth_cli::loudness::measure(&audio).ok();
 
     let beat_ms: Vec<u32> = analysis.grid.beats.iter().map(|b| b.time_ms).collect();
     let phrases = analysis
@@ -468,7 +468,7 @@ pub fn cue_color(letter: u8) -> [u8; 3] {
 /// tool that gets someone's IP blocked has done them real harm, so the pacing
 /// is the services' own and is not configurable down.
 fn identify(tracks: &[(u32, PathBuf)], key: &str, reporter: &Channel) -> anyhow::Result<()> {
-    use booth_core::tag::{acoustid, fingerprint, musicbrainz};
+    use booth_cli::tag::{acoustid, fingerprint, musicbrainz};
 
     let mut acoustid = acoustid::Client::new(key.to_string(), acoustid::DEFAULT_MIN_INTERVAL);
     let mut brainz = musicbrainz::Client::new(std::time::Duration::from_millis(1_100));
@@ -509,7 +509,7 @@ fn identify(tracks: &[(u32, PathBuf)], key: &str, reporter: &Channel) -> anyhow:
             // carry. A failure here is not a failure of the identification.
             match brainz.lookup_recording(&best.recording_mbid) {
                 Ok(recording) => {
-                    let metadata = booth_core::tag::Metadata::from_musicbrainz(
+                    let metadata = booth_cli::tag::Metadata::from_musicbrainz(
                         &recording,
                         Some(&best.acoustid),
                     );
@@ -561,7 +561,7 @@ pub fn stem_envelopes(kit: &StemKit) -> anyhow::Result<crate::wave::StemEnvelope
     let measure = |path: Option<&PathBuf>| -> anyhow::Result<Vec<u8>> {
         let Some(path) = path else { return Ok(Vec::new()) };
         let audio = decode_file(path)?;
-        let waveform = booth_core::export::waveform::analyze(&audio);
+        let waveform = booth_cli::export::waveform::analyze(&audio);
         // The three band bytes of each column, collapsed to how much is there:
         // for colouring, what matters is which stem is loudest, not what it is
         // made of.
@@ -730,8 +730,8 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
         Job::Convert(tracks) => convert(&tracks, reporter),
         Job::Rekordbox { path, key } => {
-            let connection = booth_core::rekordbox::open(&path, &key)?;
-            let collection = booth_core::rekordbox::master::read(&connection)?;
+            let connection = booth_cli::rekordbox::open(&path, &key)?;
+            let collection = booth_cli::rekordbox::master::read(&connection)?;
             crate::info!(
                 "rekordbox: {} tracks, {} playlists",
                 collection.tracks.len(),
@@ -823,7 +823,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             args.input = InputArgs { inputs: files, recursive: false };
             // The rows the drive ended up with, so the next write can carry
             // them rather than preparing everything again.
-            let rows = booth_core::commands::export(&args, reporter)?;
+            let rows = booth_cli::commands::export(&args, reporter)?;
             let _ = reporter.tx.send(Update::Wrote(rows));
             (reporter.wake)();
             Ok(())
@@ -832,7 +832,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
 }
 
 fn import(paths: &[PathBuf], recursive: bool, reporter: &Channel) -> anyhow::Result<()> {
-    let files = booth_core::discover::collect(paths, recursive)?;
+    let files = booth_cli::discover::collect(paths, recursive)?;
     let total = files.len();
     crate::info!(
         "walked {} and found {}",
@@ -927,11 +927,11 @@ fn hash_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<()>
         // has bigger problems than being a copy, and an empty hash simply
         // never matches another. Both are sent even so, so that a track is
         // marked as looked at rather than asked about again every time.
-        let file = booth_core::hash::file_sha256(path).unwrap_or_else(|e| {
+        let file = booth_cli::hash::file_sha256(path).unwrap_or_else(|e| {
             crate::debug!("no file hash for {}: {e:#}", path.display());
             String::new()
         });
-        let audio = booth_core::hash::audio_sha256(path).unwrap_or_else(|e| {
+        let audio = booth_cli::hash::audio_sha256(path).unwrap_or_else(|e| {
             crate::debug!("no audio hash for {}: {e:#}", path.display());
             String::new()
         });
@@ -1020,7 +1020,7 @@ fn adopt(tracks: &[Adoptable], config: &Config, reporter: &Channel) -> anyhow::R
 /// collection is repointed at it; if the conversion turns out to be wrong, the
 /// thing it was made from is still there.
 fn convert(tracks: &[Convertible], reporter: &Channel) -> anyhow::Result<()> {
-    use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
+    use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
 
     let total = tracks.len();
     for (done, track) in tracks.iter().enumerate() {
@@ -1035,11 +1035,11 @@ fn convert(tracks: &[Convertible], reporter: &Channel) -> anyhow::Result<()> {
 
             // The names come with it. A converted file that arrives untitled
             // would look like a different record sitting next to the original.
-            let metadata = booth_core::tag::read_metadata(&track.path).unwrap_or_default();
-            let _ = booth_core::tag::write_tags(
+            let metadata = booth_cli::tag::read_metadata(&track.path).unwrap_or_default();
+            let _ = booth_cli::tag::write_tags(
                 &to,
                 &metadata,
-                booth_core::tag::OnExisting::Overwrite,
+                booth_cli::tag::OnExisting::Overwrite,
                 None,
             );
             Ok(to)
@@ -1092,14 +1092,14 @@ fn retag(tracks: &[Retag], reporter: &Channel) -> anyhow::Result<()> {
         if reporter.cancelled() {
             break;
         }
-        let metadata = booth_core::tag::Metadata {
+        let metadata = booth_cli::tag::Metadata {
             title: non_empty(&track.title),
             artist: non_empty(&track.artist),
             album: non_empty(&track.album),
             date: track.date.clone(),
             ..Default::default()
         };
-        match booth_core::tag::write_tags(&track.path, &metadata, track.on_existing, None) {
+        match booth_cli::tag::write_tags(&track.path, &metadata, track.on_existing, None) {
             Ok(outcome) => {
                 let fields: Vec<&str> = outcome.written.iter().map(|field| field.label()).collect();
                 let _ = reporter.tx.send(Update::Line(format!(
@@ -1175,7 +1175,7 @@ fn separate(
     tracks: &[(u32, PathBuf)],
     stems_in: &crate::config::StemsLocation,
     backend: Backend,
-    quality: booth_core::cli::StemQuality,
+    quality: booth_cli::cli::StemQuality,
     reporter: &Channel,
 ) -> anyhow::Result<()> {
     let mut args = StemsArgs::defaults();
@@ -1224,7 +1224,7 @@ fn separate(
             });
             continue;
         }
-        match booth_core::commands::stems_files(&args, std::slice::from_ref(path), &batch) {
+        match booth_cli::commands::stems_files(&args, std::slice::from_ref(path), &batch) {
             Ok(()) => {
                 let kit = find_stems(stems_in, path);
                 crate::debug!(
@@ -1250,8 +1250,8 @@ fn separate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
-    use booth_core::audio::Audio;
+    use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+    use booth_cli::audio::Audio;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("booth-job-{name}-{}", std::process::id()));

@@ -7,10 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
-use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
-use booth_core::audio::Audio;
-use booth_core::hash::{audio_sha256, file_sha256};
-use booth_core::tag::{Metadata, OnExisting};
+use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_cli::audio::Audio;
+use booth_cli::hash::{audio_sha256, file_sha256};
+use booth_cli::tag::{Metadata, OnExisting};
 
 struct Scratch(PathBuf);
 
@@ -51,7 +51,7 @@ fn retag(path: &Path, artist: &str) {
         album: Some("Tones".to_string()),
         ..Default::default()
     };
-    booth_core::tag::write_tags(path, &metadata, OnExisting::Overwrite, None).unwrap();
+    booth_cli::tag::write_tags(path, &metadata, OnExisting::Overwrite, None).unwrap();
 }
 
 #[test]

@@ -61,7 +61,7 @@ for target in "${TARGETS[@]}"; do
 	fi
 	# `-p`, because the default build is Booth alone and the command-line
 	# tool lives in another crate now.
-	cargo build --release --target "$target" -p booth-core --bin booth-cli
+	cargo build --release --target "$target" -p booth-cli --bin booth-cli
 	cargo build --release --target "$target" -p booth --bin booth
 done
 

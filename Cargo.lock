@@ -704,7 +704,7 @@ dependencies = [
  "accesskit",
  "anyhow",
  "async-std",
- "booth-core",
+ "booth-cli",
  "cpal",
  "eframe",
  "egui_kittest",
@@ -719,7 +719,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "booth-core"
+name = "booth-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -745,6 +745,19 @@ dependencies = [
  "symphonia",
  "ureq",
  "walkdir",
+]
+
+[[package]]
+name = "booth-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-std",
+ "booth-cli",
+ "clap",
+ "eframe",
+ "rayon",
+ "rfd",
 ]
 
 [[package]]
@@ -2460,19 +2473,6 @@ name = "mp4ameta"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "453e991b2efe96c288cbc2d03a19e353504294559ecb6c03067fff5bd824616d"
-
-[[package]]
-name = "musicai-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-std",
- "booth-core",
- "clap",
- "eframe",
- "rayon",
- "rfd",
-]
 
 [[package]]
 name = "naga"

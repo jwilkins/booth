@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use booth_core::rekordbox::{self, master};
+use booth_cli::rekordbox::{self, master};
 
 struct Scratch(PathBuf);
 
@@ -217,7 +217,7 @@ fn a_missing_column_costs_that_field_and_not_the_import() {
 /// one, and the difference is the schema rather than the encryption.
 #[test]
 fn a_onelibrary_drive_can_be_opened_and_described() {
-    use booth_core::rekordbox::onelibrary;
+    use booth_cli::rekordbox::onelibrary;
 
     let scratch = Scratch::new("onelibrary");
     let drive = scratch.0.join("USB");

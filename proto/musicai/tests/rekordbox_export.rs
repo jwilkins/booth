@@ -11,8 +11,8 @@
 use std::io::Cursor;
 
 use binrw::BinRead;
-use booth_core::audio::Audio;
-use booth_core::export::{anlz, waveform, BeatGrid, Cue, Mood, Phrase, SongStructure};
+use booth_cli::audio::Audio;
+use booth_cli::export::{anlz, waveform, BeatGrid, Cue, Mood, Phrase, SongStructure};
 use rekordcrate::anlz::{Content, ContentKind, CueListType, CueType, ANLZ};
 
 const SAMPLE_RATE: u32 = 44_100;
@@ -389,7 +389,7 @@ fn a_point_cue_uses_the_type_the_format_docs_give() {
     // bytes in, after the entry's own header and its hot cue number.
     assert_eq!(bytes[20 + 16], 1, "a point cue should be type 1");
 
-    let file = booth_core::export::anlz::file(&[bytes]);
+    let file = booth_cli::export::anlz::file(&[bytes]);
     match ANLZ::read(&mut Cursor::new(&file)) {
         Ok(parsed) => {
             // rekordcrate has come round to the documented value.

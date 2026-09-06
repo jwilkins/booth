@@ -1,7 +1,7 @@
-# booth-core
+# booth-cli
 
-The engine: analysis, loudness, stems, tagging and the drive writer, with the `booth-cli`
-command-line tool wrapped around it. [Booth](../../booth/README.md) is built on this crate, and the macOS app is
+The engine: analysis, loudness, stems, tagging and the drive writer, with the command-line tool
+of the same name wrapped around it. [Booth](../../booth/README.md) is built on this crate, and the macOS app is
 Booth — see [the top-level README](../../README.md). This is the interface that came first, which
 is all the `proto/` in the path — and the directory's old name — mean.
 
@@ -36,11 +36,11 @@ for flac, `hound` for wav) are built into the binary.
 ## Install
 
 ```sh
-cargo build --release -p booth-core
+cargo build --release -p booth-cli
 # binary at ./target/release/booth-cli
 ```
 
-`-p booth-core`, because a plain `cargo build` in this workspace builds Booth. Building this crate on
+`-p booth-cli`, because a plain `cargo build` in this workspace builds Booth. Building this crate on
 its own pulls in none of a window toolkit, which is why it is a crate of its own.
 
 ## The default: all of it, over everything
@@ -611,7 +611,7 @@ browsed one; whether it used the analysis files is still unproven.
 ## Tests
 
 ```sh
-cargo test --release -p booth-core
+cargo test --release -p booth-cli
 ```
 
 Unit tests cover the STFT round trip, the median filters, the limiter's ceiling guarantee, the
@@ -627,7 +627,7 @@ file.
 The batch window has its own tests, in its own crate:
 
 ```sh
-cargo test -p musicai-gui --release
+cargo test -p booth-gui --release
 ```
 
 They run real jobs through the worker thread and assert on what comes back — progress, per-file

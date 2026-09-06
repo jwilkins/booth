@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use booth_core::cli::{Cli, Command};
-use booth_core::commands;
+use booth_cli::cli::{Cli, Command};
+use booth_cli::commands;
 
 fn main() {
     if let Err(error) = run() {
@@ -21,7 +21,7 @@ fn run() -> Result<()> {
             .context("configuring the thread pool")?;
     }
 
-    let reporter = booth_core::report::Stdio;
+    let reporter = booth_cli::report::Stdio;
     match &cli.command {
         Some(Command::Analyze(args)) => commands::analyze(args, &reporter),
         Some(Command::Anlz(args)) => commands::anlz(args, &reporter),

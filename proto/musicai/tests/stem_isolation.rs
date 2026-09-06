@@ -22,10 +22,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use booth_core::audio::decode::decode_file;
-use booth_core::audio::encode::{write_file, Codec, EncodeOptions};
-use booth_core::audio::Audio;
-use booth_core::stems::{demucs, Stem, StemSet};
+use booth_cli::audio::decode::decode_file;
+use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+use booth_cli::audio::Audio;
+use booth_cli::stems::{demucs, Stem, StemSet};
 
 /// Seconds of the track to use. Long enough to contain several sung phrases,
 /// short enough that separating and transcribing it four times is bearable on
