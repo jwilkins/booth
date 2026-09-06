@@ -319,6 +319,21 @@ that the picture no longer says anything about how loud one record is against
 another — it is about the shape of the one you are looking at. The loudness
 figures in the columns are what answers the other question.
 
+The overview pictures — the strip under the deck on a player, and the small one
+in a browse list — average a window of about a second, wider than the spacing
+between their columns, so consecutive columns overlap. At twelve hundred
+columns a whole track, one column is a third of a second, which is less than a
+beat at any tempo anybody plays: windows that merely touch each other resolve
+individual kick drums and draw a comb whose spacing is the sampling rather than
+the music. A second spans a beat at every tempo, so what is left is how much is
+going on, which is the arrangement and what an overview is for. A drop's edge
+blurs across about three columns of twelve hundred, which is the price of the
+rest and not visible.
+
+The scrolling waveform is not touched by any of that. Its columns are a
+hundred-and-fiftieth of a second, a kick drum is several of them wide, and the
+peak is the right measurement at that size.
+
 The same measurement makes the pictures on the drive, so what is on screen
 while prepping is what will be on the CDJ's screen.
 

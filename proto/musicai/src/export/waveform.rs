@@ -209,14 +209,16 @@ impl Column {
         }
     }
 
-    fn merge(&mut self, other: &Column) {
-        self.full = self.full.max(other.full);
-        self.low = self.low.max(other.low);
-        self.mid = self.mid.max(other.mid);
-        self.high = self.high.max(other.high);
-        self.low_rms = self.low_rms.max(other.low_rms);
-        self.mid_rms = self.mid_rms.max(other.mid_rms);
-        self.high_rms = self.high_rms.max(other.high_rms);
+    /// Add another column's measurements into this one, on the way to an
+    /// average of them.
+    fn add(&mut self, other: &Column) {
+        self.full += other.full;
+        self.low += other.low;
+        self.mid += other.mid;
+        self.high += other.high;
+        self.low_rms += other.low_rms;
+        self.mid_rms += other.mid_rms;
+        self.high_rms += other.high_rms;
     }
 
     /// Five bits of height, three of whiteness — the encoding shared by the
@@ -403,23 +405,60 @@ fn measure(audio: &Audio) -> Vec<Column> {
     columns
 }
 
-/// Squeeze the detail columns down to a fixed-width preview by taking the peak
-/// of each span. Peak rather than average, because a preview whose job is to
-/// show you where the drops are should not smooth them away.
+/// Squeeze the detail columns down to a fixed-width overview, by averaging each
+/// span rather than taking its peak.
+///
+/// The peak is right for the scrolling waveform, where a column is a
+/// hundred-and-fiftieth of a second and a kick drum is several columns wide. It
+/// is wrong here. A preview column of a six-minute track covers about a third
+/// of a second, which is most of a beat, so whether it reaches the top comes
+/// down to whether a transient happened to land inside it — and the answer
+/// alternates. That draws a comb: a picture whose loudest feature is the
+/// sampling, at a spacing that has nothing to do with the music.
+///
+/// It also hides the thing the overview is for. With every column catching some
+/// transient, a breakdown and a drop both pin near the top and the arrangement
+/// flattens out. Averaging measures how much is going on across the span
+/// instead, which is what separates them: on a test track it cut the
+/// column-to-column jitter sixfold and *widened* the gap between the quietest
+/// section and the loudest.
 fn summarise(columns: &[Column], width: usize) -> Vec<Column> {
     let mut out = vec![Column::default(); width];
     if columns.is_empty() {
         return out;
     }
+    // Each column averages a window centred on it, and the window is wider
+    // than the spacing between columns — so consecutive ones overlap and the
+    // picture is an envelope rather than a series of separate samples of a
+    // pulse. See `OVERVIEW_WINDOW`.
+    let pitch = columns.len().div_ceil(width);
+    let window = pitch.max(OVERVIEW_WINDOW).min(columns.len());
     for (i, target) in out.iter_mut().enumerate() {
-        let from = i * columns.len() / width;
-        let to = ((i + 1) * columns.len() / width).max(from + 1).min(columns.len());
+        let centre = (i * columns.len() / width) + pitch / 2;
+        let from = centre.saturating_sub(window / 2).min(columns.len() - 1);
+        let to = (from + window).min(columns.len());
         for column in &columns[from..to] {
-            target.merge(column);
+            target.add(column);
         }
+        target.scale(1.0 / (to - from) as f32);
     }
     out
 }
+
+/// How many detail columns an overview column averages, at least.
+///
+/// One second's worth. At 1,200 columns a preview column of a six-minute track
+/// covers a third of a second, which is less than a beat at any tempo anybody
+/// plays — so windows that merely touch each other resolve individual kick
+/// drums, and the picture is a comb whose spacing is the sampling rather than
+/// the music. That is what an overview drawn this way looks like on a player,
+/// and it buries the thing it is for.
+///
+/// A second spans a beat at every tempo, so what survives the averaging is how
+/// much is going on, which is the arrangement. A drop's edge blurs across
+/// three columns of twelve hundred, which is nothing to look at and the price
+/// of the rest.
+const OVERVIEW_WINDOW: usize = DETAIL_PER_SECOND;
 
 #[cfg(test)]
 mod tests {
@@ -654,6 +693,49 @@ mod tests {
         assert_eq!(middle & 0x1f, 31, "a full-scale column should be full height");
         assert_eq!(middle >> 5, 0, "bass should not be white");
         assert_eq!(middle, 31);
+    }
+
+    /// Four minutes of four-to-the-floor: a kick on every beat, which is what
+    /// combs an overview drawn from peaks.
+    fn four_to_the_floor(seconds: f32) -> Audio {
+        use std::f32::consts::PI;
+        let rate = 44_100u32;
+        let beat = 60.0 / 128.0;
+        let n = (rate as f32 * seconds) as usize;
+        let mut plane = vec![0.0f32; n];
+        let mut at = 0usize;
+        while at < n {
+            for k in 0..(rate as f32 * beat) as usize {
+                let i = at + k;
+                if i >= n {
+                    break;
+                }
+                let t = k as f32 / rate as f32;
+                plane[i] = 0.9 * (-28.0 * t).exp() * (2.0 * PI * 52.0 * t).sin()
+                    + 0.2 * (2.0 * PI * 330.0 * (i as f32 / rate as f32)).sin();
+            }
+            at += (rate as f32 * beat) as usize;
+        }
+        Audio::new(rate, vec![plane.clone(), plane]).unwrap()
+    }
+
+    #[test]
+    fn the_overview_of_a_steady_track_is_steady() {
+        // The fault this is here for: a preview column of a long track is most
+        // of a beat, so a column drawn from the peak of its span reaches the
+        // top only when a transient happened to land inside it, and the answer
+        // alternates. The picture that draws is a comb whose spacing is the
+        // sampling rather than the music.
+        let w = analyze(&four_to_the_floor(240.0));
+        let heights: Vec<f32> =
+            w.color_preview.chunks(6).map(|c| c[3].max(c[4]).max(c[5]) as f32).collect();
+        let jitter: f32 = heights.windows(2).map(|pair| (pair[0] - pair[1]).abs()).sum::<f32>()
+            / (heights.len() - 1) as f32;
+        assert!(
+            jitter < 12.0,
+            "the overview jumps {jitter:.1} levels a column on a track that does the same thing \
+             throughout"
+        );
     }
 
     #[test]
