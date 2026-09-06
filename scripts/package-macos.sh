@@ -33,6 +33,24 @@ fi
 
 VERSION=$(awk -F'"' '/^version = /{print $2; exit}' "$REPO/booth/Cargo.toml")
 
+# A release names itself, and the disk image should agree with it: two releases
+# both shipping `booth-0.1.0.dmg` are two files nobody can tell apart. The tag
+# wins when there is one, with any leading `v` dropped.
+#
+# Only when it is digits and dots, because this becomes CFBundleVersion, and
+# macOS takes nothing else there — a bundle with `v0.2-rc1` in that field is
+# one Finder and Gatekeeper both object to. Anything else falls back to the
+# manifest rather than shipping something that will not launch.
+if [ -n "${BOOTH_VERSION:-}" ]; then
+	tagged=${BOOTH_VERSION#v}
+	if printf '%s' "$tagged" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
+		VERSION=$tagged
+	else
+		echo "==> BOOTH_VERSION=$BOOTH_VERSION is not a version macOS accepts;" \
+			"the bundle says $VERSION" >&2
+	fi
+fi
+
 echo "==> building Booth $VERSION for ${TARGETS[*]}"
 for target in "${TARGETS[@]}"; do
 	# Missing targets are the usual first-run failure, and the fix is one

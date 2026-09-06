@@ -1,27 +1,52 @@
 name: macOS app
 
-# Builds Booth.app and its disk image, and attaches it to the release for the
-# tag. Runs on demand and on tags, because a universal build is two compiles of
-# everything and is not worth doing on every push.
+# Builds Booth.app and its disk image, and attaches it to a release. Not on
+# every push, because a universal build is two compiles of everything.
 #
-# Both tag shapes, because `v1.0` and `1.0` are both things people tag, and a
-# release with no app attached because the tag was the wrong shape is a silent
-# failure — the workflow simply never runs, so there is nothing red to notice.
+# Three ways in, because there are three ways people actually cut a release and
+# missing one of them fails silently — the workflow simply never runs, so there
+# is nothing red to notice:
+#
+#   - **A release published in the web interface.** Which is how this
+#     repository's first one was made, and the reason it has no app on it.
+#   - **A tag pushed from a shell.** Both shapes: `v1.0` and `1.0` are both
+#     things people tag.
+#   - **By hand**, naming a tag, for attaching a build to a release that is
+#     already out — the only way to fix a release after the fact, since a tag
+#     that already exists is never pushed again.
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Attach the build to this release (blank: build only)"
+        required: false
+        type: string
   push:
     tags:
       - "v*"
       - "[0-9]*"
+  release:
+    types: [published]
 
 permissions:
   contents: write
+
+# One build per tag. Two racing to upload the same asset is a coin toss over
+# which one the release ends up with.
+concurrency:
+  group: macos-app-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   package:
     runs-on: macos-14
     steps:
+      # The tag's own code, not the branch's. A release published from the web
+      # interface reports the branch it was cut from in `github.ref`, so
+      # checking that out would build something other than what was released.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
 
       - name: Install the Apple targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -29,6 +54,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build the app and the disk image
+        env:
+          # The release's own name, so the disk image and the bundle agree with
+          # the tag rather than with whatever the manifest last said.
+          BOOTH_VERSION: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
         run: scripts/package-macos.sh
 
       # Unsigned by design: signing needs a Developer ID certificate, which
@@ -61,10 +90,10 @@ jobs:
       # answer to "where do I get the app". The disk image goes on the release
       # itself, where a link to it is a link anybody can follow.
       - name: Attach the disk image to the release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: ${{ github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || inputs.tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           # A tag pushed without a release made for it still gets one, so
@@ -73,3 +102,4 @@ jobs:
             gh release create "$TAG" --title "$TAG" --generate-notes
           fi
           gh release upload "$TAG" dist/*.dmg --clobber
+          echo "attached to $(gh release view "$TAG" --json url --jq .url)" >>"$GITHUB_STEP_SUMMARY"

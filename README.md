@@ -117,7 +117,15 @@ BOOTH_NOTARY_PROFILE=my-notary-profile \
     scripts/package-macos.sh
 ```
 
-`.github/workflows/macos-app.yml` builds the same thing on a macOS runner, on a tag or on demand.
+`.github/workflows/macos-app.yml` builds the same thing on a macOS runner and puts the disk image
+on the release, three ways in: a release published from GitHub's own web interface, a tag pushed
+from a shell (`v1.0` and `1.0` both count), or by hand from the Actions tab, where naming a tag
+attaches the build to a release that is already out. That last one is the only way to fix a
+release after the fact, since a tag that already exists is never pushed again.
+
+The disk image and the bundle take their version from the tag rather than from `Cargo.toml`, so
+two releases are two files you can tell apart. A tag macOS would not accept as a version — a `-rc1`
+on the end, say — falls back to the manifest rather than building something that will not launch.
 
 ### What the batch window is, and is not
 
