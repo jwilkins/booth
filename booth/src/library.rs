@@ -1401,6 +1401,19 @@ pub fn companion_of(id: u32) -> Option<(u32, Role)> {
     Some(((id & 0x7FFF_FFFF) >> 2, role))
 }
 
+/// The recording a row belongs to: a companion's parent, or the track itself.
+///
+/// A track and its stems are one recording cut three ways, and several things
+/// want to ask whether two rows are parts of the same one — the deck most of
+/// all, since switching between them is a comparison rather than a change of
+/// record.
+pub fn family(id: u32) -> u32 {
+    match companion_of(id) {
+        Some((parent, _)) => parent,
+        None => id,
+    }
+}
+
 /// Where a track's three-band picture is cached.
 ///
 /// Not in the collection file: it is 3,600 bytes a track, and a library of a

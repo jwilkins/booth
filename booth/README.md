@@ -164,6 +164,19 @@ waveform moves the playhead and takes playback with it; pressing a cue jumps
 both. That is the point of having a deck at all — a cue placed by eye is a
 guess, and the ear is what says whether it is on the beat.
 
+**Switching between a track and its stems keeps your place.** Pick the acapella
+while the track is playing and it comes in where the track had got to, still
+running; go back to the original, or across to the drums, and the same. That is
+what the comparison is for — is the vocal clean through the drop, is the groove
+still there without it — and a comparison you have to re-cue by hand is not one
+anybody makes twice. Paused, the playhead still moves across so pressing play
+picks up there, without starting a sound nobody asked for. It works from the
+arrow keys as well as the pointer, since a stem sits directly under its parent
+in the list.
+
+Between two different records nothing carries: the new one starts at its own
+beginning rather than at wherever the last one's playhead happened to be.
+
 One deck, and it audition only: no pitch, no sync, no mixing. The track is
 decoded whole in the background so that seeking anywhere is instant, which is
 what checking cues is made of. A file whose rate differs from the output

@@ -1097,15 +1097,54 @@ impl App {
         let next = (at as isize + delta).clamp(0, self.rows.len() as isize - 1) as usize;
         let id = self.rows[next].track.id;
 
-        if Some(id) != self.selected {
-            self.selected = Some(id);
-            self.waveform = None;
-            self.zoom = wave::Zoom::default();
-            self.envelopes = None;
-        }
+        self.select(id);
         match extend {
             true => self.mark_range_to(id),
             false => self.mark_only(id),
+        }
+    }
+
+    /// Move the cursor to a row. Says whether the deck went with it.
+    ///
+    /// Switching between a track and its stems is a comparison — is the vocal
+    /// clean through the drop, is the groove still there without it — and a
+    /// comparison you have to re-cue by hand is not one anybody makes twice.
+    /// See [`carry`] for what that means for the deck.
+    fn select(&mut self, id: u32) -> bool {
+        let was = self.selected;
+        if was == Some(id) {
+            return false;
+        }
+        self.selected = Some(id);
+        // The picture is per file — a stem's is not its parent's — so it is
+        // dropped either way and read again for the row now showing.
+        self.waveform = None;
+        self.envelopes = None;
+
+        // Taken off the deck rather than from the running note of the
+        // playhead, because that note only follows the row that is selected
+        // and the selection has just moved.
+        let deck = self.player.as_ref().and_then(|player| {
+            Some((player.loaded()?, player.position_secs(), player.is_playing()))
+        });
+
+        match carry(was, id, deck) {
+            Carry::Restart => {
+                self.zoom = wave::Zoom::default();
+                self.playhead_ms = None;
+                false
+            }
+            // The zoom stays as well as the playhead: it is the same minute of
+            // the same music, and throwing the view away to show it again is
+            // the opposite of a comparison.
+            Carry::Hold => false,
+            Carry::From { secs, playing } => {
+                self.playhead_ms = Some((secs * 1000.0) as u32);
+                if playing {
+                    self.audition(id, Some(secs));
+                }
+                playing
+            }
         }
     }
 
@@ -2130,6 +2169,42 @@ impl Naming {
             focused: false,
             holding: Vec::new(),
         }
+    }
+}
+
+/// What moving the cursor from one row to another should do to the deck.
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Carry {
+    /// A different recording. Nothing carries: it starts at its own beginning,
+    /// rather than at wherever the last one's playhead happened to be.
+    Restart,
+    /// Another part of the same recording, with the deck holding neither of
+    /// them. The playhead stays where it was, so pressing play picks up there.
+    Hold,
+    /// Another part of the same recording, and the deck is on one of them at
+    /// this moment. `playing` says whether it follows the cursor or waits to
+    /// be asked.
+    From { secs: f64, playing: bool },
+}
+
+/// Where the cursor is going, against where it was and what the deck holds.
+///
+/// `deck` is which row the player has loaded, where it has got to, and whether
+/// it is running.
+///
+/// A track and its stems are one recording cut three ways, so moving between
+/// them is not changing record — it is listening to the same moment a
+/// different way. The position carries, and a running deck carries with it. A
+/// paused one moves its playhead and stays quiet, which is the same promise
+/// without starting a sound nobody asked for.
+fn carry(from: Option<u32>, to: u32, deck: Option<(u32, f64, bool)>) -> Carry {
+    let together = |other: u32| crate::library::family(other) == crate::library::family(to);
+    if !from.is_some_and(together) {
+        return Carry::Restart;
+    }
+    match deck {
+        Some((loaded, secs, playing)) if together(loaded) => Carry::From { secs, playing },
+        _ => Carry::Hold,
     }
 }
 
@@ -3682,15 +3757,9 @@ impl App {
             // track it will act on, and stealing the selection would throw away
             // whatever is loaded on the deck to run an errand on something else.
             let selects = !matches!(what, rows::Hit::Chose(_));
-            if selects && Some(id) != self.selected {
-                self.selected = Some(id);
-                self.waveform = None;
-                self.zoom = wave::Zoom::default();
-                self.envelopes = None;
-                // A different track: start it from the top rather than from
-                // wherever the last one's playhead happened to be.
-                self.playhead_ms = None;
-            }
+            // Says whether picking this row already handed it the deck, which
+            // it does when the row is another part of what is playing.
+            let carried = selects && self.select(id);
             if selects {
                 // Shift takes everything between; the command key takes this
                 // one as well as what is already picked; a plain click starts
@@ -3703,6 +3772,10 @@ impl App {
                 }
             }
             match what {
+                // Already playing, from the moment the last part had reached:
+                // double-clicking a stem means "play this", and the selection
+                // did exactly that. Toggling on top would stop it again.
+                rows::Hit::Opened if carried => {}
                 rows::Hit::Opened => self.pending.push(Pending::TogglePlayback(id)),
                 rows::Hit::Chose(action) => self.pending.push(match action {
                     rows::Action::Play => Pending::TogglePlayback(id),
@@ -4562,9 +4635,9 @@ impl App {
             match action {
                 Pending::Select(id) => {
                     if Some(id) != self.selected {
-                        self.selected = Some(id);
-                        self.waveform = None;
-                        self.zoom = wave::Zoom::default();
+                        // Through the same path as a click, so that what a
+                        // selection does to the deck is decided in one place.
+                        self.select(id);
                         // Selecting from the neighbours list can leave the
                         // query showing something the track is not in; the
                         // browser widens rather than the selection being lost.
@@ -8641,6 +8714,73 @@ mod tests {
                 harness.run();
             }
             harness.input_mut().modifiers = egui::Modifiers::NONE;
+        }
+
+        #[test]
+        fn switching_between_a_track_and_its_stems_keeps_the_place() {
+            use crate::library::{companion_id, Role};
+            let track = 7u32;
+            let vocals = companion_id(track, Role::Vocals);
+            let drums = companion_id(track, Role::Drums);
+            let other = 9u32;
+
+            // The deck is running the parent, forty seconds in.
+            let deck = Some((track, 40.0, true));
+            assert_eq!(
+                carry(Some(track), vocals, deck),
+                Carry::From { secs: 40.0, playing: true },
+                "the vocal should come in where the track had got to"
+            );
+            // And between two stems of the same kit, with the deck on one of
+            // them: still the same recording, still the same moment.
+            assert_eq!(
+                carry(Some(vocals), drums, Some((vocals, 40.0, true))),
+                Carry::From { secs: 40.0, playing: true }
+            );
+            // And back to the original.
+            assert_eq!(
+                carry(Some(drums), track, Some((drums, 40.0, true))),
+                Carry::From { secs: 40.0, playing: true }
+            );
+
+            // Paused, the playhead still moves — pressing play then picks it
+            // up there — but nothing starts on its own.
+            assert_eq!(
+                carry(Some(track), vocals, Some((track, 40.0, false))),
+                Carry::From { secs: 40.0, playing: false }
+            );
+
+            // A different record is a different record, whatever the deck is
+            // doing: it starts at its own beginning.
+            assert_eq!(carry(Some(track), other, deck), Carry::Restart);
+            assert_eq!(carry(Some(other), vocals, Some((other, 40.0, true))), Carry::Restart);
+            assert_eq!(carry(None, vocals, deck), Carry::Restart);
+
+            // The same recording, but the deck is somewhere else entirely:
+            // the playhead stays where it was rather than being dragged to
+            // another record's position.
+            assert_eq!(carry(Some(track), vocals, Some((other, 12.0, true))), Carry::Hold);
+            assert_eq!(carry(Some(track), vocals, None), Carry::Hold);
+        }
+
+        #[test]
+        fn clicking_a_stem_keeps_the_playhead_and_clicking_away_drops_it() {
+            // The same rule as it arrives through the window: a click moves the
+            // cursor, and what that does to the position is decided in one
+            // place whether it came from the pointer or the arrow keys.
+            let mut app = listing("stem switch", 2);
+            let ids: Vec<u32> = app.rows.iter().map(|row| row.track.id).collect();
+            app.selected = Some(ids[0]);
+            app.playhead_ms = Some(40_000);
+
+            let vocals = crate::library::companion_id(ids[0], crate::library::Role::Vocals);
+            app.select(vocals);
+            assert_eq!(app.selected, Some(vocals));
+            assert_eq!(app.playhead_ms, Some(40_000), "the stem started from the top");
+
+            // And on to a different track, where it means nothing.
+            app.select(ids[1]);
+            assert_eq!(app.playhead_ms, None, "a different record kept the old playhead");
         }
 
         #[test]
