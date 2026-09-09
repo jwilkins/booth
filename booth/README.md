@@ -143,6 +143,15 @@ is different for a first pass and a re-run. Re-analysing is the same code path
 as analysing — there is no separate re-do, which is how the two would come to
 disagree.
 
+**Hold shift and the batch Analyse button becomes Re-analyse**, acting on
+everything showing rather than only the tracks that have never been done. That
+is the button to reach for when what analysis produces has changed — a new
+waveform, a different grid — and every track in the collection is holding an
+answer from the old code. The label changes with the key, not just the hover
+text, because the two act on different numbers of tracks and a button has to
+say what pressing it will do. The query bar still decides what the batch is, so
+narrowing the list narrows the work.
+
 Right-clicking does not move the selection, and the menu names the track it will
 act on. A stem companion offers only play and copy-path: it is a file its parent
 owns, and analysing it separately would put a second answer beside the one it
