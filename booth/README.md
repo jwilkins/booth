@@ -366,6 +366,29 @@ mastered. Without that a modern master is a solid block: the height curve ran
 out of room near the top and a drop, a build and a breakdown all drew at full
 height, which is a waveform with the arrangement taken out of it.
 
+**The height is a weighted blend of the bands, not the peak of the signal** —
+0.6 low, 0.3 mid, 0.1 high. A modern master is limited, and limiting is
+precisely the business of making the peak the same from moment to moment:
+measured column by column across one loud section of one, the peak has a
+spread of 0.00. It is a straight line, and no scaling or curve-bending recovers
+a shape from a straight line, which is why a loud track drew as a solid block
+however its gain was worked out. Through the same section the mid band, the
+high band and the overall RMS sit at 0.04 to 0.07; the low band is at 0.36. On
+a limited record the kick is the one thing still moving, and it is what a
+waveform is read for, so it leads.
+
+The other two still carry the level, which is what stops this being a bass
+meter: a breakdown that takes the drums out but keeps a loud pad draws at about
+a third of full height rather than the tenth the low band alone would give it.
+It looks thinner than a section with the drums in, which is the useful part —
+a passage with no kick in it *should*.
+
+Two scales, though, not one. How tall a column is drawn and what it is made of
+do not live on the same scale — the blend sits below any single band — so one
+gain cannot serve both: set from the blend it drives the band bytes past the
+top of their range, and set from the bands it leaves the height using a third
+of the display. The colours are ratios between bands and do not care either way.
+
 **The scrolling waveform and the overviews are scaled separately**, because
 they are two different measurements of the same track. A scrolling column is a
 peak; an overview column is a second of audio averaged, and on anything with
@@ -374,22 +397,20 @@ both: worked out on the averages and applied to the peaks it comes out about
 twice too large, and every hit flattens against the top until the picture is a
 solid block. That is what it did.
 
-For the scrolling waveform the reference is the 95th percentile of the peaks
-rather than the maximum — one clap that clips sets the maximum on a great many
-records, and scaling to it spends the top of the display on a moment nobody is
-looking for. The loudest twentieth reaches the top and everything else is drawn
-against it. For the overviews it is the maximum, because a second of audio
-averaged is not something a single clap can carry, so the outlier the
-percentile guards against cannot arise there — and the maximum means the
-loudest passage draws exactly at the top with nothing above it thrown away. One
-overview gain across all three of them, so the strip under the deck and the
-small picture in a browse list agree.
+For the scrolling waveform the reference is the 99th percentile rather than the
+maximum: a single freak column — one clap that clips on an otherwise quiet
+record — would otherwise set it, and the whole picture would be drawn against a
+moment nobody is looking for. Not the loudest twentieth, though. That was the
+setting when the height was a raw peak, and on a limited master half the track
+sits within a hair of the peak, so the 95th percentile falls *inside* the
+loudest passage and draws its median at 29 of 31 with the kicks clipped off
+above it. Measured on one, 0.99 doubles the movement visible inside a loud
+section and drops that median to 23, which is where a kick has somewhere to go.
 
-Either way the reference is the peak of the whole signal, which is what the
-height is drawn from, and not the loudest band. The bands are complementary —
-they add back up to the whole — so the loudest of them is always the smaller
-number, and referencing it made every picture about a quarter hotter than it
-was meant to be.
+For the overviews it is the maximum, because a second of audio averaged is not
+something a single clap can carry, so the outlier a percentile guards against
+cannot arise there. One overview reference across all three of them, so the
+strip under the deck and the small picture in a browse list agree.
 
 A very quiet transfer is lifted, up to thirty decibels, which is more than any
 real recording needs and short of what it takes to make a noise floor look like

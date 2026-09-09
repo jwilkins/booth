@@ -7,6 +7,8 @@
 
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui, Vec2};
 
+use booth_cli::export::waveform::loudness;
+
 use crate::library::{CueMark, Phrase};
 use crate::theme;
 
@@ -421,10 +423,15 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
                     bar(band * reach, color);
                 }
             }
-            // One bar as tall as the loudest band, coloured by the mix.
+            // One bar, coloured by the mix. As tall as the same weighted
+            // blend of the bands the drive is written from, so the picture on
+            // screen and the picture on the player are the same picture — and
+            // so that this mode is not the flat one. Drawn from the loudest
+            // band it followed the mid, which on a limited master is a
+            // straight line.
             Paint::Frequency => {
                 let [low, mid, high] = peaks;
-                bar(low.max(mid).max(high) * reach, frequency_color(low, mid, high));
+                bar(loudness(low, mid, high) * reach, frequency_color(low, mid, high));
             }
             Paint::Stems => {
                 let [low, mid, high] = peaks;
@@ -432,7 +439,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
                     .stems
                     .map(|stems| stems.color_at(loudest * stems.columns() / wave.columns().max(1)))
                     .unwrap_or(theme::RULE);
-                bar(low.max(mid).max(high) * reach, color);
+                bar(loudness(low, mid, high) * reach, color);
             }
         }
     }
