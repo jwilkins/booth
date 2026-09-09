@@ -275,8 +275,8 @@ pub struct App {
     /// own: renaming somebody's file is not a tidy-up to spring on them.
     renames: Vec<(u32, PathBuf)>,
     /// Set when a panel has been dragged and the new size is not written out
-    /// yet. See [`App::save_panels`].
-    panels_moved: bool,
+    /// yet. See [`App::save_layout`].
+    layout_moved: bool,
     /// Set by the sidebar, acted on after every panel has drawn. The tree is
     /// walked while the library is borrowed, so it cannot save or rebuild from
     /// inside the walk.
@@ -602,7 +602,7 @@ impl App {
             looked_for_drives: None,
             kept_drives: std::collections::HashMap::new(),
             renames: Vec::new(),
-            panels_moved: false,
+            layout_moved: false,
             pending_save: false,
             pending_rebuild: false,
             tag_entry: String::new(),
@@ -751,24 +751,54 @@ impl App {
     /// changes, and saving on each would rewrite the settings file a hundred
     /// times across one pull. So the number is kept as it moves and committed
     /// when the pointer comes up.
-    fn remember_panel(&mut self, which: fn(&mut crate::config::Panels) -> &mut f32, size: f32) {
+    ///
+    /// And only while the pointer is down, because that is the only way a
+    /// panel is ever meant to change size. Everything else that moves one is
+    /// something being done to the window rather than to the panel: dragging
+    /// the window narrower squeezes the side panels, and recording that would
+    /// make a temporary squeeze into the size they open at from then on.
+    fn remember_panel(
+        &mut self,
+        dragging: bool,
+        which: fn(&mut crate::config::Panels) -> &mut f32,
+        size: f32,
+    ) {
+        if !dragging {
+            return;
+        }
         let stored = which(&mut self.config.panels);
         if !crate::config::Panels::differs(*stored, size) {
             return;
         }
         *stored = size;
-        self.panels_moved = true;
+        self.layout_moved = true;
     }
 
-    /// Write the panel sizes out, if a drag has just finished moving one.
-    fn save_panels(&mut self, ctx: &egui::Context) {
-        if !self.panels_moved || ctx.input(|i| i.pointer.any_down()) {
+    /// Write the sizes out, if a drag has just finished changing one.
+    ///
+    /// Panels and columns both: they are dragged the same way, they are
+    /// written to the same file, and one flag between them means a drag that
+    /// moved both still costs one write.
+    fn save_layout(&mut self, ctx: &egui::Context) {
+        if !self.layout_moved || ctx.input(|i| i.pointer.any_down()) {
             return;
         }
-        self.panels_moved = false;
+        self.layout_moved = false;
+        let widths: Vec<String> = self
+            .config
+            .columns
+            .columns
+            .iter()
+            .filter(|slot| slot.shown)
+            .map(|slot| format!("{} {:.0}", slot.column.name(), slot.width))
+            .collect();
         match self.config.save(&self.config_path) {
-            Ok(()) => crate::debug!("panel sizes saved: {:?}", self.config.panels),
-            Err(e) => crate::warn!("could not save the panel sizes: {e:#}"),
+            Ok(()) => crate::debug!(
+                "layout saved: panels {:?}, columns {}",
+                self.config.panels,
+                widths.join(", ")
+            ),
+            Err(e) => crate::warn!("could not save the layout: {e:#}"),
         }
     }
 
@@ -1879,28 +1909,26 @@ impl Naming {
 /// did both: empty, it collapsed to its narrowest column; with a long title or
 /// path in it, it climbed until it was eating the browser.
 ///
-/// Pinning the content to what we were handed makes the stored size the panel's
-/// own, so it only ever changes when someone drags it. The cross axis is left
-/// alone — egui already makes a panel fill it.
-fn pinned_width<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
-    let width = ui.available_width();
-    ui.set_min_width(width);
-    ui.set_max_width(width);
-    contents(ui)
-}
-
-/// [`pinned_width`], for a panel that resizes up and down instead.
+/// Setting a minimum and a maximum on the contents is not enough to stop the
+/// second half of that. A maximum is where egui wraps text and lays widgets
+/// out to, not a wall: a row of things that will not fit — a long playlist
+/// name beside its count, a button strip — runs past it, and the rectangle
+/// the panel is measured by runs past it too. A 200-point panel holding one
+/// such row came out 327 points wide, which is how a panel dragged narrow
+/// found its own way back to its widest.
 ///
-/// This holds the floor on its own: a panel with little in it keeps its height
-/// rather than collapsing to its contents. It cannot hold the ceiling by
-/// itself, because a column of labels grows past a maximum where a line of text
-/// would wrap inside one — so contents that can run long belong in a
-/// `ScrollArea`, which is what stops them pushing the panel open.
-fn pinned_height<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
-    let height = ui.available_height();
-    ui.set_min_height(height);
-    ui.set_max_height(height);
-    contents(ui)
+/// So the contents get a box of exactly the size the panel was handed, they
+/// are clipped to it, and the panel takes up that much room whatever happened
+/// inside. The stored size is then the panel's own, and only a drag changes
+/// it. Contents that can run past the box belong in a `ScrollArea`, which is
+/// what turns being clipped into being scrolled to.
+fn pinned<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let rect = ui.available_rect_before_wrap();
+    let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()));
+    inner.shrink_clip_rect(rect);
+    let out = contents(&mut inner);
+    ui.advance_cursor_after_rect(rect);
+    out
 }
 
 /// What colour a log line is drawn in, by how much it matters.
@@ -1951,13 +1979,16 @@ impl eframe::App for App {
         // after starting up, so handing it the remembered size there is all it
         // takes for a drag to outlive the window.
         let sizes = self.config.panels;
+        // A panel only changes size because somebody is dragging its edge, so
+        // that is the only time a new size is worth keeping.
+        let dragging = ctx.input(|i| i.pointer.any_down());
         let dock = egui::TopBottomPanel::bottom("dock")
             .frame(bar_frame())
             .resizable(true)
             .default_height(sizes.dock.max(DOCK_HEIGHT))
             .height_range(DOCK_HEIGHT..=460.0)
-            .show(ctx, |ui| pinned_height(ui, |ui| self.dock(ui)));
-        self.remember_panel(|panels| &mut panels.dock, dock.response.rect.height());
+            .show(ctx, |ui| pinned(ui, |ui| self.dock(ui)));
+        self.remember_panel(dragging, |panels| &mut panels.dock, dock.response.rect.height());
 
         // Both side panels drag. The inspector especially: it carries the
         // cue list, the stem rows and the notes field, and how much room those
@@ -1972,16 +2003,24 @@ impl eframe::App for App {
             .width_range(150.0..=300.0)
             .frame(pane_frame())
             .resizable(true)
-            .show(ctx, |ui| pinned_width(ui, |ui| self.sidebar(ui)));
-        self.remember_panel(|panels| &mut panels.collection, collection.response.rect.width());
+            .show(ctx, |ui| pinned(ui, |ui| self.sidebar(ui)));
+        self.remember_panel(
+            dragging,
+            |panels| &mut panels.collection,
+            collection.response.rect.width(),
+        );
 
         let inspector = egui::SidePanel::right("inspector")
             .default_width(sizes.inspector)
             .width_range(180.0..=420.0)
             .frame(pane_frame())
             .resizable(true)
-            .show(ctx, |ui| pinned_width(ui, |ui| self.inspector(ui)));
-        self.remember_panel(|panels| &mut panels.inspector, inspector.response.rect.width());
+            .show(ctx, |ui| pinned(ui, |ui| self.inspector(ui)));
+        self.remember_panel(
+            dragging,
+            |panels| &mut panels.inspector,
+            inspector.response.rect.width(),
+        );
 
         egui::CentralPanel::default().frame(pane_frame()).show(ctx, |ui| self.browser(ui));
 
@@ -2015,7 +2054,7 @@ impl eframe::App for App {
 
         // Everything the panels asked for happens here, after they have all
         // drawn, so no panel ever reads a collection halfway through a change.
-        self.save_panels(ctx);
+        self.save_layout(ctx);
         self.apply_pending(ctx);
         self.flush_retags();
     }
@@ -2919,17 +2958,18 @@ impl App {
 
     /// The list, and the prep editor underneath it.
     fn browser(&mut self, ui: &mut Ui) {
-        // The column widths are worked out here, once, and handed to both the
-        // header and the rows, so the two cannot drift apart — and the header
-        // is drawn outside the scroll area, so that scrolling a long list never
-        // takes away the names of the columns or the way to sort by them.
+        // The column widths are worked out once, from the settings, and handed
+        // to both the header and the rows, so the two cannot drift apart — and
+        // the header is drawn outside the scroll area, so that scrolling a long
+        // list never takes away the names of the columns, the way to sort by
+        // one, or the menu that says which columns there are.
         //
-        // The width the rows will get is what is left after the scroll bar, and
-        // that is what both are measured against: when there is no bar the
-        // widths are unchanged and only a sliver of space goes unused at the
-        // right, which is nothing next to a header that lines up either way.
-        let widths = rows::columns(ui.available_width() - ui.spacing().scroll.allocated_width());
-        self.header(ui, &widths);
+        // The width they are measured against is what is left after the scroll
+        // bar, because that is what the rows will get. When there is no bar a
+        // sliver of space goes unused at the right, which is a great deal less
+        // trouble than a header a scroll bar's width out of step with the list
+        // under it.
+        let widths = self.header(ui, ui.available_width() - ui.spacing().scroll.allocated_width());
 
         let list_height = (ui.available_height() - PREP_HEIGHT).max(120.0);
         egui::ScrollArea::vertical()
@@ -3184,20 +3224,52 @@ impl App {
     }
 
     /// The column names, pinned above the list.
-    fn header(&mut self, ui: &mut Ui, widths: &rows::Widths) {
-        let Some(column) = rows::header_row(ui, widths, self.sort) else { return };
-        let was = self.sort;
-        self.sort = self.sort.clicked(column);
-        self.config.sort = self.sort;
-        let _ = self.config.save(&self.config_path);
-        crate::debug!(
-            "sort {} {} (was {} {})",
-            self.sort.column.name(),
-            if self.sort.descending { "descending" } else { "ascending" },
-            was.column.name(),
-            if was.descending { "descending" } else { "ascending" }
-        );
-        self.pending.push(Pending::Resort);
+    /// Draw the header across `total` points, and return the widths it drew
+    /// with, for the rows to line up under.
+    ///
+    /// The same widths, not the ones a drag has just asked for: a boundary
+    /// moved this frame lands on the next one, so the names and the rows under
+    /// them are never a column apart even for a frame.
+    fn header(&mut self, ui: &mut Ui, total: f32) -> rows::Widths {
+        let widths = self.config.columns.widths(total);
+        let head = rows::header_row(ui, &mut self.config.columns, &widths, self.sort);
+
+        if head.resized {
+            self.layout_moved = true;
+        }
+        // One click with one answer, unlike a drag: written now rather than
+        // when the pointer next comes up, because there is no stream of them.
+        if head.chosen {
+            crate::debug!(
+                "columns: {}",
+                self.config
+                    .columns
+                    .columns
+                    .iter()
+                    .filter(|slot| slot.shown)
+                    .map(|slot| slot.column.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if let Err(e) = self.config.save(&self.config_path) {
+                crate::warn!("could not save the columns: {e:#}");
+            }
+        }
+        if let Some(column) = head.sorted {
+            let was = self.sort;
+            self.sort = self.sort.clicked(column);
+            self.config.sort = self.sort;
+            let _ = self.config.save(&self.config_path);
+            crate::debug!(
+                "sort {} {} (was {} {})",
+                self.sort.column.name(),
+                if self.sort.descending { "descending" } else { "ascending" },
+                was.column.name(),
+                if was.descending { "descending" } else { "ascending" }
+            );
+            self.pending.push(Pending::Resort);
+        }
+        widths
     }
 
     fn rows_table(&mut self, ui: &mut Ui, widths: &rows::Widths) {
@@ -7768,9 +7840,13 @@ mod tests {
             let mut harness = Harness::new_ui_state(
                 |ui, app: &mut App| {
                     ui.horizontal(|ui| {
+                        // A width, as the panel gives it one: the sidebar
+                        // fills what it is handed, and handing it the whole
+                        // harness would leave the list nothing to be dragged
+                        // from.
                         ui.vertical(|ui| app.sidebar(ui));
                         ui.vertical(|ui| {
-                            let widths = rows::columns(ui.available_width());
+                            let widths = rows::Layout::default().widths(ui.available_width());
                             app.rows_table(ui, &widths)
                         });
                     });
@@ -7925,6 +8001,148 @@ mod tests {
                 harness.get_by_label("Peverelist — Track 0").rect().top() < row_before.top(),
                 "the list did not scroll, so this proves nothing"
             );
+        }
+
+        #[test]
+        fn dragging_the_header_resizes_the_column_and_the_size_is_kept() {
+            // The whole chain, because any link missing looks the same from
+            // the outside: the boundary has to be grabbable where the eye says
+            // it is, the drag has to move width from one column to the next,
+            // and the result has to reach the settings rather than lasting
+            // until the window is closed.
+            let mut app = app("resize");
+            let id = app.library.add(std::path::Path::new("/music/one.flac"));
+            app.library.get_mut(id).unwrap().artist = "Peverelist".into();
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    app.browser(ui);
+                    // As the window does at the end of a frame: what a drag
+                    // changed is written once the pointer comes up.
+                    let ctx = ui.ctx().clone();
+                    app.save_layout(&ctx);
+                },
+                app,
+            );
+            harness.run();
+
+            // The header is exactly as wide as the columns, so where the
+            // boundary is can be worked out the same way the header worked it
+            // out — no guessing at a scroll bar's width.
+            let header = harness.get_by_label("columns").rect();
+            let widths = harness.state().config.columns.widths(header.width());
+            let artist = widths.of(rows::Column::Artist).unwrap();
+            let title = widths.of(rows::Column::Title).unwrap();
+            let edge = egui::pos2(header.left() + artist, header.center().y);
+
+            harness.event(egui::Event::PointerMoved(edge));
+            harness.run();
+            harness.event(egui::Event::PointerButton {
+                pos: edge,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+            for step in 1..=4 {
+                let at = edge + egui::vec2(15.0 * step as f32, 0.0);
+                harness.event(egui::Event::PointerMoved(at));
+                harness.run();
+            }
+            harness.event(egui::Event::PointerButton {
+                pos: edge + egui::vec2(60.0, 0.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+            harness.run();
+
+            let after = harness.state().config.columns.widths(header.width());
+            assert!(
+                after.of(rows::Column::Artist).unwrap() > artist + 50.0,
+                "the artist column did not follow the drag: {artist} to {:?}",
+                after.of(rows::Column::Artist)
+            );
+            assert!(
+                after.of(rows::Column::Title).unwrap() < title - 50.0,
+                "the width came from somewhere other than the column beside it"
+            );
+            assert!(
+                (after.total() - header.width()).abs() < 0.01,
+                "the row stopped filling the window"
+            );
+
+            // Written out once the pointer came up, not left in memory to be
+            // lost with the window.
+            let saved = crate::config::Config::load(&harness.state().config_path);
+            assert_eq!(
+                saved.columns,
+                harness.state().config.columns,
+                "the new widths never reached the settings"
+            );
+            assert_ne!(saved.columns, rows::Layout::default(), "nothing was actually changed");
+        }
+
+        #[test]
+        fn the_header_menu_takes_a_column_away_and_puts_them_all_back() {
+            // The way a column is got rid of and the way one is got back. Both
+            // live on the header's right-click menu, so a menu that lists only
+            // what is showing — or that has no way back to the defaults — is a
+            // door that locks behind you.
+            let mut app = app("columns");
+            let id = app.library.add(std::path::Path::new("/music/one.flac"));
+            app.library.get_mut(id).unwrap().artist = "Peverelist".into();
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.browser(ui), app);
+            harness.run();
+
+            let at = harness.get_by_label("columns").rect().center();
+            right_click(&mut harness, at);
+
+            // Every column, on or off, not just the ones showing.
+            for column in rows::Column::ALL {
+                harness.get_by_label(column.name());
+            }
+            harness.get_by_label("Reset to default");
+
+            harness.get_by_label(rows::Column::Location.name()).click();
+            harness.run();
+            harness.run();
+            let layout = &harness.state().config.columns;
+            assert!(
+                !layout.columns.iter().any(|s| s.column == rows::Column::Location && s.shown),
+                "the location column is still showing"
+            );
+            assert_eq!(
+                harness.state().config.columns.widths(900.0).iter().count(),
+                rows::Column::ALL.len() - 1
+            );
+
+            right_click(&mut harness, at);
+            harness.get_by_label("Reset to default").click();
+            harness.run();
+            harness.run();
+            assert_eq!(
+                harness.state().config.columns,
+                rows::Layout::default(),
+                "reset did not put the columns back"
+            );
+        }
+
+        /// Open a context menu where the pointer is put.
+        fn right_click(harness: &mut Harness<'_, App>, at: egui::Pos2) {
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                harness.run();
+            }
         }
 
         #[test]
@@ -8810,7 +9028,7 @@ mod tests {
                         .frame(pane_frame())
                         .resizable(true)
                         .show(ctx, |ui| {
-                            pinned_width(ui, |ui| {
+                            pinned(ui, |ui| {
                                 ui.label("something narrower than the panel");
                             })
                         });
@@ -8837,7 +9055,7 @@ mod tests {
                         .max_rect(rect)
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                 );
-                pinned_height(&mut dock, |ui| {
+                pinned(&mut dock, |ui| {
                     // As the dock draws it: a scrolling list, which is what
                     // keeps a long run inside the height rather than pushing
                     // it open.
@@ -8879,7 +9097,7 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
-            pinned_width(&mut panel, |ui| draw(ui));
+            pinned(&mut panel, |ui| draw(ui));
             kept.set(panel.min_rect().width());
         });
         kept.get()
@@ -8907,6 +9125,21 @@ mod tests {
             );
         });
         assert_eq!(long, 210.0, "a long label pushed the panel out");
+
+        // The case a maximum width does not cover, and the one the panels were
+        // actually losing their size to. A label wraps at the maximum; a row
+        // of things that will not fit simply runs past it, and the rectangle
+        // egui measures the panel by runs past it too. Every panel here has
+        // one — the sidebar's name-and-count rows, the inspector's button
+        // strips — so before this held, a panel dragged narrow went back to
+        // its widest as soon as somebody named a playlist something long.
+        let row = kept_width(210.0, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("a playlist name far longer than the panel is wide");
+                ui.label("999");
+            });
+        });
+        assert_eq!(row, 210.0, "a row too wide to fit pushed the panel out");
     }
 
     #[test]
