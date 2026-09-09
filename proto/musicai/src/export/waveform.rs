@@ -76,18 +76,28 @@ impl WaveformData {
     }
 
     fn from_columns(columns: &[Column]) -> Self {
-        let preview_columns = summarise(columns, PREVIEW_COLUMNS);
-        let tiny_columns = summarise(columns, TINY_COLUMNS);
-        let wide_columns = summarise(columns, WIDE_COLUMNS);
+        // Two scalings, because these are two different measurements of the
+        // track and normalising both against one of them ruins the other. See
+        // [`reference_gain`] and [`overview_gain`].
+        let detail_columns = scaled(columns, reference_gain(columns));
+
+        let wide = summarise(columns, WIDE_COLUMNS);
+        // One gain across all three overviews, from the finest of them, so the
+        // small picture in a browse list and the strip under the deck agree
+        // about how tall the same moment is.
+        let gain = overview_gain(&wide);
+        let preview_columns = scaled(&summarise(columns, PREVIEW_COLUMNS), gain);
+        let tiny_columns = scaled(&summarise(columns, TINY_COLUMNS), gain);
+        let wide_columns = scaled(&wide, gain);
 
         Self {
             preview: preview_columns.iter().map(Column::mono_byte).collect(),
             tiny: tiny_columns.iter().map(Column::tiny_byte).collect(),
-            detail: columns.iter().map(Column::mono_byte).collect(),
+            detail: detail_columns.iter().map(Column::mono_byte).collect(),
             color_preview: wide_columns.iter().flat_map(Column::color_preview_bytes).collect(),
-            color_detail: columns.iter().flat_map(Column::color_detail_bytes).collect(),
+            color_detail: detail_columns.iter().flat_map(Column::color_detail_bytes).collect(),
             band_preview: wide_columns.iter().flat_map(Column::band_bytes).collect(),
-            band_detail: columns.iter().flat_map(Column::band_bytes).collect(),
+            band_detail: detail_columns.iter().flat_map(Column::band_bytes).collect(),
         }
     }
 }
@@ -102,12 +112,16 @@ impl WaveformData {
 /// Then the whole track is scaled against its own loudest content, before any
 /// of the pictures are encoded, so every picture derived from it agrees.
 pub fn analyze(audio: &Audio) -> WaveformData {
-    let mut columns = measure(audio);
-    let gain = reference_gain(&summarise(&columns, WIDE_COLUMNS));
-    for column in &mut columns {
+    WaveformData::from_columns(&measure(audio))
+}
+
+/// A copy of the columns with one gain applied to all of them.
+fn scaled(columns: &[Column], gain: f32) -> Vec<Column> {
+    let mut out = columns.to_vec();
+    for column in &mut out {
         column.scale(gain);
     }
-    WaveformData::from_columns(&columns)
+    out
 }
 
 /// The fraction of the track that is allowed to reach full height.
@@ -139,7 +153,7 @@ const MAX_GAIN: f32 = 32.0;
 /// and the parts of a track that differ still look different.
 const SHAPE: f32 = 0.7;
 
-/// The gain that puts the track's reference level at full height.
+/// The gain that puts the scrolling waveform's reference level at full height.
 ///
 /// One gain for the whole track and every band in it, rather than one per band
 /// or per column. The height of a column is what says how loud that moment is,
@@ -147,19 +161,40 @@ const SHAPE: f32 = 0.7;
 /// them apart would destroy both, and leave a picture in which every moment
 /// looks equally loud.
 ///
-/// Measured at preview resolution rather than on the raw columns, because a
-/// preview column is the peak of about twenty-six of those and so sits well
-/// above a typical one. Referenced against the raw columns the previews come
-/// out hot and a fifth of them flatten against the top, which is the fault
-/// this is here to fix rather than move.
+/// Measured on the same number the height is drawn from. A column's height
+/// comes from the peak of the whole signal, not from its loudest band, and the
+/// bands are complementary — they add back up to it — so the loudest band is
+/// always the smaller number. Referencing that made the gain about a quarter
+/// too big and the picture that much hotter.
+///
+/// And measured on these columns, not on an overview of them: an overview
+/// column is the *average* of a second of these, which for anything with
+/// transients in it sits well below them. A gain worked out there and applied
+/// here was roughly twice what it should be, and the scrolling waveform came
+/// out with every transient flattened against the top.
 fn reference_gain(columns: &[Column]) -> f32 {
-    let mut peaks: Vec<f32> =
-        columns.iter().map(|c| c.low.max(c.mid).max(c.high)).filter(|a| *a > 0.0).collect();
+    gain_for(columns, REFERENCE_QUANTILE)
+}
+
+/// The same, for the whole-track overviews.
+///
+/// At the maximum rather than a quantile below it. The quantile exists because
+/// one clap that clips sets the peak on a great many records; an overview
+/// column is a second of audio averaged, which no single transient can carry,
+/// so the outlier the quantile was guarding against cannot occur — and taking
+/// the maximum means the loudest passage draws exactly at the top and nothing
+/// above it is thrown away.
+fn overview_gain(columns: &[Column]) -> f32 {
+    gain_for(columns, 1.0)
+}
+
+fn gain_for(columns: &[Column], quantile: f32) -> f32 {
+    let mut peaks: Vec<f32> = columns.iter().map(|c| c.full).filter(|a| *a > 0.0).collect();
     if peaks.is_empty() {
         return 1.0;
     }
     peaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let at = ((peaks.len() as f32 - 1.0) * REFERENCE_QUANTILE).round() as usize;
+    let at = ((peaks.len() as f32 - 1.0) * quantile).round() as usize;
     let reference = peaks[at.min(peaks.len() - 1)];
     if reference <= f32::EPSILON {
         return 1.0;
@@ -487,6 +522,97 @@ mod tests {
         assert_eq!(w.detail.len(), 300);
         assert_eq!(w.color_detail.len(), 300 * 2);
         assert_eq!(w.band_detail.len(), 300 * 3);
+    }
+
+    /// Music-shaped: a sustained bed with sharp percussive hits over it, so
+    /// that the peak within any second sits well above the average of that
+    /// second.
+    ///
+    /// The tones the other tests are built from do not do this — a steady sine
+    /// averaged over a second is very nearly its own peak — which is exactly
+    /// why they went on passing while the scrolling waveform was being drawn
+    /// at more than twice the height it should have been.
+    fn percussive(levels: &[f32], secs_each: f32) -> Audio {
+        let rate = 44_100;
+        let mut plane = Vec::new();
+        for (n, level) in levels.iter().enumerate() {
+            for i in 0..(rate as f32 * secs_each) as usize {
+                let t = (n as f32 * secs_each) + i as f32 / rate as f32;
+                let bed = (2.0 * std::f32::consts::PI * 220.0 * t).sin() * 0.12;
+                // Two hits a second, each decaying over about 40 ms.
+                let since = (t * 2.0).fract() / 2.0;
+                let hit = (-since * 60.0).exp() * (2.0 * std::f32::consts::PI * 60.0 * t).sin();
+                plane.push((bed + hit) * level);
+            }
+        }
+        Audio::new(rate, vec![plane.clone(), plane]).unwrap()
+    }
+
+    fn heights(bytes: &[u8]) -> Vec<u8> {
+        let mut out: Vec<u8> = bytes.iter().map(|b| b & 0x1f).collect();
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn the_scrolling_waveform_is_not_flattened_against_the_top() {
+        // The fault this is here for. The gain was worked out on an overview,
+        // where a column is a second of audio averaged, and then applied to
+        // these columns, where a column is a peak — about twice too much on
+        // anything with transients in it. Every hit pinned against the top and
+        // the picture became a solid block.
+        let w = analyze(&percussive(&[0.8], 20.0));
+        let h = heights(&w.detail);
+        let full = h.iter().filter(|&&x| x == 31).count();
+
+        // The reference is a quantile, so a little clipping is the point —
+        // but only a little.
+        assert!(full * 10 <= h.len(), "{full} of {} columns are at full height", h.len());
+        assert!(h[h.len() / 2] < 21, "the middle of the track draws at {} of 31", h[h.len() / 2]);
+    }
+
+    #[test]
+    fn the_scrolling_waveform_tells_one_passage_from_another() {
+        // What the picture is read for. A quarter of the level is about 12 dB
+        // down and has to look plainly different, not a shade shorter.
+        let levels = [1.0f32, 0.25];
+        let w = analyze(&percussive(&levels, 10.0));
+        let half = w.detail.len() / 2;
+        let loud = heights(&w.detail[..half]);
+        let quiet = heights(&w.detail[half..]);
+        let (loud, quiet) = (loud[loud.len() / 2], quiet[quiet.len() / 2]);
+        assert!(loud as i32 - quiet as i32 >= 8, "loud {loud} quiet {quiet} of 31");
+    }
+
+    #[test]
+    fn the_two_pictures_are_scaled_for_what_each_of_them_measures() {
+        // A peak and a one-second average are different measurements of the
+        // same track, and one gain cannot serve both: normalising against
+        // either ruins the other. On material with transients the two
+        // references genuinely differ, which is the whole reason for the
+        // split — if they ever stop differing here, this test is no longer
+        // watching anything.
+        let columns = measure(&percussive(&[0.8], 20.0));
+        let detail = reference_gain(&columns);
+        let overview = overview_gain(&summarise(&columns, WIDE_COLUMNS));
+        assert!(
+            overview > detail * 1.3,
+            "peak gain {detail:.2} and average gain {overview:.2} are close enough that \
+             one would have done"
+        );
+    }
+
+    #[test]
+    fn the_height_is_referenced_against_what_the_height_is_drawn_from() {
+        // A column's height comes from the peak of the whole signal; the bands
+        // are complementary, so the loudest of them is always the smaller
+        // number. Referencing that made every picture about a quarter hotter
+        // than it was meant to be.
+        let columns = measure(&percussive(&[0.8], 10.0));
+        let loudest_band =
+            columns.iter().map(|c| c.low.max(c.mid).max(c.high)).fold(0.0f32, f32::max);
+        let whole = columns.iter().map(|c| c.full).fold(0.0f32, f32::max);
+        assert!(whole > loudest_band, "full {whole} band {loudest_band}");
     }
 
     #[test]

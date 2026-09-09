@@ -357,10 +357,31 @@ mastered. Without that a modern master is a solid block: the height curve ran
 out of room near the top and a drop, a build and a breakdown all drew at full
 height, which is a waveform with the arrangement taken out of it.
 
-The reference is the 95th percentile of the preview rather than the maximum —
-one clap that clips sets the maximum on a great many records, and scaling to it
-spends the top of the display on a moment nobody is looking for. The loudest
-twentieth of the track reaches the top and everything else is drawn against it.
+**The scrolling waveform and the overviews are scaled separately**, because
+they are two different measurements of the same track. A scrolling column is a
+peak; an overview column is a second of audio averaged, and on anything with
+transients in it that sits well below the peaks. One reference cannot serve
+both: worked out on the averages and applied to the peaks it comes out about
+twice too large, and every hit flattens against the top until the picture is a
+solid block. That is what it did.
+
+For the scrolling waveform the reference is the 95th percentile of the peaks
+rather than the maximum — one clap that clips sets the maximum on a great many
+records, and scaling to it spends the top of the display on a moment nobody is
+looking for. The loudest twentieth reaches the top and everything else is drawn
+against it. For the overviews it is the maximum, because a second of audio
+averaged is not something a single clap can carry, so the outlier the
+percentile guards against cannot arise there — and the maximum means the
+loudest passage draws exactly at the top with nothing above it thrown away. One
+overview gain across all three of them, so the strip under the deck and the
+small picture in a browse list agree.
+
+Either way the reference is the peak of the whole signal, which is what the
+height is drawn from, and not the loudest band. The bands are complementary —
+they add back up to the whole — so the loudest of them is always the smaller
+number, and referencing it made every picture about a quarter hotter than it
+was meant to be.
+
 A very quiet transfer is lifted, up to thirty decibels, which is more than any
 real recording needs and short of what it takes to make a noise floor look like
 music.
@@ -383,9 +404,10 @@ going on, which is the arrangement and what an overview is for. A drop's edge
 blurs across about three columns of twelve hundred, which is the price of the
 rest and not visible.
 
-The scrolling waveform is not touched by any of that. Its columns are a
+The scrolling waveform is not summarised that way. Its columns are a
 hundred-and-fiftieth of a second, a kick drum is several of them wide, and the
-peak is the right measurement at that size.
+peak is the right measurement at that size — which is exactly why it needs a
+reference of its own rather than the overview's.
 
 The same measurement makes the pictures on the drive, so what is on screen
 while prepping is what will be on the CDJ's screen.
