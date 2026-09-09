@@ -29,6 +29,13 @@ left, the browser in the middle with the prep editor beneath it rather than in
 place of it, the inspector on the right, and the drive dock along the bottom
 where the delta is always visible.
 
+**Drag a panel's edge** to resize it, and it stays there — the size is written
+to the settings when the drag ends and is what the panel opens at next time.
+Only a drag changes it: a panel is drawn at exactly the size it was given and
+its contents are clipped to that, so a long path in the inspector or a long
+playlist name in the collection no longer widens the panel it is in, and
+squeezing the window does not overwrite what you dragged to.
+
 ## The query bar is the browser
 
 Every filter is text, which means every filter can be saved, pasted, and read.
@@ -220,6 +227,20 @@ inspector.
 Artist, Title, BPM, Key, Energy, Stems, Location. **Click a heading to sort by
 it**; click again to reverse. Names start forwards, measurements start at the
 loud end, and the choice is remembered between runs.
+
+The header stays put when the list is scrolled, and it is where the columns are
+worked. **Drag a boundary between two headings** to make one wider and the one
+beside it narrower; the pair keeps its total, so nothing further along the row
+shuffles under the pointer. **Right-click the header** for which columns there
+are at all: every column is listed whether it is showing or not, so one turned
+off can be turned back on, and **Reset to default** puts the whole lot back.
+The last column cannot be turned off — the menu to undo it lives on the header.
+
+Widths and which columns are on are remembered between runs, alongside the sort
+and the panel sizes. The list always fills the window: what is left over goes to
+the last column, and a window too narrow for the widths scales them all down
+rather than pushing one off the edge, because a column you cannot see is
+indistinguishable from one you turned off.
 
 A track with nothing in the column always sorts last, whichever way round — an
 ungridded track is not slower than every other track, and reversing a sort must

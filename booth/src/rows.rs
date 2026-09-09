@@ -55,16 +55,206 @@ impl Column {
         matches!(self, Column::Bpm | Column::Energy)
     }
 
-    fn width(self, widths: &Widths) -> f32 {
+    /// What the column says it is for, in the menu that adds and removes them.
+    fn about(self) -> &'static str {
         match self {
-            Column::Artist => widths.artist,
-            Column::Title => widths.title,
-            Column::Bpm => widths.bpm,
-            Column::Key => widths.key,
-            Column::Energy => widths.energy,
-            Column::Stems => widths.stems,
-            Column::Location => widths.location,
+            Column::Artist => "Who made it",
+            Column::Title => "What it is called",
+            Column::Bpm => "Tempo, from the grid",
+            Column::Key => "Camelot key",
+            Column::Energy => "How hard it goes, as a rank",
+            Column::Stems => "Whether a kit has been rendered",
+            Column::Location => "The file it plays from",
         }
+    }
+
+    /// How wide the column is before anybody drags it, and what "reset to
+    /// default" puts it back to.
+    ///
+    /// The five narrow ones are as wide as their contents: a tempo is always
+    /// six characters, a Camelot key two or three, and the energy column is
+    /// wide enough for the letter-spaced word above the meter rather than for
+    /// the meter. The three that hold names are wide because names are.
+    pub fn default_width(self) -> f32 {
+        match self {
+            Column::Artist => 230.0,
+            Column::Title => 360.0,
+            Column::Bpm => 58.0,
+            Column::Key => 42.0,
+            Column::Energy => 64.0,
+            Column::Stems => 88.0,
+            Column::Location => 230.0,
+        }
+    }
+}
+
+/// The narrowest a column can be dragged.
+///
+/// Not zero: a column dragged shut is one whose handle has gone with it, and
+/// the way to be rid of a column is to turn it off in the header's menu, where
+/// it can be turned back on.
+pub const MIN_WIDTH: f32 = 36.0;
+
+/// How wide the strip is that a column boundary can be grabbed by.
+const GRIP: f32 = 6.0;
+
+/// One column as this person has it: how wide they left it, and whether they
+/// want it at all.
+#[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Slot {
+    pub column: Column,
+    pub width: f32,
+    pub shown: bool,
+}
+
+/// Which columns the list shows, in the order they are drawn, and how wide
+/// each was left.
+///
+/// A preference about how this person reads their collection, like the sort
+/// and the panel sizes — kept in the settings rather than in the collection,
+/// because it says nothing about the music.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Layout {
+    pub columns: Vec<Slot>,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        let columns = Column::ALL
+            .iter()
+            .map(|&column| Slot { column, width: column.default_width(), shown: true })
+            .collect();
+        Self { columns }
+    }
+}
+
+impl Layout {
+    /// Make a layout read from the settings usable, whatever is in it.
+    ///
+    /// A file written by an older version knows nothing about a column added
+    /// since, and one edited by hand can say anything. A missing column is
+    /// added at its default rather than silently never appearing again; one
+    /// listed twice is dropped; a width that is not a positive number is put
+    /// back to the column's default; and a layout with nothing shown is put
+    /// back to the default outright, because a list with no columns is a blank
+    /// rectangle with no way out of it.
+    ///
+    /// A width merely narrower than a drag would allow is left alone: a window
+    /// too narrow for the columns shows them scaled below that floor, and what
+    /// it wrote down is what it was showing, not a mistake to be corrected on
+    /// the way back in.
+    pub fn repair(&mut self) {
+        let mut seen = Vec::new();
+        self.columns.retain(|slot| match seen.contains(&slot.column) {
+            true => false,
+            false => {
+                seen.push(slot.column);
+                true
+            }
+        });
+        for column in Column::ALL {
+            if !seen.contains(&column) {
+                self.columns.push(Slot { column, width: column.default_width(), shown: true });
+            }
+        }
+        for slot in &mut self.columns {
+            if !slot.width.is_finite() || slot.width <= 0.0 {
+                slot.width = slot.column.default_width();
+            }
+        }
+        if !self.columns.iter().any(|slot| slot.shown) {
+            *self = Self::default();
+        }
+    }
+
+    /// How many columns are on.
+    fn showing(&self) -> usize {
+        self.columns.iter().filter(|slot| slot.shown).count()
+    }
+
+    /// Turn a column on or off, refusing to turn the last one off.
+    pub fn toggle(&mut self, column: Column) {
+        let showing = self.showing();
+        for slot in &mut self.columns {
+            if slot.column == column && !(slot.shown && showing == 1) {
+                slot.shown = !slot.shown;
+            }
+        }
+    }
+
+    /// Write a width down as it is. The floor belongs to the drag, which
+    /// refuses to go under it, and to [`Layout::repair`], which is reading
+    /// something that may not have come from a drag at all — putting it here
+    /// as well would mean a window too narrow to give every column its floor
+    /// could not write down what it was actually showing.
+    fn set(&mut self, column: Column, width: f32) {
+        for slot in &mut self.columns {
+            if slot.column == column {
+                slot.width = width;
+            }
+        }
+    }
+
+    /// Move a boundary: `by` points from the column after `at` to the one at
+    /// `at`, counting only the columns that are showing. Says whether it moved.
+    ///
+    /// Both ends at once, so the pair keeps its total and the columns to the
+    /// right of it do not shuffle along under the pointer. Refused rather than
+    /// clamped when either end would go under the floor: a drag that keeps
+    /// eating into a column already at its narrowest would silently spend the
+    /// next one after it.
+    ///
+    /// It works from the widths on screen, and writes them all back as it
+    /// goes. That second half is what makes a drag land where the pointer is:
+    /// a window narrower than the columns were left at shows them all scaled
+    /// down, so writing a dragged width straight into the settings would put
+    /// a number in that the next frame scales again — and the boundary would
+    /// wander off the other way while the pointer pulled it. Taking what is on
+    /// screen as what was meant makes the columns and the settings the same
+    /// numbers, and from there a drag is a drag.
+    pub fn drag_edge(&mut self, widths: &Widths, at: usize, by: f32) -> bool {
+        let shown: Vec<(Column, f32)> = widths.iter().collect();
+        let (Some(&(column, width)), Some(&(next, beside))) = (shown.get(at), shown.get(at + 1))
+        else {
+            return false;
+        };
+        let here = width + by;
+        let there = beside - by;
+        if by == 0.0 || here < MIN_WIDTH || there < MIN_WIDTH {
+            return false;
+        }
+        for (which, was) in shown {
+            self.set(which, was);
+        }
+        self.set(column, here);
+        self.set(next, there);
+        true
+    }
+
+    /// Lay the shown columns out across the width the list has.
+    ///
+    /// The list always fills the window: whatever is left over after the
+    /// stored widths goes to the last column, and if they add up to more than
+    /// there is room for they are all scaled down to fit. Scrolling sideways
+    /// would be the other answer, and it is the wrong one here — a header that
+    /// can be scrolled off is a header that stops saying what a column is.
+    pub fn widths(&self, total: f32) -> Widths {
+        let mut shown: Vec<(Column, f32)> =
+            self.columns.iter().filter(|slot| slot.shown).map(|s| (s.column, s.width)).collect();
+        if shown.is_empty() {
+            return Widths(shown);
+        }
+        let sum: f32 = shown.iter().map(|(_, width)| *width).sum();
+        if sum > total && sum > 0.0 {
+            let scale = (total / sum).max(0.0);
+            for (_, width) in &mut shown {
+                *width *= scale;
+            }
+        } else if let Some((_, width)) = shown.last_mut() {
+            *width += total - sum;
+        }
+        Widths(shown)
     }
 }
 
@@ -101,15 +291,25 @@ impl Sort {
     }
 }
 
-/// The width of each column, in the order they are drawn.
-pub struct Widths {
-    pub artist: f32,
-    pub title: f32,
-    pub bpm: f32,
-    pub key: f32,
-    pub energy: f32,
-    pub stems: f32,
-    pub location: f32,
+/// The shown columns and the width each gets this frame, in drawing order.
+///
+/// Worked out once and handed to both the header and the rows, so the two
+/// cannot drift apart and leave a name over the wrong column.
+pub struct Widths(Vec<(Column, f32)>);
+
+impl Widths {
+    pub fn iter(&self) -> impl Iterator<Item = (Column, f32)> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// How wide a column came out, or nothing if it is turned off.
+    pub fn of(&self, column: Column) -> Option<f32> {
+        self.0.iter().find(|(which, _)| *which == column).map(|(_, width)| *width)
+    }
+
+    pub fn total(&self) -> f32 {
+        self.0.iter().map(|(_, width)| *width).sum()
+    }
 }
 
 /// How tall one line is.
@@ -117,55 +317,77 @@ const ROW_HEIGHT: f32 = 19.0;
 /// How far a stem companion is indented.
 const INDENT: f32 = 14.0;
 
-/// Split the available width between the columns.
-///
-/// The five narrow ones are fixed, because their contents are: a tempo is
-/// always six characters, a Camelot key is always two or three. Whatever is
-/// left goes to the names, which is where a wider window actually helps.
-pub fn columns(total: f32) -> Widths {
-    let bpm = 58.0;
-    let key = 42.0;
-    // Wide enough for the letter-spaced header rather than for the meter,
-    // which is narrower than the word above it.
-    let energy = 64.0;
-    let stems = 88.0;
-    // The names and the location share what is left. The location gets the
-    // smallest share of the three because it is the one that can be read from
-    // its tail — a folder name — while a title cannot.
-    let flexible = (total - bpm - key - energy - stems - 24.0).max(240.0);
-    Widths {
-        artist: flexible * 0.28,
-        title: flexible * 0.44,
-        location: flexible * 0.28,
-        bpm,
-        key,
-        energy,
-        stems,
-    }
+/// What the header was asked to do this frame.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Head {
+    /// The column whose name was clicked, to sort by.
+    pub sorted: Option<Column>,
+    /// A boundary was dragged. Arrives as a stream of sub-point changes, so
+    /// what it wants is to be written once the drag is over.
+    pub resized: bool,
+    /// A column was added, removed or put back to its default from the menu.
+    /// One click, one answer: worth writing down now.
+    pub chosen: bool,
 }
 
-/// Draw the header. Returns the column whose name was clicked.
-pub fn header_row(ui: &mut Ui, widths: &Widths, sort: Sort) -> Option<Column> {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::click());
+/// Draw the header, and let it be worked: click a name to sort, drag a
+/// boundary to resize, right-click for which columns there are at all.
+///
+/// The layout is taken by reference and changed in place, because a drag and a
+/// menu both act on it and threading either back out as a value would mean
+/// naming every way a header can be touched twice.
+pub fn header_row(ui: &mut Ui, layout: &mut Layout, widths: &Widths, sort: Sort) -> Head {
+    let mut head = Head::default();
+    // Exactly as wide as the columns it is drawing, which is what the rows
+    // under it get: a header that ran on across the scroll bar's gutter would
+    // put its rule and its hit areas a few points past where the row below
+    // ends, and the last column's name would answer for a strip of nothing.
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(widths.total(), 18.0), Sense::click());
+
+    // The boundaries first, so that the pointer belongs to whichever handle it
+    // is over rather than to the column name behind it: a drag that sorted the
+    // list halfway through would be a nasty surprise.
+    let shown: Vec<(Column, f32)> = widths.iter().collect();
+    let mut grips = Vec::new();
+    let mut x = rect.left();
+    for (at, (_, width)) in shown.iter().enumerate() {
+        x += width;
+        // Nothing after the last column: what is on its right is the edge of
+        // the window, and there is no neighbour to take the width from.
+        if at + 1 == shown.len() {
+            break;
+        }
+        let grip = Rect::from_min_max(
+            egui::pos2(x - GRIP / 2.0, rect.top()),
+            egui::pos2(x + GRIP / 2.0, rect.bottom()),
+        );
+        let handle = ui.interact(grip, ui.id().with(("column-edge", at)), Sense::drag());
+        if handle.hovered() || handle.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if layout.drag_edge(widths, at, handle.drag_delta().x) {
+            head.resized = true;
+        }
+        grips.push((grip, handle.hovered() || handle.dragged()));
+    }
+    let on_a_grip = grips.iter().any(|(_, lit)| *lit);
+
     let painter = ui.painter_at(rect);
     let pointer = response.hover_pos();
-    let mut clicked = None;
     let mut x = rect.left();
 
-    for column in Column::ALL {
-        let width = column.width(widths);
+    for (column, width) in shown.iter().copied() {
         // The whole column's width is the target, not just the word: a
         // ten-point label is a small thing to hit twice in a row.
         let area = Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(width, rect.height()));
-        let over = pointer.is_some_and(|at| area.contains(at));
+        let over = !on_a_grip && pointer.is_some_and(|at| area.contains(at));
         let on = sort.column == column;
 
         if over {
             painter.rect_filled(area, 0.0, theme::BOOTH_2);
         }
         if over && response.clicked() {
-            clicked = Some(column);
+            head.sorted = Some(column);
         }
 
         let color = if on { theme::AMBER } else { theme::DIM };
@@ -189,14 +411,66 @@ pub fn header_row(ui: &mut Ui, widths: &Widths, sort: Sort) -> Option<Column> {
     // check that scrolling the list has not carried it off.
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "columns"));
 
-    if pointer.is_some() {
+    if pointer.is_some() && !on_a_grip {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    // A boundary is invisible until the pointer finds it, and then it is a
+    // line: enough to say the pointer is on something and that the something
+    // runs the height of the strip.
+    for (grip, lit) in grips {
+        if lit {
+            painter.line_segment(
+                [grip.center_top(), grip.center_bottom()],
+                egui::Stroke::new(1.0_f32, theme::AMBER),
+            );
+        }
     }
     painter.line_segment(
         [egui::pos2(rect.left(), rect.bottom()), egui::pos2(rect.right(), rect.bottom())],
         egui::Stroke::new(1.0_f32, theme::RULE),
     );
-    clicked
+
+    columns_menu(&response, layout, &mut head);
+    head
+}
+
+/// The header's right-click menu: which columns there are, and a way back.
+///
+/// Every column is listed whether it is on or off, because a menu that only
+/// lists what is showing is one you cannot use to get a column back.
+fn columns_menu(response: &egui::Response, layout: &mut Layout, head: &mut Head) {
+    response.context_menu(|ui| {
+        ui.set_min_width(200.0);
+        ui.label(egui::RichText::new("Columns").color(theme::DIM).size(theme::SMALL));
+        ui.separator();
+        let showing = layout.showing();
+        let listed: Vec<Slot> = layout.columns.clone();
+        for slot in listed {
+            // The last one left cannot be turned off: a list with no columns
+            // is a blank rectangle, and the menu to undo it is on a header
+            // that no longer has anything in it.
+            let last = slot.shown && showing == 1;
+            let mut on = slot.shown;
+            let item = ui.add_enabled(
+                !last,
+                egui::Checkbox::new(&mut on, egui::RichText::new(slot.column.name())),
+            );
+            let item = match last {
+                true => item.on_disabled_hover_text("The list needs one column"),
+                false => item.on_hover_text(slot.column.about()),
+            };
+            if item.changed() {
+                layout.toggle(slot.column);
+                head.chosen = true;
+            }
+        }
+        ui.separator();
+        if ui.button("Reset to default").clicked() {
+            *layout = Layout::default();
+            head.chosen = true;
+            ui.close();
+        }
+    });
 }
 
 /// The rows being dragged, by id.
@@ -358,58 +632,63 @@ pub fn row(
     let ink = if indented { theme::DIM } else { theme::TEXT };
     let mut x = rect.left();
 
-    let artist = if indented { format!("↳ {}", track.artist) } else { track.artist.clone() };
-    text(
-        &painter,
-        rect,
-        x + if indented { INDENT } else { 0.0 },
-        widths.artist,
-        &artist,
-        ink,
-        false,
-    );
-    x += widths.artist;
-
-    text(&painter, rect, x, widths.title, &track.display_title(), ink, false);
-    x += widths.title;
-
-    let bpm = if track.has_grid { format!("{:.2}", track.bpm) } else { "—".into() };
-    text(&painter, rect, x, widths.bpm, &bpm, ink, true);
-    x += widths.bpm;
-
-    let key = if track.key.is_empty() { "—".to_string() } else { track.key.clone() };
-    text(&painter, rect, x, widths.key, &key, ink, true);
-    x += widths.key;
-
-    // A companion carries the parent's grid, so it does not repeat its energy:
-    // a second meter for the same record is a second thing to read for nothing.
-    if !indented {
-        meter(&painter, rect, x, track.energy);
+    // Whichever columns are on, in whatever width they were left at. The row
+    // walks the same list the header drew, so a column turned off here is a
+    // column with nothing under its name rather than a gap in the middle.
+    for (column, width) in widths.iter() {
+        match column {
+            Column::Artist => {
+                let artist = match indented {
+                    true => format!("↳ {}", track.artist),
+                    false => track.artist.clone(),
+                };
+                let indent = if indented { INDENT } else { 0.0 };
+                text(&painter, rect, x + indent, width - indent, &artist, ink, false);
+            }
+            Column::Title => text(&painter, rect, x, width, &track.display_title(), ink, false),
+            Column::Bpm => {
+                let bpm = if track.has_grid { format!("{:.2}", track.bpm) } else { "—".into() };
+                text(&painter, rect, x, width, &bpm, ink, true);
+            }
+            Column::Key => {
+                let key = if track.key.is_empty() { "—".to_string() } else { track.key.clone() };
+                text(&painter, rect, x, width, &key, ink, true);
+            }
+            // A companion carries the parent's grid, so it does not repeat its
+            // energy: a second meter for the same record is a second thing to
+            // read for nothing.
+            Column::Energy => {
+                if !indented {
+                    meter(&painter, rect, x, track.energy);
+                }
+            }
+            Column::Stems => {
+                if !track.stems.is_empty() || indented {
+                    pill(
+                        &painter,
+                        rect,
+                        x,
+                        track.role.label(),
+                        if indented { theme::DIM } else { theme::AMBER },
+                    );
+                }
+            }
+            // The whole path, trimmed from the front when it will not fit, so
+            // that the file name is always the part that survives.
+            Column::Location => {
+                let font = theme::mono(10.0);
+                let location = fit_tail(&painter, &font, &location_of(track), width - 8.0);
+                painter.text(
+                    egui::pos2(x, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    location,
+                    font,
+                    theme::DIM,
+                );
+            }
+        }
+        x += width;
     }
-    x += widths.energy;
-
-    if !track.stems.is_empty() || indented {
-        pill(
-            &painter,
-            rect,
-            x,
-            track.role.label(),
-            if indented { theme::DIM } else { theme::AMBER },
-        );
-    }
-    x += widths.stems;
-
-    // The whole path, trimmed from the front when it will not fit, so that the
-    // file name is always the part that survives.
-    let font = theme::mono(10.0);
-    let location = fit_tail(&painter, &font, &location_of(track), widths.location - 8.0);
-    painter.text(
-        egui::pos2(x, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        location,
-        font,
-        theme::DIM,
-    );
 
     // A companion is a file the parent owns: there is nothing to analyse, look
     // up or separate about it separately, and doing any of those to it would
@@ -690,22 +969,166 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn the_names_get_whatever_the_numbers_do_not() {
-        let widths = columns(1000.0);
-        let total =
-            widths.artist + widths.title + widths.bpm + widths.key + widths.energy + widths.stems;
-        assert!(total <= 1000.0, "the columns overflowed the window: {total}");
-        assert!(widths.title > widths.artist, "titles are longer than artist names");
+    fn the_columns_fill_the_list_and_no_more() {
+        // Whatever the window is, the header and the rows cover it exactly:
+        // short of it leaves a strip of nothing on the right that the header
+        // rule runs across anyway, and over it puts a column half off the
+        // edge with no way to reach the rest of it.
+        let layout = Layout::default();
+        for total in [1400.0f32, 1072.0, 700.0, 320.0] {
+            let widths = layout.widths(total);
+            assert!(
+                (widths.total() - total).abs() < 0.01,
+                "{total} wide came out {}",
+                widths.total()
+            );
+            assert_eq!(widths.iter().count(), Column::ALL.len(), "a column went missing");
+        }
     }
 
     #[test]
-    fn a_narrow_window_still_leaves_room_for_the_names() {
-        // Below a certain width the columns cannot all fit; the names keep a
-        // floor rather than collapsing to nothing, and the row clips instead.
-        let widths = columns(120.0);
-        assert!(widths.artist > 0.0 && widths.title > 0.0);
-        assert_eq!(widths.bpm, 58.0, "the fixed columns stay fixed");
-        assert_eq!(widths.energy, 64.0);
+    fn a_window_too_narrow_for_the_columns_scales_them_rather_than_dropping_one() {
+        // The alternative is a column that is simply not there, which looks
+        // exactly like one that was turned off — and the way to get it back
+        // would be to widen a window nobody knew had to be widened.
+        let widths = Layout::default().widths(300.0);
+        assert_eq!(widths.iter().count(), Column::ALL.len());
+        for (column, width) in widths.iter() {
+            assert!(width > 0.0, "{} came out {width}", column.name());
+        }
+    }
+
+    #[test]
+    fn what_is_left_over_goes_to_the_last_column() {
+        // So that a window wider than the columns were left at grows the one
+        // thing that can use it — the file path, which is the longest thing in
+        // the row — rather than opening a gap at the right.
+        let layout = Layout::default();
+        let stored: f32 = layout.columns.iter().map(|slot| slot.width).sum();
+        let widths = layout.widths(stored + 200.0);
+        assert_eq!(widths.of(Column::Bpm), Some(Column::Bpm.default_width()));
+        assert_eq!(
+            widths.of(Column::Location),
+            Some(Column::Location.default_width() + 200.0),
+            "the slack went somewhere else"
+        );
+    }
+
+    #[test]
+    fn a_column_turned_off_takes_its_width_with_it() {
+        let mut layout = Layout::default();
+        layout.toggle(Column::Location);
+        let widths = layout.widths(1072.0);
+        assert_eq!(widths.of(Column::Location), None, "a hidden column was still laid out");
+        assert_eq!(widths.iter().count(), Column::ALL.len() - 1);
+        assert!((widths.total() - 1072.0).abs() < 0.01, "the row stopped filling the window");
+
+        // And comes back where it was, at the width it had.
+        layout.toggle(Column::Location);
+        assert_eq!(layout.widths(1072.0).iter().count(), Column::ALL.len());
+    }
+
+    #[test]
+    fn dragging_a_boundary_moves_width_from_one_column_to_its_neighbour() {
+        // The pair keeps its total, so the columns to the right of the one
+        // being dragged stay where they are — otherwise widening the artist
+        // column would slide the whole row along under the pointer.
+        let mut layout = Layout::default();
+        let before = layout.widths(1072.0);
+        let artist = before.of(Column::Artist).unwrap();
+        let title = before.of(Column::Title).unwrap();
+
+        assert!(layout.drag_edge(&before, 0, 40.0), "the drag did nothing");
+        let after = layout.widths(1072.0);
+        assert_eq!(after.of(Column::Artist), Some(artist + 40.0));
+        assert_eq!(after.of(Column::Title), Some(title - 40.0));
+        assert_eq!(after.of(Column::Bpm), before.of(Column::Bpm), "a column beyond it moved");
+        assert!((after.total() - 1072.0).abs() < 0.01, "the row stopped filling the window");
+    }
+
+    #[test]
+    fn a_drag_in_a_window_too_narrow_for_the_columns_still_lands_where_it_is_pulled() {
+        // The bug this is here for: with the columns scaled down to fit, a
+        // width written straight into the settings gets scaled again on the
+        // next frame, and the boundary walks the wrong way while the pointer
+        // pulls it the right way. Pulled sixty points, it went eleven back.
+        let mut layout = Layout::default();
+        let narrow = 780.0;
+        let before = layout.widths(narrow);
+        let artist = before.of(Column::Artist).unwrap();
+        assert!(before.total() < layout.columns.iter().map(|s| s.width).sum::<f32>());
+
+        assert!(layout.drag_edge(&before, 0, 30.0));
+        let after = layout.widths(narrow);
+        assert_eq!(after.of(Column::Artist), Some(artist + 30.0), "the drag did not land");
+        assert!((after.total() - narrow).abs() < 0.01, "the row stopped filling the window");
+
+        // And the one after it, from where the first left off, because a drag
+        // is a stream of these rather than one.
+        assert!(layout.drag_edge(&after, 0, 30.0));
+        assert_eq!(layout.widths(narrow).of(Column::Artist), Some(artist + 60.0));
+    }
+
+    #[test]
+    fn a_boundary_stops_rather_than_eating_the_column_past_the_next() {
+        // Dragging left with the next column already at its narrowest has to
+        // stop somewhere. Refusing is the honest answer: clamping would leave
+        // the pointer travelling while nothing moved, and taking the rest out
+        // of the column after that would move a boundary nobody grabbed.
+        let mut layout = Layout::default();
+        let widths = layout.widths(1072.0);
+        let title = widths.of(Column::Title).unwrap();
+        assert!(!layout.drag_edge(&widths, 0, title - MIN_WIDTH + 1.0), "it ate past the floor");
+        assert_eq!(layout.widths(1072.0).of(Column::Title), Some(title), "it moved anyway");
+    }
+
+    #[test]
+    fn there_is_no_boundary_after_the_last_column() {
+        // What is on its right is the edge of the window, and there is no
+        // neighbour to take the width from.
+        let mut layout = Layout::default();
+        let widths = layout.widths(1072.0);
+        assert!(!layout.drag_edge(&widths, Column::ALL.len() - 1, 20.0));
+        assert!(!layout.drag_edge(&widths, 40, 20.0));
+    }
+
+    #[test]
+    fn the_last_column_cannot_be_turned_off() {
+        // The menu that turns them back on is on the header, and a header with
+        // no columns in it has nothing to right-click.
+        let mut layout = Layout::default();
+        for column in Column::ALL {
+            layout.toggle(column);
+        }
+        let left: Vec<Column> =
+            layout.columns.iter().filter(|s| s.shown).map(|s| s.column).collect();
+        assert_eq!(left.len(), 1, "the list was left with {} columns", left.len());
+    }
+
+    #[test]
+    fn a_layout_from_an_older_settings_file_gains_what_it_never_had() {
+        // The case this is really for: a column added to the program after
+        // somebody last saved. Without repair it would never appear for them
+        // again, and the menu would not list it either.
+        let mut layout = Layout::default();
+        layout.columns.retain(|slot| slot.column != Column::Stems);
+        layout.columns.push(Slot { column: Column::Bpm, width: 0.0, shown: true });
+        layout.repair();
+
+        assert_eq!(layout.columns.len(), Column::ALL.len(), "a column was left out or doubled");
+        assert!(layout.columns.iter().any(|slot| slot.column == Column::Stems));
+        for slot in &layout.columns {
+            assert!(slot.width > 0.0, "{} came back at {}", slot.column.name(), slot.width);
+        }
+
+        // And a layout with nothing shown goes back to the default rather than
+        // drawing a blank rectangle with no menu on it.
+        let mut empty = Layout::default();
+        for slot in &mut empty.columns {
+            slot.shown = false;
+        }
+        empty.repair();
+        assert_eq!(empty, Layout::default());
     }
 
     fn track(id: u32, artist: &str, title: &str, bpm: f64, key: &str) -> Track {
@@ -863,13 +1286,6 @@ mod tests {
         track.path = "/music/Batu/a.flac".into();
         other.path = "/music/Batu/b.flac".into();
         assert_ne!(location_of(&track), location_of(&other));
-    }
-
-    #[test]
-    fn every_column_fits_in_the_window() {
-        let widths = columns(1200.0);
-        let total: f32 = Column::ALL.iter().map(|c| c.width(&widths)).sum();
-        assert!(total <= 1200.0, "the columns overflowed: {total}");
     }
 
     #[test]

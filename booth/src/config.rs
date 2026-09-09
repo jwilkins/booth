@@ -287,6 +287,10 @@ pub struct Config {
     /// of the collection: it describes how this person likes to look at their
     /// music, not anything about the music.
     pub sort: crate::rows::Sort,
+    /// Which columns the browser shows, and how wide each was left. Also a
+    /// preference: it says how this person reads a list, not what is in it.
+    #[serde(default)]
+    pub columns: crate::rows::Layout,
     /// How the waveform is coloured.
     pub paint: crate::wave::Paint,
     /// Whether a track's length reads as bars or as beats.
@@ -430,6 +434,7 @@ impl Default for Config {
             stems_in: StemsIn::default(),
             on_external: OnExternal::default(),
             sort: crate::rows::Sort::default(),
+            columns: crate::rows::Layout::default(),
             panels: Panels::default(),
             paint: crate::wave::Paint::default(),
             length: Length::default(),
@@ -493,10 +498,16 @@ impl Config {
     /// there is nothing in it that cannot be set again, and refusing to open
     /// the window over it would be worse than starting from the defaults.
     pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
+        let mut config: Self = std::fs::read_to_string(path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A settings file written before a column existed does not mention it,
+        // and one edited by hand can say anything. Sorting that out here means
+        // nothing downstream has to wonder whether the list it was handed
+        // covers every column.
+        config.columns.repair();
+        config
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
