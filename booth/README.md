@@ -29,6 +29,18 @@ left, the browser in the middle with the prep editor beneath it rather than in
 place of it, the inspector on the right, and the drive dock along the bottom
 where the delta is always visible.
 
+**Any of the five sections can go to a window of its own** — the collection,
+the browser, the prep editor, the inspector, the drive dock. The **⧉** menu on
+the query bar sends one out and brings it back; so does closing the window it
+went to, so nothing can be shut out of existence. Which ones are out is
+remembered between runs, because which screen the waveform lives on is exactly
+the sort of thing that is annoying to set twice. The log has always had a
+window of its own and is listed in the same menu.
+
+The query bar stays in the main window whatever else leaves, and it still
+filters a list that has gone to another screen: it is the browser, and the two
+being in different windows does not change that.
+
 **Drag a panel's edge** to resize it, and it stays there — the size is written
 to the settings when the drag ends and is what the panel opens at next time.
 Only a drag changes it: a panel is drawn at exactly the size it was given and
