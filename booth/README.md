@@ -98,6 +98,26 @@ tagging a track does not queue a 40 MB rewrite. A tag already in use is offered
 as one click, and a new one that differs only in case joins the existing tag
 rather than starting a second one that queries miss.
 
+## Choosing rows
+
+The arrow keys walk the list. **Hold shift** and they take everything they pass;
+**shift-click** a row takes everything between it and where you started;
+**⌘-click** (control on Linux and Windows) adds or removes one row on its own;
+and **⌘A** takes everything the query has left showing — everything showing
+rather than the whole collection, because narrowing to what you want and then
+taking all of it is what the query bar is for.
+
+A range grows from an anchor, which is the last row picked plainly, so holding
+shift and pressing down four times takes five rows and coming back up again
+gives one of them back rather than leaving it behind.
+
+**One selected row is not a selection.** It is where the cursor happens to be,
+so the batch buttons still read "Analyse 40" and act on everything showing.
+Pick two or more and they narrow to those, and the label beside the playlist
+field changes to say so. Stem companions come along with their parents rather
+than being picked on their own: a stem is not a thing to analyse or put on a
+drive by itself.
+
 ## Doing one track at a time
 
 Every batch job has a single-track twin. The prep editor under the waveform has

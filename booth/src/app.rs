@@ -906,6 +906,14 @@ impl App {
             .selected
             .and_then(|id| self.rows.iter().position(|row| row.track.id == id))
             .unwrap_or(0);
+        // The row being left is where a range grows from, if nothing has set
+        // that yet. Without this, shift-down in a window nobody had clicked in
+        // took only the row it arrived at, and took only the next one again on
+        // the press after that — the gesture did nothing at all until a plain
+        // click or arrow had happened first.
+        if self.anchor.is_none() {
+            self.anchor = self.selected.or_else(|| self.rows.first().map(|row| row.track.id));
+        }
         let next = (at as isize + delta).clamp(0, self.rows.len() as isize - 1) as usize;
         let id = self.rows[next].track.id;
 
@@ -932,7 +940,10 @@ impl App {
     /// listed — which is what the eye means by "these ones", whichever
     /// direction they were picked in.
     fn mark_range_to(&mut self, id: u32) {
-        let anchor = self.anchor.unwrap_or(id);
+        // Pinned, not just read: a range that left the anchor unset would find
+        // it unset again on the next shift-press and measure from wherever the
+        // cursor had got to, so the selection would never grow past two rows.
+        let anchor = *self.anchor.get_or_insert(id);
         let at = |wanted: u32| self.rows.iter().position(|row| row.track.id == wanted);
         let (Some(from), Some(to)) = (at(anchor), at(id)) else {
             self.mark_only(id);
@@ -947,6 +958,29 @@ impl App {
             .filter(|row| !row.indented)
             .map(|row| row.track.id)
             .collect();
+    }
+
+    /// Take everything the query has left showing.
+    ///
+    /// Everything showing rather than the whole collection, because the query
+    /// bar is how a set is picked here: narrowing to what you want and then
+    /// taking all of it is the gesture, and a select-all that reached past the
+    /// filter would undo the narrowing it was meant to finish.
+    ///
+    /// The cursor does not move, and the anchor follows it, so a shift-arrow
+    /// straight after this grows from the row being looked at rather than
+    /// from the top of the list.
+    fn mark_showing(&mut self) {
+        self.marked = self
+            .rows
+            .iter()
+            // Companions are not selected on their own: a stem is not a thing
+            // to analyse or put on a drive by itself, and it goes wherever its
+            // parent goes.
+            .filter(|row| !row.indented)
+            .map(|row| row.track.id)
+            .collect();
+        self.anchor = self.selected.or_else(|| self.rows.first().map(|row| row.track.id));
     }
 
     /// Add a row to the selection, or take it out again.
@@ -2269,6 +2303,11 @@ impl App {
             }
             if typing {
                 return;
+            }
+            // Everything showing. Consumed rather than merely read, so that
+            // nothing downstream reads the same press as something else.
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::A) {
+                self.mark_showing();
             }
             let extend = i.modifiers.shift;
             if i.key_pressed(egui::Key::ArrowDown) {
@@ -8143,6 +8182,139 @@ mod tests {
                 });
                 harness.run();
             }
+        }
+
+        /// A window on a listing, with the keys read as the real one reads
+        /// them: `keys` runs before the panels, as it does in `update`.
+        fn browsing(name: &str, n: u32) -> Harness<'static, App> {
+            let mut app = listing(name, n);
+            app.selected = app.rows.first().map(|row| row.track.id);
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.keys(&ctx);
+                    app.browser(ui);
+                    app.apply_pending(&ctx);
+                },
+                app,
+            );
+            harness.run();
+            harness
+        }
+
+        fn press(harness: &mut Harness<'_, App>, key: egui::Key, modifiers: egui::Modifiers) {
+            // On the raw input as well as on the event: the window reads
+            // `i.modifiers`, which is what the platform says is held down
+            // rather than what any one event carries, and that is the thing a
+            // real shift-press changes.
+            harness.input_mut().modifiers = modifiers;
+            for pressed in [true, false] {
+                harness.event(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                });
+                harness.run();
+            }
+            harness.input_mut().modifiers = egui::Modifiers::NONE;
+        }
+
+        /// The rows the window would act on, in list order.
+        fn picked(harness: &Harness<'_, App>) -> Vec<u32> {
+            let app = harness.state();
+            app.rows
+                .iter()
+                .filter(|row| app.marked.contains(&row.track.id))
+                .map(|row| row.track.id)
+                .collect()
+        }
+
+        #[test]
+        fn command_a_takes_everything_the_query_left_showing() {
+            // Everything showing, not the whole collection: narrowing to what
+            // you want and then taking all of it is the gesture the query bar
+            // is for, and reaching past the filter would undo the narrowing.
+            let mut harness = browsing("select all", 12);
+            harness.state_mut().text = "Track 1".into();
+            harness.state_mut().rebuild();
+            harness.run();
+            let showing: Vec<u32> = harness.state().rows.iter().map(|row| row.track.id).collect();
+            assert!(
+                showing.len() < 12 && !showing.is_empty(),
+                "the query did not narrow anything, so this proves nothing"
+            );
+
+            press(&mut harness, egui::Key::A, egui::Modifiers::COMMAND);
+            assert_eq!(picked(&harness), showing, "command-A did not take what was showing");
+            assert_eq!(
+                harness.state().acting_on(|_| true),
+                showing,
+                "the buttons would still act on everything"
+            );
+        }
+
+        #[test]
+        fn shift_and_the_arrow_keys_grow_the_selection_from_where_the_cursor_was() {
+            let mut harness = browsing("shift arrows", 6);
+            let ids: Vec<u32> = harness.state().rows.iter().map(|row| row.track.id).collect();
+
+            for _ in 0..3 {
+                press(&mut harness, egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+            }
+            assert_eq!(picked(&harness), ids[..4], "shift-down did not take the rows it passed");
+
+            // Back up one: the range is measured from the anchor, so it
+            // shrinks rather than leaving the row behind still selected.
+            press(&mut harness, egui::Key::ArrowUp, egui::Modifiers::SHIFT);
+            assert_eq!(picked(&harness), ids[..3], "coming back up left a row behind");
+
+            // And without shift it is a cursor again, not a selection.
+            press(&mut harness, egui::Key::ArrowDown, egui::Modifiers::NONE);
+            assert_eq!(picked(&harness), ids[3..4], "a plain arrow kept the old selection");
+        }
+
+        #[test]
+        fn shift_clicking_a_row_takes_everything_between() {
+            let mut harness = browsing("shift click", 6);
+            let ids: Vec<u32> = harness.state().rows.iter().map(|row| row.track.id).collect();
+
+            let row = |harness: &Harness<'_, App>, at: usize| {
+                harness.get_by_label_contains(&format!("Track {:02}", at + 1)).rect().center()
+            };
+            let first = row(&harness, 0);
+            let fourth = row(&harness, 3);
+
+            click(&mut harness, first, egui::Modifiers::NONE);
+            assert_eq!(picked(&harness), ids[..1], "a plain click did not start a selection");
+
+            click(&mut harness, fourth, egui::Modifiers::SHIFT);
+            assert_eq!(picked(&harness), ids[..4], "shift-click did not take everything between");
+
+            // The command key adds one on its own without disturbing the rest.
+            let sixth = row(&harness, 5);
+            click(&mut harness, sixth, egui::Modifiers::COMMAND);
+            let mut wanted = ids[..4].to_vec();
+            wanted.push(ids[5]);
+            assert_eq!(picked(&harness), wanted, "command-click did not add a single row");
+        }
+
+        /// Click where the pointer is put, with modifiers held.
+        fn click(harness: &mut Harness<'_, App>, at: egui::Pos2, modifiers: egui::Modifiers) {
+            harness.input_mut().modifiers = modifiers;
+            harness.event(egui::Event::PointerMoved(at));
+            harness.run();
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers,
+                });
+                harness.run();
+            }
+            harness.input_mut().modifiers = egui::Modifiers::NONE;
         }
 
         #[test]
