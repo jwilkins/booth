@@ -7,6 +7,8 @@
 
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui, Vec2};
 
+use booth_cli::export::waveform::loudness;
+
 use crate::library::{CueMark, Phrase};
 use crate::theme;
 
@@ -98,7 +100,13 @@ impl StemEnvelopes {
 /// is a true average and a useless picture. Raising the shares to a power
 /// first does not invent a band that is not there — it stops the two that are
 /// quieter from speaking as loudly as the one that is not.
-const CONTRAST: f32 = 3.0;
+///
+/// Two rather than three. At three the leading band takes so much of the mix
+/// that the others cannot tint it, and every column comes out the colour of
+/// whichever band happened to lead — which for most music is the mid, all the
+/// way through. A column with a strong bass under it and one with none came
+/// out the same hue to within a third of a degree.
+const CONTRAST: f32 = 2.0;
 
 /// How far a fully mixed colour is then pushed back away from grey.
 ///
@@ -157,8 +165,54 @@ fn blend(parts: &[(Color32, f32)]) -> Color32 {
 /// The same mix the analysis files carry to the player — bass reads blue, the
 /// mid-range amber, and treble washes everything towards white — so the picture
 /// on screen and the picture on the CDJ are the same picture.
+/// The palette the colour mode mixes in, low to high.
+///
+/// Not the band colours the stacked mode uses. Those are three labels on three
+/// bars and only have to be told apart; these are mixed together, and blue and
+/// amber sit opposite each other on the wheel — so any column with both in it,
+/// which is most music, cancels to grey. Measured across four kinds of column,
+/// one with a strong bass and one with none came out at hue 36 and hue 36:
+/// the same colour, whatever the track was doing.
+///
+/// Violet is a third of the way round from amber rather than opposite it, so
+/// mixing the two rotates the hue instead of cancelling it. The same four
+/// columns now land at 280, 24 and 51 degrees. Bass with no mid over it reads
+/// purple, a full-band body reads orange, and a breakdown with the bass gone
+/// reads yellower — which is the picture a colour waveform is for.
+const FREQ_LOW: Color32 = Color32::from_rgb(0x8B, 0x5C, 0xF6);
+const FREQ_MID: Color32 = theme::BAND_MID;
+const FREQ_HIGH: Color32 = Color32::from_rgb(0x67, 0xE8, 0xF9);
+
+/// The colour of a column, from what it is made of.
+///
+/// The levels are undone first. They are stored bent by a display curve that
+/// exists to make heights readable, and it flattens the bands against each
+/// other on the way — a column that is plainly a kick reads 0.95 low against
+/// 0.71 mid through it. A colour is a set of proportions, so it has to be
+/// worked out on the amplitudes the curve was applied to rather than on what
+/// came out.
 pub fn frequency_color(low: f32, mid: f32, high: f32) -> Color32 {
-    mix([theme::BAND_LOW, theme::BAND_MID, theme::BAND_HIGH], [low, mid, high])
+    use booth_cli::export::waveform::unshape;
+    mix([FREQ_LOW, FREQ_MID, FREQ_HIGH], [unshape(low), unshape(mid), unshape(high)])
+}
+
+/// The bands in the order they have to be drawn: tallest first.
+///
+/// The bars are all centred on the same line, so a band drawn after a taller
+/// one is hidden behind it completely. Drawn in a fixed low, mid, high order
+/// that is only right when the low band is the loudest — which on most music
+/// it is not. The mid band covers the whole range from a bassline to a vocal
+/// and is usually the tallest, so it painted over the low band every time and
+/// the kick, the one thing this mode exists to find, was never visible at all.
+///
+/// It matters most on a modern master, where the total height carries almost
+/// nothing: a limiter flattens the peak of the whole signal to a straight
+/// line, and the low band is the only measurement left that still moves with
+/// the music.
+pub fn stacked(peaks: [f32; 3], colors: [Color32; 3]) -> [(f32, Color32); 3] {
+    let mut stack = [(peaks[0], colors[0]), (peaks[1], colors[1]), (peaks[2], colors[2])];
+    stack.sort_by(|a, b| b.0.total_cmp(&a.0));
+    stack
 }
 
 /// Which part of the track the picture is showing.
@@ -395,17 +449,22 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
         };
 
         match paint {
-            // Three bars, one per band, drawn low first so the quieter bands
-            // land on top of the louder one.
+            // Three bars, one per band, tallest first so the quieter ones land
+            // on top of the louder one rather than behind it.
             Paint::Bands => {
-                for (band, color) in peaks.iter().zip(bands) {
+                for (band, color) in stacked(peaks, bands) {
                     bar(band * reach, color);
                 }
             }
-            // One bar as tall as the loudest band, coloured by the mix.
+            // One bar, coloured by the mix. As tall as the same weighted
+            // blend of the bands the drive is written from, so the picture on
+            // screen and the picture on the player are the same picture — and
+            // so that this mode is not the flat one. Drawn from the loudest
+            // band it followed the mid, which on a limited master is a
+            // straight line.
             Paint::Frequency => {
                 let [low, mid, high] = peaks;
-                bar(low.max(mid).max(high) * reach, frequency_color(low, mid, high));
+                bar(loudness(low, mid, high) * reach, frequency_color(low, mid, high));
             }
             Paint::Stems => {
                 let [low, mid, high] = peaks;
@@ -413,7 +472,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
                     .stems
                     .map(|stems| stems.color_at(loudest * stems.columns() / wave.columns().max(1)))
                     .unwrap_or(theme::RULE);
-                bar(low.max(mid).max(high) * reach, color);
+                bar(loudness(low, mid, high) * reach, color);
             }
         }
     }
@@ -817,18 +876,93 @@ mod tests {
     }
 
     #[test]
+    fn the_quieter_bands_are_drawn_on_top_of_the_louder_one() {
+        // All three bars are centred on the same line, so a band drawn after a
+        // taller one is hidden behind it. The bug this is here for: they were
+        // drawn low, mid, high regardless of height, and the mid band — which
+        // on most music is the tallest — painted over the low band every time.
+        // The kick, which is the whole reason for this mode, was never visible.
+        let colors = [theme::BAND_LOW, theme::BAND_MID, theme::BAND_HIGH];
+
+        // A typical column of a modern master: mid loudest, the kick under it.
+        let order = stacked([0.37, 1.0, 0.46], colors);
+        assert_eq!(order[0].1, theme::BAND_MID, "the tallest band must go down first");
+        assert_eq!(order[2].1, theme::BAND_LOW, "the kick is still buried");
+        assert!(order[0].0 >= order[1].0 && order[1].0 >= order[2].0);
+
+        // And a bass-heavy one, where the old fixed order happened to be right.
+        let order = stacked([1.0, 0.4, 0.2], colors);
+        assert_eq!(order[0].1, theme::BAND_LOW);
+        assert_eq!(order[2].1, theme::BAND_HIGH);
+    }
+
+    #[test]
     fn frequency_colour_follows_whichever_band_is_loudest() {
-        // Pure bass reads blue, pure mid-range amber, pure treble near-white:
-        // the palette the player itself draws in.
-        assert_eq!(frequency_color(1.0, 0.0, 0.0), theme::BAND_LOW);
-        assert_eq!(frequency_color(0.0, 1.0, 0.0), theme::BAND_MID);
-        assert_eq!(frequency_color(0.0, 0.0, 1.0), theme::BAND_HIGH);
+        // A column that is only one band comes out exactly that band's colour.
+        assert_eq!(frequency_color(1.0, 0.0, 0.0), FREQ_LOW);
+        assert_eq!(frequency_color(0.0, 1.0, 0.0), FREQ_MID);
+        assert_eq!(frequency_color(0.0, 0.0, 1.0), FREQ_HIGH);
 
         // A mix lands between them rather than snapping to one.
         let mixed = frequency_color(1.0, 1.0, 0.0);
-        assert!(mixed != theme::BAND_LOW && mixed != theme::BAND_MID);
+        assert!(mixed != FREQ_LOW && mixed != FREQ_MID);
         let between = |a: u8, b: u8, c: u8| c >= a.min(b) && c <= a.max(b);
-        assert!(between(theme::BAND_LOW.r(), theme::BAND_MID.r(), mixed.r()));
+        assert!(between(FREQ_LOW.b(), FREQ_MID.b(), mixed.b()));
+    }
+
+    /// Where a colour sits on the wheel, in degrees, and how far from grey.
+    fn hue(colour: Color32) -> (f32, f32) {
+        let (r, g, b) =
+            (colour.r() as f32 / 255.0, colour.g() as f32 / 255.0, colour.b() as f32 / 255.0);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let spread = max - min;
+        if spread < 1e-6 {
+            return (0.0, 0.0);
+        }
+        let degrees = if max == r {
+            60.0 * (((g - b) / spread) % 6.0)
+        } else if max == g {
+            60.0 * ((b - r) / spread + 2.0)
+        } else {
+            60.0 * ((r - g) / spread + 4.0)
+        };
+        ((degrees + 360.0) % 360.0, spread / max)
+    }
+
+    #[test]
+    fn a_column_with_bass_under_it_is_a_different_colour_from_one_without() {
+        // The fault this is here for: it was not. Blue and amber sit opposite
+        // each other on the wheel, so a column holding both cancelled to grey,
+        // and a sharpening exponent of three then handed the mix to whichever
+        // band led — the mid, nearly always. A body with a strong bass and a
+        // breakdown with none came out at hue 36.0 and hue 35.8: the same
+        // colour, for the two passages a DJ most needs to tell apart.
+        //
+        // The levels here are as they are stored, bent by the display curve.
+        let body = frequency_color(0.59, 0.86, 0.49);
+        let breakdown = frequency_color(0.09, 0.95, 0.57);
+        let bass = frequency_color(0.95, 0.71, 0.08);
+
+        let apart = |a: Color32, b: Color32| {
+            let gap = (hue(a).0 - hue(b).0).abs();
+            gap.min(360.0 - gap)
+        };
+        assert!(
+            apart(body, breakdown) > 15.0,
+            "a body and a breakdown are {:.1} degrees apart",
+            apart(body, breakdown)
+        );
+        assert!(
+            apart(bass, body) > 90.0,
+            "bass and a full-band body are {:.1} degrees apart",
+            apart(bass, body)
+        );
+
+        // And they are colours, not shades of beige.
+        for (name, colour) in [("body", body), ("breakdown", breakdown), ("bass", bass)] {
+            assert!(hue(colour).1 > 0.3, "{name} came out {:.2} from grey", hue(colour).1);
+        }
     }
 
     /// How far a colour is from the grey of the same brightness.
@@ -850,16 +984,18 @@ mod tests {
             "a bass-heavy column should read as bass: {kick:?} is {:.0} off grey",
             colourfulness(kick)
         );
-        assert!(kick.b() > kick.r(), "and it should read blue: {kick:?}");
+        assert!(kick.b() > kick.r(), "and it should read as the low band: {kick:?}");
 
         // The same shape with the mid-range winning has to be visibly a
-        // different colour, not a different shade of the same one.
+        // different colour, not a different shade of the same one. Measured
+        // round the wheel rather than down one channel: a red channel told
+        // blue from amber well enough, and says almost nothing about violet,
+        // which has plenty of red in it.
         let lead = frequency_color(0.32, 0.95, 0.63);
         assert!(lead.r() > lead.b(), "a mid-heavy column should read amber: {lead:?}");
-        assert!(
-            (kick.r() as i32 - lead.r() as i32).abs() > 40,
-            "the two should not be neighbours: {kick:?} vs {lead:?}"
-        );
+        let gap = (hue(kick).0 - hue(lead).0).abs();
+        let apart = gap.min(360.0 - gap);
+        assert!(apart > 90.0, "the two are {apart:.0} degrees apart: {kick:?} vs {lead:?}");
     }
 
     #[test]

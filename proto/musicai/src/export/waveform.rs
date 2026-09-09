@@ -76,18 +76,29 @@ impl WaveformData {
     }
 
     fn from_columns(columns: &[Column]) -> Self {
-        let preview_columns = summarise(columns, PREVIEW_COLUMNS);
-        let tiny_columns = summarise(columns, TINY_COLUMNS);
-        let wide_columns = summarise(columns, WIDE_COLUMNS);
+        // The scrolling pictures and the whole-track ones are scaled apart,
+        // because they are two different measurements and normalising both
+        // against one of them ruins the other. See [`Scaled`].
+        let detail = Scaled::of(columns, REFERENCE_QUANTILE);
+
+        let wide = summarise(columns, WIDE_COLUMNS);
+        // One reference across all three overviews, taken from the finest of
+        // them, so the small picture in a browse list and the strip under the
+        // deck agree about how tall the same moment is.
+        let over =
+            |width: usize| Scaled::like(&summarise(columns, width), &wide, OVERVIEW_QUANTILE);
+        let preview = over(PREVIEW_COLUMNS);
+        let tiny = over(TINY_COLUMNS);
+        let wide = Scaled::of(&wide, OVERVIEW_QUANTILE);
 
         Self {
-            preview: preview_columns.iter().map(Column::mono_byte).collect(),
-            tiny: tiny_columns.iter().map(Column::tiny_byte).collect(),
-            detail: columns.iter().map(Column::mono_byte).collect(),
-            color_preview: wide_columns.iter().flat_map(Column::color_preview_bytes).collect(),
-            color_detail: columns.iter().flat_map(Column::color_detail_bytes).collect(),
-            band_preview: wide_columns.iter().flat_map(Column::band_bytes).collect(),
-            band_detail: columns.iter().flat_map(Column::band_bytes).collect(),
+            preview: preview.mono_bytes(),
+            tiny: tiny.tiny_bytes(),
+            detail: detail.mono_bytes(),
+            color_preview: wide.color_preview_bytes(),
+            color_detail: detail.color_detail_bytes(),
+            band_preview: wide.band_bytes(),
+            band_detail: detail.band_bytes(),
         }
     }
 }
@@ -102,31 +113,143 @@ impl WaveformData {
 /// Then the whole track is scaled against its own loudest content, before any
 /// of the pictures are encoded, so every picture derived from it agrees.
 pub fn analyze(audio: &Audio) -> WaveformData {
-    let mut columns = measure(audio);
-    let gain = reference_gain(&summarise(&columns, WIDE_COLUMNS));
-    for column in &mut columns {
+    WaveformData::from_columns(&measure(audio))
+}
+
+/// Columns scaled and ready to encode.
+///
+/// Two scales, because a column carries two quantities that do not live on the
+/// same one. How *tall* the column is drawn is [`loudness`], a weighted blend
+/// of the bands that sits below any of them. What the column is *made of* is
+/// the bands themselves. One gain cannot serve both: set from the blend it
+/// drives the band bytes past the top of their range — a ten-kilohertz tone
+/// came out with a full mid band as well as a full high one — and set from the
+/// bands it leaves the height using a third of the display.
+///
+/// The colours are ratios between bands and so do not care which gain was
+/// applied; they are taken from the band-scaled columns because that is where
+/// they sit.
+struct Scaled {
+    bands: Vec<Column>,
+    /// Normalised heights, nought to one, one per column.
+    heights: Vec<f32>,
+}
+
+impl Scaled {
+    fn of(columns: &[Column], quantile: f32) -> Self {
+        Self::like(columns, columns, quantile)
+    }
+
+    /// Scale `columns` against the references taken from `against`, so that
+    /// pictures of different widths can be put on one scale.
+    fn like(columns: &[Column], against: &[Column], quantile: f32) -> Self {
+        let band = gain_for(against, quantile, |c| c.low.max(c.mid).max(c.high));
+        let tall = gain_for(against, quantile, Column::loudness);
+        Self {
+            bands: scaled(columns, band),
+            heights: columns.iter().map(|c| c.loudness() * tall).collect(),
+        }
+    }
+
+    fn mono_bytes(&self) -> Vec<u8> {
+        self.pairs().map(|(c, h)| c.mono_byte(h)).collect()
+    }
+
+    fn tiny_bytes(&self) -> Vec<u8> {
+        self.heights.iter().map(|h| height(*h, 15)).collect()
+    }
+
+    fn band_bytes(&self) -> Vec<u8> {
+        self.bands.iter().flat_map(Column::band_bytes).collect()
+    }
+
+    fn color_detail_bytes(&self) -> Vec<u8> {
+        self.pairs().flat_map(|(c, h)| c.color_detail_bytes(h)).collect()
+    }
+
+    /// The browse-list picture is made of band levels only — it carries no
+    /// height of its own — so it comes from the band-scaled columns alone.
+    fn color_preview_bytes(&self) -> Vec<u8> {
+        self.bands.iter().flat_map(Column::color_preview_bytes).collect()
+    }
+
+    fn pairs(&self) -> impl Iterator<Item = (&Column, f32)> {
+        self.bands.iter().zip(self.heights.iter().copied())
+    }
+}
+
+/// A copy of the columns with one gain applied to all of them.
+fn scaled(columns: &[Column], gain: f32) -> Vec<Column> {
+    let mut out = columns.to_vec();
+    for column in &mut out {
         column.scale(gain);
     }
-    WaveformData::from_columns(&columns)
+    out
 }
 
 /// The fraction of the track that is allowed to reach full height.
 ///
-/// The maximum would be the obvious reference and is the wrong one: one clap
-/// that clips sets it on a great many records, and scaling the picture to that
-/// spends the top of the display on a moment nobody is reading the waveform to
-/// find. At the 95th percentile the loudest twentieth of the track pins the
-/// top and everything else is drawn against it.
-const REFERENCE_QUANTILE: f32 = 0.95;
+/// The maximum is not quite the right reference: a single freak column — one
+/// clap that clips on an otherwise quiet record — would set it, and the whole
+/// picture would then be drawn against a moment nobody is reading the waveform
+/// to find. A quantile just short of the top throws that column away and keeps
+/// everything else.
+///
+/// Just short of it, though, and not the loudest twentieth. This was 0.95,
+/// from when the height was the peak of the whole signal — but on a limited
+/// master half the track sits within a hair of that peak, so the 95th
+/// percentile falls *inside* the loudest passage and draws its median at 29 of
+/// 31 with the kicks clipped off above it. Measured on one, moving the
+/// reference to 0.99 doubles the movement visible inside a loud section
+/// (spread 0.048 to 0.094) and drops that median to 23, which is where a kick
+/// has somewhere to go. One per cent of a six-minute track is still several
+/// hundred columns discarded, which is a great deal more than a clap.
+const REFERENCE_QUANTILE: f32 = 0.99;
 
 /// The most a quiet track's picture is lifted, as a gain.
 ///
 /// A quiet transfer should be drawn as though it were not, which is the whole
 /// point of normalising. But a track that is mostly silence has a reference
 /// level made of its own noise floor, and without a limit that noise is drawn
-/// as a full-height block. Thirty decibels is more than any real recording
-/// needs and well short of what it takes to make hiss look like music.
-const MAX_GAIN: f32 = 32.0;
+/// as a full-height block.
+///
+/// About forty decibels. The number has to be read against what it is capping:
+/// [`loudness`] is a weighted blend of the bands and sits well below the peak
+/// of the signal — for a tone in one band it is a third of it — so a cap set
+/// as though it were a peak fires on legitimately quiet records rather than on
+/// silence. What it works out to is a floor on the reference level: a track
+/// whose loudest passage measures below about −42 dBFS is not lifted, and
+/// there is nothing at that level anybody is trying to look at.
+const MAX_GAIN: f32 = 128.0;
+
+/// How tall a column is drawn, from the three bands it is made of.
+///
+/// Not the peak of the whole signal, which is what this used to be. A modern
+/// master is limited, and limiting is precisely the business of making the peak
+/// the same from moment to moment: measured column by column across one loud
+/// section of one, the peak of the whole signal has a spread of 0.00. It is a
+/// straight line, and no amount of scaling or curve-bending recovers a shape
+/// from a straight line — which is why a loud track drew as a solid block
+/// however its gain was worked out.
+///
+/// The bands are not all flat. Through the same section the mid band, the high
+/// band and the overall RMS sit at 0.04 to 0.07, but the low band is at 0.36:
+/// on a limited record the kick is the one thing still moving, and it is what
+/// a waveform is read for.
+///
+/// So the low band leads and the other two carry the level. Weighted this way
+/// a loud section keeps a visible pulse — 0.15 against 0.00 — while a
+/// breakdown that takes the drums out but keeps a loud pad still draws at
+/// about a third of full height rather than the tenth that the low band alone
+/// would give it. Leading with the low band is not a distortion: a passage
+/// with the drums out *should* look thinner than one with them in.
+pub fn loudness(low: f32, mid: f32, high: f32) -> f32 {
+    LOW_WEIGHT * low + MID_WEIGHT * mid + HIGH_WEIGHT * high
+}
+
+const LOW_WEIGHT: f32 = 0.6;
+const MID_WEIGHT: f32 = 0.3;
+const HIGH_WEIGHT: f32 = 0.1;
 
 /// How the normalised amplitude is bent before it becomes a height.
 ///
@@ -139,27 +262,35 @@ const MAX_GAIN: f32 = 32.0;
 /// and the parts of a track that differ still look different.
 const SHAPE: f32 = 0.7;
 
-/// The gain that puts the track's reference level at full height.
+/// The quantile the whole-track pictures are referenced at.
 ///
-/// One gain for the whole track and every band in it, rather than one per band
-/// or per column. The height of a column is what says how loud that moment is,
-/// and the ratios between the bands are what the colour is made of — scaling
-/// them apart would destroy both, and leave a picture in which every moment
-/// looks equally loud.
+/// The maximum, rather than the shade below it the scrolling pictures use. The
+/// quantile is there to survive one freak column, and an overview column is a
+/// second of audio averaged — which no single transient can carry, so the
+/// outlier it guards against cannot occur here. Taking the maximum means the
+/// loudest passage draws exactly at the top with nothing above it thrown away.
+const OVERVIEW_QUANTILE: f32 = 1.0;
+
+/// The gain that puts a track's reference level at full height.
 ///
-/// Measured at preview resolution rather than on the raw columns, because a
-/// preview column is the peak of about twenty-six of those and so sits well
-/// above a typical one. Referenced against the raw columns the previews come
-/// out hot and a fifth of them flatten against the top, which is the fault
-/// this is here to fix rather than move.
-fn reference_gain(columns: &[Column]) -> f32 {
-    let mut peaks: Vec<f32> =
-        columns.iter().map(|c| c.low.max(c.mid).max(c.high)).filter(|a| *a > 0.0).collect();
+/// One gain for every column and every band in it, rather than one per band or
+/// per column: the height of a column is what says how loud that moment is,
+/// and the ratios between the bands are what the colour is made of, so scaling
+/// them apart would wreck both and leave a picture in which every moment looks
+/// equally loud.
+///
+/// `measure` has to be the same number the picture is drawn from. Reference
+/// one thing and draw another and the picture comes out hot by whatever the
+/// ratio between them happens to be — which is how the scrolling waveform came
+/// to be drawn at twice its height, from a gain worked out on an overview
+/// whose columns are the *average* of a second of the ones it was applied to.
+fn gain_for(columns: &[Column], quantile: f32, measure: fn(&Column) -> f32) -> f32 {
+    let mut peaks: Vec<f32> = columns.iter().map(measure).filter(|a| *a > 0.0).collect();
     if peaks.is_empty() {
         return 1.0;
     }
     peaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let at = ((peaks.len() as f32 - 1.0) * REFERENCE_QUANTILE).round() as usize;
+    let at = ((peaks.len() as f32 - 1.0) * quantile).round() as usize;
     let reference = peaks[at.min(peaks.len() - 1)];
     if reference <= f32::EPSILON {
         return 1.0;
@@ -223,12 +354,13 @@ impl Column {
 
     /// Five bits of height, three of whiteness — the encoding shared by the
     /// original preview and the scrolling monochrome waveform.
-    fn mono_byte(&self) -> u8 {
-        (self.whiteness() << 5) | height(self.full, 31)
+    fn mono_byte(&self, tall: f32) -> u8 {
+        (self.whiteness() << 5) | height(tall, 31)
     }
 
-    fn tiny_byte(&self) -> u8 {
-        height(self.full, 15)
+    /// How tall this column is drawn, before scaling. See [`loudness`].
+    fn loudness(&self) -> f32 {
+        loudness(self.low, self.mid, self.high)
     }
 
     /// Higher values are drawn in a whiter, less saturated blue. Treble is what
@@ -241,12 +373,12 @@ impl Column {
 
     /// Three bits each of red, green and blue, then five of height, packed
     /// big-endian into two bytes with the low two bits unused.
-    fn color_detail_bytes(&self) -> [u8; 2] {
+    fn color_detail_bytes(&self, tall: f32) -> [u8; 2] {
         let (r, g, b) = self.color();
         let packed = ((r as u16) << 13)
             | ((g as u16) << 10)
             | ((b as u16) << 7)
-            | ((height(self.full, 31) as u16) << 2);
+            | ((height(tall, 31) as u16) << 2);
         packed.to_be_bytes()
     }
 
@@ -330,6 +462,18 @@ fn height(amplitude: f32, max: u8) -> u8 {
 
 fn level(amplitude: f32) -> u8 {
     height(amplitude, 255)
+}
+
+/// Undo [`SHAPE`], turning a stored level back into the amplitude it was made
+/// from.
+///
+/// The curve is there to make a picture readable, and it flattens the
+/// differences between the bands on the way: a column that is plainly a kick
+/// comes out of it reading 0.95 low against 0.71 mid. Anything working out
+/// what a column is *made of* — a colour, a ratio — has to undo it first, or
+/// it is reading proportions the display invented.
+pub fn unshape(level: f32) -> f32 {
+    level.clamp(0.0, 1.0).powf(1.0 / SHAPE)
 }
 
 /// A low-pass of two single poles in series, kept as its own state so the whole
@@ -487,6 +631,198 @@ mod tests {
         assert_eq!(w.detail.len(), 300);
         assert_eq!(w.color_detail.len(), 300 * 2);
         assert_eq!(w.band_detail.len(), 300 * 3);
+    }
+
+    /// Music-shaped: a sustained bed with sharp percussive hits over it, so
+    /// that the peak within any second sits well above the average of that
+    /// second.
+    ///
+    /// The tones the other tests are built from do not do this — a steady sine
+    /// averaged over a second is very nearly its own peak — which is exactly
+    /// why they went on passing while the scrolling waveform was being drawn
+    /// at more than twice the height it should have been.
+    fn percussive(levels: &[f32], secs_each: f32) -> Audio {
+        let rate = 44_100;
+        let mut plane = Vec::new();
+        for (n, level) in levels.iter().enumerate() {
+            for i in 0..(rate as f32 * secs_each) as usize {
+                let t = (n as f32 * secs_each) + i as f32 / rate as f32;
+                let bed = (2.0 * std::f32::consts::PI * 220.0 * t).sin() * 0.12;
+                // Two hits a second, each decaying over about 40 ms.
+                let since = (t * 2.0).fract() / 2.0;
+                let hit = (-since * 60.0).exp() * (2.0 * std::f32::consts::PI * 60.0 * t).sin();
+                plane.push((bed + hit) * level);
+            }
+        }
+        Audio::new(rate, vec![plane.clone(), plane]).unwrap()
+    }
+
+    fn heights(bytes: &[u8]) -> Vec<u8> {
+        let mut out: Vec<u8> = bytes.iter().map(|b| b & 0x1f).collect();
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn the_scrolling_waveform_is_not_flattened_against_the_top() {
+        // The fault this is here for. The gain was worked out on an overview,
+        // where a column is a second of audio averaged, and then applied to
+        // these columns, where a column is a peak — about twice too much on
+        // anything with transients in it. Every hit pinned against the top and
+        // the picture became a solid block.
+        let w = analyze(&percussive(&[0.8], 20.0));
+        let h = heights(&w.detail);
+        let full = h.iter().filter(|&&x| x == 31).count();
+
+        // The reference is a quantile, so a little clipping is the point —
+        // but only a little.
+        assert!(full * 10 <= h.len(), "{full} of {} columns are at full height", h.len());
+        assert!(h[h.len() / 2] < 21, "the middle of the track draws at {} of 31", h[h.len() / 2]);
+    }
+
+    #[test]
+    fn the_scrolling_waveform_tells_one_passage_from_another() {
+        // What the picture is read for. A quarter of the level is about 12 dB
+        // down and has to look plainly different, not a shade shorter.
+        let levels = [1.0f32, 0.25];
+        let w = analyze(&percussive(&levels, 10.0));
+        let half = w.detail.len() / 2;
+        let loud = heights(&w.detail[..half]);
+        let quiet = heights(&w.detail[half..]);
+        let (loud, quiet) = (loud[loud.len() / 2], quiet[quiet.len() / 2]);
+        // As a ratio rather than a number of steps. On sparse material most
+        // columns sit between the hits, so the middle of even a loud section
+        // is low on the scale and the two medians are small numbers — what
+        // has to hold is that one is plainly taller than the other, which is
+        // the same claim wherever on the scale they land.
+        assert!(loud >= quiet * 2 && loud - quiet >= 4, "loud {loud} quiet {quiet} of 31");
+    }
+
+    #[test]
+    fn the_two_pictures_are_scaled_for_what_each_of_them_measures() {
+        // A peak and a one-second average are different measurements of the
+        // same track, and one gain cannot serve both: normalising against
+        // either ruins the other. On material with transients the two
+        // references genuinely differ, which is the whole reason for the
+        // split — if they ever stop differing here, this test is no longer
+        // watching anything.
+        let columns = measure(&percussive(&[0.8], 20.0));
+        let detail = gain_for(&columns, REFERENCE_QUANTILE, Column::loudness);
+        let overview =
+            gain_for(&summarise(&columns, WIDE_COLUMNS), OVERVIEW_QUANTILE, Column::loudness);
+        assert!(
+            overview > detail * 1.3,
+            "peak gain {detail:.2} and average gain {overview:.2} are close enough that \
+             one would have done"
+        );
+    }
+
+    #[test]
+    fn the_height_is_referenced_against_what_the_height_is_drawn_from() {
+        // A column's height comes from the peak of the whole signal; the bands
+        // are complementary, so the loudest of them is always the smaller
+        // number. Referencing that made every picture about a quarter hotter
+        // than it was meant to be.
+        let columns = measure(&percussive(&[0.8], 10.0));
+        let loudest_band =
+            columns.iter().map(|c| c.low.max(c.mid).max(c.high)).fold(0.0f32, f32::max);
+        let whole = columns.iter().map(|c| c.full).fold(0.0f32, f32::max);
+        assert!(whole > loudest_band, "full {whole} band {loudest_band}");
+    }
+
+    /// Sections of a limited master, some with a kick and some without: a
+    /// breakdown that drops the drums but keeps a loud pad is the case a
+    /// low-weighted height can get badly wrong.
+    fn mastered(sections: &[(f32, bool)], secs_each: f32) -> Audio {
+        let rate = 44_100;
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        let mut plane = Vec::new();
+        for (n, (level, kicking)) in sections.iter().enumerate() {
+            for i in 0..(rate as f32 * secs_each) as usize {
+                let t = (n as f32 * secs_each) + i as f32 / rate as f32;
+                let since = (t * 2.0).fract() / 2.0;
+                let kick = match kicking {
+                    true => (-since * 24.0).exp() * (2.0 * std::f32::consts::PI * 55.0 * t).sin(),
+                    false => 0.0,
+                };
+                // A kickless section is a breakdown: pads and a vocal, with
+                // essentially nothing below 200 Hz. That is the case a height
+                // weighted towards the low band can draw as silence.
+                let bed = match kicking {
+                    true => noise() * 0.5 + (2.0 * std::f32::consts::PI * 220.0 * t).sin() * 0.35,
+                    false => {
+                        (2.0 * std::f32::consts::PI * 900.0 * t).sin() * 0.5
+                            + (2.0 * std::f32::consts::PI * 3_000.0 * t).sin() * 0.35
+                    }
+                };
+                plane.push((3.0 * (bed + kick * 0.8)).tanh() * level);
+            }
+        }
+        Audio::new(rate, vec![plane.clone(), plane]).unwrap()
+    }
+
+    #[test]
+    fn a_limited_master_still_shows_its_kick() {
+        // The fault this is here for. A limiter's whole business is making the
+        // peak the same from moment to moment, so on a modern master the peak
+        // of the signal is a straight line — spread 0.00 measured across a
+        // loud section — and a picture drawn from it is a solid block however
+        // it is scaled. Leading the height with the low band puts the kick
+        // back, because on such a record the low band is the only measurement
+        // still moving.
+        let w = analyze(&mastered(&[(1.0, true)], 12.0));
+        let h: Vec<f32> = w.detail.iter().map(|b| (b & 0x1f) as f32).collect();
+        let mean = h.iter().sum::<f32>() / h.len() as f32;
+        let spread =
+            (h.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / h.len() as f32).sqrt() / mean;
+        assert!(spread > 0.07, "the loud section is a flat block: spread {spread:.2}");
+
+        // And it is not a block against the ceiling either.
+        let pinned = h.iter().filter(|x| **x == 31.0).count();
+        assert!(pinned * 5 < h.len(), "{pinned} of {} columns are at full height", h.len());
+    }
+
+    #[test]
+    fn a_breakdown_without_drums_is_thinner_but_not_empty() {
+        // The other side of the same bargain, and the way weighting the height
+        // towards the low band can go badly wrong. A breakdown that takes the
+        // drums out but keeps a loud pad has almost nothing below 200 Hz: the
+        // low band alone would draw it at a tenth of full height, which reads
+        // as silence in the middle of a record. It should look thinner than a
+        // section with the drums in — that is the useful part — and still
+        // plainly be there.
+        let w = analyze(&mastered(&[(1.0, true), (0.6, false), (1.0, true)], 8.0));
+        let third = w.detail.len() / 3;
+        let median = |part: &[u8]| {
+            let mut h: Vec<u8> = part.iter().map(|b| b & 0x1f).collect();
+            h.sort_unstable();
+            h[h.len() / 2]
+        };
+        let full = median(&w.detail[..third]);
+        let broken = median(&w.detail[third..third * 2]);
+        assert!(broken < full, "the breakdown is as tall as the drop: {broken} and {full}");
+        assert!(broken >= 6, "the breakdown all but vanished: {broken} of 31");
+    }
+
+    #[test]
+    fn the_bands_are_not_driven_past_the_top_of_their_range() {
+        // The height is a weighted blend of the bands and sits below any one of
+        // them, so a gain worked out from it and then applied to the bands
+        // overdrives them: a ten-kilohertz tone came out with a full mid band
+        // as well as a full high one, and every colour went with it. The two
+        // are scaled apart for exactly this reason.
+        for hz in [50.0f32, 800.0, 10_000.0] {
+            let w = analyze(&tone(hz, 1.0, 0.8));
+            let at = w.band_detail.len() / 2 / 3 * 3;
+            let full = w.band_detail[at..at + 3].iter().filter(|b| **b == 255).count();
+            assert!(full <= 1, "{hz} Hz saturated {full} bands: {:?}", &w.band_detail[at..at + 3]);
+        }
     }
 
     #[test]

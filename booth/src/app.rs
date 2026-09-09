@@ -1498,6 +1498,26 @@ impl App {
         self.analyze_tracks(&waiting);
     }
 
+    /// Analyse everything showing, whether it has been analysed or not.
+    ///
+    /// What this is for is a change in what analysis produces — a new
+    /// waveform, a different grid, a better key detector. Every track already
+    /// in the collection is then holding an answer from the old code, and
+    /// until now there was no way to ask for them all again: the batch button
+    /// only ever offered the tracks that had never been done, and the row menu
+    /// meant doing a crate one right-click at a time.
+    ///
+    /// The same call as a first analysis, because a re-analysis is not a
+    /// different operation and two of them is how they come to disagree.
+    fn analyze_showing(&mut self) {
+        let waiting = self.acting_on(|_| true);
+        if waiting.is_empty() {
+            self.note("nothing showing to analyse", theme::DIM);
+            return;
+        }
+        self.analyze_tracks(&waiting);
+    }
+
     /// Render stem kits for these tracks.
     fn separate_tracks(&mut self, ids: &[u32]) {
         let waiting = self.files_for(ids);
@@ -3311,18 +3331,49 @@ impl App {
             if ui.add_enabled(idle, egui::Button::new("Add music…")).clicked() {
                 self.want_pick = Some(Picking::Music);
             }
+            // Shift turns the verb round, the same bargain the Check button
+            // makes further along this strip: one modifier beats a second
+            // button for the same verb. The label follows it rather than only
+            // the hover text, because the two act on different numbers of
+            // tracks and a button has to say what pressing it will do.
+            let again = ui.input(|i| i.modifiers.shift);
+            let (verb, count) =
+                if again { ("Re-analyse", showing) } else { ("Analyse", unanalysed) };
             if ui
-                .add_enabled(
-                    idle && unanalysed > 0,
-                    egui::Button::new(format!("Analyse {unanalysed}")),
-                )
-                .on_hover_text(match chosen {
-                    true => "Grid, key, phrases and cues for the selected tracks that have none",
-                    false => "Grid, key, phrases and cues for everything showing that has none",
+                .add_enabled(idle && count > 0, egui::Button::new(format!("{verb} {count}")))
+                .on_hover_text(match (again, chosen) {
+                    (true, true) => {
+                        "Grid, key, phrases and cues for the selected tracks again, \
+                         replacing what they have"
+                    }
+                    (true, false) => {
+                        "Grid, key, phrases and cues for everything showing again, \
+                         replacing what they have"
+                    }
+                    (false, true) => {
+                        "Grid, key, phrases and cues for the selected tracks that have none \
+                         \u{2014} hold shift to do them all again"
+                    }
+                    (false, false) => {
+                        "Grid, key, phrases and cues for everything showing that has none \
+                         \u{2014} hold shift to do it all again"
+                    }
+                })
+                // The case this most needs saying in: a collection where
+                // everything has been analysed reads "Analyse 0" and is greyed
+                // out, so the way to ask for the work again is exactly where
+                // there is no enabled button to hover over.
+                .on_disabled_hover_text(match again {
+                    true => "Nothing is showing to analyse",
+                    false => "Everything here has been analysed \u{2014} \
+                              hold shift to do it all again",
                 })
                 .clicked()
             {
-                self.analyze_unprepared();
+                match again {
+                    true => self.analyze_showing(),
+                    false => self.analyze_unprepared(),
+                }
             }
             let unnamed = self.acting_on(|track| !track.identified).len();
             if ui
@@ -8590,6 +8641,69 @@ mod tests {
                 harness.run();
             }
             harness.input_mut().modifiers = egui::Modifiers::NONE;
+        }
+
+        #[test]
+        fn shift_turns_the_analyse_button_into_a_batch_re_analysis() {
+            // The case it exists for: a collection where everything has
+            // already been analysed, and something about what analysis
+            // produces has changed. Before this the batch button only ever
+            // offered the tracks that had never been done — which is none of
+            // them — and the way to ask again was one right-click per row.
+            let mut app = listing("re-analyse", 5);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                app.library.get_mut(id).unwrap().analyzed = true;
+            }
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+
+            // Nothing to do, and the button says so.
+            harness.get_by_label("Analyse 0");
+
+            harness.input_mut().modifiers = egui::Modifiers::SHIFT;
+            harness.run();
+            harness.run();
+            // The verb turns round and the count is the whole of what is
+            // showing — the label has to say what pressing it will do, because
+            // the two act on different numbers of tracks.
+            harness.get_by_label("Re-analyse 5");
+            assert!(harness.query_by_label("Analyse 0").is_none(), "both buttons are showing");
+
+            harness.input_mut().modifiers = egui::Modifiers::NONE;
+            harness.run();
+            harness.run();
+            harness.get_by_label("Analyse 0");
+        }
+
+        #[test]
+        fn re_analysing_takes_everything_showing_rather_than_what_is_unfinished() {
+            // The query bar decides what a batch is, the same as every other
+            // button on that strip — so narrowing the list narrows the work,
+            // and a re-analysis does not quietly reach past the filter.
+            let mut app = listing("batch", 12);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                app.library.get_mut(id).unwrap().analyzed = true;
+            }
+            app.text = "Track 1".into();
+            app.rebuild();
+
+            let showing = app.acting_on(|_| true);
+            assert!(
+                showing.len() < 12 && !showing.is_empty(),
+                "the query did not narrow anything, so this proves nothing"
+            );
+            assert!(
+                app.acting_on(|track| !track.analyzed).is_empty(),
+                "some of these still need a first analysis, so this proves nothing"
+            );
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+            harness.input_mut().modifiers = egui::Modifiers::SHIFT;
+            harness.run();
+            harness.get_by_label(&format!("Re-analyse {}", showing.len()));
         }
 
         #[test]

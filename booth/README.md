@@ -143,6 +143,15 @@ is different for a first pass and a re-run. Re-analysing is the same code path
 as analysing — there is no separate re-do, which is how the two would come to
 disagree.
 
+**Hold shift and the batch Analyse button becomes Re-analyse**, acting on
+everything showing rather than only the tracks that have never been done. That
+is the button to reach for when what analysis produces has changed — a new
+waveform, a different grid — and every track in the collection is holding an
+answer from the old code. The label changes with the key, not just the hover
+text, because the two act on different numbers of tracks and a button has to
+say what pressing it will do. The query bar still decides what the batch is, so
+narrowing the list narrows the work.
+
 Right-clicking does not move the selection, and the menu names the track it will
 act on. A stem companion offers only play and copy-path: it is a file its parent
 owns, and analysing it separately would put a second answer beside the one it
@@ -357,10 +366,52 @@ mastered. Without that a modern master is a solid block: the height curve ran
 out of room near the top and a drop, a build and a breakdown all drew at full
 height, which is a waveform with the arrangement taken out of it.
 
-The reference is the 95th percentile of the preview rather than the maximum —
-one clap that clips sets the maximum on a great many records, and scaling to it
-spends the top of the display on a moment nobody is looking for. The loudest
-twentieth of the track reaches the top and everything else is drawn against it.
+**The height is a weighted blend of the bands, not the peak of the signal** —
+0.6 low, 0.3 mid, 0.1 high. A modern master is limited, and limiting is
+precisely the business of making the peak the same from moment to moment:
+measured column by column across one loud section of one, the peak has a
+spread of 0.00. It is a straight line, and no scaling or curve-bending recovers
+a shape from a straight line, which is why a loud track drew as a solid block
+however its gain was worked out. Through the same section the mid band, the
+high band and the overall RMS sit at 0.04 to 0.07; the low band is at 0.36. On
+a limited record the kick is the one thing still moving, and it is what a
+waveform is read for, so it leads.
+
+The other two still carry the level, which is what stops this being a bass
+meter: a breakdown that takes the drums out but keeps a loud pad draws at about
+a third of full height rather than the tenth the low band alone would give it.
+It looks thinner than a section with the drums in, which is the useful part —
+a passage with no kick in it *should*.
+
+Two scales, though, not one. How tall a column is drawn and what it is made of
+do not live on the same scale — the blend sits below any single band — so one
+gain cannot serve both: set from the blend it drives the band bytes past the
+top of their range, and set from the bands it leaves the height using a third
+of the display. The colours are ratios between bands and do not care either way.
+
+**The scrolling waveform and the overviews are scaled separately**, because
+they are two different measurements of the same track. A scrolling column is a
+peak; an overview column is a second of audio averaged, and on anything with
+transients in it that sits well below the peaks. One reference cannot serve
+both: worked out on the averages and applied to the peaks it comes out about
+twice too large, and every hit flattens against the top until the picture is a
+solid block. That is what it did.
+
+For the scrolling waveform the reference is the 99th percentile rather than the
+maximum: a single freak column — one clap that clips on an otherwise quiet
+record — would otherwise set it, and the whole picture would be drawn against a
+moment nobody is looking for. Not the loudest twentieth, though. That was the
+setting when the height was a raw peak, and on a limited master half the track
+sits within a hair of the peak, so the 95th percentile falls *inside* the
+loudest passage and draws its median at 29 of 31 with the kicks clipped off
+above it. Measured on one, 0.99 doubles the movement visible inside a loud
+section and drops that median to 23, which is where a kick has somewhere to go.
+
+For the overviews it is the maximum, because a second of audio averaged is not
+something a single clap can carry, so the outlier a percentile guards against
+cannot arise there. One overview reference across all three of them, so the
+strip under the deck and the small picture in a browse list agree.
+
 A very quiet transfer is lifted, up to thirty decibels, which is more than any
 real recording needs and short of what it takes to make a noise floor look like
 music.
@@ -383,22 +434,44 @@ going on, which is the arrangement and what an overview is for. A drop's edge
 blurs across about three columns of twelve hundred, which is the price of the
 rest and not visible.
 
-The scrolling waveform is not touched by any of that. Its columns are a
+The scrolling waveform is not summarised that way. Its columns are a
 hundred-and-fiftieth of a second, a kick drum is several of them wide, and the
-peak is the right measurement at that size.
+peak is the right measurement at that size — which is exactly why it needs a
+reference of its own rather than the overview's.
 
 The same measurement makes the pictures on the drive, so what is on screen
 while prepping is what will be on the CDJ's screen.
 
 ## Colouring the waveform
 
+The colour mode mixes in its own palette rather than the three the stacked mode
+labels its bars with. Those only have to be told apart; these get mixed
+together, and blue and amber sit opposite each other on the wheel — so a column
+holding both, which is most music, cancels to grey. Measured across four kinds
+of column, one with a strong bass and one with none came out at hue 36 and hue
+36: the same colour, for the two passages a DJ most needs to tell apart. Violet
+is a third of the way round from amber rather than opposite it, so mixing them
+rotates the hue instead of cancelling it, and the same columns land 25 degrees
+apart with bass-only a long way from both.
+
+The levels are also undone before they are mixed. They are stored bent by the
+curve that makes heights readable, and it flattens the bands against each other
+on the way — a column that is plainly a kick reads 0.95 low against 0.71 mid
+through it. A colour is a set of proportions, so it has to be worked out on the
+amplitudes the curve was applied to. And the sharpening that decides how much
+the quieter bands may tint the mix went from three to two: at three the leading
+band took so much of it that nothing could tint anything, and every column came
+out the colour of whichever band led — the mid, nearly always.
+
 Three modes, on the right of the cue row, remembered between runs:
 
-- **bands** — low, mid and high stacked in their own colours. Easiest for
-  finding the kick, because the low band is drawn on its own.
-- **colour** — one shape, hue mixed from the frequency content: bass blue,
-  mid-range amber, treble washing towards white. This is the picture the player
-  itself draws, so it is the one to prep against.
+- **bands** — low, mid and high stacked in their own colours, tallest first so
+  the shorter ones land on top. Easiest for finding the kick, because the low
+  band is drawn on its own.
+- **colour** — one shape, hue mixed from the frequency content: bass violet,
+  mid-range amber, treble washing towards cyan. A body with everything in it
+  reads orange, a breakdown with the bass gone reads yellower, and bass with
+  nothing over it reads purple.
 - **stems** — one shape, hue from which stem is loudest: vocals rose, melody
   teal, drums amber. Needs a rendered kit, and measures the stem files
   themselves — a band split can say where the bass is, and only a separation can
