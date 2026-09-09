@@ -156,6 +156,113 @@ pub struct Phrase {
     pub kind: String,
 }
 
+impl Phrase {
+    /// The names a section can have, in the order a track tends to use them.
+    ///
+    /// The same five the detector produces, because the strip has to mean one
+    /// thing whether a section was measured or moved by hand.
+    pub const KINDS: [&'static str; 5] = ["intro", "build", "break", "drop", "outro"];
+
+    pub fn len_ms(&self) -> u32 {
+        self.end_ms.saturating_sub(self.start_ms)
+    }
+}
+
+/// The shortest a section may be left.
+///
+/// A boundary dragged past its neighbour would invert the section, and one
+/// dragged to within a pixel of it leaves a sliver nobody can grab again — so
+/// the drag stops here instead. A second is well under a bar at any tempo
+/// anybody plays, so it only ever bites at the very end of a drag.
+pub const MIN_PHRASE_MS: u32 = 1_000;
+
+/// What the phrase strip was asked to do to a track's sections.
+///
+/// The positions are already snapped by the time they arrive: where a boundary
+/// may land is a question about the grid, and the grid is the window's to know.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PhraseEdit {
+    /// Move the boundary that starts phrase `at`.
+    Move { at: usize, time_ms: u32 },
+    /// Cut phrase `at` in two here. Both halves keep the name until one is
+    /// given another — a split is somebody saying the detector missed a
+    /// boundary, not that it got the name wrong.
+    Split { at: usize, time_ms: u32 },
+    /// Fold phrase `at` into the one before it, which is how a boundary is
+    /// taken away.
+    Merge { at: usize },
+    /// Rename phrase `at`.
+    Name { at: usize, kind: String },
+}
+
+/// Apply an edit, and say whether anything actually moved.
+///
+/// The strip stays what it was: sections in order, none of them inside
+/// another, together covering exactly what they covered before. Every edit is
+/// local — it moves one boundary, adds one, or takes one away — so a
+/// hand-corrected strip never has to be re-derived from anything.
+///
+/// A position that cannot be honoured is clamped; an edit that cannot be
+/// honoured at all is refused. A boundary dragged past its neighbour stops at
+/// the floor, but a split of a section too short to have two halves is not a
+/// smaller split, it is nothing.
+pub fn edit_phrases(phrases: &mut Vec<Phrase>, edit: &PhraseEdit) -> bool {
+    match edit {
+        PhraseEdit::Name { at, kind } => match phrases.get_mut(*at) {
+            Some(phrase) if phrase.kind != *kind => {
+                phrase.kind = kind.clone();
+                true
+            }
+            _ => false,
+        },
+
+        PhraseEdit::Move { at, time_ms } => {
+            let Some(before) = at.checked_sub(1) else { return false };
+            let (Some(previous), Some(after)) = (phrases.get(before), phrases.get(*at)) else {
+                return false;
+            };
+            let Some(landed) = room(previous.start_ms, after.end_ms, *time_ms) else {
+                return false;
+            };
+            if landed == previous.end_ms && landed == after.start_ms {
+                return false;
+            }
+            phrases[before].end_ms = landed;
+            phrases[*at].start_ms = landed;
+            true
+        }
+
+        PhraseEdit::Split { at, time_ms } => {
+            let Some(phrase) = phrases.get(*at) else { return false };
+            let Some(landed) = room(phrase.start_ms, phrase.end_ms, *time_ms) else {
+                return false;
+            };
+            let first =
+                Phrase { start_ms: phrase.start_ms, end_ms: landed, kind: phrase.kind.clone() };
+            phrases[*at].start_ms = landed;
+            phrases.insert(*at, first);
+            true
+        }
+
+        PhraseEdit::Merge { at } => {
+            let Some(before) = at.checked_sub(1) else { return false };
+            let Some(end) = phrases.get(*at).map(|phrase| phrase.end_ms) else { return false };
+            let Some(previous) = phrases.get_mut(before) else { return false };
+            previous.end_ms = end;
+            phrases.remove(*at);
+            true
+        }
+    }
+}
+
+/// Where a boundary may land between `from` and `to`, leaving a section either
+/// side of it. `None` when there is not room for both.
+fn room(from: u32, to: u32, wanted: u32) -> Option<u32> {
+    let floor = from + MIN_PHRASE_MS;
+    let ceiling = to.checked_sub(MIN_PHRASE_MS)?;
+    (floor <= ceiling).then(|| wanted.clamp(floor, ceiling))
+}
+
 /// A cue point, as the waveform draws it and the export writes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CueMark {
@@ -1501,6 +1608,132 @@ pub fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// A strip of sections back to back, as the detector leaves one.
+    fn strip(runs: &[(u32, u32, &str)]) -> Vec<Phrase> {
+        runs.iter()
+            .map(|(start, end, kind)| Phrase {
+                start_ms: *start,
+                end_ms: *end,
+                kind: (*kind).to_string(),
+            })
+            .collect()
+    }
+
+    fn edges(phrases: &[Phrase]) -> Vec<(u32, u32, String)> {
+        phrases.iter().map(|p| (p.start_ms, p.end_ms, p.kind.clone())).collect()
+    }
+
+    #[test]
+    fn moving_a_boundary_moves_both_sections_that_meet_at_it() {
+        // The point of the whole thing: a boundary is one edge shared by two
+        // sections, not two edges that happen to line up. Moving it must not
+        // leave a gap between them or make them overlap.
+        let mut phrases = strip(&[(0, 30_000, "intro"), (30_000, 90_000, "build")]);
+        assert!(edit_phrases(&mut phrases, &PhraseEdit::Move { at: 1, time_ms: 40_000 }));
+        assert_eq!(
+            edges(&phrases),
+            vec![(0, 40_000, "intro".to_string()), (40_000, 90_000, "build".to_string())]
+        );
+
+        // Nowhere to move to is not a move.
+        assert!(!edit_phrases(&mut phrases, &PhraseEdit::Move { at: 1, time_ms: 40_000 }));
+        // Neither is the boundary before the first section, which is the start
+        // of the track and not a boundary at all.
+        assert!(!edit_phrases(&mut phrases, &PhraseEdit::Move { at: 0, time_ms: 5_000 }));
+    }
+
+    #[test]
+    fn a_boundary_cannot_be_dragged_over_its_neighbour() {
+        // Dragged hard to one end it stops with a section still either side.
+        // Past it, the section would invert; just short of it, what is left is
+        // a sliver too narrow to ever grab again.
+        let mut phrases = strip(&[(0, 30_000, "intro"), (30_000, 90_000, "build")]);
+
+        edit_phrases(&mut phrases, &PhraseEdit::Move { at: 1, time_ms: 0 });
+        assert_eq!(phrases[0].start_ms, 0);
+        assert_eq!(phrases[0].len_ms(), MIN_PHRASE_MS, "the first section was crushed");
+
+        edit_phrases(&mut phrases, &PhraseEdit::Move { at: 1, time_ms: u32::MAX });
+        assert_eq!(phrases[1].end_ms, 90_000);
+        assert_eq!(phrases[1].len_ms(), MIN_PHRASE_MS, "the second section was crushed");
+    }
+
+    #[test]
+    fn splitting_puts_a_boundary_where_the_detector_missed_one() {
+        // The answer to a strip that is too coarse. Both halves keep the name:
+        // a split says the boundary was missed, not that the name was wrong.
+        let mut phrases = strip(&[(0, 30_000, "intro"), (30_000, 120_000, "drop")]);
+        assert!(edit_phrases(&mut phrases, &PhraseEdit::Split { at: 1, time_ms: 60_000 }));
+        assert_eq!(
+            edges(&phrases),
+            vec![
+                (0, 30_000, "intro".to_string()),
+                (30_000, 60_000, "drop".to_string()),
+                (60_000, 120_000, "drop".to_string()),
+            ]
+        );
+
+        // And then one of them is given its own name.
+        assert!(edit_phrases(&mut phrases, &PhraseEdit::Name { at: 1, kind: "build".to_string() }));
+        assert_eq!(phrases[1].kind, "build");
+        assert!(!edit_phrases(
+            &mut phrases,
+            &PhraseEdit::Name { at: 1, kind: "build".to_string() }
+        ));
+    }
+
+    #[test]
+    fn a_section_with_no_room_for_two_halves_is_not_split() {
+        // Refused rather than made smaller. A split that leaves a sliver is
+        // not a smaller version of what was asked for.
+        let mut phrases = strip(&[(0, MIN_PHRASE_MS + 500, "intro")]);
+        assert!(!edit_phrases(&mut phrases, &PhraseEdit::Split { at: 0, time_ms: 500 }));
+        assert_eq!(phrases.len(), 1, "a sliver was left behind");
+    }
+
+    #[test]
+    fn merging_takes_a_boundary_away_without_leaving_a_hole() {
+        // How a boundary is deleted: the section before it swallows it, so the
+        // strip still covers exactly what it covered.
+        let mut phrases =
+            strip(&[(0, 30_000, "intro"), (30_000, 60_000, "build"), (60_000, 90_000, "drop")]);
+        assert!(edit_phrases(&mut phrases, &PhraseEdit::Merge { at: 1 }));
+        assert_eq!(
+            edges(&phrases),
+            vec![(0, 60_000, "intro".to_string()), (60_000, 90_000, "drop".to_string())]
+        );
+
+        // There is nothing before the first section to merge it into.
+        assert!(!edit_phrases(&mut phrases, &PhraseEdit::Merge { at: 0 }));
+    }
+
+    #[test]
+    fn an_edited_strip_still_covers_the_track() {
+        // The invariant behind all of it, checked after a run of edits rather
+        // than one at a time: in order, meeting exactly, same span as before.
+        let mut phrases =
+            strip(&[(0, 30_000, "intro"), (30_000, 60_000, "build"), (60_000, 120_000, "drop")]);
+        let span = (phrases[0].start_ms, phrases[phrases.len() - 1].end_ms);
+
+        for edit in [
+            PhraseEdit::Move { at: 1, time_ms: 20_000 },
+            PhraseEdit::Split { at: 2, time_ms: 90_000 },
+            PhraseEdit::Name { at: 2, kind: "break".to_string() },
+            PhraseEdit::Merge { at: 1 },
+            PhraseEdit::Move { at: 1, time_ms: 75_000 },
+        ] {
+            edit_phrases(&mut phrases, &edit);
+        }
+
+        assert_eq!((phrases[0].start_ms, phrases[phrases.len() - 1].end_ms), span);
+        for pair in phrases.windows(2) {
+            assert_eq!(pair[0].end_ms, pair[1].start_ms, "a gap or an overlap: {pair:?}");
+        }
+        for phrase in &phrases {
+            assert!(phrase.start_ms < phrase.end_ms, "an inverted section: {phrase:?}");
+        }
+    }
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {

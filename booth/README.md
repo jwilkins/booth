@@ -190,6 +190,25 @@ starting a track mid-bar is a different mistake from starting it four
 milliseconds early. A track with no grid can still be marked up: the cue is what
 you are sure of.
 
+**The phrase strip is editable.** A detector working from onset strength gets a
+good many boundaries right and some plainly wrong, and a wrong one is worth
+less than none — it is a lie about where the drop is, on the strip a player
+draws. So **drag a boundary** to move it, snapped to the bar like the memory
+cue: a section that starts three beats into a bar is a section in the wrong
+place however carefully it was dragged. **Right-click a block** to rename it —
+every name is offered, not just the ones the track already uses, because a menu
+listing only what is there cannot correct anything — or to **split** it where
+the pointer is, or **join** it to the one before. Splitting is how a boundary
+the detector missed gets put in; joining is how one it invented is taken away.
+
+Both halves of a split keep the name until one is given another: a split says
+the boundary was missed, not that the name was wrong. A boundary cannot be
+dragged over its neighbour, and a section too short to have two halves is not
+split at all rather than split into a sliver.
+
+The strip stays the map as well: away from a boundary, dragging still moves the
+zoom window.
+
 Cue times, names and the track's names all go through the drive delta, so an
 edit shows as *changed* on the next sync — except a cue's name, which the player
 never sees.

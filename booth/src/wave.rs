@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui, Vec2};
 
 use booth_cli::export::waveform::loudness;
 
-use crate::library::{CueMark, Phrase};
+use crate::library::{CueMark, Phrase, PhraseEdit};
 use crate::theme;
 
 /// How tall the waveform draws, in points.
@@ -352,9 +352,10 @@ pub enum Touched {
     Moved { letter: u8, time_ms: u32 },
 }
 
-/// How close to a cue's line the pointer has to be to take hold of it, in
-/// points. Wide enough to grab without aiming, narrow enough that two cues a
-/// bar apart are still two things.
+/// How close to a line the pointer has to be to take hold of it, in points.
+/// Wide enough to grab without aiming, narrow enough that two cues a bar apart
+/// are still two things. Shared by the cues and by the phrase boundaries,
+/// which are the same gesture on two different strips.
 const GRAB: f32 = 5.0;
 
 /// What one frame of the waveform panel came to.
@@ -504,7 +505,11 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
 
     // The pointer changes over a cue, which is the only signal that it can be
     // taken hold of at all.
-    if held.is_some() || cue_under(&response, rect, wave).is_some() {
+    let hovering_a_cue = response
+        .hover_pos()
+        .or_else(|| response.interact_pointer_pos())
+        .and_then(|at| cue_under(at, rect, wave));
+    if held.is_some() || hovering_a_cue.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
 
@@ -565,8 +570,7 @@ fn time_at(rect: Rect, wave: &Waveform<'_>, x: f32) -> u32 {
 }
 
 /// Which cue the pointer is over, if any.
-fn cue_under(response: &egui::Response, rect: Rect, wave: &Waveform<'_>) -> Option<u8> {
-    let at = response.hover_pos().or_else(|| response.interact_pointer_pos())?;
+fn cue_under(at: egui::Pos2, rect: Rect, wave: &Waveform<'_>) -> Option<u8> {
     if wave.duration_secs <= 0.0 {
         return None;
     }
@@ -590,7 +594,14 @@ fn cue_x(rect: Rect, wave: &Waveform<'_>, time_ms: u32) -> f32 {
 fn dragged_cue(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'_>) -> Option<u8> {
     let id = response.id.with("dragging-cue");
     if response.drag_started() {
-        let under = cue_under(response, rect, wave);
+        // From where the button went down, not from where the pointer is by
+        // the time egui calls it a drag — by then it has already travelled off
+        // the line it took hold of. See [`dragged_boundary`].
+        let from = ui
+            .ctx()
+            .input(|input| input.pointer.press_origin())
+            .or_else(|| response.interact_pointer_pos());
+        let under = from.and_then(|at| cue_under(at, rect, wave));
         ui.ctx().memory_mut(|memory| memory.data.insert_temp(id, under));
     }
     if response.drag_stopped() {
@@ -679,29 +690,45 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
     }
 }
 
+/// What the phrase strip was used for this frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Strip {
+    /// A new view, when the map was used to move the window.
+    pub zoom: Option<Zoom>,
+    /// A change to the sections, when one was dragged, split, merged or named.
+    pub edit: Option<PhraseEdit>,
+}
+
 /// The phrase strip: one block per section, as wide as the section is long.
+///
 /// The strip always shows the whole track, whatever the waveform above it is
 /// showing, which makes it the map: `zoom` is drawn over it as the window, and
-/// clicking or dragging moves that window. Returns a new view when it was
-/// moved.
-pub fn phrase_strip(
-    ui: &mut Ui,
-    phrases: &[Phrase],
-    duration_secs: f64,
-    zoom: Zoom,
-) -> Option<Zoom> {
+/// dragging inside a block moves that window.
+///
+/// It is also where the sections are corrected. A detector working from onset
+/// strength gets a good many boundaries right and some plainly wrong, and a
+/// wrong one is worth more than a missing one — it is a lie about where the
+/// drop is, on the strip a player draws. So drag a boundary to move it,
+/// right-click a block to rename it, and split or merge to put a boundary
+/// where the detector did not find one or take away one it invented.
+pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64, zoom: Zoom) -> Strip {
     let width = ui.available_width();
-    let sense = if zoom.is_fit() { Sense::hover() } else { Sense::click_and_drag() };
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, STRIP_HEIGHT), sense);
+    // Draggable whatever the zoom is: the map only means something zoomed in,
+    // but the sections are edited at any zoom and mostly at none.
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, STRIP_HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
+    let mut strip = Strip::default();
     if phrases.is_empty() || duration_secs <= 0.0 {
-        return None;
+        return strip;
     }
     let total_ms = duration_secs * 1000.0;
+    let across = |ms: u32| rect.left() + rect.width() * (ms as f64 / total_ms) as f32;
+    let time_at =
+        |x: f32| (((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * total_ms) as u32;
 
     for phrase in phrases {
-        let from = rect.left() + rect.width() * (phrase.start_ms as f64 / total_ms) as f32;
-        let to = rect.left() + rect.width() * (phrase.end_ms as f64 / total_ms) as f32;
+        let (from, to) = (across(phrase.start_ms), across(phrase.end_ms));
         // A one-pixel gap between blocks, which is what makes them read as
         // separate phrases rather than as a colour bar.
         let block =
@@ -726,8 +753,94 @@ pub fn phrase_strip(
         }
     }
 
-    if zoom.is_fit() {
-        return None;
+    // Painted rather than built out of widgets, so this is the only thing that
+    // says the strip is there and that it can be worked — and it is what lets a
+    // test find it and drag one of its boundaries.
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "phrases"));
+
+    // Which section the pointer is over, and which boundary — if any — it is
+    // near enough to take hold of. The first section has no boundary before it:
+    // that edge is the start of the track.
+    let under = |x: f32| {
+        let ms = time_at(x);
+        phrases.iter().position(|phrase| ms >= phrase.start_ms && ms < phrase.end_ms)
+    };
+    let boundary_near = |x: f32| {
+        (1..phrases.len())
+            .map(|at| (at, (across(phrases[at].start_ms) - x).abs()))
+            .filter(|(_, gap)| *gap <= GRAB)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(at, _)| at)
+    };
+
+    let held = dragged_boundary(ui, &response, boundary_near);
+    if let Some(at) = held {
+        strip.edit = Some(PhraseEdit::Move { at, time_ms: time_at(pointer_x(&response, rect)) });
+    }
+
+    // Lit while the pointer is on it or dragging it, because a line one pixel
+    // wide that does something is a line that has to say so first.
+    let lit = held.or_else(|| response.hover_pos().and_then(|at| boundary_near(at.x)));
+    if let Some(at) = lit {
+        let x = match held == Some(at) {
+            true => pointer_x(&response, rect),
+            false => across(phrases[at].start_ms),
+        };
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            Stroke::new(1.0_f32, theme::TEXT),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+
+    // The block a right-click was on, remembered: once the menu is open the
+    // pointer is over the menu and no longer over anything on the strip.
+    let menu_id = response.id.with("phrase-menu");
+    if response.secondary_clicked() {
+        let on = response.interact_pointer_pos().and_then(|at| under(at.x));
+        let ms = response.interact_pointer_pos().map(|at| time_at(at.x));
+        ui.ctx().memory_mut(|memory| memory.data.insert_temp(menu_id, (on, ms)));
+    }
+    let (on, at_ms) = ui
+        .ctx()
+        .memory(|memory| memory.data.get_temp::<(Option<usize>, Option<u32>)>(menu_id))
+        .unwrap_or((None, None));
+    response.context_menu(|ui| {
+        let (Some(at), Some(time_ms)) = (on, at_ms) else {
+            ui.label(egui::RichText::new("no section here").color(theme::DIM));
+            return;
+        };
+        ui.set_min_width(160.0);
+        for kind in Phrase::KINDS {
+            let picked = phrases[at].kind == kind;
+            let label = egui::RichText::new(theme::label_text(kind))
+                .color(theme::phrase_color(kind))
+                .size(theme::LABEL);
+            if ui.radio(picked, label).clicked() {
+                strip.edit = Some(PhraseEdit::Name { at, kind: kind.to_string() });
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button("Split here").on_hover_text("Put a boundary where the pointer is").clicked() {
+            strip.edit = Some(PhraseEdit::Split { at, time_ms });
+            ui.close();
+        }
+        // Nothing before the first section to fold it into, and the button
+        // saying so is better than one that quietly does nothing.
+        if ui
+            .add_enabled(at > 0, egui::Button::new("Join to the one before"))
+            .on_disabled_hover_text("This is the first section")
+            .on_hover_text("Take away the boundary at its left edge")
+            .clicked()
+        {
+            strip.edit = Some(PhraseEdit::Merge { at });
+            ui.close();
+        }
+    });
+
+    if zoom.is_fit() || held.is_some() {
+        return strip;
     }
 
     // The window, drawn by dimming everything outside it rather than by
@@ -753,18 +866,62 @@ pub fn phrase_strip(
         egui::StrokeKind::Inside,
     );
 
-    if response.hovered() {
+    if response.hovered() && lit.is_none() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
     // Clicking the map puts the window where you clicked, which is the whole
     // point of having one: getting from the intro to the last drop should not
     // be a scroll.
-    let at = response.interact_pointer_pos()?;
-    if !response.dragged() && !response.clicked() {
+    let Some(at) = response.interact_pointer_pos() else { return strip };
+    if response.dragged() || response.clicked() {
+        let across = ((at.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        strip.zoom = Some(zoom.centred(across));
+    }
+    strip
+}
+
+/// Where the pointer is, clamped to the strip.
+fn pointer_x(response: &egui::Response, rect: Rect) -> f32 {
+    response
+        .interact_pointer_pos()
+        .map(|at| at.x)
+        .unwrap_or(rect.left())
+        .clamp(rect.left(), rect.right())
+}
+
+/// The boundary a drag took hold of, for as long as the drag lasts.
+///
+/// Decided once, when the drag starts, and remembered: a boundary that was
+/// re-chosen every frame from whatever is under the pointer would hand the
+/// drag to its neighbour the moment the two crossed.
+///
+/// Decided from where the button went *down*, not from where the pointer is by
+/// the time egui calls it a drag. A drag is only a drag once the pointer has
+/// travelled, so by then it has already left the line it took hold of — and a
+/// quick flick, which travels furthest before the first frame reports it, is
+/// exactly the drag most likely to miss.
+fn dragged_boundary(
+    ui: &Ui,
+    response: &egui::Response,
+    near: impl Fn(f32) -> Option<usize>,
+) -> Option<usize> {
+    let id = response.id.with("dragging-boundary");
+    if response.drag_started() {
+        let from = ui
+            .ctx()
+            .input(|input| input.pointer.press_origin())
+            .or_else(|| response.interact_pointer_pos());
+        let under = from.and_then(|at| near(at.x));
+        ui.ctx().memory_mut(|memory| memory.data.insert_temp(id, under));
+    }
+    if response.drag_stopped() {
+        ui.ctx().memory_mut(|memory| memory.data.remove::<Option<usize>>(id));
         return None;
     }
-    let across = ((at.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-    Some(zoom.centred(across))
+    if !response.dragged() {
+        return None;
+    }
+    ui.ctx().memory(|memory| memory.data.get_temp::<Option<usize>>(id)).flatten()
 }
 
 #[cfg(test)]
@@ -786,6 +943,135 @@ mod tests {
             stems: None,
             zoom: Zoom::default(),
         }
+    }
+
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    fn sections(runs: &[(u32, u32, &str)]) -> Vec<Phrase> {
+        runs.iter()
+            .map(|(start, end, kind)| Phrase {
+                start_ms: *start,
+                end_ms: *end,
+                kind: (*kind).to_string(),
+            })
+            .collect()
+    }
+
+    /// Drive the strip, and hand back what it asked for.
+    fn worked(
+        phrases: Vec<Phrase>,
+        act: impl Fn(&mut egui_kittest::Harness<'_>, Rect),
+    ) -> Option<PhraseEdit> {
+        let asked = std::cell::RefCell::new(None);
+        let mut harness = Harness::new_ui(|ui| {
+            let strip = phrase_strip(ui, &phrases, 90.0, Zoom::default());
+            if strip.edit.is_some() {
+                *asked.borrow_mut() = strip.edit.clone();
+            }
+        });
+        harness.run();
+        let rect = harness.get_by_label("phrases").rect();
+        act(&mut harness, rect);
+        let out = asked.borrow().clone();
+        out
+    }
+
+    #[test]
+    fn dragging_a_phrase_boundary_asks_for_it_to_be_moved() {
+        // A ninety-second track with the boundary a third of the way along, so
+        // the line to grab is a third of the way across the strip.
+        let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
+        let edit = worked(phrases, |harness, rect| {
+            let boundary = egui::pos2(rect.left() + rect.width() / 3.0, rect.center().y);
+            drag(harness, boundary, boundary + egui::vec2(rect.width() / 9.0, 0.0));
+        });
+        // Which boundary, not where it landed: where is the grid's business,
+        // and the strip does not know the grid.
+        assert!(
+            matches!(edit, Some(PhraseEdit::Move { at: 1, .. })),
+            "the drag did not take hold of the boundary: {edit:?}"
+        );
+    }
+
+    #[test]
+    fn dragging_the_middle_of_a_section_moves_the_view_and_not_the_boundary() {
+        // The strip is a map as well as an editor, and the two gestures share
+        // it. Away from a boundary the drag belongs to the map.
+        let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
+        let edit = worked(phrases, |harness, rect| {
+            let middle = egui::pos2(rect.left() + rect.width() * 0.7, rect.center().y);
+            drag(harness, middle, middle + egui::vec2(20.0, 0.0));
+        });
+        assert_eq!(edit, None, "a drag in open ground moved a boundary");
+    }
+
+    #[test]
+    fn the_menu_on_a_section_offers_every_name_and_a_way_to_cut_it() {
+        let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
+        let asked = std::cell::RefCell::new(None);
+        let mut harness = Harness::new_ui(|ui| {
+            let strip = phrase_strip(ui, &phrases, 90.0, Zoom::default());
+            if strip.edit.is_some() {
+                *asked.borrow_mut() = strip.edit.clone();
+            }
+        });
+        harness.run();
+        let rect = harness.get_by_label("phrases").rect();
+        let on_the_drop = egui::pos2(rect.left() + rect.width() * 0.7, rect.center().y);
+
+        harness.event(egui::Event::PointerMoved(on_the_drop));
+        harness.run();
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: on_the_drop,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+        }
+
+        // Every name is offered, not just the ones this track happens to use:
+        // a menu that only lists what is already there cannot correct anything.
+        for kind in Phrase::KINDS {
+            harness.get_by_label_contains(&theme::label_text(kind));
+        }
+        harness.get_by_label("Split here");
+
+        harness.get_by_label_contains(&theme::label_text("break")).click();
+        harness.run();
+        harness.run();
+        assert_eq!(
+            *asked.borrow(),
+            Some(PhraseEdit::Name { at: 1, kind: "break".to_string() }),
+            "renaming the section under the pointer did not come back"
+        );
+    }
+
+    /// Press, travel, release — egui only calls it a drag once the pointer has
+    /// actually moved.
+    fn drag(harness: &mut Harness<'_>, from: egui::Pos2, to: egui::Pos2) {
+        harness.event(egui::Event::PointerMoved(from));
+        harness.run();
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run();
+        for step in 1..=4 {
+            harness.event(egui::Event::PointerMoved(from + (to - from) * (step as f32 / 4.0)));
+            harness.run();
+        }
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run();
     }
 
     #[test]

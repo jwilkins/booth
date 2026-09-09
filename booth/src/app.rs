@@ -369,6 +369,11 @@ enum Pending {
         letter: u8,
         time_ms: u32,
     },
+    /// Move, split, join or rename one of a track's phrase sections.
+    EditPhrase {
+        id: u32,
+        edit: crate::library::PhraseEdit,
+    },
     TogglePlayback(u32),
     /// Change how the waveform is coloured.
     PaintAs(wave::Paint),
@@ -3856,8 +3861,11 @@ impl App {
         // borrows the cached picture out of the window's own state, and that
         // borrow has to be finished with before the panel changes anything.
         let shown = wave::show(ui, &waveform);
-        let moved = wave::phrase_strip(ui, &track.phrases, track.duration_secs, shown.zoom);
-        let zoom = moved.unwrap_or(shown.zoom);
+        let strip = wave::phrase_strip(ui, &track.phrases, track.duration_secs, shown.zoom);
+        let zoom = strip.zoom.unwrap_or(shown.zoom);
+        if let Some(edit) = strip.edit {
+            self.pending.push(Pending::EditPhrase { id: track.id, edit });
+        }
 
         match shown.touched {
             Some(wave::Touched::Scrubbed(ms)) => {
@@ -4742,6 +4750,9 @@ impl App {
                 Pending::WriteTags(id) => {
                     self.write_tags(id, booth_cli::tag::OnExisting::Overwrite)
                 }
+                Pending::EditPhrase { id, edit } => {
+                    touched |= self.edit_phrase(id, edit);
+                }
                 Pending::PlaceCue { id, letter, time_ms } => {
                     self.place_cue(id, letter, time_ms);
                     touched = true;
@@ -5084,6 +5095,31 @@ impl App {
     /// the grid is a cue that stutters when it is pressed. A memory cue —
     /// letter zero — is snapped to the bar instead: it marks where a track
     /// starts, and starting one mid-bar is a different mistake.
+    /// Move, split, join or rename one of a track's phrase sections.
+    ///
+    /// A boundary is snapped to the bar on the way in, like the memory cue and
+    /// for the same reason: a section that starts three beats into a bar is a
+    /// section in the wrong place, however carefully it was dragged. The grid
+    /// is the window's to know, so the snapping happens here rather than in
+    /// the strip that drew the drag or the model that applies it.
+    fn edit_phrase(&mut self, id: u32, edit: crate::library::PhraseEdit) -> bool {
+        use crate::library::PhraseEdit;
+        let Some(track) = self.library.get(id) else { return false };
+        let beats = beat_times(track);
+        let snapped = match edit {
+            PhraseEdit::Move { at, time_ms } => {
+                PhraseEdit::Move { at, time_ms: snap_to(&beats, time_ms, 4) }
+            }
+            PhraseEdit::Split { at, time_ms } => {
+                PhraseEdit::Split { at, time_ms: snap_to(&beats, time_ms, 4) }
+            }
+            other => other,
+        };
+
+        let Some(track) = self.library.get_mut(id) else { return false };
+        crate::library::edit_phrases(&mut track.phrases, &snapped)
+    }
+
     fn place_cue(&mut self, id: u32, letter: u8, time_ms: u32) {
         let Some(track) = self.library.get(id) else { return };
         let beats = beat_times(track);
@@ -8714,6 +8750,50 @@ mod tests {
                 harness.run();
             }
             harness.input_mut().modifiers = egui::Modifiers::NONE;
+        }
+
+        #[test]
+        fn a_dragged_phrase_boundary_lands_on_a_bar() {
+            // The strip reports which boundary moved and roughly where to; the
+            // window decides where a boundary may actually land, because that
+            // is a question about the grid and the strip does not know the
+            // grid. A section that starts three beats into a bar is a section
+            // in the wrong place however carefully it was dragged.
+            let mut app = listing("phrase edit", 1);
+            let id = app.rows[0].track.id;
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.duration_secs = 120.0;
+                track.bpm = 120.0;
+                track.has_grid = true;
+                track.phrases = vec![
+                    crate::library::Phrase { start_ms: 0, end_ms: 30_000, kind: "intro".into() },
+                    crate::library::Phrase {
+                        start_ms: 30_000,
+                        end_ms: 120_000,
+                        kind: "drop".into(),
+                    },
+                ];
+            }
+
+            // At 120 BPM a beat is 500 ms and a bar 2,000 ms, so a boundary
+            // asked for at 41.3 seconds belongs at 42.
+            app.edit_phrase(id, crate::library::PhraseEdit::Move { at: 1, time_ms: 41_300 });
+            let phrases = &app.library.get(id).unwrap().phrases;
+            assert_eq!(phrases[0].end_ms % 2_000, 0, "off the bar: {}", phrases[0].end_ms);
+            assert_eq!(
+                phrases[0].end_ms, phrases[1].start_ms,
+                "the two sections came apart at the boundary"
+            );
+            assert!(
+                (phrases[1].start_ms as i64 - 41_300).abs() < 2_000,
+                "it landed on a bar, but not the near one: {}",
+                phrases[1].start_ms
+            );
+
+            // And a rename goes straight through, with no grid involved.
+            app.edit_phrase(id, crate::library::PhraseEdit::Name { at: 0, kind: "build".into() });
+            assert_eq!(app.library.get(id).unwrap().phrases[0].kind, "build");
         }
 
         #[test]
