@@ -615,6 +615,35 @@ mod tests {
         assert!(whole > loudest_band, "full {whole} band {loudest_band}");
     }
 
+    /// A limited master: dense broadband content driven into a soft clip, so
+    /// that the peak inside nearly every column sits close to the section's
+    /// own level rather than far above it. This is what most records handed to
+    /// this actually look like, and the sparse percussive signal above is not:
+    /// there the peak of a column is a transient many times its median, which
+    /// flatters any normalising scheme you care to try.
+    fn limited(levels: &[f32], secs_each: f32) -> Audio {
+        let rate = 44_100;
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        let mut plane = Vec::new();
+        for (n, level) in levels.iter().enumerate() {
+            for i in 0..(rate as f32 * secs_each) as usize {
+                let t = (n as f32 * secs_each) + i as f32 / rate as f32;
+                let since = (t * 2.0).fract() / 2.0;
+                let kick = (-since * 24.0).exp() * (2.0 * std::f32::consts::PI * 55.0 * t).sin();
+                let bed = noise() * 0.5 + (2.0 * std::f32::consts::PI * 220.0 * t).sin() * 0.35;
+                // Driven hard into a soft clip, the way a master is.
+                plane.push((3.0 * (bed + kick * 0.8)).tanh() * level);
+            }
+        }
+        Audio::new(rate, vec![plane.clone(), plane]).unwrap()
+    }
+
     #[test]
     fn silence_draws_nothing() {
         let silent = Audio::new(44_100, vec![vec![0.0; 44_100]]).unwrap();

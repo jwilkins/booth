@@ -161,6 +161,25 @@ pub fn frequency_color(low: f32, mid: f32, high: f32) -> Color32 {
     mix([theme::BAND_LOW, theme::BAND_MID, theme::BAND_HIGH], [low, mid, high])
 }
 
+/// The bands in the order they have to be drawn: tallest first.
+///
+/// The bars are all centred on the same line, so a band drawn after a taller
+/// one is hidden behind it completely. Drawn in a fixed low, mid, high order
+/// that is only right when the low band is the loudest — which on most music
+/// it is not. The mid band covers the whole range from a bassline to a vocal
+/// and is usually the tallest, so it painted over the low band every time and
+/// the kick, the one thing this mode exists to find, was never visible at all.
+///
+/// It matters most on a modern master, where the total height carries almost
+/// nothing: a limiter flattens the peak of the whole signal to a straight
+/// line, and the low band is the only measurement left that still moves with
+/// the music.
+pub fn stacked(peaks: [f32; 3], colors: [Color32; 3]) -> [(f32, Color32); 3] {
+    let mut stack = [(peaks[0], colors[0]), (peaks[1], colors[1]), (peaks[2], colors[2])];
+    stack.sort_by(|a, b| b.0.total_cmp(&a.0));
+    stack
+}
+
 /// Which part of the track the picture is showing.
 ///
 /// Both numbers are fractions of the whole track, so the view survives the
@@ -395,10 +414,10 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
         };
 
         match paint {
-            // Three bars, one per band, drawn low first so the quieter bands
-            // land on top of the louder one.
+            // Three bars, one per band, tallest first so the quieter ones land
+            // on top of the louder one rather than behind it.
             Paint::Bands => {
-                for (band, color) in peaks.iter().zip(bands) {
+                for (band, color) in stacked(peaks, bands) {
                     bar(band * reach, color);
                 }
             }
@@ -814,6 +833,27 @@ mod tests {
         let wave = wave(&bytes);
         assert_eq!(wave.columns(), 0);
         assert_eq!(wave.column(5), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_quieter_bands_are_drawn_on_top_of_the_louder_one() {
+        // All three bars are centred on the same line, so a band drawn after a
+        // taller one is hidden behind it. The bug this is here for: they were
+        // drawn low, mid, high regardless of height, and the mid band — which
+        // on most music is the tallest — painted over the low band every time.
+        // The kick, which is the whole reason for this mode, was never visible.
+        let colors = [theme::BAND_LOW, theme::BAND_MID, theme::BAND_HIGH];
+
+        // A typical column of a modern master: mid loudest, the kick under it.
+        let order = stacked([0.37, 1.0, 0.46], colors);
+        assert_eq!(order[0].1, theme::BAND_MID, "the tallest band must go down first");
+        assert_eq!(order[2].1, theme::BAND_LOW, "the kick is still buried");
+        assert!(order[0].0 >= order[1].0 && order[1].0 >= order[2].0);
+
+        // And a bass-heavy one, where the old fixed order happened to be right.
+        let order = stacked([1.0, 0.4, 0.2], colors);
+        assert_eq!(order[0].1, theme::BAND_LOW);
+        assert_eq!(order[2].1, theme::BAND_HIGH);
     }
 
     #[test]
