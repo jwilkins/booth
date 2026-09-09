@@ -37,6 +37,15 @@ pub struct Cli {
     /// Worker threads. Defaults to one per core.
     #[arg(long, short = 'j', global = true, value_name = "N")]
     pub jobs: Option<usize>,
+
+    /// Say what each step is doing, on stderr.
+    ///
+    /// Which file went where, how long it took, and what was read back to
+    /// check it. A drive write is several of these lines per file, so it is
+    /// off unless asked for — and the run that wants them is the one that has
+    /// already gone wrong.
+    #[arg(long, short = 'v', global = true)]
+    pub verbose: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -433,6 +442,20 @@ pub struct ExportArgs {
     /// changed. Defaults to `ONELIBRARY_KEY`, then to the built-in one.
     #[arg(long, value_name = "KEY")]
     pub onelibrary_key: Option<String>,
+
+    /// What to write in each track's `analysedBits` in the OneLibrary database.
+    ///
+    /// The one field on a content row that is both undetermined and known to
+    /// change what a player does with the analysis files. Told a track is
+    /// analysed, a CDJ does not re-measure it and shows nothing where an
+    /// analysis it will not read would have gone — so a bit that is wrong is a
+    /// picture that is missing rather than an error anybody sees.
+    ///
+    /// Defaults to 105, which is what a drive that played on a CDJ-3000
+    /// carried. Settable because the only way to learn what a bit means is to
+    /// try it on a deck. `BOOTH_ANALYSED_BITS` does the same for the window.
+    #[arg(long, value_name = "N")]
+    pub analysed_bits: Option<i64>,
 
     /// Files that are stems of another track, as (stem, parent) pairs.
     ///

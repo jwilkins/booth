@@ -296,6 +296,47 @@ stems. Zooming stops where the picture runs out: past about one stored column
 per two pixels it would be stretching rather than revealing, and a staircase
 drawn confidently invites placing a cue against an edge that is not there.
 
+## How tall the waveform draws
+
+The picture is scaled against the track's own loudest content before anything
+is drawn, so it says how a record is put together rather than how hot it was
+mastered. Without that a modern master is a solid block: the height curve ran
+out of room near the top and a drop, a build and a breakdown all drew at full
+height, which is a waveform with the arrangement taken out of it.
+
+The reference is the 95th percentile of the preview rather than the maximum —
+one clap that clips sets the maximum on a great many records, and scaling to it
+spends the top of the display on a moment nobody is looking for. The loudest
+twentieth of the track reaches the top and everything else is drawn against it.
+A very quiet transfer is lifted, up to thirty decibels, which is more than any
+real recording needs and short of what it takes to make a noise floor look like
+music.
+
+One gain for the whole track and every band in it: the height of a column says
+how loud that moment is, and the ratios between the bands are what the colour
+is made of, so scaling them apart would wreck both. The consequence to know is
+that the picture no longer says anything about how loud one record is against
+another — it is about the shape of the one you are looking at. The loudness
+figures in the columns are what answers the other question.
+
+The overview pictures — the strip under the deck on a player, and the small one
+in a browse list — average a window of about a second, wider than the spacing
+between their columns, so consecutive columns overlap. At twelve hundred
+columns a whole track, one column is a third of a second, which is less than a
+beat at any tempo anybody plays: windows that merely touch each other resolve
+individual kick drums and draw a comb whose spacing is the sampling rather than
+the music. A second spans a beat at every tempo, so what is left is how much is
+going on, which is the arrangement and what an overview is for. A drop's edge
+blurs across about three columns of twelve hundred, which is the price of the
+rest and not visible.
+
+The scrolling waveform is not touched by any of that. Its columns are a
+hundred-and-fiftieth of a second, a kick drum is several of them wide, and the
+peak is the right measurement at that size.
+
+The same measurement makes the pictures on the drive, so what is on screen
+while prepping is what will be on the CDJ's screen.
+
 ## Colouring the waveform
 
 Three modes, on the right of the cue row, remembered between runs:
@@ -514,12 +555,13 @@ own — a real one, so it can go on a second screen and stay open beside the
 browser without taking anything from the collection. Filter by level, follow the
 tail or park it, clear, or copy everything shown.
 
-Every line starts with the date and time it happened — `20260904 21:14:03` —
-in UTC. A log is read next to things that have clocks of their own: a file's
-modification time, yesterday's log, somebody saying their drive stopped working
-about half nine. "412.008 seconds into some run" cannot be lined up with any of
-those. The window keeps the run's own elapsed clock beside it for the times you
-want to know how long something took.
+Every line starts with the date and time it happened, as ISO 8601 in UTC —
+`2026-09-04T21:14:03Z`. A log is read next to things that have clocks of their
+own: a file's modification time, yesterday's log, somebody saying their drive
+stopped working about half nine. "412.008 seconds into some run" cannot be
+lined up with any of those, and a stamp anything can parse means nobody has to
+do the conversion in their head. The window keeps the run's own elapsed clock
+beside it for the times you want to know how long something took.
 
 Everything also goes to `booth.log` in the data directory, and the previous
 run's is kept beside it as `booth.log.1` — the run worth reading is usually the
@@ -528,6 +570,29 @@ The default is everything, and everything means everything: which file was
 imported and what its path was taken to mean, what each drive state came out
 as and which file changed it, every track a check disagreed with, each session
 read off a drive, and the machine and version at the top of every run.
+
+Two things get written down in more detail than the rest, because they are the
+two that take minutes and are hard to see into afterwards.
+
+**A drive write** says where it is going and what it opened, and then, for each
+file: what it decoded and how long that took, where on the drive it is going
+and how much of the length a player will follow that uses, what its grid and
+cues came out as — or, for a stem, whose grid it took — how many bytes were
+copied and how long the copy took, and the analysis files written and read
+straight back. Then the database: built, written, read back off the drive and
+walked, in both formats, each timed. And a closing line with the whole run's
+time and what ended up on the drive.
+
+**A copy of a drive** says what the library had to match against, each of the
+drive's own files as it is carried, each audio file as it is linked to the
+library's copy and which file that was — or why it could not be linked, which
+is usually a backup on another filesystem — and each one copied or noted
+because the library has not got it. Then the time each phase took.
+
+That is a few lines per file, so it sits at the log's most detailed level and
+`BOOTH_LOG=info` turns it off without losing the results. In the command-line
+tool the same detail is `-v`, on stderr, so redirecting the results still
+captures only results.
 
 ## Where things are kept
 

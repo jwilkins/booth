@@ -248,8 +248,30 @@ pub fn export(
     args: &ExportArgs,
     reporter: &dyn Reporter,
 ) -> Result<Vec<(PathBuf, crate::export::pdb::Track)>> {
+    let began = std::time::Instant::now();
     let files = discover::collect(&args.input.inputs, args.input.recursive)?;
-    let destination = if args.dry_run { None } else { Some(open_destination(args, &files)?) };
+    report::detail(
+        reporter,
+        format!(
+            "export to {}: {} to prepare, {} carried from the last write, {}, {}",
+            args.drive
+                .as_ref()
+                .or(args.image.as_ref())
+                .map(|at| at.display().to_string())
+                .unwrap_or_else(|| "nowhere".to_string()),
+            report::plural(files.len(), "file"),
+            report::plural(args.already.len(), "row"),
+            report::plural(args.playlists.len(), "playlist"),
+            match args.dry_run {
+                true => "a dry run",
+                false => "for real",
+            }
+        ),
+    );
+    let destination = match args.dry_run {
+        true => None,
+        false => Some(open_destination(args, &files, reporter)?),
+    };
     let progress = Progress::new(reporter, files.len());
 
     // What is already on the drive, carried through unchanged. Its ids are
@@ -293,7 +315,7 @@ pub fn export(
                 if progress.cancelled() {
                     return Ok(Prepared::skipped());
                 }
-                let outcome = prepare(args, path, first_id + i as u32, &analyses);
+                let outcome = prepare(args, path, first_id + i as u32, &analyses, reporter);
                 progress.tick();
                 outcome
             })
@@ -319,7 +341,7 @@ pub fn export(
                         prepared.cues
                     ));
                     let landed = match &destination {
-                        Some(destination) => match prepared.commit(destination, path) {
+                        Some(destination) => match prepared.commit(destination, path, reporter) {
                             Ok(()) => Some(prepared.track.unwrap()),
                             Err(e) => {
                                 lines.pop();
@@ -353,7 +375,18 @@ pub fn export(
             false => playlist_tree(&args.playlists, &ids_by_path),
         };
         let database = pdb::Database { tracks, playlists };
+        let building = std::time::Instant::now();
         let bytes = database.to_bytes()?;
+        report::detail(
+            reporter,
+            format!(
+                "built the database in {}: {}, {}, {} bytes",
+                took(building),
+                report::plural(database.tracks.len(), "track"),
+                report::plural(database.playlists.len(), "playlist"),
+                bytes.len()
+            ),
+        );
 
         match &destination {
             None => lines.push(format!(
@@ -363,12 +396,19 @@ pub fn export(
             )),
             Some(destination) => {
                 const DATABASE: &str = "/PIONEER/rekordbox/export.pdb";
+                let writing = std::time::Instant::now();
                 destination.write(DATABASE, &bytes)?;
+                report::detail(reporter, format!("wrote {DATABASE} in {}", took(writing)));
                 // Read the database back off the drive and walk it the way a
                 // player would. The export is not finished until that works.
+                let checking = std::time::Instant::now();
                 let tables = pdb::inspect(&destination.read(DATABASE)?)
                     .context("the database did not read back off the drive")?;
                 let rows: usize = tables.iter().map(|t| t.rows).sum();
+                report::detail(
+                    reporter,
+                    format!("read {DATABASE} back and walked it in {}", took(checking)),
+                );
                 lines.push(format!(
                     "wrote {DATABASE} to {}: {} tables, {} rows, verified",
                     destination.describe(),
@@ -382,16 +422,31 @@ pub fn export(
         // are built from the one `database` above, so the two files on the
         // drive cannot disagree about what is on it — which is the failure
         // that firmware 3.30 turned into a room full of DJs with no playlists.
-        lines.extend(write_onelibrary(args, &database, destination.as_ref())?);
+        lines.extend(write_onelibrary(args, &database, destination.as_ref(), reporter)?);
     }
 
     if let Some(destination) = destination {
+        // For an image this is where the filesystem is flushed and the file
+        // closed — the point at which a write that looked finished can still
+        // fail, so it gets a line of its own.
+        let closing = std::time::Instant::now();
         destination.finish()?;
+        report::detail(reporter, format!("closed the destination in {}", took(closing)));
     }
 
     for line in lines {
         reporter.event(Event::Line(line));
     }
+    report::detail(
+        reporter,
+        format!(
+            "export finished in {}: {} prepared, {} failed, {} on the drive",
+            took(began),
+            report::plural(files.len() - failures.len(), "file"),
+            failures.len(),
+            report::plural(made.len(), "row")
+        ),
+    );
     let mut outcome = Outcome::new(files.len(), failures);
     outcome.cancelled = reporter.cancelled();
     outcome.report(reporter)?;
@@ -456,13 +511,40 @@ impl Prepared {
         track.analyze_path.clone_from(&names[0]);
     }
 
-    fn commit(&self, destination: &Destination, source: &Path) -> Result<()> {
+    fn commit(
+        &self,
+        destination: &Destination,
+        source: &Path,
+        reporter: &dyn Reporter,
+    ) -> Result<()> {
+        let name = short(source);
+        let copying = std::time::Instant::now();
         destination.copy_in(&self.on_drive, source)?;
+        let size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
+        report::detail(
+            reporter,
+            format!("{name}: copied {size} bytes to {} in {}", self.on_drive, took(copying)),
+        );
+
+        let writing = std::time::Instant::now();
+        let mut written = 0usize;
         for (at, bytes) in &self.analysis {
             destination.write(at, bytes)?;
+            // Read back through a parser that shares no code with the writer,
+            // here rather than at the end, so a drive that cannot hold what was
+            // just put on it says so on the file it failed.
             anlz::inspect(&destination.read(at)?)
                 .with_context(|| format!("{at} did not read back off the drive"))?;
+            written += bytes.len();
         }
+        report::detail(
+            reporter,
+            format!(
+                "{name}: wrote and read back {} ({written} bytes) in {}",
+                report::plural(self.analysis.len(), "analysis file"),
+                took(writing)
+            ),
+        );
         Ok(())
     }
 }
@@ -486,10 +568,12 @@ fn write_onelibrary(
     args: &ExportArgs,
     database: &pdb::Database,
     destination: Option<&Destination>,
+    reporter: &dyn Reporter,
 ) -> Result<Vec<String>> {
     use crate::export::onelibrary;
 
     let Some(key) = crate::rekordbox::onelibrary_key(args.onelibrary_key.as_deref()) else {
+        report::detail(reporter, "no OneLibrary key, so only the legacy database goes on");
         return Ok(vec![crate::rekordbox::no_onelibrary_key()]);
     };
 
@@ -503,8 +587,19 @@ fn write_onelibrary(
         (None, None) => String::new(),
     };
 
-    let bytes = onelibrary::to_bytes(database, &key, &device)
+    let analysed = onelibrary::analysed_bits(args.analysed_bits);
+    let building = std::time::Instant::now();
+    let bytes = onelibrary::to_bytes(database, &key, &device, analysed)
         .context("building the OneLibrary database")?;
+    report::detail(reporter, format!("every track is marked analysedBits {analysed}"));
+    report::detail(
+        reporter,
+        format!(
+            "built the OneLibrary database for device {device:?} in {}: {} bytes",
+            took(building),
+            bytes.len()
+        ),
+    );
     let Some(destination) = destination else {
         return Ok(vec![format!(
             "would write {}: {} tracks, {} bytes",
@@ -514,11 +609,18 @@ fn write_onelibrary(
         )]);
     };
 
+    let writing = std::time::Instant::now();
     destination.write(onelibrary::DRIVE_PATH, &bytes)?;
+    report::detail(reporter, format!("wrote {} in {}", onelibrary::DRIVE_PATH, took(writing)));
     // Off the drive again, keyed again, counted again — the same standard the
     // legacy database is held to.
+    let checking = std::time::Instant::now();
     let summary = onelibrary::inspect(&destination.read(onelibrary::DRIVE_PATH)?, &key)
         .context("the OneLibrary database did not read back off the drive")?;
+    report::detail(
+        reporter,
+        format!("read {} back and opened it in {}", onelibrary::DRIVE_PATH, took(checking)),
+    );
     Ok(vec![format!(
         "wrote {} to {}: {} tables, {} tracks, {} playlists, verified — a CDJ-3000X browses \
          these",
@@ -530,8 +632,13 @@ fn write_onelibrary(
     )])
 }
 
-fn open_destination(args: &ExportArgs, files: &[PathBuf]) -> Result<Destination> {
+fn open_destination(
+    args: &ExportArgs,
+    files: &[PathBuf],
+    reporter: &dyn Reporter,
+) -> Result<Destination> {
     if let Some(root) = &args.drive {
+        report::detail(reporter, format!("writing into the folder {}", root.display()));
         return Ok(Destination::Directory(root.clone()));
     }
     let image = args.image.as_ref().expect("clap requires one of --drive and --image");
@@ -539,7 +646,39 @@ fn open_destination(args: &ExportArgs, files: &[PathBuf]) -> Result<Destination>
     let audio: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
     let analysis = files.len() as u64 * 2 * 1024 * 1024;
     let capacity = capacity_for(audio + analysis);
-    Ok(Destination::Image(std::sync::Mutex::new(DriveImage::create(image, capacity, &args.label)?)))
+    // The size has to be settled before a byte is written, so what it was
+    // worked out from is worth saying: an image that turns out too small is a
+    // write that fails a long way in.
+    report::detail(
+        reporter,
+        format!(
+            "creating a {capacity} byte image at {}, labelled {:?} — {audio} bytes of audio plus \
+             {analysis} for analysis",
+            image.display(),
+            args.label
+        ),
+    );
+    let making = std::time::Instant::now();
+    let created = DriveImage::create(image, capacity, &args.label)?;
+    report::detail(reporter, format!("formatted the image in {}", took(making)));
+    Ok(Destination::Image(std::sync::Mutex::new(created)))
+}
+
+/// How long a step took, for the detail lines. Milliseconds under ten seconds,
+/// and seconds above it, because "94318 ms" is a number nobody reads as a
+/// minute and a half.
+fn took(since: std::time::Instant) -> String {
+    let ms = since.elapsed().as_millis();
+    match ms {
+        0..=9_999 => format!("{ms} ms"),
+        _ => format!("{:.1} s", ms as f64 / 1000.0),
+    }
+}
+
+/// A file's name on its own, which is what a detail line has room for. The
+/// whole path is in the result line the same file gets.
+fn short(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "?".to_string())
 }
 
 /// The analysis of a track, kept so that its stems can share it.
@@ -568,14 +707,32 @@ impl Analyses {
     }
 }
 
-fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Result<Prepared> {
+fn prepare(
+    args: &ExportArgs,
+    path: &Path,
+    id: u32,
+    analyses: &Analyses,
+    reporter: &dyn Reporter,
+) -> Result<Prepared> {
+    let name = short(path);
     let extension =
         path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     if !PLAYABLE.contains(&extension.as_str()) {
         bail!("a player cannot open a .{extension} file");
     }
 
+    let began = std::time::Instant::now();
     let audio = decode_file(path)?;
+    report::detail(
+        reporter,
+        format!(
+            "{name}: decoded {} Hz, {} ch, {:.1}s in {}",
+            audio.sample_rate,
+            audio.planes.len(),
+            audio.duration_secs(),
+            took(began)
+        ),
+    );
     if audio.sample_rate > 96_000 {
         bail!("{} Hz is above the 96 kHz a player will accept", audio.sample_rate);
     }
@@ -614,6 +771,10 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
     if on_drive.len() > MAX_DRIVE_PATH {
         bail!("{} characters is longer than a player will follow", on_drive.len());
     }
+    report::detail(
+        reporter,
+        format!("{name}: goes to {on_drive} ({} of {MAX_DRIVE_PATH} characters)", on_drive.len()),
+    );
 
     // Named the way rekordbox names it, which is not a courtesy: the player
     // works this name out for itself from the audio path and looks nowhere
@@ -628,18 +789,38 @@ fn prepare(args: &ExportArgs, path: &Path, id: u32, analyses: &Analyses) -> Resu
     // measured from audio with most of the track removed — a vocal with no
     // drums under it — and a cue that does not line up with the one on the
     // parent is worse than no cue at all.
+    let listening = std::time::Instant::now();
     let listened = match parent {
-        Some(parent) => analyses.of(parent, args.bpm).with_context(|| {
-            format!("analysing {} for its stem {}", parent.display(), path.display())
-        })?,
+        Some(parent) => {
+            report::detail(
+                reporter,
+                format!("{name}: takes its grid, cues, key and phrases from {}", short(parent)),
+            );
+            analyses.of(parent, args.bpm).with_context(|| {
+                format!("analysing {} for its stem {}", parent.display(), path.display())
+            })?
+        }
         None => analyses.of(path, args.bpm)?,
     };
+    report::detail(
+        reporter,
+        format!(
+            "{name}: {:.2} BPM, {}, {} ({} hot) in {}",
+            listened.bpm,
+            report::plural(listened.grid.beats.len(), "beat"),
+            report::plural(listened.cues.len(), "cue"),
+            listened.cues.iter().filter(|c| c.is_hot()).count(),
+            took(listening)
+        ),
+    );
     if !listened.found_beats() {
         bail!("no beat could be found; pass --bpm to say what the tempo is");
     }
     // The picture, though, is of this file: an acapella that drew the whole
     // track's waveform would be showing something that is not playing.
+    let drawing = std::time::Instant::now();
     let waveforms = waveform::analyze(&audio);
+    report::detail(reporter, format!("{name}: drew its own waveforms in {}", took(drawing)));
     let structure = listened.song_structure();
     let seek = seek_index(path);
     let files = anlz::Analysis {

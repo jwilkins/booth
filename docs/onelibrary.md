@@ -538,6 +538,12 @@ Against §2 to §5 what is left is:
   the numbers a capture reported.
 - The `.EXT` carries no extended beat grid at all, where rekordbox writes
   `PQT2`; see §5.
+- `analysedBits` is 105 on every row, and settable with `--analysed-bits` or
+  `BOOTH_ANALYSED_BITS` so a value can be tried on a deck without a rebuild. A
+  CDJ-3000X that draws the colour waveform and no phrase strip has read the
+  `.EXT` past the point where `PQT2` would be — `PWV5` and `PWV4` sit after it
+  and come through — so the phrases are being skipped for a reason of their own,
+  and this is the field to bisect.
 - No artwork, so `image` is empty and every `image_id` is 0.
 - No My Tags beyond rekordbox's four empty groups, no history, no hot-cue
   banks: the collection has none of them to write.

@@ -445,6 +445,32 @@ on the player — see [What it hears](#what-it-hears). Every other format seeks 
 Once the database is written it is read back off the drive and walked the way a player
 walks it, and the command fails rather than reporting success if that does not work.
 
+`-v` adds a step-by-step account on stderr — which is where the results are not, so
+redirecting stdout still captures only results:
+
+```
+  export to /Volumes/USB: 2 files to prepare, 0 rows carried from the last write, 1 playlist, for real
+  writing into the folder /Volumes/USB
+  01 - opener.flac: decoded 44100 Hz, 2 ch, 361.4s in 604 ms
+  01 - opener.flac: goes to /Contents/Peverelist/01 - opener.flac (42 of 255 characters)
+  01 - opener.flac: 128.02 BPM, 1536 beats, 6 cues (5 hot) in 2.1 s
+  01 - opener.flac: copied 62914560 bytes to /Contents/Peverelist/01 - opener.flac in 812 ms
+  01 - opener.flac: wrote and read back 3 analysis files (98304 bytes) in 41 ms
+  built the database in 4 ms: 2 tracks, 1 playlist, 167936 bytes
+  read /PIONEER/rekordbox/export.pdb back and walked it in 1 ms
+  export finished in 8.4 s: 2 files prepared, 0 failed, 2 rows on the drive
+```
+
+A stem says whose grid it took rather than reporting one of its own, which is the thing
+about a companion that cannot be seen from the file it became.
+
+`--analysed-bits N` sets what each track's `analysedBits` says in the OneLibrary database.
+It defaults to 105, which is what a drive that played on a CDJ-3000 carried, and it is
+settable because it is the one field on a content row that is both undetermined and known
+to change what a player does with the analysis files: told a track is analysed, a CDJ does
+not re-measure it and shows nothing where an analysis it will not read would have gone.
+`BOOTH_ANALYSED_BITS` does the same for the window.
+
 **What is missing before this plays in a club:** none of it has been tried on real
 hardware. It has been checked against an independent parser, which is not the same thing.
 

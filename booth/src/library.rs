@@ -1476,21 +1476,10 @@ pub fn data_dir() -> PathBuf {
 
 /// "1 track", "2 tracks", "3 copies".
 ///
-/// Here rather than in the window because the log needs it too, and a run whose
-/// log says "1 tracks" reads like nobody checked.
-pub fn plural(count: usize, noun: &str) -> String {
-    if count == 1 {
-        return format!("1 {noun}");
-    }
-    // A noun ending in a consonant and a y takes -ies, which is the difference
-    // between "3 copies" and "3 copys". Everything else here takes -s.
-    let vowel = |c: char| "aeiou".contains(c);
-    match noun.strip_suffix('y').filter(|stem| stem.chars().next_back().is_some_and(|c| !vowel(c)))
-    {
-        Some(stem) => format!("{count} {stem}ies"),
-        None => format!("{count} {noun}s"),
-    }
-}
+/// Re-exported rather than written again here: the engine's own output counts
+/// the same things, and two copies of this would be two places for "1 tracks"
+/// to come from.
+pub use booth_cli::report::plural;
 
 /// Now, in seconds since the Unix epoch.
 pub fn now() -> u64 {
@@ -1748,16 +1737,6 @@ mod tests {
         track.file_hash = file.into();
         track.audio_hash = audio.into();
         id
-    }
-
-    #[test]
-    fn counting_things_reads_like_somebody_checked() {
-        assert_eq!(plural(1, "track"), "1 track");
-        assert_eq!(plural(2, "track"), "2 tracks");
-        assert_eq!(plural(3, "copy"), "3 copies", "not \"copys\"");
-        assert_eq!(plural(1, "copy"), "1 copy");
-        // A vowel before the y keeps the plain -s: days, not daies.
-        assert_eq!(plural(2, "day"), "2 days");
     }
 
     #[test]

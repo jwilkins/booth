@@ -652,6 +652,14 @@ struct Channel {
 impl Reporter for Channel {
     fn event(&self, event: Event) {
         let update = match event {
+            // Straight to the log rather than through the window: this is the
+            // step-by-step account of a job, it belongs at the log's most
+            // detailed level, and going the direct way keeps it in order with
+            // the rest of what this thread has to say.
+            Event::Detail(text) => {
+                crate::debug!("{text}");
+                return;
+            }
             Event::Progress { done, total } => Update::Progress { done, total },
             Event::Started { total } => Update::Progress { done: 0, total },
             Event::Step { percent } => Update::Step { percent },
@@ -746,8 +754,18 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Hash(tracks) => hash_all(&tracks, reporter),
         Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
         Job::Keep { root, drive, state, into, known, foreign, library, key } => {
-            let kept =
-                crate::backup::keep(&root, &into, &drive, &state, &known, foreign, &library)?;
+            let kept = match crate::backup::keep(
+                &root, &into, &drive, &state, &known, foreign, &library,
+            ) {
+                Ok(kept) => kept,
+                Err(e) => {
+                    // Said here as well as returned, because a copy is minutes
+                    // of work and the log is where somebody looks to find out
+                    // how far it got before it stopped.
+                    crate::error!("copying {drive} failed: {e:#}");
+                    return Err(e);
+                }
+            };
             let _ = reporter.tx.send(Update::Kept(Box::new(kept)));
             (reporter.wake)();
 
@@ -799,32 +817,63 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             // command is told exactly what to write rather than walking a
             // folder again and possibly finding something else.
             let mut args = *args;
-            crate::info!(
-                "writing {} files to {}",
-                files.len(),
-                args.drive
-                    .as_ref()
-                    .or(args.image.as_ref())
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default()
-            );
+            let at = args
+                .drive
+                .as_ref()
+                .or(args.image.as_ref())
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let bytes: u64 =
+                files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+            crate::info!("writing {} files ({}) to {at}", files.len(), crate::sync::bytes(bytes));
             crate::debug!(
-                "labelled {:?}, {} playlists, {}",
+                "labelled {:?}, {} playlists, {} rows carried, {} companion pairs, {}",
                 args.label,
                 args.playlists.len(),
+                args.already.len(),
+                args.companions.len(),
                 match args.dry_run {
                     true => "a dry run",
                     false => "for real",
                 }
             );
+            // The tree the player will show, list by list, because it is what
+            // is being written and the easiest thing to get wrong without
+            // noticing until the drive is in a booth.
+            for spec in &args.playlists {
+                crate::debug!(
+                    "  playlist {}{} — {} entries",
+                    match spec.folder.is_empty() {
+                        true => String::new(),
+                        false => format!("{}/", spec.folder),
+                    },
+                    spec.name,
+                    spec.tracks.len()
+                );
+            }
             for file in &files {
-                crate::debug!("  {}", file.display());
+                crate::debug!("  to prepare: {}", file.display());
+            }
+            for (path, _) in &args.already {
+                crate::debug!("  carried: {}", path.display());
             }
             args.input = InputArgs { inputs: files, recursive: false };
             // The rows the drive ended up with, so the next write can carry
             // them rather than preparing everything again.
-            let rows = booth_cli::commands::export(&args, reporter)?;
-            let _ = reporter.tx.send(Update::Wrote(rows));
+            let began = std::time::Instant::now();
+            let outcome = booth_cli::commands::export(&args, reporter);
+            match &outcome {
+                Ok(rows) => crate::info!(
+                    "wrote {at} in {:.1}s — {} rows on the drive",
+                    began.elapsed().as_secs_f64(),
+                    rows.len()
+                ),
+                Err(e) => crate::error!(
+                    "writing {at} failed after {:.1}s: {e:#}",
+                    began.elapsed().as_secs_f64()
+                ),
+            }
+            let _ = reporter.tx.send(Update::Wrote(outcome?));
             (reporter.wake)();
             Ok(())
         }

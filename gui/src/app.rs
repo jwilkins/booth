@@ -135,6 +135,10 @@ impl App {
                 Update::Event(Event::Heading(text)) => self.push(text, Kind::Heading),
                 Update::Event(Event::Line(text)) => self.push(text, Kind::Normal),
                 Update::Event(Event::Summary(text)) => self.push(text, Kind::Note),
+                // This window keeps one list and no log, and a drive write is
+                // several detail lines per file — enough to bury the results
+                // they sit between. Booth has the log that these are for.
+                Update::Event(Event::Detail(_)) => {}
                 Update::Event(Event::Failed { path, message }) => {
                     self.push(format!("{}: {message}", path.display()), Kind::Error)
                 }

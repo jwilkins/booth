@@ -152,9 +152,13 @@ mod tests {
                 ..Track::default()
             })
             .collect();
-        let bytes =
-            onelibrary::to_bytes(&Database { tracks, playlists: Vec::new() }, key, "TESTSTICK")
-                .unwrap();
+        let bytes = onelibrary::to_bytes(
+            &Database { tracks, playlists: Vec::new() },
+            key,
+            "TESTSTICK",
+            onelibrary::analysed_bits(None),
+        )
+        .unwrap();
 
         let at = dir.join("PIONEER/rekordbox/exportLibrary.db");
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();

@@ -96,6 +96,7 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         playlists: Vec::new(),
         dry_run: false,
         onelibrary_key: None,
+        analysed_bits: None,
         companions: Vec::new(),
         already: Vec::new(),
     }
@@ -1019,4 +1020,70 @@ fn a_second_sync_carries_the_stem_rows_rather_than_making_them_again() {
     for path in by_id.values() {
         assert!(drive.join(path.trim_start_matches('/')).exists(), "{path} is not on the drive");
     }
+}
+
+#[test]
+fn a_drive_write_says_what_it_did_step_by_step() {
+    // The account somebody needs when a drive comes back from a booth wrong:
+    // where each file went, what was copied, what was read back to check it,
+    // and how long each part took. It is off in a terminal without `-v` and
+    // sits at the log's most detailed level in the window.
+    let scratch = Scratch::new("detail");
+    let drive = scratch.path("USB");
+    let track = write_song(&scratch, "one.flac");
+
+    let args = ExportArgs { drive: Some(drive.clone()), ..args_for(vec![track.clone()]) };
+    let reporter = Collected::new();
+    commands::export(&args, &reporter).expect("export failed");
+
+    let detail = reporter.details().join("\n");
+    for wanted in [
+        "writing into the folder",
+        "one.flac: decoded",
+        "one.flac: goes to /Contents/",
+        "one.flac: copied",
+        "wrote and read back 3 analysis files",
+        "built the database",
+        "wrote /PIONEER/rekordbox/export.pdb",
+        "read /PIONEER/rekordbox/export.pdb back",
+        "export finished in",
+    ] {
+        assert!(detail.contains(wanted), "nothing about {wanted:?} in:\n{detail}");
+    }
+
+    // And the results are still only results: a caller redirecting them does
+    // not get the commentary mixed in.
+    assert!(
+        reporter.lines().iter().all(|line| !line.contains("decoded")),
+        "{:?}",
+        reporter.lines()
+    );
+}
+
+#[test]
+fn a_stem_says_whose_grid_it_took() {
+    // The one thing about a companion that cannot be seen from the file it
+    // became: a stem is analysed as its parent, not on its own.
+    let scratch = Scratch::new("detail-stems");
+    let drive = scratch.path("USB");
+    let (track, stems) = track_and_its_stems(&scratch);
+
+    let mut inputs = vec![track.clone()];
+    inputs.extend(stems.iter().cloned());
+    let args = ExportArgs {
+        drive: Some(drive.clone()),
+        companions: stems.iter().map(|stem| (stem.clone(), track.clone())).collect(),
+        ..args_for(inputs)
+    };
+    let reporter = Collected::new();
+    commands::export(&args, &reporter).expect("export failed");
+
+    let detail = reporter.details().join("\n");
+    assert!(
+        detail.contains(
+            "Ohm Hourglass-vocals.wav: takes its grid, cues, key and phrases from Ohm \
+             Hourglass.flac"
+        ),
+        "{detail}"
+    );
 }
