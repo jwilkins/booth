@@ -444,13 +444,34 @@ while prepping is what will be on the CDJ's screen.
 
 ## Colouring the waveform
 
+The colour mode mixes in its own palette rather than the three the stacked mode
+labels its bars with. Those only have to be told apart; these get mixed
+together, and blue and amber sit opposite each other on the wheel — so a column
+holding both, which is most music, cancels to grey. Measured across four kinds
+of column, one with a strong bass and one with none came out at hue 36 and hue
+36: the same colour, for the two passages a DJ most needs to tell apart. Violet
+is a third of the way round from amber rather than opposite it, so mixing them
+rotates the hue instead of cancelling it, and the same columns land 25 degrees
+apart with bass-only a long way from both.
+
+The levels are also undone before they are mixed. They are stored bent by the
+curve that makes heights readable, and it flattens the bands against each other
+on the way — a column that is plainly a kick reads 0.95 low against 0.71 mid
+through it. A colour is a set of proportions, so it has to be worked out on the
+amplitudes the curve was applied to. And the sharpening that decides how much
+the quieter bands may tint the mix went from three to two: at three the leading
+band took so much of it that nothing could tint anything, and every column came
+out the colour of whichever band led — the mid, nearly always.
+
 Three modes, on the right of the cue row, remembered between runs:
 
-- **bands** — low, mid and high stacked in their own colours. Easiest for
-  finding the kick, because the low band is drawn on its own.
-- **colour** — one shape, hue mixed from the frequency content: bass blue,
-  mid-range amber, treble washing towards white. This is the picture the player
-  itself draws, so it is the one to prep against.
+- **bands** — low, mid and high stacked in their own colours, tallest first so
+  the shorter ones land on top. Easiest for finding the kick, because the low
+  band is drawn on its own.
+- **colour** — one shape, hue mixed from the frequency content: bass violet,
+  mid-range amber, treble washing towards cyan. A body with everything in it
+  reads orange, a breakdown with the bass gone reads yellower, and bass with
+  nothing over it reads purple.
 - **stems** — one shape, hue from which stem is loudest: vocals rose, melody
   teal, drums amber. Needs a rendered kit, and measures the stem files
   themselves — a band split can say where the bass is, and only a separation can

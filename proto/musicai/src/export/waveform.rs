@@ -464,6 +464,18 @@ fn level(amplitude: f32) -> u8 {
     height(amplitude, 255)
 }
 
+/// Undo [`SHAPE`], turning a stored level back into the amplitude it was made
+/// from.
+///
+/// The curve is there to make a picture readable, and it flattens the
+/// differences between the bands on the way: a column that is plainly a kick
+/// comes out of it reading 0.95 low against 0.71 mid. Anything working out
+/// what a column is *made of* — a colour, a ratio — has to undo it first, or
+/// it is reading proportions the display invented.
+pub fn unshape(level: f32) -> f32 {
+    level.clamp(0.0, 1.0).powf(1.0 / SHAPE)
+}
+
 /// A low-pass of two single poles in series, kept as its own state so the whole
 /// track can be filtered in one streaming pass.
 ///
