@@ -774,6 +774,186 @@ impl App {
         self.layout_moved = true;
     }
 
+    /// Whether a section is currently in a window of its own.
+    fn is_out(&self, pane: Pane) -> bool {
+        self.config.popped.contains(&pane)
+    }
+
+    /// Send a section to its own window, or bring it back.
+    ///
+    /// Written down straight away rather than on the next pointer release:
+    /// this is one click with one answer, not a drag, and a second-screen
+    /// arrangement that had to be rebuilt every morning would not be worth
+    /// having.
+    fn set_out(&mut self, pane: Pane, out: bool) {
+        self.config.popped.retain(|&which| which != pane);
+        if out {
+            self.config.popped.push(pane);
+        }
+        crate::debug!(
+            "{} {} the main window",
+            pane.title(),
+            if out { "left" } else { "came back to" }
+        );
+        if let Err(e) = self.config.save(&self.config_path) {
+            crate::warn!("could not save which panels are out: {e:#}");
+        }
+    }
+
+    /// Draw one section, wherever it happens to be.
+    ///
+    /// One place that says what each section is made of, so a pane in its own
+    /// window and the same pane in the main one cannot come to differ.
+    fn pane(&mut self, ui: &mut Ui, pane: Pane) {
+        match pane {
+            Pane::Collection => self.sidebar(ui),
+            // Not sharing: whatever the prep editor was holding room for, it is
+            // not underneath this one.
+            Pane::Browser => self.track_list(ui, false),
+            Pane::Prep => self.prep(ui),
+            Pane::Inspector => self.inspector(ui),
+            Pane::Drives => self.dock(ui),
+        }
+    }
+
+    /// The sections that are in windows of their own.
+    ///
+    /// Immediate viewports rather than deferred ones. A deferred viewport
+    /// repaints on its own clock, which is what the log's window wants — but it
+    /// pays for that with a callback that must be `Send + Sync + 'static`, so
+    /// all it can reach is what has been put behind an `Arc`. These panels read
+    /// and write the collection, the settings and the queue of things to do
+    /// next, all of which live on the window itself; an immediate viewport is
+    /// drawn inside this frame and so can simply be handed it.
+    ///
+    /// What that costs is a repaint in step with the main window rather than
+    /// on its own, which for panels that show the same collection is what you
+    /// want anyway.
+    fn popped_panes(&mut self, ctx: &egui::Context) {
+        // Cloned first: each window is drawn with the whole of `self` in hand,
+        // and one of them may ask to come back while the list is still being
+        // walked.
+        let out = self.config.popped.clone();
+        let mut returning = Vec::new();
+
+        for pane in out {
+            let mut back = false;
+            ctx.show_viewport_immediate(
+                pane.window(),
+                egui::ViewportBuilder::default()
+                    .with_title(format!("Booth \u{2014} {}", pane.title()))
+                    .with_inner_size(pane.size())
+                    .with_min_inner_size([300.0, 160.0]),
+                |ctx, _class| {
+                    egui::TopBottomPanel::top("pane-bar").frame(bar_frame()).show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(theme::label_text(pane.title()))
+                                    .size(theme::LABEL)
+                                    .color(theme::DIM)
+                                    .strong(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .button("Put it back")
+                                        .on_hover_text(
+                                            "Return this to where it sits in the main window",
+                                        )
+                                        .clicked()
+                                    {
+                                        back = true;
+                                    }
+                                },
+                            );
+                        });
+                    });
+                    egui::CentralPanel::default()
+                        .frame(pane_frame())
+                        .show(ctx, |ui| self.pane(ui, pane));
+
+                    // Shutting the window puts the section back rather than
+                    // hiding it. A pane that could be closed out of existence
+                    // would leave a gap in the main window and nothing in it
+                    // to say where the missing thing had gone.
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        back = true;
+                    }
+                },
+            );
+            if back {
+                returning.push(pane);
+            }
+        }
+
+        for pane in returning {
+            self.set_out(pane, false);
+        }
+    }
+
+    /// The middle of the window: the list, the prep editor, or neither.
+    fn centre(&mut self, ui: &mut Ui) {
+        match (self.is_out(Pane::Browser), self.is_out(Pane::Prep)) {
+            (false, false) => self.browser(ui),
+            (false, true) => self.track_list(ui, false),
+            (true, false) => self.prep(ui),
+            (true, true) => self.everything_elsewhere(ui),
+        }
+    }
+
+    /// What the middle says when both halves of it are in other windows.
+    ///
+    /// Somewhere to say where things went and a way to get them back, because
+    /// an empty rectangle says neither.
+    fn everything_elsewhere(&mut self, ui: &mut Ui) {
+        ui.add_space(28.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new("The list and the prep editor are in windows of their own.")
+                    .color(theme::DIM),
+            );
+            ui.add_space(8.0);
+            if ui.button("Put them back").clicked() {
+                self.set_out(Pane::Browser, false);
+                self.set_out(Pane::Prep, false);
+            }
+        });
+    }
+
+    /// The menu that sends a section to its own window and brings it back.
+    ///
+    /// On the query bar rather than in the section it acts on, because the bar
+    /// is the one strip that never goes anywhere: a control that popped out
+    /// along with the thing it controls would be a door that shuts behind you.
+    fn panes_menu(&mut self, ui: &mut Ui) {
+        ui.menu_button(RichText::new("⧉").font(theme::mono(11.0)).color(theme::DIM), |ui| {
+            ui.set_min_width(230.0);
+            ui.label(RichText::new("In its own window").color(theme::DIM).size(theme::SMALL));
+            ui.separator();
+            for pane in Pane::ALL {
+                let mut out = self.is_out(pane);
+                if ui.checkbox(&mut out, pane.title()).on_hover_text(pane.about()).changed() {
+                    self.set_out(pane, out);
+                }
+            }
+            ui.separator();
+            // The log has had a window of its own all along, and it works the
+            // other way round — it is not in the main window to begin with —
+            // so it is listed here rather than pretending to be a sixth pane.
+            let mut log = self.log.is_open();
+            if ui
+                .checkbox(&mut log, "Log")
+                .on_hover_text("The whole run, in a window of its own")
+                .changed()
+            {
+                self.log.set_open(log);
+            }
+        })
+        .response
+        .on_hover_text("Send a part of the window to a window of its own");
+    }
+
     /// Write the sizes out, if a drag has just finished changing one.
     ///
     /// Panels and columns both: they are dragged the same way, they are
@@ -906,6 +1086,14 @@ impl App {
             .selected
             .and_then(|id| self.rows.iter().position(|row| row.track.id == id))
             .unwrap_or(0);
+        // The row being left is where a range grows from, if nothing has set
+        // that yet. Without this, shift-down in a window nobody had clicked in
+        // took only the row it arrived at, and took only the next one again on
+        // the press after that — the gesture did nothing at all until a plain
+        // click or arrow had happened first.
+        if self.anchor.is_none() {
+            self.anchor = self.selected.or_else(|| self.rows.first().map(|row| row.track.id));
+        }
         let next = (at as isize + delta).clamp(0, self.rows.len() as isize - 1) as usize;
         let id = self.rows[next].track.id;
 
@@ -932,7 +1120,10 @@ impl App {
     /// listed — which is what the eye means by "these ones", whichever
     /// direction they were picked in.
     fn mark_range_to(&mut self, id: u32) {
-        let anchor = self.anchor.unwrap_or(id);
+        // Pinned, not just read: a range that left the anchor unset would find
+        // it unset again on the next shift-press and measure from wherever the
+        // cursor had got to, so the selection would never grow past two rows.
+        let anchor = *self.anchor.get_or_insert(id);
         let at = |wanted: u32| self.rows.iter().position(|row| row.track.id == wanted);
         let (Some(from), Some(to)) = (at(anchor), at(id)) else {
             self.mark_only(id);
@@ -947,6 +1138,29 @@ impl App {
             .filter(|row| !row.indented)
             .map(|row| row.track.id)
             .collect();
+    }
+
+    /// Take everything the query has left showing.
+    ///
+    /// Everything showing rather than the whole collection, because the query
+    /// bar is how a set is picked here: narrowing to what you want and then
+    /// taking all of it is the gesture, and a select-all that reached past the
+    /// filter would undo the narrowing it was meant to finish.
+    ///
+    /// The cursor does not move, and the anchor follows it, so a shift-arrow
+    /// straight after this grows from the row being looked at rather than
+    /// from the top of the list.
+    fn mark_showing(&mut self) {
+        self.marked = self
+            .rows
+            .iter()
+            // Companions are not selected on their own: a stem is not a thing
+            // to analyse or put on a drive by itself, and it goes wherever its
+            // parent goes.
+            .filter(|row| !row.indented)
+            .map(|row| row.track.id)
+            .collect();
+        self.anchor = self.selected.or_else(|| self.rows.first().map(|row| row.track.id));
     }
 
     /// Add a row to the selection, or take it out again.
@@ -1899,6 +2113,74 @@ impl Naming {
     }
 }
 
+/// A part of the window that can be sent to a window of its own.
+///
+/// The five sections the one window is made of, which is what a second screen
+/// is actually for: the waveform big on one monitor and the crate on the other
+/// is how this gets used, and there is no arrangement of one window that gives
+/// you that.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Pane {
+    Collection,
+    Browser,
+    Prep,
+    Inspector,
+    Drives,
+}
+
+impl Pane {
+    /// In the order they sit in the window, left to right and top to bottom,
+    /// which is the order the menu lists them in.
+    pub const ALL: [Pane; 5] =
+        [Pane::Collection, Pane::Browser, Pane::Prep, Pane::Inspector, Pane::Drives];
+
+    /// What it is called, in the menu and in its window's title bar.
+    pub fn title(self) -> &'static str {
+        match self {
+            Pane::Collection => "Collection",
+            Pane::Browser => "Browser",
+            Pane::Prep => "Prep editor",
+            Pane::Inspector => "Inspector",
+            Pane::Drives => "Drives",
+        }
+    }
+
+    fn about(self) -> &'static str {
+        match self {
+            Pane::Collection => "Views, playlists and saved queries",
+            Pane::Browser => "The track list and the batch actions",
+            Pane::Prep => "The waveform, the phrase strip and the measurements",
+            Pane::Inspector => "Names, cues, stems and tags for the selected track",
+            Pane::Drives => "The drive, what would go on it, and the log",
+        }
+    }
+
+    /// The id its window keeps, so that one popped out, put back and popped out
+    /// again is the same window to the operating system rather than a new one
+    /// in a new place.
+    fn window(self) -> egui::ViewportId {
+        egui::ViewportId::from_hash_of(match self {
+            Pane::Collection => "booth-pane-collection",
+            Pane::Browser => "booth-pane-browser",
+            Pane::Prep => "booth-pane-prep",
+            Pane::Inspector => "booth-pane-inspector",
+            Pane::Drives => "booth-pane-drives",
+        })
+    }
+
+    /// How big its window opens, shaped like the thing it holds: the side
+    /// panels are tall and narrow, the strips are wide and short.
+    fn size(self) -> [f32; 2] {
+        match self {
+            Pane::Collection => [300.0, 720.0],
+            Pane::Browser => [1100.0, 700.0],
+            Pane::Prep => [1000.0, 340.0],
+            Pane::Inspector => [380.0, 760.0],
+            Pane::Drives => [900.0, 320.0],
+        }
+    }
+}
+
 /// Draw a panel's contents at exactly the size the panel was given.
 ///
 /// egui stores a panel's size along its resizable axis from the rectangle its
@@ -1982,13 +2264,15 @@ impl eframe::App for App {
         // A panel only changes size because somebody is dragging its edge, so
         // that is the only time a new size is worth keeping.
         let dragging = ctx.input(|i| i.pointer.any_down());
-        let dock = egui::TopBottomPanel::bottom("dock")
-            .frame(bar_frame())
-            .resizable(true)
-            .default_height(sizes.dock.max(DOCK_HEIGHT))
-            .height_range(DOCK_HEIGHT..=460.0)
-            .show(ctx, |ui| pinned(ui, |ui| self.dock(ui)));
-        self.remember_panel(dragging, |panels| &mut panels.dock, dock.response.rect.height());
+        if !self.is_out(Pane::Drives) {
+            let dock = egui::TopBottomPanel::bottom("dock")
+                .frame(bar_frame())
+                .resizable(true)
+                .default_height(sizes.dock.max(DOCK_HEIGHT))
+                .height_range(DOCK_HEIGHT..=460.0)
+                .show(ctx, |ui| pinned(ui, |ui| self.dock(ui)));
+            self.remember_panel(dragging, |panels| &mut panels.dock, dock.response.rect.height());
+        }
 
         // Both side panels drag. The inspector especially: it carries the
         // cue list, the stem rows and the notes field, and how much room those
@@ -1998,31 +2282,40 @@ impl eframe::App for App {
         // The minimum is what the widest fixed thing in each still fits in,
         // not zero: a panel that can be dragged shut leaves no handle to drag
         // it back with.
-        let collection = egui::SidePanel::left("collection")
-            .default_width(sizes.collection)
-            .width_range(150.0..=300.0)
-            .frame(pane_frame())
-            .resizable(true)
-            .show(ctx, |ui| pinned(ui, |ui| self.sidebar(ui)));
-        self.remember_panel(
-            dragging,
-            |panels| &mut panels.collection,
-            collection.response.rect.width(),
-        );
+        if !self.is_out(Pane::Collection) {
+            let collection = egui::SidePanel::left("collection")
+                .default_width(sizes.collection)
+                .width_range(150.0..=300.0)
+                .frame(pane_frame())
+                .resizable(true)
+                .show(ctx, |ui| pinned(ui, |ui| self.sidebar(ui)));
+            self.remember_panel(
+                dragging,
+                |panels| &mut panels.collection,
+                collection.response.rect.width(),
+            );
+        }
 
-        let inspector = egui::SidePanel::right("inspector")
-            .default_width(sizes.inspector)
-            .width_range(180.0..=420.0)
-            .frame(pane_frame())
-            .resizable(true)
-            .show(ctx, |ui| pinned(ui, |ui| self.inspector(ui)));
-        self.remember_panel(
-            dragging,
-            |panels| &mut panels.inspector,
-            inspector.response.rect.width(),
-        );
+        if !self.is_out(Pane::Inspector) {
+            let inspector = egui::SidePanel::right("inspector")
+                .default_width(sizes.inspector)
+                .width_range(180.0..=420.0)
+                .frame(pane_frame())
+                .resizable(true)
+                .show(ctx, |ui| pinned(ui, |ui| self.inspector(ui)));
+            self.remember_panel(
+                dragging,
+                |panels| &mut panels.inspector,
+                inspector.response.rect.width(),
+            );
+        }
 
-        egui::CentralPanel::default().frame(pane_frame()).show(ctx, |ui| self.browser(ui));
+        egui::CentralPanel::default().frame(pane_frame()).show(ctx, |ui| self.centre(ui));
+
+        // After the main window's own panels, so that a section drawn in a
+        // window of its own is drawn with the same collection the rest of this
+        // frame was drawn from.
+        self.popped_panes(ctx);
 
         if self.sheet {
             self.sync_sheet(ctx);
@@ -2269,6 +2562,11 @@ impl App {
             }
             if typing {
                 return;
+            }
+            // Everything showing. Consumed rather than merely read, so that
+            // nothing downstream reads the same press as something else.
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::A) {
+                self.mark_showing();
             }
             let extend = i.modifiers.shift;
             if i.key_pressed(egui::Key::ArrowDown) {
@@ -2529,7 +2827,7 @@ impl App {
             let field = egui::TextEdit::singleline(&mut self.text)
                 .font(theme::mono(12.0))
                 .frame(false)
-                .desired_width(ui.available_width() - 260.0)
+                .desired_width(ui.available_width() - 290.0)
                 .hint_text(
                     RichText::new("bpm:124-128 key:~8A -played:30d tag:peak")
                         .monospace()
@@ -2545,6 +2843,7 @@ impl App {
             }
 
             ui.label(RichText::new("⌘K").font(theme::mono(10.5)).color(theme::DIM));
+            self.panes_menu(ui);
             if ui
                 .add(
                     egui::Button::new(RichText::new("?").font(theme::mono(10.5)).color(theme::DIM))
@@ -2957,7 +3256,7 @@ impl App {
     }
 
     /// The list, and the prep editor underneath it.
-    fn browser(&mut self, ui: &mut Ui) {
+    fn track_list(&mut self, ui: &mut Ui, sharing: bool) {
         // The column widths are worked out once, from the settings, and handed
         // to both the header and the rows, so the two cannot drift apart — and
         // the header is drawn outside the scroll area, so that scrolling a long
@@ -2971,7 +3270,10 @@ impl App {
         // under it.
         let widths = self.header(ui, ui.available_width() - ui.spacing().scroll.allocated_width());
 
-        let list_height = (ui.available_height() - PREP_HEIGHT).max(120.0);
+        // Room kept for the prep editor only when it is underneath: popped out
+        // into its own window, the space it was holding belongs to the list.
+        let reserve = if sharing { PREP_HEIGHT } else { 0.0 };
+        let list_height = (ui.available_height() - reserve).max(120.0);
         egui::ScrollArea::vertical()
             .max_height(list_height)
             .auto_shrink([false, false])
@@ -2980,6 +3282,12 @@ impl App {
         ui.add_space(6.0);
         self.actions(ui);
         ui.add_space(4.0);
+    }
+
+    /// The list with the prep editor under it, which is what the middle of the
+    /// window is when neither has been sent anywhere.
+    fn browser(&mut self, ui: &mut Ui) {
+        self.track_list(ui, true);
         ui.separator();
         self.prep(ui);
     }
@@ -3385,7 +3693,13 @@ impl App {
     /// The prep editor: waveform, phrase strip, and the line of measurements.
     fn prep(&mut self, ui: &mut Ui) {
         let track = self.selected_track().cloned();
-        let Some(track) = track else { return };
+        let Some(track) = track else {
+            // Nothing to draw. In the main window that is a strip of nothing
+            // under the list, which reads fine; in a window of its own it is
+            // an empty window, which reads as broken.
+            ui.label(RichText::new("nothing selected").color(theme::DIM));
+            return;
+        };
 
         // Whether there is a picture is decided once, up front: the panel goes
         // on to change the collection, and a borrow of the cache held across
@@ -8141,6 +8455,258 @@ mod tests {
                     pressed,
                     modifiers: egui::Modifiers::NONE,
                 });
+                harness.run();
+            }
+        }
+
+        /// A window on a listing, with the keys read as the real one reads
+        /// them: `keys` runs before the panels, as it does in `update`.
+        fn browsing(name: &str, n: u32) -> Harness<'static, App> {
+            let mut app = listing(name, n);
+            app.selected = app.rows.first().map(|row| row.track.id);
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.keys(&ctx);
+                    app.browser(ui);
+                    app.apply_pending(&ctx);
+                },
+                app,
+            );
+            harness.run();
+            harness
+        }
+
+        fn press(harness: &mut Harness<'_, App>, key: egui::Key, modifiers: egui::Modifiers) {
+            // On the raw input as well as on the event: the window reads
+            // `i.modifiers`, which is what the platform says is held down
+            // rather than what any one event carries, and that is the thing a
+            // real shift-press changes.
+            harness.input_mut().modifiers = modifiers;
+            for pressed in [true, false] {
+                harness.event(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                });
+                harness.run();
+            }
+            harness.input_mut().modifiers = egui::Modifiers::NONE;
+        }
+
+        /// The rows the window would act on, in list order.
+        fn picked(harness: &Harness<'_, App>) -> Vec<u32> {
+            let app = harness.state();
+            app.rows
+                .iter()
+                .filter(|row| app.marked.contains(&row.track.id))
+                .map(|row| row.track.id)
+                .collect()
+        }
+
+        #[test]
+        fn command_a_takes_everything_the_query_left_showing() {
+            // Everything showing, not the whole collection: narrowing to what
+            // you want and then taking all of it is the gesture the query bar
+            // is for, and reaching past the filter would undo the narrowing.
+            let mut harness = browsing("select all", 12);
+            harness.state_mut().text = "Track 1".into();
+            harness.state_mut().rebuild();
+            harness.run();
+            let showing: Vec<u32> = harness.state().rows.iter().map(|row| row.track.id).collect();
+            assert!(
+                showing.len() < 12 && !showing.is_empty(),
+                "the query did not narrow anything, so this proves nothing"
+            );
+
+            press(&mut harness, egui::Key::A, egui::Modifiers::COMMAND);
+            assert_eq!(picked(&harness), showing, "command-A did not take what was showing");
+            assert_eq!(
+                harness.state().acting_on(|_| true),
+                showing,
+                "the buttons would still act on everything"
+            );
+        }
+
+        #[test]
+        fn shift_and_the_arrow_keys_grow_the_selection_from_where_the_cursor_was() {
+            let mut harness = browsing("shift arrows", 6);
+            let ids: Vec<u32> = harness.state().rows.iter().map(|row| row.track.id).collect();
+
+            for _ in 0..3 {
+                press(&mut harness, egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+            }
+            assert_eq!(picked(&harness), ids[..4], "shift-down did not take the rows it passed");
+
+            // Back up one: the range is measured from the anchor, so it
+            // shrinks rather than leaving the row behind still selected.
+            press(&mut harness, egui::Key::ArrowUp, egui::Modifiers::SHIFT);
+            assert_eq!(picked(&harness), ids[..3], "coming back up left a row behind");
+
+            // And without shift it is a cursor again, not a selection.
+            press(&mut harness, egui::Key::ArrowDown, egui::Modifiers::NONE);
+            assert_eq!(picked(&harness), ids[3..4], "a plain arrow kept the old selection");
+        }
+
+        #[test]
+        fn shift_clicking_a_row_takes_everything_between() {
+            let mut harness = browsing("shift click", 6);
+            let ids: Vec<u32> = harness.state().rows.iter().map(|row| row.track.id).collect();
+
+            let row = |harness: &Harness<'_, App>, at: usize| {
+                harness.get_by_label_contains(&format!("Track {:02}", at + 1)).rect().center()
+            };
+            let first = row(&harness, 0);
+            let fourth = row(&harness, 3);
+
+            click(&mut harness, first, egui::Modifiers::NONE);
+            assert_eq!(picked(&harness), ids[..1], "a plain click did not start a selection");
+
+            click(&mut harness, fourth, egui::Modifiers::SHIFT);
+            assert_eq!(picked(&harness), ids[..4], "shift-click did not take everything between");
+
+            // The command key adds one on its own without disturbing the rest.
+            let sixth = row(&harness, 5);
+            click(&mut harness, sixth, egui::Modifiers::COMMAND);
+            let mut wanted = ids[..4].to_vec();
+            wanted.push(ids[5]);
+            assert_eq!(picked(&harness), wanted, "command-click did not add a single row");
+        }
+
+        /// Click where the pointer is put, with modifiers held.
+        fn click(harness: &mut Harness<'_, App>, at: egui::Pos2, modifiers: egui::Modifiers) {
+            harness.input_mut().modifiers = modifiers;
+            harness.event(egui::Event::PointerMoved(at));
+            harness.run();
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers,
+                });
+                harness.run();
+            }
+            harness.input_mut().modifiers = egui::Modifiers::NONE;
+        }
+
+        #[test]
+        fn a_section_in_its_own_window_is_not_also_in_this_one() {
+            // The point of popping one out: the space it was taking goes to
+            // what is left, rather than the same thing being drawn twice.
+            let mut app = listing("popping", 4);
+            app.selected = app.rows.first().map(|row| row.track.id);
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.centre(ui), app);
+            harness.run();
+            assert!(harness.query_by_label("columns").is_some(), "the list was never there");
+
+            harness.state_mut().set_out(Pane::Browser, true);
+            harness.run();
+            harness.run();
+            assert!(
+                harness.query_by_label("columns").is_none(),
+                "the list is still in the middle of the main window"
+            );
+
+            harness.state_mut().set_out(Pane::Browser, false);
+            harness.run();
+            harness.run();
+            assert!(harness.query_by_label("columns").is_some(), "putting it back did nothing");
+        }
+
+        #[test]
+        fn the_middle_of_the_window_says_where_everything_went() {
+            // An empty rectangle says neither what is missing nor how to get
+            // it back, and both halves of the middle can be out at once.
+            let mut app = listing("both out", 4);
+            app.selected = app.rows.first().map(|row| row.track.id);
+            app.set_out(Pane::Browser, true);
+            app.set_out(Pane::Prep, true);
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.centre(ui), app);
+            harness.run();
+            harness.get_by_label("Put them back").click();
+            harness.run();
+            harness.run();
+
+            assert!(harness.state().config.popped.is_empty(), "they did not come back");
+            assert!(harness.query_by_label("columns").is_some(), "the list did not come back");
+        }
+
+        #[test]
+        fn the_menu_that_pops_a_section_out_is_on_the_bar_that_never_moves() {
+            // Every section is listed, and the control is on the query bar
+            // rather than inside the thing it acts on: a button that left with
+            // the panel it belonged to would be a door that shuts behind you.
+            let mut harness =
+                Harness::new_ui_state(|ui, app: &mut App| app.command_bar(ui), listing("menu", 2));
+            harness.run();
+            harness.get_by_label("⧉").click();
+            harness.run();
+            for pane in Pane::ALL {
+                harness.get_by_label(pane.title());
+            }
+
+            harness.get_by_label(Pane::Inspector.title()).click();
+            harness.run();
+            harness.run();
+            assert_eq!(
+                harness.state().config.popped,
+                vec![Pane::Inspector],
+                "the inspector did not go anywhere"
+            );
+
+            // And written down, because rebuilding a second-screen layout
+            // every morning is not worth having.
+            let saved = crate::config::Config::load(&harness.state().config_path);
+            assert_eq!(saved.popped, vec![Pane::Inspector], "it never reached the settings");
+        }
+
+        #[test]
+        fn a_popped_out_section_carries_its_own_way_back() {
+            // The window it goes to has to offer a way home, because the menu
+            // that sent it there is in the other window — which may be on the
+            // other screen, or behind this one. Closing the window does the
+            // same thing, so a section cannot be shut out of existence.
+            //
+            // Drawn embedded here: with no real windowing behind it, egui runs
+            // an immediate viewport's contents in the context it was asked
+            // from, which is exactly the callback the real one runs.
+            let mut app = listing("its own window", 3);
+            app.selected = app.rows.first().map(|row| row.track.id);
+            app.set_out(Pane::Inspector, true);
+
+            let mut harness = Harness::new_state(
+                |ctx, app: &mut App| {
+                    app.popped_panes(ctx);
+                },
+                app,
+            );
+            harness.run();
+            harness.get_by_label("Put it back").click();
+            harness.run();
+            harness.run();
+
+            assert!(harness.state().config.popped.is_empty(), "it would not come back");
+            assert!(
+                harness.query_by_label("Put it back").is_none(),
+                "the window it went to is still being drawn"
+            );
+        }
+
+        #[test]
+        fn every_section_can_be_drawn_on_its_own() {
+            // Each pane has to stand up outside the panel it was written for —
+            // a side panel's contents in a central panel, a strip in a window.
+            // Cheap to get wrong and invisible until somebody pops that one.
+            for pane in Pane::ALL {
+                let mut app = listing("alone", 3);
+                app.selected = app.rows.first().map(|row| row.track.id);
+                let mut harness =
+                    Harness::new_ui_state(move |ui, app: &mut App| app.pane(ui, pane), app);
+                harness.run();
                 harness.run();
             }
         }

@@ -291,6 +291,12 @@ pub struct Config {
     /// preference: it says how this person reads a list, not what is in it.
     #[serde(default)]
     pub columns: crate::rows::Layout,
+    /// Which parts of the window are in windows of their own.
+    ///
+    /// A preference about this person's desk: which screen the waveform lives
+    /// on is exactly the sort of thing that is annoying to set twice.
+    #[serde(default)]
+    pub popped: Vec<crate::app::Pane>,
     /// How the waveform is coloured.
     pub paint: crate::wave::Paint,
     /// Whether a track's length reads as bars or as beats.
@@ -435,6 +441,7 @@ impl Default for Config {
             on_external: OnExternal::default(),
             sort: crate::rows::Sort::default(),
             columns: crate::rows::Layout::default(),
+            popped: Vec::new(),
             panels: Panels::default(),
             paint: crate::wave::Paint::default(),
             length: Length::default(),
@@ -507,6 +514,17 @@ impl Config {
         // nothing downstream has to wonder whether the list it was handed
         // covers every column.
         config.columns.repair();
+        // One window each. A hand-edited file naming the same section twice
+        // would have it drawn twice in one frame under one window id, which is
+        // a state egui has no good answer for.
+        let mut seen = Vec::new();
+        config.popped.retain(|pane| match seen.contains(pane) {
+            true => false,
+            false => {
+                seen.push(*pane);
+                true
+            }
+        });
         config
     }
 
