@@ -262,44 +262,28 @@ const HIGH_WEIGHT: f32 = 0.1;
 /// and the parts of a track that differ still look different.
 const SHAPE: f32 = 0.7;
 
-/// The gain that puts the scrolling waveform's reference level at full height.
+/// The quantile the whole-track pictures are referenced at.
 ///
-/// One gain for the whole track and every band in it, rather than one per band
-/// or per column. The height of a column is what says how loud that moment is,
-/// and the ratios between the bands are what the colour is made of — scaling
-/// them apart would destroy both, and leave a picture in which every moment
-/// looks equally loud.
-///
-/// Measured on the same number the height is drawn from, which is
-/// [`loudness`] and not the peak of the whole signal. Referencing anything
-/// else puts the reference and the picture on different scales, and the
-/// picture comes out hot by whatever the ratio between them happens to be.
-///
-/// And measured on these columns, not on an overview of them: an overview
-/// column is the *average* of a second of these, which for anything with
-/// transients in it sits well below them. A gain worked out there and applied
-/// here was roughly twice what it should be, and the scrolling waveform came
-/// out with every transient flattened against the top.
-fn reference_gain(columns: &[Column]) -> f32 {
-    gain_for(columns, REFERENCE_QUANTILE, Column::loudness)
-}
-
-/// The same, for the whole-track overviews.
-///
-/// At the maximum rather than a quantile below it. The quantile exists because
-/// one clap that clips sets the peak on a great many records; an overview
-/// column is a second of audio averaged, which no single transient can carry,
-/// so the outlier the quantile was guarding against cannot occur — and taking
-/// the maximum means the loudest passage draws exactly at the top and nothing
-/// above it is thrown away.
-fn overview_gain(columns: &[Column]) -> f32 {
-    gain_for(columns, OVERVIEW_QUANTILE, Column::loudness)
-}
-
-/// The quantile the whole-track pictures are referenced at. See
-/// [`overview_gain`].
+/// The maximum, rather than the shade below it the scrolling pictures use. The
+/// quantile is there to survive one freak column, and an overview column is a
+/// second of audio averaged — which no single transient can carry, so the
+/// outlier it guards against cannot occur here. Taking the maximum means the
+/// loudest passage draws exactly at the top with nothing above it thrown away.
 const OVERVIEW_QUANTILE: f32 = 1.0;
 
+/// The gain that puts a track's reference level at full height.
+///
+/// One gain for every column and every band in it, rather than one per band or
+/// per column: the height of a column is what says how loud that moment is,
+/// and the ratios between the bands are what the colour is made of, so scaling
+/// them apart would wreck both and leave a picture in which every moment looks
+/// equally loud.
+///
+/// `measure` has to be the same number the picture is drawn from. Reference
+/// one thing and draw another and the picture comes out hot by whatever the
+/// ratio between them happens to be — which is how the scrolling waveform came
+/// to be drawn at twice its height, from a gain worked out on an overview
+/// whose columns are the *average* of a second of the ones it was applied to.
 fn gain_for(columns: &[Column], quantile: f32, measure: fn(&Column) -> f32) -> f32 {
     let mut peaks: Vec<f32> = columns.iter().map(measure).filter(|a| *a > 0.0).collect();
     if peaks.is_empty() {
@@ -711,8 +695,9 @@ mod tests {
         // split — if they ever stop differing here, this test is no longer
         // watching anything.
         let columns = measure(&percussive(&[0.8], 20.0));
-        let detail = reference_gain(&columns);
-        let overview = overview_gain(&summarise(&columns, WIDE_COLUMNS));
+        let detail = gain_for(&columns, REFERENCE_QUANTILE, Column::loudness);
+        let overview =
+            gain_for(&summarise(&columns, WIDE_COLUMNS), OVERVIEW_QUANTILE, Column::loudness);
         assert!(
             overview > detail * 1.3,
             "peak gain {detail:.2} and average gain {overview:.2} are close enough that \
@@ -731,35 +716,6 @@ mod tests {
             columns.iter().map(|c| c.low.max(c.mid).max(c.high)).fold(0.0f32, f32::max);
         let whole = columns.iter().map(|c| c.full).fold(0.0f32, f32::max);
         assert!(whole > loudest_band, "full {whole} band {loudest_band}");
-    }
-
-    /// A limited master: dense broadband content driven into a soft clip, so
-    /// that the peak inside nearly every column sits close to the section's
-    /// own level rather than far above it. This is what most records handed to
-    /// this actually look like, and the sparse percussive signal above is not:
-    /// there the peak of a column is a transient many times its median, which
-    /// flatters any normalising scheme you care to try.
-    fn limited(levels: &[f32], secs_each: f32) -> Audio {
-        let rate = 44_100;
-        let mut seed = 0x2545_F491_4F6C_DD1Du64;
-        let mut noise = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            (seed >> 40) as f32 / 8_388_608.0 - 1.0
-        };
-        let mut plane = Vec::new();
-        for (n, level) in levels.iter().enumerate() {
-            for i in 0..(rate as f32 * secs_each) as usize {
-                let t = (n as f32 * secs_each) + i as f32 / rate as f32;
-                let since = (t * 2.0).fract() / 2.0;
-                let kick = (-since * 24.0).exp() * (2.0 * std::f32::consts::PI * 55.0 * t).sin();
-                let bed = noise() * 0.5 + (2.0 * std::f32::consts::PI * 220.0 * t).sin() * 0.35;
-                // Driven hard into a soft clip, the way a master is.
-                plane.push((3.0 * (bed + kick * 0.8)).tanh() * level);
-            }
-        }
-        Audio::new(rate, vec![plane.clone(), plane]).unwrap()
     }
 
     /// Sections of a limited master, some with a kick and some without: a
