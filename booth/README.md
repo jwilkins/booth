@@ -164,6 +164,19 @@ waveform moves the playhead and takes playback with it; pressing a cue jumps
 both. That is the point of having a deck at all — a cue placed by eye is a
 guess, and the ear is what says whether it is on the beat.
 
+**Switching between a track and its stems keeps your place.** Pick the acapella
+while the track is playing and it comes in where the track had got to, still
+running; go back to the original, or across to the drums, and the same. That is
+what the comparison is for — is the vocal clean through the drop, is the groove
+still there without it — and a comparison you have to re-cue by hand is not one
+anybody makes twice. Paused, the playhead still moves across so pressing play
+picks up there, without starting a sound nobody asked for. It works from the
+arrow keys as well as the pointer, since a stem sits directly under its parent
+in the list.
+
+Between two different records nothing carries: the new one starts at its own
+beginning rather than at wherever the last one's playhead happened to be.
+
 One deck, and it audition only: no pitch, no sync, no mixing. The track is
 decoded whole in the background so that seeking anywhere is instant, which is
 what checking cues is made of. A file whose rate differs from the output
@@ -176,6 +189,25 @@ snapped on the way in — hot cues to the beat, the memory cue to the bar, becau
 starting a track mid-bar is a different mistake from starting it four
 milliseconds early. A track with no grid can still be marked up: the cue is what
 you are sure of.
+
+**The phrase strip is editable.** A detector working from onset strength gets a
+good many boundaries right and some plainly wrong, and a wrong one is worth
+less than none — it is a lie about where the drop is, on the strip a player
+draws. So **drag a boundary** to move it, snapped to the bar like the memory
+cue: a section that starts three beats into a bar is a section in the wrong
+place however carefully it was dragged. **Right-click a block** to rename it —
+every name is offered, not just the ones the track already uses, because a menu
+listing only what is there cannot correct anything — or to **split** it where
+the pointer is, or **join** it to the one before. Splitting is how a boundary
+the detector missed gets put in; joining is how one it invented is taken away.
+
+Both halves of a split keep the name until one is given another: a split says
+the boundary was missed, not that the name was wrong. A boundary cannot be
+dragged over its neighbour, and a section too short to have two halves is not
+split at all rather than split into a sliver.
+
+The strip stays the map as well: away from a boundary, dragging still moves the
+zoom window.
 
 Cue times, names and the track's names all go through the drive delta, so an
 edit shows as *changed* on the next sync — except a cue's name, which the player
