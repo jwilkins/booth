@@ -29,22 +29,33 @@ const SNAP_BEATS: usize = 2;
 
 /// What a cue was set for, which decides its colour and what it is called.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Reason {
+pub enum Reason {
     Section(Kind),
+    /// Where a voice arrives, measured off the mix.
     Vocal,
+    /// The first landing of the line the track repeats most, read out of the
+    /// words. See [`crate::transcribe`].
+    Hook,
+    /// And every landing after that.
+    Refrain,
 }
 
 impl Reason {
-    fn label(self) -> &'static str {
+    /// What to call it, when nothing better is known. A hook knows better: it
+    /// carries the line itself.
+    pub fn label(self) -> &'static str {
         match self {
             Reason::Section(kind) => kind.label(),
             Reason::Vocal => "vocal",
+            Reason::Hook => "hook",
+            Reason::Refrain => "hook again",
         }
     }
 
     /// Colours a DJ can read at a glance in a dark booth: the drop is red, the
-    /// breakdown is blue, the voice is purple.
-    fn color(self) -> Rgb {
+    /// breakdown is blue, the voice is purple and the hook is the brightest
+    /// thing on the waveform.
+    pub fn color(self) -> Rgb {
         let (r, g, b) = match self {
             Reason::Section(Kind::Intro) => (0x30, 0x5a, 0xff),
             Reason::Section(Kind::Up) => (0xe2, 0xa0, 0x3f),
@@ -52,25 +63,77 @@ impl Reason {
             Reason::Section(Kind::Down) => (0x2f, 0x6f, 0xd0),
             Reason::Section(Kind::Outro) => (0x2f, 0x7d, 0x52),
             Reason::Vocal => (0x9a, 0x6b, 0xd4),
+            Reason::Hook => (0xe8, 0x3c, 0x9e),
+            Reason::Refrain => (0xb4, 0x5c, 0xc8),
         };
         Rgb { r, g, b }
     }
 
-    /// Which cues survive when there are more than eight candidates. The drop
-    /// and the first vocal are what a DJ reaches for; a build is what they can
-    /// find by looking at the waveform.
-    fn priority(self, first_of_its_kind: bool) -> u32 {
+    /// Which cues survive when there are more than eight candidates.
+    ///
+    /// The hook outranks everything, including the drop. A drop can be found by
+    /// looking at the waveform — it is the loud part — and the line the crowd
+    /// sings cannot be found by looking at anything.
+    pub fn priority(self, first_of_its_kind: bool) -> u32 {
         match self {
+            Reason::Hook => 110,
             Reason::Section(Kind::Chorus) => 100,
             Reason::Vocal if first_of_its_kind => 95,
             Reason::Section(Kind::Intro) => 90,
             Reason::Section(Kind::Down) => 70,
+            Reason::Refrain => 65,
             Reason::Vocal => 60,
             Reason::Section(Kind::Outro) => 55,
             Reason::Section(Kind::Up) => 50,
         }
     }
+
+    fn is_section(self) -> bool {
+        matches!(self, Reason::Section(_))
+    }
 }
+
+/// One moment that might be worth a cue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub time_ms: u32,
+    pub reason: Reason,
+    /// What to write on the cue, when there is something better to say than the
+    /// reason's own name — the words of a hook, say.
+    pub label: Option<String>,
+}
+
+impl Candidate {
+    pub fn new(time_ms: u32, reason: Reason) -> Self {
+        Self { time_ms, reason, label: None }
+    }
+
+    pub fn named(time_ms: u32, reason: Reason, label: &str) -> Self {
+        let label = label.trim();
+        Self { time_ms, reason, label: (!label.is_empty()).then(|| label.to_string()) }
+    }
+
+    fn comment(&self) -> String {
+        self.label.clone().unwrap_or_else(|| self.reason.label().to_string())
+    }
+}
+
+/// The cue a moment in the words has earned.
+pub fn from_moment(moment: &crate::transcribe::Moment) -> Candidate {
+    use crate::transcribe::MomentKind;
+    let reason = match moment.kind {
+        MomentKind::VocalIn => Reason::Vocal,
+        MomentKind::Hook => Reason::Hook,
+        MomentKind::Refrain => Reason::Refrain,
+    };
+    Candidate::named(moment.time_ms, reason, &moment.text)
+}
+
+/// How close two moments have to be before they are one moment.
+///
+/// Half a second. A cue that near another one is not a second place to drop
+/// in — it is the same place, found twice by two different measurements.
+const TOGETHER_MS: u32 = 500;
 
 /// Suggest cue points for a track.
 ///
@@ -81,59 +144,117 @@ pub fn suggest(features: &Features, beat_times: &[u32], structure: &Structure) -
         return Vec::new();
     }
 
-    let mut candidates: Vec<(u32, Reason)> = structure
-        .sections
-        .iter()
-        .filter_map(|section| {
-            beat_times
-                .get(section.start_beat as usize - 1)
-                .map(|&at| (at, Reason::Section(section.kind)))
-        })
-        .collect();
-
+    let mut candidates = sections(structure, beat_times);
     for at in vocal_entries(features, beat_times, structure) {
-        // A vocal that lands on a section start is that section's cue, not a
-        // second one on top of it.
-        if candidates.iter().any(|(other, _)| other.abs_diff(at) < 500) {
-            continue;
-        }
-        candidates.push((at, Reason::Vocal));
-    }
-
-    candidates.sort_by_key(|(at, _)| *at);
-    let mut seen_vocal = false;
-    let ranked: Vec<(u32, Reason, u32)> = candidates
-        .iter()
-        .map(|&(at, reason)| {
-            let first = reason == Reason::Vocal && !seen_vocal;
-            if reason == Reason::Vocal {
-                seen_vocal = true;
-            }
-            (at, reason, reason.priority(first))
-        })
-        .collect();
-
-    let mut kept = ranked;
-    if kept.len() > HOT_CUES {
-        kept.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
-        kept.truncate(HOT_CUES);
-        kept.sort_by_key(|(at, _, _)| *at);
+        candidates.push(Candidate::new(at, Reason::Vocal));
     }
 
     // The memory cue is where the track begins as far as a player is
     // concerned: the first downbeat, or the first beat if the grid has no bar
     // lines yet.
     let start = first_downbeat(beat_times, structure).unwrap_or(beat_times[0]);
-    let mut cues = vec![Cue::memory(start)];
-    for (letter, (at, reason, _)) in kept.into_iter().enumerate() {
-        let color = reason.color();
+    assemble(start, candidates)
+}
+
+/// A cue at the start of every section the phrase analysis found.
+pub fn sections(structure: &Structure, beat_times: &[u32]) -> Vec<Candidate> {
+    structure
+        .sections
+        .iter()
+        .filter_map(|section| {
+            beat_times
+                .get(section.start_beat as usize - 1)
+                .map(|&at| Candidate::new(at, Reason::Section(section.kind)))
+        })
+        .collect()
+}
+
+/// Turn everything worth cueing into the cues a player will actually hold.
+///
+/// One memory cue at `start_ms`, then the best eight of `candidates` in time
+/// order, lettered A onwards. Moments that land on top of each other are folded
+/// into one, and the survivors are ranked by [`Reason::priority`] — because a
+/// player has eight hot cues and a busy track has more than eight moments, and
+/// which eight it keeps is the whole difference between a useful set of cues
+/// and a wall of markers.
+pub fn assemble(start_ms: u32, candidates: Vec<Candidate>) -> Vec<Cue> {
+    let mut kept = fold(rank(candidates));
+    if kept.len() > HOT_CUES {
+        kept.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.time_ms.cmp(&b.0.time_ms)));
+        kept.truncate(HOT_CUES);
+        kept.sort_by_key(|(candidate, _)| candidate.time_ms);
+    }
+
+    let mut cues = vec![Cue::memory(start_ms)];
+    for (letter, (candidate, _)) in kept.into_iter().enumerate() {
+        let color = candidate.reason.color();
         cues.push(
-            Cue::hot(letter as u8 + 1, at)
-                .with_comment(reason.label())
+            Cue::hot(letter as u8 + 1, candidate.time_ms)
+                .with_comment(&candidate.comment())
                 .with_color(color.r, color.g, color.b),
         );
     }
     cues
+}
+
+/// Put the candidates in time order and price each one.
+///
+/// The first vocal is worth more than the ones after it, which is why this is a
+/// pass over the whole list rather than a map: what a moment is worth depends
+/// on what came before it.
+fn rank(mut candidates: Vec<Candidate>) -> Vec<(Candidate, u32)> {
+    candidates.sort_by_key(|candidate| candidate.time_ms);
+    let mut seen_vocal = false;
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            let first = candidate.reason == Reason::Vocal && !seen_vocal;
+            if candidate.reason == Reason::Vocal {
+                seen_vocal = true;
+            }
+            let priority = candidate.reason.priority(first);
+            (candidate, priority)
+        })
+        .collect()
+}
+
+/// Fold moments that land together into one.
+///
+/// A section start wins any such argument, whatever it is worth: when the voice
+/// arrives exactly where the drop does, that is the drop, and a second marker
+/// half a second away from the first is a marker nobody can use. But the loser's
+/// words are kept — a drop that is also where the hook lands should say so,
+/// because "drop" is something a DJ can see on the waveform and the line the
+/// crowd sings is not.
+///
+/// Takes the list already in time order, as [`rank`] leaves it.
+fn fold(ranked: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
+    let mut kept: Vec<(Candidate, u32)> = Vec::with_capacity(ranked.len());
+    for (candidate, priority) in ranked {
+        let Some((last, last_priority)) = kept.last_mut() else {
+            kept.push((candidate, priority));
+            continue;
+        };
+        if last.time_ms.abs_diff(candidate.time_ms) >= TOGETHER_MS {
+            kept.push((candidate, priority));
+            continue;
+        }
+        let beaten = match (last.reason.is_section(), candidate.reason.is_section()) {
+            (true, false) => false,
+            (false, true) => true,
+            _ => priority > *last_priority,
+        };
+        match beaten {
+            true => {
+                let words = last.label.take();
+                *last = candidate;
+                *last_priority = priority;
+                last.label = last.label.take().or(words);
+            }
+            false => last.label = last.label.take().or(candidate.label),
+        }
+    }
+    kept
 }
 
 fn first_downbeat(beat_times: &[u32], structure: &Structure) -> Option<u32> {
@@ -235,6 +356,10 @@ mod tests {
 
     fn beats(count: usize) -> Vec<u32> {
         (0..count).map(|i| i as u32 * BEAT_MS).collect()
+    }
+
+    fn line(start_ms: u32, text: &str) -> crate::transcribe::Line {
+        crate::transcribe::Line { start_ms, end_ms: start_ms + 2_000, text: text.to_string() }
     }
 
     fn section(start_bar: usize, end_bar: usize, kind: Kind, intensity: f32) -> Section {
@@ -392,6 +517,70 @@ mod tests {
             assert!(pair[0].hot_cue < pair[1].hot_cue);
             assert!(pair[0].time_ms <= pair[1].time_ms);
         }
+    }
+
+    #[test]
+    fn the_hook_is_cued_with_the_words_that_make_it_one() {
+        let words = crate::transcribe::Transcript {
+            lines: vec![
+                line(30_000, "hold me closer now"),
+                line(90_000, "hold me closer now"),
+                line(150_000, "hold me closer now"),
+            ],
+        };
+        let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
+        candidates.extend(words.moments().iter().map(from_moment));
+        let cues = assemble(0, candidates);
+
+        let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
+        let hook = hot.iter().find(|c| c.time_ms == 30_000).expect("no cue on the hook");
+        assert_eq!(hook.comment.as_deref(), Some("hold me closer now"));
+        // And its returns are cued too, with the same words.
+        assert_eq!(
+            hot.iter().filter(|c| c.comment.as_deref() == hook.comment.as_deref()).count(),
+            3
+        );
+    }
+
+    #[test]
+    fn the_hook_survives_a_track_with_more_moments_than_a_player_has_cues() {
+        // Ten sections, all of them loud, plus a hook halfway through. Eight
+        // slots; the hook takes one of them whatever else is going on.
+        let mut candidates: Vec<Candidate> =
+            (0..10).map(|i| Candidate::new(i * 20_000, Reason::Section(Kind::Chorus))).collect();
+        candidates.push(Candidate::named(95_000, Reason::Hook, "hold me closer now"));
+
+        let cues = assemble(0, candidates);
+        let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
+        assert_eq!(hot.len(), 8);
+        assert!(
+            hot.iter().any(|c| c.comment.as_deref() == Some("hold me closer now")),
+            "the hook was dropped for a drop: {hot:?}"
+        );
+    }
+
+    #[test]
+    fn a_drop_that_is_also_the_hook_is_one_cue_that_says_the_words() {
+        let candidates = vec![
+            Candidate::new(60_000, Reason::Section(Kind::Chorus)),
+            Candidate::named(60_200, Reason::Hook, "hold me closer now"),
+        ];
+        let cues = assemble(0, candidates);
+
+        let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
+        assert_eq!(hot.len(), 1, "two markers half a second apart: {hot:?}");
+        // The section keeps the moment — it is on the grid — and the words
+        // come with it.
+        assert_eq!(hot[0].time_ms, 60_000);
+        assert_eq!(hot[0].comment.as_deref(), Some("hold me closer now"));
+        assert_eq!(hot[0].color, Some(Reason::Section(Kind::Chorus).color()));
+    }
+
+    #[test]
+    fn a_hook_is_worth_more_than_a_build() {
+        assert!(Reason::Hook.priority(false) > Reason::Section(Kind::Chorus).priority(false));
+        assert!(Reason::Refrain.priority(false) > Reason::Section(Kind::Up).priority(false));
+        assert!(Reason::Hook.color() != Reason::Section(Kind::Chorus).color());
     }
 
     #[test]

@@ -69,6 +69,19 @@ impl Kind {
             Kind::Outro => "outro",
         }
     }
+
+    /// And back again, for sections that have been round a library and come
+    /// back as the words the strip shows.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "intro" => Some(Kind::Intro),
+            "build" => Some(Kind::Up),
+            "break" => Some(Kind::Down),
+            "drop" => Some(Kind::Chorus),
+            "outro" => Some(Kind::Outro),
+            _ => None,
+        }
+    }
 }
 
 /// One stretch of a track, measured in beats from the first one.
