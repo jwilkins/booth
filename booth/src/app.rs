@@ -2187,6 +2187,16 @@ impl App {
         args.companions = companions;
         args.already = carry.already;
         args.onelibrary_key = self.config.onelibrary_key().map(str::to_string);
+        // What the collection knows, so the exporter writes it rather than
+        // measuring its own and quietly writing that instead. Everything the
+        // drive should hold, not only what is being prepared now: a stem looks
+        // its prep up under its parent, and a parent being carried rather than
+        // rewritten is still the parent of a stem that is being written.
+        args.prepared = wanted
+            .iter()
+            .filter_map(|id| self.library.get(*id))
+            .map(|track| (track.path.clone(), sync::prep(track)))
+            .collect();
 
         // The drive's record is everything that should be on it once this is
         // done, not the part being written now. Recording only the part is how

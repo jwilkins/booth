@@ -484,6 +484,23 @@ pub struct ExportArgs {
     /// Empty for a command-line export, where the files given are the drive.
     #[arg(skip)]
     pub already: Vec<(PathBuf, crate::export::pdb::Track)>,
+
+    /// What the caller already knows about these files, by path.
+    ///
+    /// The exporter measures every file it prepares and, left alone, writes
+    /// what it measured. That is right for a command-line export, where the
+    /// files given are all there is to go on, and wrong for a caller that has
+    /// been keeping a collection: a cue moved by hand, a section renamed or a
+    /// key corrected is an answer the audio cannot supply, and measuring over
+    /// it discards the work silently. Anything named here is written in place
+    /// of what was measured. See [`crate::export::Prep`].
+    ///
+    /// Keyed by the track's own path. A stem is looked up under its parent's,
+    /// for the same reason it takes its parent's grid.
+    ///
+    /// Not a command-line option: there is no way to type a cue list.
+    #[arg(skip)]
+    pub prepared: Vec<(PathBuf, crate::export::Prep)>,
 }
 
 /// One playlist to write onto a drive, named by the files that belong to it.

@@ -99,6 +99,7 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         analysed_bits: None,
         companions: Vec::new(),
         already: Vec::new(),
+        prepared: Vec::new(),
     }
 }
 
@@ -1086,4 +1087,174 @@ fn a_stem_says_whose_grid_it_took() {
         ),
         "{detail}"
     );
+}
+
+/// The collection's own answers, written rather than measured over.
+///
+/// Booth keeps cues a person has moved and sections a person has renamed. The
+/// exporter listens to every file it prepares, and before this it wrote what it
+/// heard — so a drive carried the analyser's opinion and the hand-editing went
+/// nowhere. These prove the other way round: what the caller says it knows is
+/// what lands on the drive.
+///
+/// What the analysis files look like is checked against an independent parser
+/// in `rekordbox_export`; rekordcrate 0.3 will not parse the ones a whole drive
+/// write produces, with or without any of this. So what these scan for is whose
+/// answers are in them, which is the question they are here to settle.
+mod what_the_collection_knows {
+    use super::*;
+    use booth_cli::export::{Cue, Part, Prep};
+
+    /// Long enough that the arrangement detector has something to find: the
+    /// test song drops its drums for the middle third, and a section has to run
+    /// eight bars before it is called one.
+    const SECONDS: f32 = 60.0;
+
+    fn exported_with(name: &str, prep: Prep) -> (Scratch, PathBuf, String) {
+        let scratch = Scratch::new(name);
+        let source = write_song_of(&scratch, "Track.flac", SECONDS);
+        let drive = scratch.path("drive");
+
+        let args = ExportArgs {
+            drive: Some(drive.clone()),
+            prepared: match prep.is_empty() {
+                true => Vec::new(),
+                false => vec![(source.clone(), prep)],
+            },
+            ..args_for(vec![source])
+        };
+        commands::export(&args, &Collected::new()).expect("export failed");
+
+        let rows = tracks_on(&drive);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (_, _, analysis) = rows.into_iter().next().unwrap();
+        (scratch, drive, analysis)
+    }
+
+    fn on_drive(drive: &Path, analysis: &str, extension: &str) -> Vec<u8> {
+        let relative = analysis.trim_start_matches('/').replace(".DAT", extension);
+        std::fs::read(drive.join(&relative))
+            .unwrap_or_else(|e| panic!("no {relative} on the drive: {e}"))
+    }
+
+    /// Whether a comment reached the extended cue list, which stores its text
+    /// as UTF-16 big-endian.
+    ///
+    /// A scan rather than a parse, deliberately: what the section looks like is
+    /// checked against an independent parser in `rekordbox_export`, and what is
+    /// being asked here is only whose words are in it.
+    fn carries_text(bytes: &[u8], text: &str) -> bool {
+        let wanted: Vec<u8> = text.encode_utf16().flat_map(|unit| unit.to_be_bytes()).collect();
+        bytes.windows(wanted.len()).any(|window| window == wanted)
+    }
+
+    #[test]
+    fn a_cue_named_by_hand_is_the_cue_that_goes_on_the_drive() {
+        let mine = vec![
+            Cue::memory(0),
+            Cue::hot(1, 4_000).with_comment("hold me closer now").with_color(0xe8, 0x3c, 0x9e),
+            Cue::hot(2, 9_500).with_comment("second time").with_color(0x2f, 0x6f, 0xd0),
+        ];
+        let (_scratch, drive, analysis) =
+            exported_with("prepared-cues", Prep { cues: mine, ..Prep::default() });
+        let ext = on_drive(&drive, &analysis, ".EXT");
+
+        assert!(carries_text(&ext, "hold me closer now"), "the collection's cue never arrived");
+        assert!(carries_text(&ext, "second time"));
+        // Substituted rather than added to: the analyser names its own cues
+        // after the sections it found, and none of those should be here.
+        for measured in ["intro", "build", "break", "drop", "outro", "vocal"] {
+            assert!(
+                !carries_text(&ext, measured),
+                "the analyser's {measured:?} cue was written alongside the collection's"
+            );
+        }
+    }
+
+    #[test]
+    fn a_section_renamed_by_hand_is_the_section_that_goes_on_the_drive() {
+        // Two sections in milliseconds, as a collection keeps them, against a
+        // track the detector would divide differently.
+        let parts = vec![
+            Part { start_ms: 0, end_ms: 7_500, kind: "intro".into() },
+            Part { start_ms: 7_500, end_ms: 19_000, kind: "drop".into() },
+        ];
+        let (_scratch, drive, analysis) =
+            exported_with("prepared-parts", Prep { parts, ..Prep::default() });
+
+        // The phrase section is masked on the way out, so what is checked here
+        // is that one was written at all; that the beats in it are the ones
+        // asked for is `Structure::from_parts`'s own test.
+        let ext = on_drive(&drive, &analysis, ".EXT");
+        assert!(
+            ext.windows(4).any(|window| window == b"PSSI"),
+            "no phrase section reached the drive"
+        );
+    }
+
+    /// The names in the drive database's key table.
+    fn keys_on(drive: &Path) -> Vec<String> {
+        let bytes = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+        let mut cursor = Cursor::new(&bytes);
+        let header = Header::read(&mut cursor).unwrap();
+        let Some(table) = header.tables.iter().find(|t| t.page_type == PageType::Keys) else {
+            return Vec::new();
+        };
+        let pages = header
+            .read_pages(&mut cursor, binrw::Endian::Little, (&table.first_page, &table.last_page))
+            .unwrap();
+
+        let mut names = Vec::new();
+        for row in pages
+            .iter()
+            .filter(|page| page.has_data())
+            .flat_map(|page| page.row_groups.iter().flat_map(|group| group.present_rows()))
+        {
+            let Row::Key(key) = row else { continue };
+            // The parser keeps its fields private, so the name is read back out
+            // of its own description — the same trick `tracks_in` uses.
+            let described = format!("{key:?}");
+            let marker = "DeviceSQLString(\"";
+            let Some(at) = described.find(marker) else { continue };
+            let rest = &described[at + marker.len()..];
+            names.push(rest[..rest.find('"').unwrap()].to_string());
+        }
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_key_the_user_corrected_is_the_key_on_the_row() {
+        let (_scratch, drive, _) = exported_with(
+            "prepared-key",
+            Prep { key: "8A".into(), cues: vec![Cue::memory(0)], ..Prep::default() },
+        );
+        assert_eq!(
+            keys_on(&drive),
+            vec!["8A".to_string()],
+            "the drive carries the detected key rather than the one the collection holds"
+        );
+    }
+
+    #[test]
+    fn saying_nothing_leaves_the_exporter_exactly_as_it_was() {
+        // The path every command-line export takes. A prep with nothing in it
+        // must not be a prep that blanks the track, so the two writes are
+        // compared byte for byte rather than by anything either could get
+        // wrong in the same way.
+        let (_left, drive, analysis) = exported_with("prepared-none", Prep::default());
+        let measured = on_drive(&drive, &analysis, ".EXT");
+
+        let (_right, drive, analysis) = exported_with(
+            "prepared-empty",
+            Prep { bpm: None, key: String::new(), cues: Vec::new(), parts: Vec::new() },
+        );
+        assert_eq!(on_drive(&drive, &analysis, ".EXT"), measured);
+        assert!(
+            ["intro", "build", "break", "drop", "outro"]
+                .iter()
+                .any(|name| carries_text(&measured, name)),
+            "the analyser named no cues at all, so this proves nothing"
+        );
+    }
 }

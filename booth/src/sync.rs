@@ -240,6 +240,12 @@ pub fn fingerprint(track: &Track) -> u64 {
     for cue in &track.cues {
         eat(&[cue.letter]);
         eat(&cue.time_ms.to_le_bytes());
+        // The name and the colour go on the drive too, so a cue renamed from
+        // "drop" to the line that lands there is a change the drive has not
+        // got yet. They were left out while the exporter measured its own
+        // cues and neither ever reached a player.
+        eat(cue.label.as_bytes());
+        eat(&cue.color);
     }
     for phrase in &track.phrases {
         eat(&phrase.start_ms.to_le_bytes());
@@ -247,6 +253,54 @@ pub fn fingerprint(track: &Track) -> u64 {
         eat(phrase.kind.as_bytes());
     }
     hash
+}
+
+/// What the collection knows about a track, for the exporter to write in place
+/// of what it would measure.
+///
+/// The same fields [`fingerprint`] hashes, and deliberately so: the fingerprint
+/// is what decides a track needs writing again, and this is what gets written.
+/// If one covered something the other did not, an edit would either be written
+/// without being noticed or noticed without being written.
+pub fn prep(track: &Track) -> booth_cli::export::Prep {
+    use booth_cli::export::{Cue, Part, Prep, Rgb};
+
+    let cues = track
+        .cues
+        .iter()
+        .map(|cue| {
+            let [r, g, b] = cue.color;
+            let placed = match cue.letter {
+                0 => Cue::memory(cue.time_ms),
+                letter => Cue::hot(letter, cue.time_ms),
+            };
+            Cue {
+                comment: (!cue.label.is_empty()).then(|| cue.label.clone()),
+                color: Some(Rgb { r, g, b }),
+                ..placed
+            }
+        })
+        .collect();
+    let parts = track
+        .phrases
+        .iter()
+        .map(|phrase| Part {
+            start_ms: phrase.start_ms,
+            end_ms: phrase.end_ms,
+            kind: phrase.kind.clone(),
+        })
+        .collect();
+
+    Prep {
+        cues,
+        parts,
+        // Only where there is a grid behind it. A tempo on a track nobody has
+        // analysed is a guess off the file name, and handing a guess to the
+        // beat tracker as a fact is how a drive ends up with a grid that is
+        // confidently wrong rather than measured.
+        bpm: (track.has_grid && track.bpm > 0.0).then_some(track.bpm),
+        key: track.key.clone(),
+    }
 }
 
 /// How serious a preflight finding is.
@@ -597,6 +651,60 @@ mod tests {
             before,
             "a play count should not rewrite the drive"
         );
+    }
+
+    #[test]
+    fn everything_the_fingerprint_watches_is_something_the_prep_carries() {
+        // The two have to cover the same ground. Something in the prep that is
+        // not in the fingerprint is an edit written without being noticed, and
+        // so never written at all; something in the fingerprint that is not in
+        // the prep is a track rewritten with the same contents for ever.
+        let (mut library, ids) = library_with(1);
+        let id = ids[0];
+        library.get_mut(id).unwrap().cues.push(crate::library::CueMark {
+            letter: 1,
+            time_ms: 4_000,
+            label: "drop".into(),
+            color: [1, 2, 3],
+        });
+        library.get_mut(id).unwrap().phrases.push(Phrase {
+            start_ms: 0,
+            end_ms: 8_000,
+            kind: "intro".into(),
+        });
+
+        let before = (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap()));
+
+        // A cue renamed. It goes on the drive, so it has to count as a change.
+        library.get_mut(id).unwrap().cues[0].label = "hold me closer now".into();
+        let after = (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap()));
+        assert_ne!(after.0, before.0, "renaming a cue left the drive thinking it was up to date");
+        assert_ne!(after.1, before.1);
+
+        // And recoloured.
+        library.get_mut(id).unwrap().cues[0].color = [9, 9, 9];
+        assert_ne!(fingerprint(library.get(id).unwrap()), after.0);
+
+        // A play count is neither.
+        let unchanged = (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap()));
+        library.get_mut(id).unwrap().play_count += 1;
+        assert_eq!(
+            (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap())),
+            unchanged
+        );
+    }
+
+    #[test]
+    fn a_track_nobody_has_analysed_hands_the_exporter_no_tempo_to_trust() {
+        // A tempo with no grid behind it is a guess off a file name, and the
+        // beat tracker given a guess as a fact produces a grid that is
+        // confidently wrong rather than measured.
+        let (mut library, ids) = library_with(1);
+        library.get_mut(ids[0]).unwrap().has_grid = false;
+        assert_eq!(prep(library.get(ids[0]).unwrap()).bpm, None);
+
+        library.get_mut(ids[0]).unwrap().has_grid = true;
+        assert_eq!(prep(library.get(ids[0]).unwrap()).bpm, Some(128.0));
     }
 
     #[test]

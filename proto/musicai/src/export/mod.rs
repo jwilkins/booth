@@ -100,6 +100,60 @@ impl BeatGrid {
     }
 }
 
+/// What a caller already knows about a track, for the exporter to write rather
+/// than measure its own.
+///
+/// The exporter listens to every file it prepares, because it has to: the
+/// waveform is of the audio and nothing else can supply it. But a collection
+/// that has been kept by a person holds answers the audio does not — a cue
+/// moved by hand, a section renamed, a key corrected — and an exporter that
+/// measures its own and writes those instead is an exporter that quietly
+/// discards the work. So the measured answers are the fallback and these are
+/// what is written where they exist.
+///
+/// Every field is optional in the sense that an empty one means "you decide".
+/// A caller with nothing to say passes `Prep::default()`, or does not pass one
+/// at all, and gets exactly what it got before this existed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Prep {
+    /// The cues as the collection has them, memory and hot together, in
+    /// milliseconds. Empty means the exporter suggests its own.
+    pub cues: Vec<Cue>,
+    /// The sections as the collection has them. Empty means the exporter finds
+    /// its own.
+    pub parts: Vec<Part>,
+    /// The tempo the collection has. The beats are still tracked rather than
+    /// assumed from it — a tempo says how far apart they are, not where they
+    /// fall. `None` lets the tracker decide the tempo too.
+    pub bpm: Option<f64>,
+    /// The key as the collection has it, e.g. `8A`. Empty means the exporter
+    /// detects its own.
+    pub key: String,
+}
+
+impl Prep {
+    /// Whether there is anything here worth preferring to a measurement.
+    pub fn is_empty(&self) -> bool {
+        self.cues.is_empty() && self.parts.is_empty() && self.bpm.is_none() && self.key.is_empty()
+    }
+}
+
+/// One section of a track, in milliseconds, as a collection keeps it.
+///
+/// Milliseconds rather than beat numbers because that is what a collection can
+/// keep without also keeping the whole grid, and because a section's position
+/// in a record does not change when the grid is re-measured. Turning it back
+/// into the beat number the analysis file wants is the exporter's job, against
+/// the grid it is actually writing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub start_ms: u32,
+    pub end_ms: u32,
+    /// `intro`, `build`, `break`, `drop` or `outro`, as
+    /// [`crate::analysis::structure::Kind::label`] writes them.
+    pub kind: String,
+}
+
 /// Whether a cue is a point to jump to or a loop to fall into.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CueKind {
