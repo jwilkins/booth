@@ -306,6 +306,17 @@ pub struct App {
     /// stem to read. They are waiting on a separation; when it lands, the
     /// recogniser is what happens next.
     want_cues: std::collections::HashSet<u32>,
+    /// Tracks changed here and on the drive since the two last agreed, worked
+    /// out when the sync sheet opens rather than every frame: it reads the
+    /// stick.
+    clashes: Vec<sync::Conflict>,
+    /// Which copy to keep for each of those, as the sheet has it. Seeded with
+    /// whichever is newer and then whatever the person says.
+    settled: std::collections::HashMap<u32, sync::Side>,
+    /// What the drive was holding when it was last examined, so that a track
+    /// left as the player left it can have that recorded as agreed rather than
+    /// being asked about again on every sync.
+    drive_now: std::collections::HashMap<u32, crate::library::Stamp>,
     /// Where the playhead sits in the selected track, in milliseconds. It is
     /// where a new cue goes, so it is a position rather than a playing thing —
     /// nothing here makes a sound.
@@ -625,6 +636,9 @@ impl App {
             remeasured: std::collections::HashSet::new(),
             re_enveloped: std::collections::HashSet::new(),
             want_cues: std::collections::HashSet::new(),
+            clashes: Vec::new(),
+            settled: std::collections::HashMap::new(),
+            drive_now: std::collections::HashMap::new(),
             playhead_ms: None,
             cue_entry: (None, String::new()),
             pending: Vec::new(),
@@ -1078,6 +1092,62 @@ impl App {
             Some(drive) => sync::plan(&self.library, drive),
             None => Plan::default(),
         };
+    }
+
+    /// Ask the drive what has happened to it since it was last written.
+    ///
+    /// A CDJ-3000X can move a cue or re-grid a track on the deck, and the next
+    /// sync would write over it without a word. So before the sheet offers to
+    /// write, the stick is read: which tracks it has changed, and which of
+    /// those have also been changed here. Only the ones changed in both places
+    /// are a question — a track changed only on the drive is not being
+    /// rewritten anyway, and one changed only here is what a sync is for.
+    ///
+    /// Reads the drive, so it is done when the sheet opens and when the button
+    /// on it is pressed, not on every frame. An image is skipped: there is no
+    /// player that could have edited one.
+    fn examine_drive(&mut self) {
+        self.clashes.clear();
+        self.settled.clear();
+        self.drive_now.clear();
+        let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
+        if drive.is_image || !drive.path.exists() {
+            return;
+        }
+
+        let found = sync::on_the_drive(&drive.path, &drive, self.config.onelibrary_key());
+        self.clashes = sync::conflicts(&self.library, &drive, &found);
+        self.drive_now = found;
+        for clash in &self.clashes {
+            self.settled.insert(clash.id, clash.default_side());
+        }
+        if !self.clashes.is_empty() {
+            crate::info!(
+                "{} on {} changed both here and on the drive",
+                plural(self.clashes.len(), "track"),
+                drive.label
+            );
+        }
+    }
+
+    /// The stamps to record for the tracks a write has just touched.
+    ///
+    /// Taken after the write rather than before it: writing a track rewrites
+    /// its analysis files, so a stamp taken beforehand describes a drive that
+    /// no longer exists and the next examination would read this program's own
+    /// write as a player's edit.
+    fn restamp_drive(&mut self) {
+        let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
+        if drive.is_image || !drive.path.exists() {
+            return;
+        }
+        let found = sync::on_the_drive(&drive.path, &drive, self.config.onelibrary_key());
+        let Some(drive) = self.library.drives.get_mut(self.drive) else { return };
+        for written in &mut drive.written {
+            if let Some(stamp) = found.get(&written.id) {
+                written.theirs = Some(stamp.clone());
+            }
+        }
     }
 
     fn selected_track(&self) -> Option<&Track> {
@@ -1721,6 +1791,7 @@ impl App {
         if let Some(track) = self.library.get_mut(id) {
             track.cues = placed;
         }
+        self.prep_changed(id);
         hot
     }
 
@@ -1828,6 +1899,9 @@ impl App {
                     // if it happens to be mounted somewhere a sweep looks.
                     let (path, label, is_image) =
                         (drive.path.clone(), drive.label.clone(), drive.is_image);
+                    // What the drive holds for each track now, so the next
+                    // sheet can tell a player's edit from this program's own.
+                    self.restamp_drive();
                     if self.config.keep_drives && !is_image {
                         let listing = crate::backup::listing(&path);
                         let state = crate::backup::digest(&listing);
@@ -1957,6 +2031,9 @@ impl App {
                         track.bitrate_kbps = bitrate(track.bytes, analyzed.duration_secs);
                         track.analyzed = true;
                     }
+                    // An analysis replaces the grid, the cues and the phrases,
+                    // which is exactly what a player can also change.
+                    self.prep_changed(analyzed.id);
                     if let Err(e) = crate::library::cache_waveform(analyzed.id, &analyzed.bands) {
                         self.note(format!("could not cache the waveform: {e}"), theme::DIM);
                     }
@@ -2140,10 +2217,36 @@ impl App {
         // playlists, which is what the plan was worked out against.
         let wanted: Vec<u32> = sync::wanted(&self.library, &drive);
 
+        // Tracks the player has edited since this drive was written, and that
+        // the person has said to leave as they are. Taken out of the plan
+        // rather than written and then put back: preparing one is what would
+        // overwrite it.
+        //
+        // Their row is carried through untouched, so the track stays on the
+        // drive and in its playlists with whatever the deck made of it.
+        let mut plan = self.plan.clone();
+        let kept_theirs: Vec<u32> = self
+            .settled
+            .iter()
+            .filter(|(_, side)| **side == sync::Side::Theirs)
+            .map(|(id, _)| *id)
+            .collect();
+        if !kept_theirs.is_empty() {
+            plan.update.retain(|(id, _)| !kept_theirs.contains(id));
+            crate::info!(
+                "leaving {} as the player left {}",
+                plural(kept_theirs.len(), "track"),
+                match kept_theirs.len() {
+                    1 => "it",
+                    _ => "them",
+                }
+            );
+        }
+
         // What is carried through from the last write and what has to be made
         // again — the rule for both, including how a stem follows its parent,
         // is in `sync::carry`.
-        let carry = sync::carry(&self.library, &drive, &self.plan);
+        let carry = sync::carry(&self.library, &drive, &plan);
 
         // Which stem came from which track, so each one takes its parent's
         // grid, cues, key and phrases rather than being listened to alone, and
@@ -2213,8 +2316,21 @@ impl App {
                 let before = drive.written.iter().find(|w| w.id == track.id);
                 Written {
                     id: track.id,
+                    // The collection's prep either way, including for a track
+                    // whose drive copy is being kept: the two have been
+                    // reconciled, by somebody saying which to keep, and asking
+                    // again on the next sync would be asking a settled
+                    // question for ever.
                     prep: sync::fingerprint(track),
                     row: before.and_then(|w| w.row.clone()),
+                    // Carried through for a track being left alone, whose files
+                    // are not about to change. For everything else it is filled
+                    // in after the write, because writing a track rewrites the
+                    // files this describes.
+                    theirs: match kept_theirs.contains(&track.id) {
+                        true => self.drive_now.get(&track.id).cloned(),
+                        false => None,
+                    },
                     // Kept only where the parent's row is: a stem being
                     // written again gets its row back from what the write
                     // reports, and one whose kit has been re-rendered names a
@@ -5086,6 +5202,7 @@ impl App {
                     if let Some(track) = self.library.get_mut(id) {
                         track.cues.retain(|cue| cue.letter != letter);
                     }
+                    self.prep_changed(id);
                     touched = true;
                 }
                 Pending::RenameCue { id, letter, label } => {
@@ -5094,6 +5211,7 @@ impl App {
                             cue.label = label;
                         }
                     }
+                    self.prep_changed(id);
                     touched = true;
                 }
             }
@@ -5359,7 +5477,24 @@ impl App {
         };
 
         let Some(track) = self.library.get_mut(id) else { return false };
-        crate::library::edit_phrases(&mut track.phrases, &snapped)
+        let changed = crate::library::edit_phrases(&mut track.phrases, &snapped);
+        if changed {
+            self.prep_changed(id);
+        }
+        changed
+    }
+
+    /// Note that a track's prep changed here, and when.
+    ///
+    /// Called from every place that moves a cue, a boundary or a grid, because
+    /// a CDJ-3000X can move the same things on the drive and the two have to be
+    /// comparable. Deliberately not called for a tag, a rating or a play count:
+    /// a player has no opinion about those, so there is nothing to disagree
+    /// about and nothing to ask.
+    fn prep_changed(&mut self, id: u32) {
+        if let Some(track) = self.library.get_mut(id) {
+            track.edited = Some(crate::library::now());
+        }
     }
 
     fn place_cue(&mut self, id: u32, letter: u8, time_ms: u32) {
@@ -5380,6 +5515,7 @@ impl App {
             }),
         }
         track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
+        self.prep_changed(id);
     }
 
     /// Write one track's names into the file's own tags.
@@ -5575,6 +5711,7 @@ impl App {
                             })
                             .clicked()
                         {
+                            self.examine_drive();
                             self.sheet = true;
                         }
                         ui.label(
@@ -7930,6 +8067,99 @@ impl App {
         }
     }
 
+    /// The tracks changed here and on the player, and which copy to keep.
+    ///
+    /// Always asked rather than decided, even where the clocks are clear about
+    /// which came later. A time is not a reason, and the one thing worse than
+    /// losing an edit is losing it without being told — so the newer one is
+    /// what each row starts on, and the person still has to look.
+    fn clashes_section(&mut self, ui: &mut Ui) {
+        let mut all: Option<sync::Side> = None;
+        ui.label(
+            RichText::new(format!(
+                "{} {} changed here and on the player since this drive was written",
+                theme::WARN,
+                plural(self.clashes.len(), "track")
+            ))
+            .font(theme::mono(11.5))
+            .color(theme::AMBER),
+        );
+        ui.label(
+            RichText::new(
+                "Keeping the drive's leaves the track exactly as the deck left it: it is not \
+                 prepared again, and its row and playlists carry through. Nothing here can read \
+                 a player's edits back, so what it changed will not appear in the collection — \
+                 which is why this asks rather than picking for you.",
+            )
+            .font(theme::mono(10.0))
+            .color(theme::DIM),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            if ui.button("Keep all mine").clicked() {
+                all = Some(sync::Side::Mine);
+            }
+            if ui.button("Keep all the drive's").clicked() {
+                all = Some(sync::Side::Theirs);
+            }
+        });
+        ui.add_space(4.0);
+
+        for clash in &self.clashes {
+            let name = self
+                .library
+                .get(clash.id)
+                .map(|track| format!("{} — {}", track.artist, track.display_title()))
+                .unwrap_or_else(|| format!("#{}", clash.id));
+            let side = self.settled.entry(clash.id).or_insert(sync::Side::Mine);
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.label(RichText::new(name).font(theme::mono(11.0)).color(theme::TEXT));
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                ui.radio_value(
+                    side,
+                    sync::Side::Mine,
+                    format!("mine, {}", how_long_ago(clash.mine)),
+                );
+                ui.radio_value(
+                    side,
+                    sync::Side::Theirs,
+                    format!("the drive's, {}", how_long_ago(clash.theirs)),
+                );
+            });
+        }
+
+        if let Some(side) = all {
+            for clash in &self.clashes {
+                self.settled.insert(clash.id, side);
+            }
+        }
+
+        let leaving = self.settled.values().filter(|side| **side == sync::Side::Theirs).count();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            ui.label(
+                RichText::new(match leaving {
+                    0 => "All of them will be written from the collection.".to_string(),
+                    n => format!(
+                        "{} will be left as the player left {} and not written.",
+                        plural(n, "track"),
+                        match n {
+                            1 => "it",
+                            _ => "them",
+                        }
+                    ),
+                })
+                .font(theme::mono(10.5))
+                .color(theme::DIM),
+            );
+        });
+    }
+
     fn sync_sheet(&mut self, ctx: &egui::Context) {
         let Some(drive) = self.library.drives.get(self.drive).cloned() else {
             self.sheet = false;
@@ -8066,6 +8296,11 @@ impl App {
                                     .color(theme::TEXT),
                             );
                         });
+                    }
+
+                    if !self.clashes.is_empty() {
+                        ui.add_space(12.0);
+                        self.clashes_section(ui);
                     }
 
                     ui.add_space(6.0);
@@ -8345,6 +8580,22 @@ fn beat_at(track: &Track, at_ms: u32) -> Option<usize> {
     Some(index.min(track.beats.saturating_sub(1)))
 }
 
+/// How long ago a moment was, in the roughest terms that are still useful.
+///
+/// For putting two edits beside each other and saying which came later, which
+/// is a comparison nobody makes in seconds. An unknown time says so rather than
+/// pretending to be the epoch.
+fn how_long_ago(at: Option<u64>) -> String {
+    let Some(at) = at else { return "at some point".to_string() };
+    let seconds = crate::library::now().saturating_sub(at);
+    match seconds {
+        0..=90 => "just now".to_string(),
+        91..=5_400 => format!("{} minutes ago", seconds / 60),
+        5_401..=172_800 => format!("{} hours ago", seconds / 3_600),
+        _ => format!("{} days ago", seconds / 86_400),
+    }
+}
+
 /// A position in a track, as minutes, seconds and hundredths.
 fn time_text(ms: u32) -> String {
     let total = ms / 1000;
@@ -8485,6 +8736,48 @@ mod tests {
                 dir.join("config.json"),
                 String::new(),
             )
+        }
+
+        /// Noting when the prep changed, which is half of telling a player's
+        /// edit from one made here.
+        mod when_it_changed {
+            use super::*;
+
+            fn one_track(name: &str) -> (App, u32) {
+                let mut app = app(name);
+                let id = app.library.add(std::path::Path::new("/music/track.flac"));
+                let track = app.library.get_mut(id).unwrap();
+                track.bpm = 120.0;
+                track.has_grid = true;
+                track.analyzed = true;
+                track.duration_secs = 300.0;
+                app.rebuild();
+                (app, id)
+            }
+
+            #[test]
+            fn placing_a_cue_says_when() {
+                let (mut app, id) = one_track("stamped");
+                assert_eq!(app.library.get(id).unwrap().edited, None, "nothing has happened yet");
+
+                app.place_cue(id, 1, 4_000);
+                assert!(
+                    app.library.get(id).unwrap().edited.is_some(),
+                    "a moved cue with no time on it cannot be compared with the drive's"
+                );
+            }
+
+            #[test]
+            fn a_tag_is_not_a_change_a_player_could_disagree_about() {
+                // Only the things a drive carries and a deck can edit count.
+                // Stamping a rating would turn every one into a question about
+                // a drive nobody has touched.
+                let (mut app, id) = one_track("untouched");
+                let track = app.library.get_mut(id).unwrap();
+                track.tags.push("peak".into());
+                track.play_count += 1;
+                assert_eq!(app.library.get(id).unwrap().edited, None);
+            }
         }
 
         /// Cues placed off what is sung, rather than off what is played.

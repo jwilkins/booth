@@ -384,6 +384,18 @@ pub struct Track {
     pub role: Role,
     /// For a stem companion, the track it belongs to.
     pub parent: Option<u32>,
+    /// When the prep last changed here, in seconds since the epoch.
+    ///
+    /// Not when the record changed — a tag, a rating or a play count is not
+    /// something a player holds an opinion about. This is the grid, the cues,
+    /// the phrases and the key: the things a drive carries and a CDJ-3000X can
+    /// also edit. When both have moved since the last sync, this is one half of
+    /// saying which is the newer, and the other half is on the drive.
+    ///
+    /// `None` on a track nothing has edited, which is not the same as one
+    /// edited long ago.
+    #[serde(default)]
+    pub edited: Option<u64>,
     /// Whether the analysers have run. An unanalysed track has no grid, no key
     /// and no cues, which is different from having been analysed and found to
     /// have none.
@@ -464,6 +476,7 @@ impl Track {
             phrases: Vec::new(),
             cues: Vec::new(),
             lyrics: Vec::new(),
+            edited: None,
             loudness_lufs: None,
             peak_dbtp: None,
             tags: Vec::new(),
@@ -841,15 +854,61 @@ pub struct SavedQuery {
     pub text: String,
 }
 
+/// What the drive was holding for one track, the last time anything looked.
+///
+/// A CDJ-3000X can move a cue, re-grid a track or rename a phrase on the deck,
+/// and it writes the result back to the stick. Nothing here can tell what it
+/// changed — reading a player's edits back is not something this build does —
+/// but it can tell *that* something did, which is the difference between
+/// overwriting somebody's work in silence and asking first.
+///
+/// Two independent pieces of evidence, because neither is enough alone. The
+/// counters are the field the format keeps for exactly this question and are
+/// the right thing to read; what a player actually writes into them is not
+/// documented and nobody has published a reading of one, so a drive that shows
+/// no change there has not said it was not edited. The analysis files cannot
+/// argue: a player that rewrote a track's cues rewrote the file that holds
+/// them, whatever the database says about it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamp {
+    /// The track's analysis files, as `name:size:modified`, in the order
+    /// [`crate::sync::analysis_files`] looks for them.
+    pub files: Vec<String>,
+    /// `hasModified`, `cueUpdateCount`, `analysisDataUpdateCount` and
+    /// `informationUpdateCount` from the OneLibrary row, when the drive has one
+    /// and it could be opened. Empty when it could not, which is not the same
+    /// as four zeroes.
+    #[serde(default)]
+    pub counts: Vec<i64>,
+    /// The newest modification time among those files, in seconds since the
+    /// epoch. What the drive's side of "which was edited more recently" is.
+    #[serde(default)]
+    pub at: Option<u64>,
+}
+
+impl Stamp {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.counts.is_empty()
+    }
+}
+
 /// One track as it was written to a drive.
 ///
 /// The fingerprint is what makes an update distinguishable from an addition
 /// without re-reading the drive: it summarises the prep the player will see, so
 /// a moved cue marks the track for rewriting and a play count does not.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Written {
     pub id: u32,
     pub prep: u64,
+    /// What the drive was holding for this track when the two last agreed.
+    ///
+    /// Absent for a drive written before this was recorded, and for a track
+    /// whose files could not be found. Absent means no evidence rather than no
+    /// change: a drive that cannot be asked is never treated as having
+    /// answered, so nothing is refused on the strength of it.
+    #[serde(default)]
+    pub theirs: Option<Stamp>,
     /// The row this track has in the drive's own database.
     ///
     /// Kept because a second write is only given what changed — preparing a

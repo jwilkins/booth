@@ -752,6 +752,58 @@ command: the database and every analysis file are read back off the drive by a
 parser that shares no code with the writer. Until that passes, the drive is not
 finished.
 
+### What goes on the drive is what the collection says
+
+The exporter listens to every file it prepares, because it has to — the waveform
+is of the audio and nothing else can supply it. But it used to write *everything*
+it heard, including the cues and the phrases, so a cue moved by hand was
+faithfully marked as changed, faithfully rewritten, and faithfully replaced with
+whatever the analyser thought that time. The edit went nowhere and nothing said
+so.
+
+Now the collection's cues, phrases, key and tempo are what get written, and the
+measured ones are the fallback for a track that has none. Cue names and colours
+go with them, which they never did before — so renaming a cue now counts as a
+change the drive has not got. **The first sync after this upgrade reports every
+track as changed**, once, because the drive genuinely does not have them.
+
+### When the player has edited it too
+
+A CDJ-3000X can move a cue, re-grid a track or rename a phrase on the deck, and
+it writes that back to the stick. So a sync is not a copy — it is two sides that
+may both have moved.
+
+Opening the sync sheet reads the drive first: for each track it was written, the
+analysis files beside it and the `hasModified`, `cueUpdateCount`,
+`analysisDataUpdateCount` and `informationUpdateCount` columns in the OneLibrary
+database. Two independent pieces of evidence, because neither is enough alone.
+The counters are the field the format keeps for exactly this question — but what
+a player writes into them is not documented and nobody has published a reading
+of one, so a drive showing no change there has not said it was not edited. The
+analysis files cannot argue: a deck that rewrote a track's cues rewrote the file
+that holds them.
+
+Three cases, and only one of them is a question:
+
+- **Changed only here** — the sync writes it, as it always did.
+- **Changed only on the drive** — nothing here changed, so nothing here is
+  going to be written over it, and the sheet says nothing.
+- **Changed in both places** — the sheet asks. Each track is listed with when
+  each side was last edited, starting on whichever is the later, and there are
+  buttons to take all of one side.
+
+Keeping the drive's copy leaves the track exactly as the deck left it: it is not
+prepared again, and its row and its place in the playlists carry through
+untouched. The decision is recorded, so a settled question is not asked again on
+every sync.
+
+Two limits worth knowing. **Nothing here can read a player's edits back into the
+collection** — the analysis files are written but not parsed — so keeping the
+drive's copy protects it without showing you what it is. And a drive written by
+a build from before this existed has no record of what it looked like, so its
+tracks are never treated as edited: no evidence is not evidence of a change, and
+the alternative would make every older drive unwritable.
+
 ## The collection against its files
 
 A collection is a set of claims about files other programs can also move,
@@ -955,6 +1007,14 @@ drive played only on older hardware has a history nothing here can see.
   its confidence for that reason.
 - Cues and grids are never written back to the source files — they live in the
   collection and on the drive. Names can be, on request.
+- A player's own edits can be detected but not read. When a track has been
+  changed on the deck and in the collection, the sheet can protect the drive's
+  copy by leaving it alone; it cannot bring what the deck did back into the
+  collection, because nothing here parses an analysis file it has written.
+- What a CDJ-3000X actually writes into the OneLibrary edit counters after an
+  edit on the deck has not been published by anyone, so the file timestamps are
+  doing most of the work. A deck that edited a track without touching its
+  analysis files would go unnoticed.
 - One deck, and no pitch, sync or mixing — it is for auditioning, not
   performing. The spec asks for two decks eventually.
 - Playback resamples linearly, which is right for auditioning and is not what
