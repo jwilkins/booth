@@ -1166,6 +1166,19 @@ impl App {
                     taken += 1;
                 }
             }
+
+            // The reconciliation, recorded here rather than left to the write:
+            // taking the drive's copy *is* the two sides agreeing, and it has
+            // to hold even when there turns out to be nothing else to write.
+            // Without this the same question comes back on every sync.
+            let Some(track) = self.library.get(id) else { continue };
+            let settled = (sync::fingerprint(track), self.drive_now.get(&id).cloned());
+            if let Some(drive) = self.library.drives.get_mut(self.drive) {
+                if let Some(written) = drive.written.iter_mut().find(|w| w.id == id) {
+                    written.prep = settled.0;
+                    written.theirs = settled.1;
+                }
+            }
         }
 
         if taken > 0 {
