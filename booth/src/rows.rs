@@ -500,6 +500,8 @@ pub enum Action {
     Analyze,
     Identify,
     Separate,
+    /// Read the vocal stem and cue what it finds.
+    AutoCue,
     CopyIn,
     Reveal,
     /// Take it out of the playlist being shown, leaving it in the collection.
@@ -523,6 +525,8 @@ impl Action {
             Action::Identify => "Look up tags",
             Action::Separate if !track.stems.is_empty() => "Render stems again",
             Action::Separate => "Render stems",
+            Action::AutoCue if !track.lyrics.is_empty() => "Cue from the words again",
+            Action::AutoCue => "Cue from the words",
             Action::AddTo(_) | Action::AddToNew => "Add to playlist",
             Action::CopyIn => "Copy into the library",
             Action::Reveal => "Copy the file path",
@@ -702,6 +706,7 @@ pub fn row(
             Action::Analyze,
             Action::Identify,
             Action::Separate,
+            Action::AutoCue,
         ];
         if !menu.in_library {
             items.push(Action::CopyIn);

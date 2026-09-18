@@ -302,6 +302,10 @@ pub struct App {
     /// the first: companion ids use the top bit too, so a bit that meant
     /// "stems" would sometimes also mean "acapella of track 3".
     re_enveloped: std::collections::HashSet<u32>,
+    /// Tracks that asked for cues from their words before they had a vocal
+    /// stem to read. They are waiting on a separation; when it lands, the
+    /// recogniser is what happens next.
+    want_cues: std::collections::HashSet<u32>,
     /// Where the playhead sits in the selected track, in milliseconds. It is
     /// where a new cue goes, so it is a position rather than a playing thing —
     /// nothing here makes a sound.
@@ -415,6 +419,9 @@ enum Pending {
     Identify(u32),
     /// Render one track's stem kit.
     Separate(u32),
+    /// Set one track's cues from its sections and its words, rendering the
+    /// vocal stem and reading it first if that has not been done.
+    AutoCue(u32),
     /// Put one track's path on the clipboard.
     CopyPath(u32),
     /// Show the whole track again.
@@ -617,6 +624,7 @@ impl App {
             unlike: Vec::new(),
             remeasured: std::collections::HashSet::new(),
             re_enveloped: std::collections::HashSet::new(),
+            want_cues: std::collections::HashSet::new(),
             playhead_ms: None,
             cue_entry: (None, String::new()),
             pending: Vec::new(),
@@ -1591,6 +1599,140 @@ impl App {
         self.separate_tracks(&waiting);
     }
 
+    // -- cues from the words -----------------------------------------------
+
+    /// Set cues from a track's sections and from what is sung over them.
+    ///
+    /// Three steps, each skipped when it has already been taken: render the
+    /// stems, read the vocal one, place the cues. Only the last is instant,
+    /// which is why the words are kept in the collection once they have been
+    /// heard — a track whose lyrics are known is re-cued with no job at all.
+    ///
+    /// Returns whether the collection changed here and now, as opposed to work
+    /// having been queued that will change it later.
+    fn auto_cue_tracks(&mut self, ids: &[u32]) -> bool {
+        // A companion row has no cues of its own; it shows its parent's. So
+        // asking for cues on an acapella is asking for them on the record.
+        let mut wanted: Vec<u32> = ids.iter().map(|id| crate::library::family(*id)).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        let mut known = Vec::new();
+        let mut reading = Vec::new();
+        let mut rendering = Vec::new();
+        for id in wanted {
+            let Some(track) = self.library.get(id) else { continue };
+            if !track.lyrics.is_empty() {
+                known.push(id);
+            } else if let Some(vocals) = track.stems.vocals.clone() {
+                reading.push(job::Transcribable { id, vocals });
+            } else {
+                rendering.push(id);
+            }
+        }
+
+        let mut placed = 0;
+        for id in &known {
+            placed += self.auto_cue(*id);
+        }
+        if !known.is_empty() {
+            self.note(
+                format!("{} from words already read", crate::library::plural(placed, "cue")),
+                theme::TEXT,
+            );
+        }
+
+        if reading.is_empty() && rendering.is_empty() {
+            return !known.is_empty();
+        }
+        // Asked once, before any of the minutes are spent. A separation that
+        // finishes and only then finds there is no recogniser to hand the stem
+        // to has wasted the expensive half of the work.
+        if let Err(why) = self.config.whisper.ready() {
+            self.note(why, theme::AMBER);
+            return !known.is_empty();
+        }
+        if !rendering.is_empty() {
+            self.want_cues.extend(rendering.iter().copied());
+            self.note(
+                format!(
+                    "rendering stems for {} first",
+                    crate::library::plural(rendering.len(), "track")
+                ),
+                theme::DIM,
+            );
+            self.separate_tracks(&rendering);
+        }
+        if !reading.is_empty() {
+            self.read_words(reading);
+        }
+        !known.is_empty()
+    }
+
+    /// Hand stems that are already on disk to the recogniser.
+    fn read_words(&mut self, tracks: Vec<job::Transcribable>) {
+        crate::info!("reading the words off {}", crate::library::plural(tracks.len(), "track"));
+        self.start(Job::Transcribe { tracks, whisper: self.config.whisper.clone() });
+    }
+
+    /// Set one track's cues from everything known about it, and say how many
+    /// hot cues that came to.
+    ///
+    /// Two sources: the sections the phrase analysis found, and the moments the
+    /// words did — where the singing starts, where the line the track repeats
+    /// most first lands, and every time it comes back. Which eight of those a
+    /// player ends up holding is the engine's decision rather than this one, so
+    /// that a cue set placed here and a cue set placed by the analyser mean the
+    /// same thing and are the same colours.
+    ///
+    /// The hot cues are replaced wholesale. The memory cue is not: it is what
+    /// the grid is anchored to, and moving it would move every bar line in the
+    /// track.
+    fn auto_cue(&mut self, id: u32) -> usize {
+        use booth_cli::analysis::cues::{self, Candidate, Reason};
+        use booth_cli::analysis::structure::Kind;
+
+        let Some(track) = self.library.get(id) else { return 0 };
+        let beats = beat_times(track);
+        let mut candidates: Vec<Candidate> = track
+            .phrases
+            .iter()
+            .filter_map(|phrase| {
+                let kind = Kind::from_label(&phrase.kind)?;
+                Some(Candidate::new(snap_to(&beats, phrase.start_ms, 4), Reason::Section(kind)))
+            })
+            .collect();
+        for moment in crate::library::transcript(&track.lyrics).moments() {
+            let mut candidate = cues::from_moment(&moment);
+            candidate.time_ms = snap_back(&beats, candidate.time_ms);
+            candidates.push(candidate);
+        }
+
+        let start = track
+            .cues
+            .iter()
+            .find(|cue| cue.letter == 0)
+            .map(|cue| cue.time_ms)
+            .or_else(|| beats.first().copied())
+            .unwrap_or(0);
+        let placed = crate::job::cue_marks(&cues::assemble(start, candidates));
+        let hot = placed.iter().filter(|cue| cue.letter != 0).count();
+
+        if let Some(track) = self.library.get_mut(id) {
+            track.cues = placed;
+        }
+        hot
+    }
+
+    fn auto_cue_showing(&mut self) {
+        let waiting = self.acting_on(|track| track.lyrics.is_empty());
+        if waiting.is_empty() {
+            self.note("the words have been read for everything showing", theme::DIM);
+            return;
+        }
+        self.auto_cue_tracks(&waiting);
+    }
+
     fn collect(&mut self) {
         let Some(runner) = &self.runner else { return };
         let updates = runner.drain();
@@ -1602,6 +1744,10 @@ impl App {
         // What this job brought in, so that the copy-in policy can be applied
         // to it once, when the import is done rather than per file.
         let mut imported: Vec<u32> = Vec::new();
+        // Stems that finished for a track which is waiting on its words. The
+        // reading is queued once, after the whole batch has been folded in,
+        // rather than a job per track as each kit lands.
+        let mut to_read: Vec<job::Transcribable> = Vec::new();
 
         for update in updates {
             match update {
@@ -1820,8 +1966,46 @@ impl App {
                     changed = true;
                 }
                 Update::Separated { id, kit } => {
+                    // Read before it is moved in, because what happens next
+                    // depends on whether the part the recogniser needs is
+                    // among what was rendered.
+                    let vocals = kit.vocals.clone();
                     if let Some(track) = self.library.get_mut(id) {
                         track.stems = kit;
+                    }
+                    if self.want_cues.remove(&id) {
+                        match vocals {
+                            Some(vocals) => to_read.push(job::Transcribable { id, vocals }),
+                            None => self.note(
+                                "the separation produced no vocal stem to read",
+                                theme::AMBER,
+                            ),
+                        }
+                    }
+                    changed = true;
+                }
+                Update::Transcribed { id, lyrics } => {
+                    let heard = lyrics.len();
+                    if let Some(track) = self.library.get_mut(id) {
+                        track.lyrics = lyrics;
+                    }
+                    // Said plainly, because an empty transcript is a real
+                    // answer and looks exactly like a failure from outside: a
+                    // track that turns out to have no words should say so
+                    // rather than leave somebody waiting for cues.
+                    match heard {
+                        0 => self.note("nothing sung was made out", theme::DIM),
+                        _ => {
+                            let placed = self.auto_cue(id);
+                            self.note(
+                                format!(
+                                    "{} heard, {}",
+                                    crate::library::plural(heard, "line"),
+                                    crate::library::plural(placed, "cue")
+                                ),
+                                theme::TEXT,
+                            );
+                        }
                     }
                     changed = true;
                 }
@@ -1891,6 +2075,9 @@ impl App {
         if !imported.is_empty() {
             self.ensure_local(&imported);
             self.check_compatibility(&imported);
+        }
+        if !to_read.is_empty() {
+            self.read_words(to_read);
         }
         if changed {
             self.rebuild();
@@ -3472,6 +3659,18 @@ impl App {
             {
                 self.render_stems();
             }
+            let unread = self.acting_on(|track| track.lyrics.is_empty()).len();
+            if ui
+                .add_enabled(idle && unread > 0, egui::Button::new(format!("Words {unread}")))
+                .on_hover_text(
+                    "Read the vocal stem and cue the hook, the drops and the phrases \u{2014} \
+                     rendering the stems first where there are none",
+                )
+                .on_disabled_hover_text("The words have been read for everything showing")
+                .clicked()
+            {
+                self.auto_cue_showing();
+            }
             // Reads rather than changes anything, so it sits at the end of the
             // strip after the three that do. Shift for the thorough version:
             // one modifier beats a second button for the same verb.
@@ -3787,6 +3986,7 @@ impl App {
                     rows::Action::Analyze => Pending::Analyze(id),
                     rows::Action::Identify => Pending::Identify(id),
                     rows::Action::Separate => Pending::Separate(id),
+                    rows::Action::AutoCue => Pending::AutoCue(id),
                     rows::Action::CopyIn => Pending::Adopt(id),
                     rows::Action::Reveal => Pending::CopyPath(id),
                     rows::Action::RemoveFromPlaylist => {
@@ -3932,6 +4132,25 @@ impl App {
                 },
                 track.stems.is_complete(),
             );
+            // What the recogniser made of the vocal stem, and what it decided
+            // the hook was. Shown because a hook found in a badly heard
+            // transcript is a cue in the wrong place, and the only way to know
+            // that has happened is to be told what it thinks it heard.
+            let heard = crate::library::transcript(&track.lyrics);
+            measurement(
+                ui,
+                "words",
+                &match (track.lyrics.len(), heard.hook()) {
+                    (0, _) => "not read".to_string(),
+                    (lines, Some(hook)) => format!(
+                        "{lines} lines \u{b7} {}\u{d7} \u{201c}{}\u{201d}",
+                        hook.times(),
+                        hook.text
+                    ),
+                    (lines, None) => format!("{lines} lines \u{b7} nothing repeats"),
+                },
+                !track.lyrics.is_empty(),
+            );
         });
 
         // The same three jobs the toolbar runs over everything showing, aimed
@@ -3980,6 +4199,18 @@ impl App {
                 "Separate it into vocals, melody and drums. Minutes, not seconds.",
             ) {
                 self.pending.push(Pending::Separate(track.id));
+            }
+            if offer(
+                ui,
+                if track.lyrics.is_empty() {
+                    "Cue from the words"
+                } else {
+                    "Cue from the words again"
+                },
+                "Read the vocal stem, find the line it keeps coming back to, and cue that, \
+                 the drops and the phrases. Replaces the hot cues it has.",
+            ) {
+                self.pending.push(Pending::AutoCue(track.id));
             }
         });
 
@@ -4704,6 +4935,7 @@ impl App {
                 Pending::Analyze(id) => self.analyze_tracks(&[id]),
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
+                Pending::AutoCue(id) => touched |= self.auto_cue_tracks(&[id]),
                 Pending::CopyPath(id) => {
                     // A companion's path is its stems, not its parent's file:
                     // copying the mix's path off an acapella row would be a
@@ -7215,6 +7447,74 @@ impl App {
                     );
 
                     ui.add_space(14.0);
+                    pane_label(ui, "Words");
+                    ui.label(
+                        RichText::new(
+                            "Cueing a track by what is sung on it needs a speech recogniser, \
+                         and Booth does not ship one or download one. Install whisper.cpp \
+                         and point at a ggml model file, or install OpenAI's `whisper` and \
+                         name the program `whisper` here. Everything else in the program \
+                         works without this; only the words need it.",
+                        )
+                        .color(theme::DIM)
+                        .size(theme::SMALL),
+                    );
+                    let mut program = self.config.whisper.program.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut program)
+                                .desired_width(ui.available_width())
+                                .hint_text("whisper-cli, or a path to it")
+                                .font(theme::mono(11.0)),
+                        )
+                        .on_hover_text(
+                            "Which of the two it is comes from this name: `whisper` is \
+                             OpenAI's, anything else is whisper.cpp. BOOTH_WHISPER_BIN when \
+                             this is empty.",
+                        )
+                        .changed()
+                    {
+                        self.config.whisper.program = program.trim().to_string();
+                        changed = true;
+                    }
+                    let mut model = self.config.whisper.model.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut model)
+                                .desired_width(ui.available_width())
+                                .hint_text("path to ggml-base.en.bin, or a model name")
+                                .font(theme::mono(11.0)),
+                        )
+                        .on_hover_text(
+                            "whisper.cpp cannot run without a model file. OpenAI's picks its \
+                             own from a name like `small` or `turbo`. BOOTH_WHISPER_MODEL \
+                             when this is empty.",
+                        )
+                        .changed()
+                    {
+                        self.config.whisper.model = model.trim().to_string();
+                        changed = true;
+                    }
+                    let mut language = self.config.whisper.language.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut language)
+                                .desired_width(ui.available_width())
+                                .hint_text("en")
+                                .font(theme::mono(11.0)),
+                        )
+                        .on_hover_text(
+                            "Worth setting. Left to itself the recogniser guesses the language \
+                             off the first few seconds, and the first few seconds of an \
+                             isolated vocal are usually a breath.",
+                        )
+                        .changed()
+                    {
+                        self.config.whisper.language = language.trim().to_string();
+                        changed = true;
+                    }
+
+                    ui.add_space(14.0);
                     pane_label(ui, "rekordbox");
                     ui.label(
                         RichText::new(
@@ -8051,6 +8351,18 @@ fn snap_to(beats: &[u32], time_ms: u32, every: usize) -> u32 {
     candidates.iter().min_by_key(|beat| beat.abs_diff(time_ms)).copied().unwrap_or(time_ms)
 }
 
+/// The last beat at or before a moment, rather than the nearest one.
+///
+/// For a cue placed off the words. A sung line rarely starts on the beat — a
+/// pickup is the whole point of a pickup — and a recogniser's idea of where a
+/// line starts is already a little late, because it trims the breath before it.
+/// Rounding to the nearest beat can therefore land after the first word, and a
+/// hook cue that clips its own first word is one nobody presses twice. So this
+/// rounds down. Falls back to the moment itself where there is no grid.
+fn snap_back(beats: &[u32], time_ms: u32) -> u32 {
+    beats.iter().rev().find(|beat| **beat <= time_ms).copied().unwrap_or(time_ms)
+}
+
 fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
@@ -8163,6 +8475,151 @@ mod tests {
                 dir.join("config.json"),
                 String::new(),
             )
+        }
+
+        /// Cues placed off what is sung, rather than off what is played.
+        mod from_the_words {
+            use super::*;
+            use crate::library::{Lyric, Phrase, Role};
+
+            /// A window holding one analysed track: a grid, two phrases, and
+            /// whatever has already been heard on its vocal stem.
+            ///
+            /// 120 BPM, so a beat is 500 ms and a bar is two seconds, and the
+            /// arithmetic in these tests can be done in the head.
+            fn sung(name: &str, lyrics: &[(u32, &str)]) -> (App, u32) {
+                let mut app = app(name);
+                // A real file: everything that spends minutes on a track
+                // checks first that it is still where the collection says.
+                let path = app.library_path.with_file_name("track.flac");
+                std::fs::write(&path, b"not really a flac").unwrap();
+
+                let id = app.library.add(&path);
+                let track = app.library.get_mut(id).unwrap();
+                track.bpm = 120.0;
+                track.has_grid = true;
+                track.analyzed = true;
+                track.beats = 600;
+                track.duration_secs = 300.0;
+                track.cues =
+                    vec![CueMark { letter: 0, time_ms: 0, label: String::new(), color: [0; 3] }];
+                track.phrases = vec![
+                    Phrase { start_ms: 0, end_ms: 32_000, kind: "intro".into() },
+                    Phrase { start_ms: 32_000, end_ms: 64_000, kind: "drop".into() },
+                ];
+                track.lyrics = lyrics
+                    .iter()
+                    .map(|&(start_ms, text)| Lyric {
+                        start_ms,
+                        end_ms: start_ms + 2_000,
+                        text: text.to_string(),
+                    })
+                    .collect();
+                app.rebuild();
+                (app, id)
+            }
+
+            fn labels(app: &App, id: u32) -> Vec<String> {
+                app.library
+                    .get(id)
+                    .unwrap()
+                    .cues
+                    .iter()
+                    .filter(|cue| cue.letter != 0)
+                    .map(|cue| cue.label.clone())
+                    .collect()
+            }
+
+            #[test]
+            fn the_line_the_track_keeps_coming_back_to_becomes_a_cue() {
+                let (mut app, id) = sung(
+                    "hook",
+                    &[
+                        (20_000, "walking through the city at night"),
+                        (40_100, "hold me closer now"),
+                        (100_100, "hold me closer now"),
+                        (160_100, "hold me closer now"),
+                    ],
+                );
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let hook = cues
+                    .iter()
+                    .find(|cue| cue.label == "hold me closer now")
+                    .unwrap_or_else(|| panic!("the hook was not cued: {cues:?}"));
+                // On the beat before the first word rather than the nearest
+                // one, so the cue cannot land after the word it is for.
+                assert_eq!(hook.time_ms, 40_000);
+                // And its returns are cued too.
+                assert_eq!(
+                    cues.iter().filter(|cue| cue.label == "hold me closer now").count(),
+                    3,
+                    "{cues:?}"
+                );
+            }
+
+            #[test]
+            fn a_line_said_once_is_not_cued_as_a_hook() {
+                let (mut app, id) = sung(
+                    "once",
+                    &[(20_000, "walking through the city at night"), (60_000, "and then home")],
+                );
+                app.auto_cue(id);
+                let placed = labels(&app, id);
+                assert!(
+                    placed.iter().all(|label| !label.contains("city")),
+                    "a line nobody repeats is not a hook: {placed:?}"
+                );
+                // The voice arriving is still worth a cue.
+                assert!(placed.iter().any(|label| label == "vocal"), "{placed:?}");
+            }
+
+            #[test]
+            fn a_track_with_no_words_still_gets_its_phrases_cued() {
+                let (mut app, id) = sung("phrases", &[]);
+                app.auto_cue(id);
+                assert_eq!(labels(&app, id), vec!["intro".to_string(), "drop".to_string()]);
+            }
+
+            #[test]
+            fn the_memory_cue_is_left_where_the_grid_is_anchored() {
+                // Every bar line in the track is measured from it, so an
+                // auto-cue pass that moved it would silently re-grid the
+                // record.
+                let (mut app, id) = sung("anchor", &[]);
+                app.library.get_mut(id).unwrap().cues[0].time_ms = 317;
+                app.auto_cue(id);
+
+                let cues = &app.library.get(id).unwrap().cues;
+                assert_eq!(cues[0].letter, 0);
+                assert_eq!(cues[0].time_ms, 317);
+            }
+
+            #[test]
+            fn asking_an_acapella_for_cues_asks_the_record_it_came_from() {
+                let (mut app, id) = sung(
+                    "acapella",
+                    &[(40_100, "hold me closer now"), (100_100, "hold me closer now")],
+                );
+                let acapella = crate::library::companion_id(id, Role::Vocals);
+                assert!(app.auto_cue_tracks(&[acapella]), "the row did nothing");
+
+                let placed = labels(&app, id);
+                assert!(placed.iter().any(|label| label == "hold me closer now"), "{placed:?}");
+            }
+
+            #[test]
+            fn a_track_with_no_vocal_stem_is_remembered_until_it_has_one() {
+                let (mut app, id) = sung("render", &[]);
+                app.config.whisper.model = "/models/ggml-base.en.bin".into();
+
+                assert!(!app.auto_cue_tracks(&[id]), "nothing can be cued yet");
+                assert!(
+                    app.want_cues.contains(&id),
+                    "the track was not remembered, so its words will never be read"
+                );
+            }
         }
 
         /// Click the named button, type into the field it opens, press a key,

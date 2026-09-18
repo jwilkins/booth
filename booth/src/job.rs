@@ -44,6 +44,8 @@ pub enum Job {
         backend: Backend,
         quality: booth_cli::cli::StemQuality,
     },
+    /// Read the words off tracks' vocal stems.
+    Transcribe { tracks: Vec<Transcribable>, whisper: crate::config::Whisper },
     /// Decode one track into memory so it can be auditioned.
     Decode {
         id: u32,
@@ -116,10 +118,21 @@ impl Job {
             Job::Verify { .. } => "checking the collection",
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
+            Job::Transcribe { .. } => "reading the words",
             Job::Sync { .. } => "writing",
             Job::Keep { .. } => "copying a drive",
         }
     }
+}
+
+/// A track to read the words off, and the stem to read them off.
+///
+/// The vocal stem rather than the mix. A recogniser handed a club record
+/// transcribes the kick drum, and the whole reason this waits on a separation
+/// is that an isolated voice is the only thing it has a chance with.
+pub struct Transcribable {
+    pub id: u32,
+    pub vocals: PathBuf,
 }
 
 /// A track whose file should be copied into the library.
@@ -208,6 +221,12 @@ pub enum Update {
     Separated {
         id: u32,
         kit: StemKit,
+    },
+    /// A vocal stem has been through the recogniser. Empty lines are a real
+    /// answer: it means nothing was sung, or nothing could be made out.
+    Transcribed {
+        id: u32,
+        lyrics: Vec<crate::library::Lyric>,
     },
     Progress {
         done: usize,
@@ -408,19 +427,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
         })
         .collect();
 
-    let cues = analysis
-        .cues
-        .iter()
-        .map(|cue| CueMark {
-            letter: cue.hot_cue,
-            time_ms: cue.time_ms,
-            label: cue.comment.clone().unwrap_or_default(),
-            color: cue
-                .color
-                .map(|rgb| [rgb.r, rgb.g, rgb.b])
-                .unwrap_or_else(|| cue_color(cue.hot_cue)),
-        })
-        .collect();
+    let cues = cue_marks(&analysis.cues);
 
     // The energy meter reads the loudest stretch rather than the average: what
     // decides where a record sits in a crate is how hard it goes at its peak,
@@ -454,6 +461,25 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
 fn beat_time(beats: &[u32], beat_number: u16) -> u32 {
     let index = beat_number.saturating_sub(1) as usize;
     beats.get(index).copied().unwrap_or_else(|| beats.last().copied().unwrap_or(0))
+}
+
+/// The engine's cues, as the collection keeps them.
+///
+/// Shared by the analyser and by the auto-cue pass that runs off a track's
+/// words, so that a cue means the same thing and is the same colour whichever
+/// of the two placed it.
+pub fn cue_marks(cues: &[booth_cli::export::Cue]) -> Vec<CueMark> {
+    cues.iter()
+        .map(|cue| CueMark {
+            letter: cue.hot_cue,
+            time_ms: cue.time_ms,
+            label: cue.comment.clone().unwrap_or_default(),
+            color: cue
+                .color
+                .map(|rgb| [rgb.r, rgb.g, rgb.b])
+                .unwrap_or_else(|| cue_color(cue.hot_cue)),
+        })
+        .collect()
 }
 
 pub fn cue_color(letter: u8) -> [u8; 3] {
@@ -812,6 +838,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Separate { tracks, stems_in, backend, quality } => {
             separate(&tracks, &stems_in, backend, quality, reporter)
         }
+        Job::Transcribe { tracks, whisper } => transcribe(&tracks, &whisper, reporter),
         Job::Sync { args, files } => {
             // The file list was settled when the plan was drawn up, so the
             // command is told exactly what to write rather than walking a
@@ -1288,6 +1315,66 @@ fn separate(
                 let _ = reporter
                     .tx
                     .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
+            }
+        }
+        batch.finished_one();
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// Read the words off each track's vocal stem.
+///
+/// One at a time, with a scratch directory each that is cleaned up either way:
+/// the recogniser writes a converted copy of the audio next to its transcript,
+/// and a job that leaves a wav per track behind in the temp directory is a job
+/// that fills a disk over a library.
+fn transcribe(
+    tracks: &[Transcribable],
+    whisper: &crate::config::Whisper,
+    reporter: &Channel,
+) -> anyhow::Result<()> {
+    let batch = Batch {
+        inner: reporter,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        total: tracks.len(),
+    };
+    for track in tracks {
+        if reporter.cancelled() {
+            break;
+        }
+        batch.starting();
+
+        let work = std::env::temp_dir().join(format!("booth-words-{}", track.id));
+        let _ = std::fs::remove_dir_all(&work);
+        let config = whisper.to_cli(work.clone());
+        crate::info!(
+            "reading the words off {}",
+            track.vocals.file_name().unwrap_or_default().to_string_lossy()
+        );
+
+        let outcome =
+            booth_cli::transcribe::whisper::transcribe(&track.vocals, &config, &|percent| {
+                let _ = reporter.tx.send(Update::Step { percent });
+                (reporter.wake)();
+            });
+        let _ = std::fs::remove_dir_all(&work);
+
+        match outcome {
+            Ok(transcript) => {
+                crate::debug!(
+                    "#{}: {}, hook {:?}",
+                    track.id,
+                    crate::library::plural(transcript.lines.len(), "line"),
+                    transcript.hook().map(|refrain| refrain.text)
+                );
+                let lyrics = crate::library::lyrics_from(&transcript);
+                let _ = reporter.tx.send(Update::Transcribed { id: track.id, lyrics });
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: track.vocals.clone(), message: format!("{e:#}") });
             }
         }
         batch.finished_one();

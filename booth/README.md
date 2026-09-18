@@ -133,9 +133,9 @@ drive by itself.
 ## Doing one track at a time
 
 Every batch job has a single-track twin. The prep editor under the waveform has
-**Analyse**, **Look up tags** and **Render stems** for whatever is selected, and
-right-clicking any row offers the same three plus play, copy-into-library, copy
-the path, and remove.
+**Analyse**, **Look up tags**, **Render stems** and **Cue from the words** for
+whatever is selected, and right-clicking any row offers the same four plus play,
+copy-into-library, copy the path, and remove.
 
 A job that has already been done says so: the button reads **Re-analyse** rather
 than **Analyse**, because the honest answer to "will this take twenty minutes"
@@ -536,6 +536,82 @@ on a small disk and stems on a big one. Both places are searched whichever is
 set, so changing the setting never makes a rendered kit disappear — it is
 minutes of work a track, and a preference must not look like a delete.
 
+## Cues from the words
+
+The **Words** button, and **Cue from the words** on a row, set a track's hot cues
+from what is sung on it rather than from how loud it gets.
+
+A cue placed by energy can only ever find the loud part. That is worth having —
+the drop is where most mixes turn — but the moment a DJ actually reaches for is
+usually the line the crowd sings, and a hook and the verse before it are the same
+loudness, the same instruments and the same key. Nothing in a spectrum tells them
+apart. The words do.
+
+So the pass is three steps, each skipped when it has already been taken:
+
+1. **Render the vocal stem**, if there is not one. A recogniser handed a club
+   record transcribes the kick drum; an isolated voice is the only thing it has a
+   chance with. This is the expensive step — minutes a track — and it is the same
+   separation the **Stems** button runs, so a track that already has a kit skips
+   straight past it.
+2. **Read the stem**, with whichever Whisper is installed. What comes back is
+   timed lines.
+3. **Find what repeats.** Lines that say the same thing are grouped — loosely,
+   because a recogniser writes the same sung phrase four slightly different ways
+   and matching word-for-word would count a hook sung eight times as eight
+   different lines. The group with the most separate airings is the hook, and
+   where it first lands is a cue, labelled with the line itself.
+
+Around it go the rest: **every time the hook comes back**, **where the singing
+starts**, and **the start of every phrase** the arrangement analysis found —
+intro, build, break, drop, outro. A player holds eight hot cues and a busy track
+offers more than eight moments, so they are ranked: the hook outranks even the
+drop, because a drop can be found by looking at the waveform and the line the
+crowd sings cannot be found by looking at anything. Two moments that land on top
+of each other become one cue, and it keeps the words: a drop that is also where
+the hook falls says so.
+
+Cues from the words are rounded **down** to the beat rather than to the nearest
+one. A sung line rarely starts on the beat — a pickup is the whole point of a
+pickup — and a hook cue that clips its own first word is one nobody presses
+twice.
+
+Two things it will not do. **An ad-lib is not a hook**: a line needs at least two
+words, because "yeah" is the most repeated thing in half the vocal stems ever
+recorded and marks nothing. And **a recogniser stuck in a loop does not invent
+one**: airings less than four seconds apart are one airing, which is true of a
+chorus that sings its line twice over and true of Whisper emitting "thanks for
+watching" forty times over a breakdown.
+
+The words are kept in the collection once they have been heard, so cueing the
+same track again is instant and costs no stem render and no recogniser. The
+memory cue is never moved — the grid is anchored to it — but the hot cues are
+replaced wholesale, which is what the button says it does.
+
+### Installing a recogniser
+
+Booth does not ship a speech recogniser and will not download one. Set it up
+under **Words** in Settings:
+
+- **whisper.cpp** — `brew install whisper-cpp`, or build it. Needs no Python and
+  no network, and needs a ggml model file naming: `ggml-base.en.bin` is a good
+  first choice. This is the one to reach for.
+- **OpenAI's `whisper`** — `pipx install openai-whisper`. Name the program
+  `whisper` and it is called the Python way; anything else is treated as
+  whisper.cpp. It downloads its weights the first time it runs, and shells out to
+  ffmpeg, so it is only offline afterwards.
+
+`BOOTH_WHISPER_BIN`, `BOOTH_WHISPER_MODEL` and `BOOTH_WHISPER_LANGUAGE` are used
+when the corresponding setting is empty, so the feature can be tried without
+editing a file. Setting the **language** is worth doing: left to itself the
+recogniser guesses it off the first few seconds, and the first few seconds of an
+isolated vocal are usually a breath.
+
+Whether there is a recogniser is checked **before** anything is rendered. A
+separation that finishes and only then finds there is nothing to hand the stem to
+has wasted the expensive half of the work. Nothing else in Booth needs any of
+this — only the words do.
+
 ## Importing a rekordbox library
 
 rekordbox keeps its library in `master.db`, a SQLCipher-encrypted SQLite file.
@@ -867,6 +943,13 @@ drive played only on older hardware has a history nothing here can see.
   puts in those three bits for given audio is not published, and ours has never
   been compared against a real export column by column.
 - Stem colouring needs the kit rendered first, which is minutes a track.
+- Cueing by the words needs a recogniser installed separately, and a stem kit
+  rendered first — so the first track costs minutes twice over. What it hears is
+  whatever Whisper hears: a heavily processed vocal, a language it was not told
+  about, or a chopped-up sample comes back as noise, and a hook found in noise is
+  a cue in the wrong place. The inspector shows how many lines were heard and
+  what it decided the hook was, so a bad reading can be seen to be one; there is
+  no way yet to correct it by hand.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with
   its confidence for that reason.

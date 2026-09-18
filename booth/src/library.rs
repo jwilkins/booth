@@ -263,6 +263,42 @@ fn room(from: u32, to: u32, wanted: u32) -> Option<u32> {
     (floor <= ceiling).then(|| wanted.clamp(floor, ceiling))
 }
 
+/// One line of a track's words, with when it was sung.
+///
+/// Kept in the collection rather than re-read, because getting it costs a stem
+/// render and a pass through a speech recogniser — minutes a track — and
+/// because a DJ who has seen what a cue says should be able to see it again
+/// without paying for it twice.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lyric {
+    pub start_ms: u32,
+    pub end_ms: u32,
+    pub text: String,
+}
+
+/// The words as the engine wants them, for finding what repeats in them.
+pub fn transcript(lyrics: &[Lyric]) -> booth_cli::transcribe::Transcript {
+    booth_cli::transcribe::Transcript {
+        lines: lyrics
+            .iter()
+            .map(|line| booth_cli::transcribe::Line {
+                start_ms: line.start_ms,
+                end_ms: line.end_ms,
+                text: line.text.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// And back, for storing what one came home with.
+pub fn lyrics_from(transcript: &booth_cli::transcribe::Transcript) -> Vec<Lyric> {
+    transcript
+        .lines
+        .iter()
+        .map(|line| Lyric { start_ms: line.start_ms, end_ms: line.end_ms, text: line.text.clone() })
+        .collect()
+}
+
 /// A cue point, as the waveform draws it and the export writes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CueMark {
@@ -329,6 +365,12 @@ pub struct Track {
     pub beats: usize,
     pub phrases: Vec<Phrase>,
     pub cues: Vec<CueMark>,
+    /// What is sung, and when, once the vocal stem has been through a speech
+    /// recogniser. Empty on a track nobody has asked about, on an instrumental,
+    /// and on a track whose words nothing could make out — which are three
+    /// different things the inspector is careful to tell apart.
+    #[serde(default)]
+    pub lyrics: Vec<Lyric>,
     pub loudness_lufs: Option<f64>,
     pub peak_dbtp: Option<f64>,
 
@@ -421,6 +463,7 @@ impl Track {
             beats: 0,
             phrases: Vec::new(),
             cues: Vec::new(),
+            lyrics: Vec::new(),
             loudness_lufs: None,
             peak_dbtp: None,
             tags: Vec::new(),

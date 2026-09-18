@@ -352,6 +352,92 @@ pub struct Config {
     /// How wide or tall each panel was left.
     #[serde(default)]
     pub panels: Panels,
+    /// Where to find a speech recogniser, for reading the words off a vocal
+    /// stem and cueing the hook.
+    #[serde(default)]
+    pub whisper: Whisper,
+}
+
+/// Where the speech recogniser lives and what to ask it for.
+///
+/// Off by default in the sense that nothing here points anywhere: Booth does
+/// not ship a recogniser and will not download one, so the one thing that needs
+/// it says what to install rather than failing quietly. Everything else in the
+/// program works without it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Whisper {
+    /// The program to run. `whisper-cli` is whisper.cpp's; `whisper` is
+    /// OpenAI's Python one, and is called differently — which of the two it is
+    /// is worked out from this name.
+    ///
+    /// Empty means fall back to `BOOTH_WHISPER_BIN`, and then to `whisper-cli`.
+    pub program: String,
+    /// The weights. A path to a `.bin` for whisper.cpp, which cannot run
+    /// without one; a name like `small` or `turbo` for the Python program,
+    /// which picks its own when this is empty.
+    ///
+    /// Empty means fall back to `BOOTH_WHISPER_MODEL`.
+    pub model: String,
+    /// The language to transcribe as, e.g. `en`.
+    ///
+    /// Worth setting. Left to itself the recogniser guesses the language from
+    /// the first few seconds, and the first few seconds of an isolated vocal
+    /// are usually a breath.
+    pub language: String,
+}
+
+impl Whisper {
+    /// The settings first, then the environment, then the default — the same
+    /// order the rekordbox key resolves in, and for the same reason: a feature
+    /// should be triable without editing a file.
+    fn setting(stored: &str, variable: &str) -> Option<String> {
+        let stored = stored.trim();
+        if !stored.is_empty() {
+            return Some(stored.to_string());
+        }
+        std::env::var(variable).ok().filter(|value| !value.trim().is_empty())
+    }
+
+    pub fn program(&self) -> String {
+        Self::setting(&self.program, "BOOTH_WHISPER_BIN").unwrap_or_else(|| "whisper-cli".into())
+    }
+
+    pub fn model(&self) -> Option<PathBuf> {
+        Self::setting(&self.model, "BOOTH_WHISPER_MODEL").map(PathBuf::from)
+    }
+
+    pub fn language(&self) -> Option<String> {
+        Self::setting(&self.language, "BOOTH_WHISPER_LANGUAGE")
+    }
+
+    /// The form the engine takes, pointed at a scratch directory of its own.
+    pub fn to_cli(&self, work_dir: PathBuf) -> booth_cli::transcribe::whisper::Config {
+        booth_cli::transcribe::whisper::Config {
+            program: self.program().into(),
+            model: self.model(),
+            language: self.language(),
+            flavour: None,
+            work_dir,
+        }
+    }
+
+    /// Whether this is set up far enough to be worth starting.
+    ///
+    /// whisper.cpp needs a model file naming and will not run without one, so a
+    /// library with no model set is told that before a stem is rendered rather
+    /// than after.
+    pub fn ready(&self) -> Result<(), String> {
+        let program = self.program();
+        let cpp = booth_cli::transcribe::whisper::Flavour::of(Path::new(&program))
+            == booth_cli::transcribe::whisper::Flavour::Cpp;
+        match cpp && self.model().is_none() {
+            true => Err(format!(
+                "{program} needs a model file. Set one in Settings, or in BOOTH_WHISPER_MODEL."
+            )),
+            false => Ok(()),
+        }
+    }
 }
 
 /// The panel sizes, in points, as the window was last left.
@@ -457,6 +543,7 @@ impl Default for Config {
             backups_path: default_backups_path(),
             keep_drives: true,
             on_foreign: OnForeign::default(),
+            whisper: Whisper::default(),
         }
     }
 }
@@ -952,5 +1039,52 @@ mod tests {
             .collect();
         assert_eq!(leftovers, vec!["Marius.flac".to_string()], "{leftovers:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod whisper_settings {
+    use super::*;
+
+    #[test]
+    fn the_python_recogniser_needs_no_model_file_and_the_cpp_one_does() {
+        // OpenAI's downloads and picks its own weights from a name; whisper.cpp
+        // has to be handed a file and will not start without one. Saying so
+        // before a stem is rendered is the difference between a clear message
+        // and minutes of work thrown away.
+        let mut whisper = Whisper { program: "whisper".into(), ..Default::default() };
+        assert!(whisper.ready().is_ok(), "{:?}", whisper.ready());
+
+        whisper.program = "whisper-cli".into();
+        whisper.model = "/models/ggml-base.en.bin".into();
+        assert!(whisper.ready().is_ok(), "{:?}", whisper.ready());
+    }
+
+    #[test]
+    fn a_setting_is_taken_as_written_apart_from_the_spaces() {
+        let whisper = Whisper { program: "  /opt/whisper-cli  ".into(), ..Default::default() };
+        assert_eq!(whisper.program(), "/opt/whisper-cli");
+        assert_eq!(Whisper::default().program(), "whisper-cli", "and there is a default");
+    }
+
+    #[test]
+    fn the_settings_reach_the_engine() {
+        let whisper = Whisper {
+            program: "whisper-cli".into(),
+            model: "ggml-base.en.bin".into(),
+            language: "en".into(),
+        };
+        let engine = whisper.to_cli(PathBuf::from("/tmp/words"));
+        assert_eq!(engine.program, std::ffi::OsString::from("whisper-cli"));
+        assert_eq!(engine.model, Some(PathBuf::from("ggml-base.en.bin")));
+        assert_eq!(engine.language.as_deref(), Some("en"));
+        assert_eq!(engine.work_dir, PathBuf::from("/tmp/words"));
+    }
+
+    #[test]
+    fn an_unset_language_is_none_rather_than_an_empty_one() {
+        // Passed through as an empty `-l ""`, whisper transcribes nothing.
+        let whisper = Whisper { language: "   ".into(), ..Default::default() };
+        assert_eq!(whisper.to_cli(PathBuf::new()).language, None);
     }
 }
