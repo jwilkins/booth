@@ -390,6 +390,22 @@ fn onelibrary_counters(root: &Path, key: Option<&str>) -> Option<HashMap<String,
     }
 }
 
+/// Read back what the player left, for a track whose drive copy is being kept.
+///
+/// `None` when the files are not there or will not parse — which is a real
+/// answer and the caller has to have one for it: the drive's copy can still be
+/// protected by leaving it alone, it just cannot be shown.
+pub fn what_the_player_left(
+    root: &Path,
+    written: &crate::library::Written,
+) -> Option<booth_cli::rekordbox::anlz::Analysis> {
+    let row = written.row.as_ref()?;
+    let names = analysis_files(&row.analyze_path);
+    let dat = std::fs::read(root.join(&names[0])).ok()?;
+    let ext = std::fs::read(root.join(&names[1])).ok();
+    booth_cli::rekordbox::anlz::read_files(&dat, ext.as_deref()).ok()
+}
+
 /// Which copy of a track's prep to keep.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Side {

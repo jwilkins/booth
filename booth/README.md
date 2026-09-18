@@ -792,17 +792,29 @@ Three cases, and only one of them is a question:
   each side was last edited, starting on whichever is the later, and there are
   buttons to take all of one side.
 
-Keeping the drive's copy leaves the track exactly as the deck left it: it is not
-prepared again, and its row and its place in the playlists carry through
-untouched. The decision is recorded, so a settled question is not asked again on
-every sync.
+Keeping the drive's copy does two things. The track's analysis files on the
+stick are left exactly as the deck left them — it is not prepared again, and its
+row and its place in the playlists carry through untouched — and **what the deck
+did is read back into the collection**, so the cues, their names and colours, the
+phrases and the tempo become the ones Booth shows. Keeping the drive's copy
+therefore means having it, not merely not losing it. The decision is recorded, so
+a settled question is not asked again on every sync.
 
-Two limits worth knowing. **Nothing here can read a player's edits back into the
-collection** — the analysis files are written but not parsed — so keeping the
-drive's copy protects it without showing you what it is. And a drive written by
-a build from before this existed has no record of what it looked like, so its
-tracks are never treated as edited: no evidence is not evidence of a change, and
-the alternative would make every older drive unwritable.
+The one thing that does not come back is the grid itself, only the tempo it was
+written at. A collection keeps a tempo and a downbeat rather than thousands of
+beat times, so a grid a deck has bent cannot be held here without being
+flattened — which is exactly why the track is not written again afterwards. The
+files on the stick stay as they are, and what comes back here is what can be
+shown beside them.
+
+If a track's analysis files cannot be read — pulled mid-write, or rewritten into
+something this cannot parse — the drive's copy is still protected by leaving it
+alone, and the sheet says that is all that happened rather than passing over it.
+
+A drive written by a build from before any of this existed has no record of what
+it looked like, so its tracks are never treated as edited: no evidence is not
+evidence of a change, and the alternative would make every older drive
+unwritable.
 
 ## The collection against its files
 
@@ -1007,14 +1019,19 @@ drive played only on older hardware has a history nothing here can see.
   its confidence for that reason.
 - Cues and grids are never written back to the source files — they live in the
   collection and on the drive. Names can be, on request.
-- A player's own edits can be detected but not read. When a track has been
-  changed on the deck and in the collection, the sheet can protect the drive's
-  copy by leaving it alone; it cannot bring what the deck did back into the
-  collection, because nothing here parses an analysis file it has written.
+- A grid a player bent cannot be held in the collection, only the tempo it was
+  written at, because a collection keeps a tempo and a downbeat rather than
+  every beat time. That is why a track whose drive copy is kept is not written
+  again.
 - What a CDJ-3000X actually writes into the OneLibrary edit counters after an
   edit on the deck has not been published by anyone, so the file timestamps are
   doing most of the work. A deck that edited a track without touching its
   analysis files would go unnoticed.
+- The reader for those analysis files was written from the same understanding of
+  the format as the writer, so the two agreeing says nothing about whether
+  either matches rekordbox. What it is for is reading back a file this program
+  wrote and a player has since edited, which it is tested on; the check against
+  an independent parser is the round trip in `rekordbox_export`.
 - One deck, and no pitch, sync or mixing — it is for auditioning, not
   performing. The spec asks for two decks eventually.
 - Playback resamples linearly, which is right for auditioning and is not what

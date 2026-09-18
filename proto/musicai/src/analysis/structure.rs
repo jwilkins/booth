@@ -70,6 +70,21 @@ impl Kind {
         }
     }
 
+    /// And back from the number the format stores, for a phrase read off a
+    /// drive. The values a low- or mid-mood track uses are not these and are
+    /// not written here, so they come back as `None` rather than as the wrong
+    /// name.
+    pub fn from_id(id: u16) -> Option<Self> {
+        match id {
+            1 => Some(Kind::Intro),
+            2 => Some(Kind::Up),
+            3 => Some(Kind::Down),
+            5 => Some(Kind::Chorus),
+            6 => Some(Kind::Outro),
+            _ => None,
+        }
+    }
+
     /// And back again, for sections that have been round a library and come
     /// back as the words the strip shows.
     pub fn from_label(label: &str) -> Option<Self> {

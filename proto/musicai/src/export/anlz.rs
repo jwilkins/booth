@@ -356,7 +356,7 @@ fn entry_section(fourcc: &[u8; 4], entry_bytes: u32, data: &[u8], unknown: Optio
 
 /// The nineteen-byte pattern rekordbox 6 and later use to obfuscate `PSSI`.
 /// Each byte has the phrase count added to it before it is applied.
-const PSSI_MASK: [u8; 19] = [
+pub(crate) const PSSI_MASK: [u8; 19] = [
     0xCB, 0xE1, 0xEE, 0xFA, 0xE5, 0xEE, 0xAD, 0xEE, 0xE9, 0xD2, 0xE9, 0xEB, 0xE1, 0xE9, 0xF3, 0xE8,
     0xE9, 0xF4, 0xE1,
 ];

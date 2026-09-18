@@ -1130,6 +1130,70 @@ impl App {
         }
     }
 
+    /// Make what the player left the collection's copy, for every track whose
+    /// drive version is being kept.
+    ///
+    /// Read off the stick's own analysis files. This is what turns "leave it
+    /// alone" into "take it": without it, keeping the drive's copy protects an
+    /// edit nobody here can see, and the collection goes on showing something
+    /// the drive does not have.
+    ///
+    /// The track is still not written again afterwards. Only the tempo comes
+    /// back from the grid — a collection keeps a tempo and a downbeat, not
+    /// thousands of beat times — so writing it back would flatten a grid the
+    /// deck may have bent, which is the thing being protected.
+    fn take_what_the_player_left(&mut self) {
+        let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
+        if drive.is_image {
+            return;
+        }
+        let keeping: Vec<u32> = self
+            .settled
+            .iter()
+            .filter(|(_, side)| **side == sync::Side::Theirs)
+            .map(|(id, _)| *id)
+            .collect();
+
+        let (mut taken, mut unreadable) = (0usize, 0usize);
+        for id in keeping {
+            let Some(written) = drive.written.iter().find(|w| w.id == id) else { continue };
+            let Some(found) = sync::what_the_player_left(&drive.path, written) else {
+                unreadable += 1;
+                continue;
+            };
+            if let Some(track) = self.library.get_mut(id) {
+                if crate::library::take_prep(track, &found) {
+                    taken += 1;
+                }
+            }
+        }
+
+        if taken > 0 {
+            crate::info!("took what the player left on {}", plural(taken, "track"));
+            self.note(
+                format!("{} now show what the player made of them", plural(taken, "track")),
+                theme::TEXT,
+            );
+        }
+        // Said rather than passed over. The drive's copy is still protected —
+        // the track is not written — but the collection cannot show it, and
+        // somebody who chose "the drive's" is entitled to know that is all
+        // that happened.
+        if unreadable > 0 {
+            self.note(
+                format!(
+                    "{} left alone, but {} analysis could not be read back",
+                    plural(unreadable, "track"),
+                    match unreadable {
+                        1 => "its",
+                        _ => "their",
+                    }
+                ),
+                theme::AMBER,
+            );
+        }
+    }
+
     /// The stamps to record for the tracks a write has just touched.
     ///
     /// Taken after the write rather than before it: writing a track rewrites
@@ -2222,8 +2286,14 @@ impl App {
         // rather than written and then put back: preparing one is what would
         // overwrite it.
         //
+        // What the deck did is read back into the collection first, so that
+        // keeping the drive's copy means having it rather than only not losing
+        // it. See `take_what_the_player_left`.
+        //
         // Their row is carried through untouched, so the track stays on the
         // drive and in its playlists with whatever the deck made of it.
+        self.take_what_the_player_left();
+        self.replan();
         let mut plan = self.plan.clone();
         let kept_theirs: Vec<u32> = self
             .settled

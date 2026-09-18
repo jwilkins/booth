@@ -299,6 +299,79 @@ pub fn lyrics_from(transcript: &booth_cli::transcribe::Transcript) -> Vec<Lyric>
         .collect()
 }
 
+/// Make what a player left on a drive the collection's copy.
+///
+/// The other direction from the one everything else here goes in: a CDJ-3000X
+/// moved a cue or re-gridded a track on the deck, somebody has said that is the
+/// copy to keep, and the collection has to be able to show it or the decision
+/// means nothing.
+///
+/// The grid itself is not taken, only the tempo it was written at. A collection
+/// keeps a tempo and a downbeat rather than thousands of beat times — see
+/// [`crate::app`]'s `beat_times` — so a variable grid cannot be held here
+/// without being flattened, and flattening it and writing it back would lose
+/// exactly what was being protected. This is why a track whose drive copy is
+/// kept is not written again: the files on the stick stay as the player left
+/// them, and what comes back here is what can be shown beside them.
+///
+/// Returns whether anything changed.
+pub fn take_prep(track: &mut Track, found: &booth_cli::rekordbox::anlz::Analysis) -> bool {
+    let before = (track.bpm, track.cues.clone(), track.phrases.clone(), track.beats);
+
+    if let Some(bpm) = found.bpm() {
+        track.bpm = bpm;
+    }
+    if !found.grid.beats.is_empty() {
+        track.beats = found.grid.beats.len();
+        track.has_grid = true;
+    }
+
+    track.cues = found
+        .cues
+        .iter()
+        .map(|cue| CueMark {
+            letter: cue.hot_cue,
+            time_ms: cue.time_ms,
+            label: cue.comment.clone().unwrap_or_default(),
+            color: cue
+                .color
+                .map(|rgb| [rgb.r, rgb.g, rgb.b])
+                .unwrap_or_else(|| crate::job::cue_color(cue.hot_cue)),
+        })
+        .collect();
+    track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
+
+    if let Some(structure) = &found.structure {
+        let ends = track.duration_secs.max(0.0) * 1000.0;
+        let mut phrases = Vec::with_capacity(structure.phrases.len());
+        for (index, phrase) in structure.phrases.iter().enumerate() {
+            let Some(kind) = booth_cli::analysis::structure::Kind::from_id(phrase.kind) else {
+                continue;
+            };
+            let Some(start_ms) = found.time_of(phrase.beat) else { continue };
+            // A section runs to the next one, and the last runs to wherever
+            // the phrases say the track ends — or to the end of the audio when
+            // the grid is shorter than the record, which it is for a track
+            // that fades out past its last beat.
+            let end_ms = structure
+                .phrases
+                .get(index + 1)
+                .and_then(|next| found.time_of(next.beat))
+                .or_else(|| found.time_of(structure.end_beat))
+                .unwrap_or(ends as u32)
+                .max(start_ms);
+            phrases.push(Phrase { start_ms, end_ms, kind: kind.label().to_string() });
+        }
+        track.phrases = phrases;
+    }
+
+    let changed = before != (track.bpm, track.cues.clone(), track.phrases.clone(), track.beats);
+    if changed {
+        track.edited = Some(now());
+    }
+    changed
+}
+
 /// A cue point, as the waveform draws it and the export writes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CueMark {
@@ -2670,5 +2743,153 @@ mod tests {
         assert_eq!(leftovers, vec!["library.json".to_string()], "{leftovers:?}");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Taking what a player left, through the files it would actually have left.
+///
+/// Written with the exporter and read with the reader, so the test exercises
+/// the whole path rather than a hand-built struct: a change to either end that
+/// stopped them meeting would show up here.
+#[cfg(test)]
+mod what_the_deck_did {
+    use super::*;
+    use booth_cli::export::{
+        anlz, waveform::WaveformData, Beat, BeatGrid, Cue, Mood, SongStructure,
+    };
+
+    /// 128 BPM, half a bar a second, sixteen beats.
+    fn grid() -> BeatGrid {
+        BeatGrid {
+            beats: (0..16)
+                .map(|i| Beat {
+                    number: (i % 4) as u16 + 1,
+                    tempo_x100: 12_800,
+                    time_ms: i as u32 * 469,
+                })
+                .collect(),
+        }
+    }
+
+    /// What the stick holds after somebody has been at it on a deck.
+    fn off_the_drive(
+        cues: &[Cue],
+        structure: Option<&SongStructure>,
+    ) -> booth_cli::rekordbox::anlz::Analysis {
+        let grid = grid();
+        let waveforms = WaveformData::silent(8.0);
+        let files = anlz::Analysis {
+            on_drive_path: "/Contents/Artist/Track.flac",
+            grid: &grid,
+            cues,
+            waveforms: &waveforms,
+            structure,
+            vbr: None,
+        };
+        booth_cli::rekordbox::anlz::read_files(&files.dat(), Some(&files.ext())).unwrap()
+    }
+
+    fn a_track() -> Track {
+        let mut track = Track::placeholder(1);
+        track.duration_secs = 8.0;
+        track.bpm = 174.0;
+        track.analyzed = true;
+        track.cues =
+            vec![CueMark { letter: 1, time_ms: 1_000, label: "drop".into(), color: [1, 2, 3] }];
+        track
+    }
+
+    #[test]
+    fn the_cues_the_deck_has_replace_the_ones_we_had() {
+        let cues = vec![
+            Cue::memory(0),
+            Cue::hot(1, 4_000).with_comment("hold me closer now").with_color(0xe8, 0x3c, 0x9e),
+        ];
+        let mut track = a_track();
+        assert!(take_prep(&mut track, &off_the_drive(&cues, None)));
+
+        assert_eq!(track.cues.len(), 2);
+        assert_eq!(track.cues[0].letter, 0, "the memory cue sorts first");
+        let hot = &track.cues[1];
+        assert_eq!(hot.time_ms, 4_000);
+        assert_eq!(hot.label, "hold me closer now");
+        assert_eq!(hot.color, [0xe8, 0x3c, 0x9e]);
+    }
+
+    #[test]
+    fn the_tempo_comes_back_off_the_grid() {
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&[Cue::memory(0)], None));
+        assert_eq!(track.bpm, 128.0, "the deck's grid says 128, not the 174 we had");
+        assert_eq!(track.beats, 16);
+        assert!(track.has_grid);
+    }
+
+    #[test]
+    fn phrases_come_back_as_the_positions_the_strip_draws() {
+        // The format keeps phrases as beat numbers; the strip wants
+        // milliseconds, and the grid on the drive is what turns one into the
+        // other.
+        let structure = SongStructure {
+            mood: Mood::High,
+            end_beat: 16,
+            bank: 0,
+            phrases: vec![
+                booth_cli::export::Phrase { beat: 1, kind: 1 },
+                booth_cli::export::Phrase { beat: 9, kind: 5 },
+            ],
+        };
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&[Cue::memory(0)], Some(&structure)));
+
+        let strip: Vec<(u32, u32, &str)> = track
+            .phrases
+            .iter()
+            .map(|phrase| (phrase.start_ms, phrase.end_ms, phrase.kind.as_str()))
+            .collect();
+        assert_eq!(strip, vec![(0, 8 * 469, "intro"), (8 * 469, 15 * 469, "drop")]);
+    }
+
+    #[test]
+    fn taking_it_says_when_it_was_taken() {
+        // Otherwise the next sync has no time for this side and cannot say
+        // which of the two is the later.
+        let mut track = a_track();
+        assert_eq!(track.edited, None);
+        take_prep(&mut track, &off_the_drive(&[Cue::memory(0)], None));
+        assert!(track.edited.is_some());
+    }
+
+    #[test]
+    fn taking_what_we_already_have_changes_nothing_and_says_so() {
+        let cues = vec![Cue::memory(0), Cue::hot(1, 4_000).with_color(1, 2, 3)];
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&cues, None));
+        let settled = track.clone();
+
+        assert!(!take_prep(&mut track, &off_the_drive(&cues, None)), "nothing moved");
+        assert_eq!(track.cues, settled.cues);
+        assert_eq!(track.edited, settled.edited, "an unchanged track is not re-stamped");
+    }
+
+    #[test]
+    fn a_phrase_name_the_format_has_no_word_for_is_left_out() {
+        // Low- and mid-mood tracks number their phrases differently. Guessing
+        // at one would put the wrong word on the strip.
+        let structure = SongStructure {
+            mood: Mood::High,
+            end_beat: 16,
+            bank: 0,
+            phrases: vec![
+                booth_cli::export::Phrase { beat: 1, kind: 1 },
+                booth_cli::export::Phrase { beat: 5, kind: 9 },
+                booth_cli::export::Phrase { beat: 9, kind: 6 },
+            ],
+        };
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&[Cue::memory(0)], Some(&structure)));
+
+        let kinds: Vec<&str> = track.phrases.iter().map(|p| p.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["intro", "outro"]);
     }
 }
