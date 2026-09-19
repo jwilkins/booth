@@ -1849,7 +1849,9 @@ impl App {
                 Some(Candidate::new(snap_to(&beats, phrase.start_ms, 4), Reason::Section(kind)))
             })
             .collect();
-        for moment in crate::library::transcript(&track.lyrics).moments() {
+
+        let words = crate::library::transcript(&track.lyrics);
+        for moment in words.moments() {
             let mut candidate = cues::from_moment(&moment);
             candidate.time_ms = snap_back(&beats, candidate.time_ms);
             candidates.push(candidate);
@@ -1862,8 +1864,16 @@ impl App {
             .map(|cue| cue.time_ms)
             .or_else(|| beats.first().copied())
             .unwrap_or(0);
+        let before = track.cues.clone();
+        let name = format!("{} \u{2014} {}", track.artist, track.display_title());
+        let lines = track.lyrics.len();
+
         let placed = crate::job::cue_marks(&cues::assemble(start, candidates));
         let hot = placed.iter().filter(|cue| cue.letter != 0).count();
+        crate::info!("cueing #{id} {name} from {}", plural(lines, "line"));
+        for line in what_the_words_decided(&words, &before, &placed) {
+            crate::info!("  {line}");
+        }
 
         if let Some(track) = self.library.get_mut(id) {
             track.cues = placed;
@@ -8663,6 +8673,88 @@ fn beat_at(track: &Track, at_ms: u32) -> Option<usize> {
     Some(index.min(track.beats.saturating_sub(1)))
 }
 
+/// Write down what the words decided, and why.
+///
+/// A cue placed off a transcript is a cue with a reason, and the reason is the
+/// only thing that makes it arguable. The recogniser mishears, the same sung
+/// line comes back written four ways, and the hook is picked off the top of a
+/// ranking — so a DJ who finds cue B in the wrong place needs to be able to see
+/// that it was put there because a line it heard as something else came round
+/// three times. Without that, a wrong cue is indistinguishable from a bug.
+///
+/// Three things, in the order they were decided: every line the track comes
+/// back to and how often, which of them the hook is, and what that moved.
+///
+/// Returned rather than logged from inside, so that what it says can be read
+/// back by a test instead of being asserted against a global log buffer that
+/// every other test is writing to at the same time.
+fn what_the_words_decided(
+    words: &booth_cli::transcribe::Transcript,
+    before: &[crate::library::CueMark],
+    after: &[crate::library::CueMark],
+) -> Vec<String> {
+    /// Enough of the ranking to see where it falls off, without a log that is
+    /// one track long. A hook is never far from the top of it.
+    const LISTED: usize = 8;
+
+    let mut said = Vec::new();
+    let refrains = words.refrains();
+    if refrains.is_empty() {
+        said.push("nothing was made out that is long enough to be a line".to_string());
+    } else {
+        said.push("lines by how often they come round:".to_string());
+        for refrain in refrains.iter().take(LISTED) {
+            let at: Vec<String> = refrain.at.iter().map(|at| time_text(*at)).collect();
+            said.push(format!(
+                "  {}\u{d7} \u{201c}{}\u{201d} \u{2014} {}",
+                refrain.times(),
+                refrain.text,
+                at.join(", ")
+            ));
+        }
+        if refrains.len() > LISTED {
+            said.push(format!("  \u{2026}and {} more", refrains.len() - LISTED));
+        }
+    }
+
+    said.push(match words.hook() {
+        Some(hook) => format!(
+            "hook: \u{201c}{}\u{201d}, sung {} times, first at {}",
+            hook.text,
+            hook.times(),
+            time_text(hook.at.first().copied().unwrap_or(0))
+        ),
+        // Not a failure. A track can have words and no chorus, and saying so
+        // is what stops somebody looking for a hook cue that was never going
+        // to be there.
+        None => "no line comes round twice, so the cues are the arrangement's alone".to_string(),
+    });
+
+    let reading = |cue: &crate::library::CueMark| match cue.label.is_empty() {
+        true => time_text(cue.time_ms),
+        false => format!("{} {}", time_text(cue.time_ms), cue.label),
+    };
+    let was = said.len();
+    for cue in after {
+        match before.iter().find(|old| old.letter == cue.letter) {
+            Some(old) if old.time_ms == cue.time_ms && old.label == cue.label => {}
+            Some(old) => {
+                said.push(format!("{} {} \u{2192} {}", cue.name(), reading(old), reading(cue)))
+            }
+            None => said.push(format!("{} set to {}", cue.name(), reading(cue))),
+        }
+    }
+    for old in before {
+        if !after.iter().any(|cue| cue.letter == old.letter) {
+            said.push(format!("{} cleared, was {}", old.name(), reading(old)));
+        }
+    }
+    if said.len() == was {
+        said.push("every cue is already where the words put it".to_string());
+    }
+    said
+}
+
 /// How long ago a moment was, in the roughest terms that are still useful.
 ///
 /// For putting two edits beside each other and saying which came later, which
@@ -8860,6 +8952,112 @@ mod tests {
                 track.tags.push("peak".into());
                 track.play_count += 1;
                 assert_eq!(app.library.get(id).unwrap().edited, None);
+            }
+        }
+
+        /// What the log says a cue was placed for.
+        ///
+        /// The recogniser is wrong often enough that arguing with it is the
+        /// point, and a cue whose reason cannot be read is a cue nobody can
+        /// argue with.
+        mod explaining_itself {
+            use super::*;
+            use crate::library::{CueMark, Lyric};
+
+            fn heard(lines: &[(u32, &str)]) -> booth_cli::transcribe::Transcript {
+                crate::library::transcript(
+                    &lines
+                        .iter()
+                        .map(|&(start_ms, text)| Lyric {
+                            start_ms,
+                            end_ms: start_ms + 2_000,
+                            text: text.to_string(),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+
+            fn cue(letter: u8, time_ms: u32, label: &str) -> CueMark {
+                CueMark { letter, time_ms, label: label.to_string(), color: [0; 3] }
+            }
+
+            #[test]
+            fn the_lines_are_listed_most_repeated_first() {
+                let words = heard(&[
+                    (20_000, "walking through the city at night"),
+                    (40_000, "hold me closer now"),
+                    (100_000, "hold me closer now"),
+                    (160_000, "hold me closer now"),
+                    (200_000, "and I don't want to go home"),
+                    (260_000, "and I don't want to go home"),
+                ]);
+                let said = what_the_words_decided(&words, &[], &[]);
+
+                let ranking: Vec<&String> =
+                    said.iter().filter(|line| line.contains('\u{d7}')).collect();
+                assert_eq!(ranking.len(), 3, "{said:#?}");
+                assert!(ranking[0].contains("3\u{d7}"), "{}", ranking[0]);
+                assert!(ranking[0].contains("hold me closer now"), "{}", ranking[0]);
+                assert!(ranking[1].contains("2\u{d7}"), "{}", ranking[1]);
+                assert!(ranking[2].contains("1\u{d7}"), "{}", ranking[2]);
+                // And each says where it lands, so a cue can be checked
+                // against the list that put it there.
+                assert!(ranking[0].contains("0:40.00"), "{}", ranking[0]);
+                assert!(ranking[0].contains("2:40.00"), "{}", ranking[0]);
+            }
+
+            #[test]
+            fn the_lyric_the_hook_cue_is_for_is_named() {
+                let words =
+                    heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
+                let said = what_the_words_decided(&words, &[], &[]);
+                let hook = said.iter().find(|line| line.starts_with("hook:")).expect("{said:#?}");
+                assert!(hook.contains("hold me closer now"), "{hook}");
+                assert!(hook.contains("sung 2 times"), "{hook}");
+                assert!(hook.contains("0:40.00"), "{hook}");
+            }
+
+            #[test]
+            fn a_track_with_no_chorus_says_so_rather_than_staying_quiet() {
+                // Otherwise somebody goes looking for a hook cue that was
+                // never going to be there.
+                let words = heard(&[(40_000, "one line, said once, and then nothing")]);
+                let said = what_the_words_decided(&words, &[], &[]);
+                assert!(
+                    said.iter().any(|line| line.contains("no line comes round twice")),
+                    "{said:#?}"
+                );
+            }
+
+            #[test]
+            fn every_cue_that_moved_says_what_it_was_and_what_it_became() {
+                let words =
+                    heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
+                let before = [cue(1, 32_000, "drop"), cue(2, 96_000, "break")];
+                let after = [cue(1, 40_000, "hold me closer now"), cue(3, 150_000, "outro")];
+
+                let said = what_the_words_decided(&words, &before, &after);
+                let moved = said.iter().find(|line| line.starts_with('A')).expect("{said:#?}");
+                assert_eq!(moved, "A 0:32.00 drop \u{2192} 0:40.00 hold me closer now");
+                // A slot that gained a cue, and one that lost one, both said.
+                assert!(said.iter().any(|line| line == "C set to 2:30.00 outro"), "{said:#?}");
+                assert!(
+                    said.iter().any(|line| line == "B cleared, was 1:36.00 break"),
+                    "{said:#?}"
+                );
+            }
+
+            #[test]
+            fn a_cue_that_did_not_move_is_not_reported_as_having_moved() {
+                let words =
+                    heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
+                let same = [cue(1, 40_000, "hold me closer now")];
+                let said = what_the_words_decided(&words, &same, &same);
+                assert!(
+                    said.iter().any(|line| line == "every cue is already where the words put it"),
+                    "{said:#?}"
+                );
+                assert!(!said.iter().any(|line| line.contains('\u{2192}')), "{said:#?}");
             }
         }
 
