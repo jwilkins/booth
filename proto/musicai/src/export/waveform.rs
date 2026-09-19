@@ -37,8 +37,8 @@ const WIDE_COLUMNS: usize = 1_200;
 /// because the point is a legible colour: everything from a bassline to a vocal
 /// then lands in one band and reads as one colour, where a 2 kHz corner split
 /// the middle of the music between two bands and drew it in a washed-out
-/// yellow-white. Below 200 Hz reads blue, 200 Hz to about 1.5 kHz amber, and
-/// what is left whitens.
+/// yellow-white. Below 200 Hz is the red channel, 200 Hz to 4 kHz the green,
+/// and what is left the blue.
 const LOW_CORNER_HZ: f32 = 200.0;
 const HIGH_CORNER_HZ: f32 = 4_000.0;
 
@@ -431,9 +431,19 @@ impl Column {
         [level(self.mid), level(self.high), level(self.low)]
     }
 
-    /// The hue of a column, as three-bit components. Bass reads blue, the
-    /// mid-range reads amber, treble washes towards white, and a column with
-    /// all three reads white, which is the palette a player draws in.
+    /// The hue of a column, as three-bit components: one band per channel.
+    ///
+    /// Red is the bass, green the mid-range, blue the treble — the convention
+    /// every DJ program draws waveforms in, and the reason it is a convention
+    /// is that it makes a column of two bands land on a secondary that names
+    /// the pair. Bass and mid read yellow, mid and treble cyan, bass and treble
+    /// magenta, and a column with all three reads white. Nothing cancels,
+    /// because no two primaries sit opposite each other.
+    ///
+    /// This used to map the bands onto a palette of its own — bass blue,
+    /// mid-range amber — which put a picture on the deck that no chart a DJ has
+    /// ever read accounts for, and which disagreed with what Booth drew on
+    /// screen besides.
     ///
     /// Measured against the **loudest** band rather than against the sum of
     /// them. Against the sum, the three shares add to one and the strongest
@@ -446,9 +456,7 @@ impl Column {
     fn color(&self) -> (u8, u8, u8) {
         let (low, mid, high) = self.shares();
         let bit = |v: f32| (v * 7.0).round().clamp(0.0, 7.0) as u8;
-        // Amber is red with about half its green; treble lifts all three
-        // towards white without quite reaching it on its own.
-        (bit(mid + high * 0.7), bit(mid * 0.5 + high * 0.8), bit(low + high * 0.7))
+        (bit(low), bit(mid), bit(high))
     }
 }
 
@@ -965,17 +973,19 @@ mod tests {
         // to": a player drew every column of a real track in much the same
         // pale grey, because the shares were measured against their own sum
         // and so could never reach the top of three bits.
+        // One band per channel, the way every other DJ program draws it: red
+        // is the bass, green the mid-range, blue the treble.
         let (r, g, b) = hue(60.0);
-        assert!(b > r && b > g, "bass should read blue, not {r},{g},{b}");
-        assert_eq!(b, 7, "and the loudest band in a column should saturate");
+        assert!(r > g && r > b, "bass should read red, not {r},{g},{b}");
+        assert_eq!(r, 7, "and the loudest band in a column should saturate");
 
         let (r, g, b) = hue(1_000.0);
-        assert!(r > b, "the mid-range should read amber, not {r},{g},{b}");
-        assert!(r > g, "amber is red with about half its green");
-        assert_eq!(r, 7);
+        assert!(g > r && g > b, "the mid-range should read green, not {r},{g},{b}");
+        assert_eq!(g, 7);
 
         let (r, g, b) = hue(9_000.0);
-        assert!(r >= 5 && g >= 5 && b >= 5, "treble should read near-white, not {r},{g},{b}");
+        assert!(b > r && b > g, "treble should read blue, not {r},{g},{b}");
+        assert_eq!(b, 7);
     }
 
     #[test]
@@ -998,15 +1008,15 @@ mod tests {
         let w = analyze(&Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap());
 
         // Most of this second is a bass note, and most of it should look like
-        // one.
-        let blue = w
+        // one: the red channel — the low band — above the blue.
+        let bassy = w
             .color_detail
             .chunks_exact(2)
             .map(|c| u16::from_be_bytes([c[0], c[1]]))
-            .filter(|packed| (packed >> 7) & 7 > (packed >> 13) & 7)
+            .filter(|packed| (packed >> 13) & 7 > (packed >> 7) & 7)
             .count();
         let columns = w.color_detail.len() / 2;
-        assert!(blue * 2 > columns, "only {blue} of {columns} columns read as bass");
+        assert!(bassy * 2 > columns, "only {bassy} of {columns} columns read as bass");
     }
 
     #[test]

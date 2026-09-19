@@ -160,28 +160,27 @@ fn blend(parts: &[(Color32, f32)]) -> Color32 {
     )
 }
 
-/// The hue of a column from its three band levels.
+/// The palette the colour mode mixes in: one band per channel, low to high.
 ///
-/// The same mix the analysis files carry to the player — bass reads blue, the
-/// mid-range amber, and treble washes everything towards white — so the picture
-/// on screen and the picture on the CDJ are the same picture.
-/// The palette the colour mode mixes in, low to high.
+/// The convention every other DJ program uses, and the one the EQ colour charts
+/// a DJ will have seen are drawn from — red is the bass, green the mid-range,
+/// blue the treble. It is not an arbitrary choice and never was: with the three
+/// bands on the three channels, a column made of two of them lands on a
+/// secondary that names the pair. Bass and mid read yellow, mid and treble
+/// cyan, bass and treble magenta, and a column with all three reads white.
+/// Nothing cancels, because no two primaries are opposite each other.
+///
+/// This is also what the analysis files carry, so the picture on screen and the
+/// picture on the deck are the same picture. See
+/// [`booth_cli::export::waveform`], which packs the same three numbers into
+/// three bits each.
 ///
 /// Not the band colours the stacked mode uses. Those are three labels on three
-/// bars and only have to be told apart; these are mixed together, and blue and
-/// amber sit opposite each other on the wheel — so any column with both in it,
-/// which is most music, cancels to grey. Measured across four kinds of column,
-/// one with a strong bass and one with none came out at hue 36 and hue 36:
-/// the same colour, whatever the track was doing.
-///
-/// Violet is a third of the way round from amber rather than opposite it, so
-/// mixing the two rotates the hue instead of cancelling it. The same four
-/// columns now land at 280, 24 and 51 degrees. Bass with no mid over it reads
-/// purple, a full-band body reads orange, and a breakdown with the bass gone
-/// reads yellower — which is the picture a colour waveform is for.
-const FREQ_LOW: Color32 = Color32::from_rgb(0x8B, 0x5C, 0xF6);
-const FREQ_MID: Color32 = theme::BAND_MID;
-const FREQ_HIGH: Color32 = Color32::from_rgb(0x67, 0xE8, 0xF9);
+/// bars that only have to be told apart, and they are read one at a time rather
+/// than mixed.
+const FREQ_LOW: Color32 = Color32::from_rgb(0xFF, 0x00, 0x00);
+const FREQ_MID: Color32 = Color32::from_rgb(0x00, 0xFF, 0x00);
+const FREQ_HIGH: Color32 = Color32::from_rgb(0x00, 0x00, 0xFF);
 
 /// The colour of a column, from what it is made of.
 ///
@@ -193,7 +192,51 @@ const FREQ_HIGH: Color32 = Color32::from_rgb(0x67, 0xE8, 0xF9);
 /// came out.
 pub fn frequency_color(low: f32, mid: f32, high: f32) -> Color32 {
     use booth_cli::export::waveform::unshape;
-    mix([FREQ_LOW, FREQ_MID, FREQ_HIGH], [unshape(low), unshape(mid), unshape(high)])
+    additive(unshape(low), unshape(mid), unshape(high))
+}
+
+/// One band per channel, each measured against the loudest of the three.
+///
+/// Against their sum the three shares always total one, so the strongest band
+/// can never reach the top of its channel and every column comes out a shade of
+/// grey — which is what a CDJ-3000X drew from the exported bytes before they
+/// were measured this way. Against the peak, whatever dominates the column
+/// saturates and the rest fall away from it.
+///
+/// Squared, for the same reason and to the same degree as the exported colour:
+/// a band a third as loud as the leader should tint the colour rather than
+/// dilute it. The two are the same arithmetic on purpose — a screen that
+/// disagreed with the deck about what a column is made of would be worse than
+/// no colour at all.
+///
+/// Brightness is left out of it. The height of the column is already the
+/// loudness, and a colour that said it again would make a quiet break
+/// unreadable to save repeating something the shape has already shown.
+fn additive(low: f32, mid: f32, high: f32) -> Color32 {
+    let peak = low.max(mid).max(high);
+    if peak <= f32::EPSILON {
+        return theme::RULE;
+    }
+    let share = |band: f32| {
+        let ratio = (band / peak).clamp(0.0, 1.0);
+        ratio * ratio
+    };
+
+    // Added rather than averaged. Averaging bass and mid gives the dull olive
+    // halfway between red and green; adding them gives yellow, which is the
+    // whole reason the convention is three primaries on three channels.
+    let mut rgb = [0.0f32; 3];
+    for (band, weight) in [(FREQ_LOW, share(low)), (FREQ_MID, share(mid)), (FREQ_HIGH, share(high))]
+    {
+        rgb[0] += band.r() as f32 * weight;
+        rgb[1] += band.g() as f32 * weight;
+        rgb[2] += band.b() as f32 * weight;
+    }
+    Color32::from_rgb(
+        rgb[0].min(255.0).round() as u8,
+        rgb[1].min(255.0).round() as u8,
+        rgb[2].min(255.0).round() as u8,
+    )
 }
 
 /// The bands in the order they have to be drawn: tallest first.
@@ -1188,12 +1231,32 @@ mod tests {
         assert_eq!(frequency_color(1.0, 0.0, 0.0), FREQ_LOW);
         assert_eq!(frequency_color(0.0, 1.0, 0.0), FREQ_MID);
         assert_eq!(frequency_color(0.0, 0.0, 1.0), FREQ_HIGH);
+    }
 
-        // A mix lands between them rather than snapping to one.
-        let mixed = frequency_color(1.0, 1.0, 0.0);
-        assert!(mixed != FREQ_LOW && mixed != FREQ_MID);
-        let between = |a: u8, b: u8, c: u8| c >= a.min(b) && c <= a.max(b);
-        assert!(between(FREQ_LOW.b(), FREQ_MID.b(), mixed.b()));
+    #[test]
+    fn two_bands_together_land_on_the_colour_that_names_the_pair() {
+        // The whole reason the convention is three primaries on three
+        // channels, and what every EQ colour chart a DJ has read is drawn
+        // from: a column of two bands is the secondary between them, and
+        // there is no pair that cancels.
+        assert_eq!(frequency_color(1.0, 1.0, 0.0), Color32::from_rgb(255, 255, 0), "yellow");
+        assert_eq!(frequency_color(0.0, 1.0, 1.0), Color32::from_rgb(0, 255, 255), "cyan");
+        assert_eq!(frequency_color(1.0, 0.0, 1.0), Color32::from_rgb(255, 0, 255), "magenta");
+        assert_eq!(frequency_color(1.0, 1.0, 1.0), Color32::WHITE, "all three");
+    }
+
+    #[test]
+    fn a_quiet_column_is_still_the_colour_of_what_is_in_it() {
+        // The height already says how loud it is. A colour that said it again
+        // would leave a breakdown too dark to read for the sake of repeating
+        // something the shape has already shown.
+        let loud = frequency_color(0.8, 0.08, 0.02);
+        let quiet = frequency_color(0.2, 0.02, 0.005);
+        assert_eq!(loud, quiet, "the same balance at two volumes is the same colour");
+
+        // And silence is not black, which would be a column that looks like a
+        // hole in the picture.
+        assert_eq!(frequency_color(0.0, 0.0, 0.0), theme::RULE);
     }
 
     /// Where a colour sits on the wheel, in degrees, and how far from grey.
@@ -1218,12 +1281,13 @@ mod tests {
 
     #[test]
     fn a_column_with_bass_under_it_is_a_different_colour_from_one_without() {
-        // The fault this is here for: it was not. Blue and amber sit opposite
-        // each other on the wheel, so a column holding both cancelled to grey,
-        // and a sharpening exponent of three then handed the mix to whichever
-        // band led — the mid, nearly always. A body with a strong bass and a
-        // breakdown with none came out at hue 36.0 and hue 35.8: the same
-        // colour, for the two passages a DJ most needs to tell apart.
+        // The fault this is here for: it was not. The palette was blue bass
+        // and amber mid, which sit opposite each other on the wheel, so a
+        // column holding both cancelled to grey — a body with a strong bass
+        // and a breakdown with none came out at hue 36.0 and hue 35.8, the
+        // same colour for the two passages a DJ most needs to tell apart.
+        // Red, green and blue have no opposite pair among them, which is why
+        // this is the convention rather than a matter of taste.
         //
         // The levels here are as they are stored, bent by the display curve.
         let body = frequency_color(0.59, 0.86, 0.49);
@@ -1239,8 +1303,10 @@ mod tests {
             "a body and a breakdown are {:.1} degrees apart",
             apart(body, breakdown)
         );
+        // A sixth of the wheel apart is the bar: red-orange against green is
+        // not a shade, it is a different colour. Measured at 83.
         assert!(
-            apart(bass, body) > 90.0,
+            apart(bass, body) > 60.0,
             "bass and a full-band body are {:.1} degrees apart",
             apart(bass, body)
         );
@@ -1270,17 +1336,21 @@ mod tests {
             "a bass-heavy column should read as bass: {kick:?} is {:.0} off grey",
             colourfulness(kick)
         );
-        assert!(kick.b() > kick.r(), "and it should read as the low band: {kick:?}");
+        let leads = |colour: Color32| {
+            [colour.r(), colour.g(), colour.b()].iter().copied().enumerate().max_by_key(|(_, v)| *v)
+        };
+        assert_eq!(leads(kick).map(|(i, _)| i), Some(0), "the low band is the red one: {kick:?}");
 
         // The same shape with the mid-range winning has to be visibly a
         // different colour, not a different shade of the same one. Measured
-        // round the wheel rather than down one channel: a red channel told
-        // blue from amber well enough, and says almost nothing about violet,
-        // which has plenty of red in it.
+        // round the wheel rather than down one channel, because "which channel
+        // is biggest" is a weaker claim than "these are different colours".
         let lead = frequency_color(0.32, 0.95, 0.63);
-        assert!(lead.r() > lead.b(), "a mid-heavy column should read amber: {lead:?}");
+        assert_eq!(leads(lead).map(|(i, _)| i), Some(1), "the mid band is the green one: {lead:?}");
         let gap = (hue(kick).0 - hue(lead).0).abs();
         let apart = gap.min(360.0 - gap);
+        // Two primaries apart, which is what the convention is for. Measured
+        // at exactly 120.
         assert!(apart > 90.0, "the two are {apart:.0} degrees apart: {kick:?} vs {lead:?}");
     }
 

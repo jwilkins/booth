@@ -483,15 +483,38 @@ while prepping is what will be on the CDJ's screen.
 
 ## Colouring the waveform
 
-The colour mode mixes in its own palette rather than the three the stacked mode
-labels its bars with. Those only have to be told apart; these get mixed
-together, and blue and amber sit opposite each other on the wheel — so a column
-holding both, which is most music, cancels to grey. Measured across four kinds
-of column, one with a strong bass and one with none came out at hue 36 and hue
-36: the same colour, for the two passages a DJ most needs to tell apart. Violet
-is a third of the way round from amber rather than opposite it, so mixing them
-rotates the hue instead of cancelling it, and the same columns land 25 degrees
-apart with bass-only a long way from both.
+**Red is the bass, green the mid-range, blue the treble** — the convention every
+other DJ program draws waveforms in, and the one the EQ colour charts a DJ has
+already learned are drawn from. It is not an arbitrary choice: with the three
+bands on the three channels, a column made of two of them lands on the secondary
+that names the pair.
+
+| in the column | comes out |
+| --- | --- |
+| bass alone | red — baseline, intro, outro |
+| bass + mid | yellow — melodic baseline, bridge |
+| mid alone | green — vocals, melodies |
+| mid + treble | cyan — vocals, verse |
+| treble alone | blue — hi-hats, buildup |
+| bass + treble | magenta — the beat |
+| all three | white — the chorus |
+
+Nothing cancels, because no two primaries sit opposite each other. That was the
+fault this replaced: the palette was blue bass and amber mid, which *are*
+opposite, so a column holding both — most music — cancelled to grey. A body with
+a strong bass and a breakdown with none came out at hue 36.0 and hue 35.8, the
+same colour for the two passages a DJ most needs to tell apart. The same two
+columns now land 25 degrees apart, and a kick against a lead is a clean 120 —
+the full distance between two primaries.
+
+The same three numbers go into the analysis files, so the picture on screen and
+the picture on the deck are the same picture. They had drifted apart, and the
+comment claiming they had not was out of date by a release.
+
+Brightness is deliberately left out of the colour. The height of the column is
+already the loudness, and a colour that said it again would leave a quiet
+breakdown too dark to read for the sake of repeating something the shape has
+already shown.
 
 The levels are also undone before they are mixed. They are stored bent by the
 curve that makes heights readable, and it flattens the bands against each other
@@ -507,10 +530,9 @@ Three modes, on the right of the cue row, remembered between runs:
 - **bands** — low, mid and high stacked in their own colours, tallest first so
   the shorter ones land on top. Easiest for finding the kick, because the low
   band is drawn on its own.
-- **colour** — one shape, hue mixed from the frequency content: bass violet,
-  mid-range amber, treble washing towards cyan. A body with everything in it
-  reads orange, a breakdown with the bass gone reads yellower, and bass with
-  nothing over it reads purple.
+- **colour** — one shape, hue added from the frequency content: bass red,
+  mid-range green, treble blue, per the table above. What the player draws, so
+  it is the one to prep against.
 - **stems** — one shape, hue from which stem is loudest: vocals rose, melody
   teal, drums amber. Needs a rendered kit, and measures the stem files
   themselves — a band split can say where the bass is, and only a separation can
