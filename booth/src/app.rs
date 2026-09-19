@@ -3428,7 +3428,29 @@ impl App {
         }
     }
 
+    /// The collection panel, scrolled.
+    ///
+    /// A DJ with forty playlists has more of them than any panel is tall. They
+    /// used to run off the bottom of the screen; once [`pinned`] started
+    /// clipping a panel to its own rectangle — which is what stopped the panels
+    /// growing themselves back to their widest — they stopped being drawn at
+    /// all. Either way there was no way to reach them, which is what a scroll
+    /// area is for.
+    ///
+    /// `auto_shrink` is off in both directions so the panel is the size it was
+    /// dragged to and not the size of what happens to be in it. That is the
+    /// same argument `pinned` makes, and the two work together: `pinned` hands
+    /// this a box of exactly the panel's size, and this fills it and scrolls
+    /// what will not fit. Without a box around it — in a test harness, say —
+    /// it fills whatever it is given instead, which is worth knowing before
+    /// wondering where the rest of the window went.
     fn sidebar(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.collection(ui));
+    }
+
+    /// Everything in that panel: the views, the playlist tree, the saved
+    /// queries.
+    fn collection(&mut self, ui: &mut Ui) {
         pane_label(ui, "Collection");
         let all = self.library.tracks.len();
         let unprepared = self.library.unprepared_count();
@@ -9335,50 +9357,77 @@ mod tests {
 
         /// A window with one track and one playlist, showing browser and
         /// sidebar side by side — which is what a drag crosses.
-        fn with_a_track_and_a_playlist(name: &str) -> App {
+        /// Draw a pane in a box of exactly this size, the way a side panel
+        /// does in the window. Returns the box.
+        ///
+        /// Not decoration, and not a size plucked out of the air. The sidebar
+        /// fills whatever it is handed — since it gained a `ScrollArea` it
+        /// fills it in both directions — and a `Ui` that merely *allocates* a
+        /// box does not stop it: `max_rect` is where egui lays out to, not a
+        /// wall. Handed the harness with nothing holding it, the sidebar took
+        /// all 784 points of it and left the browser a list zero pixels wide,
+        /// which is not a list a row can be dragged out of.
+        ///
+        /// So this is [`pinned`] with the box stated outright, and every part
+        /// of it has to be. Inside a `horizontal`, `available_rect_before_wrap`
+        /// reports the height of the row *so far* — eighteen points on the
+        /// first frame — and a clip rect eighteen points tall is a playlist
+        /// that `contains_pointer` says the pointer is not over, on the one
+        /// frame where that decides whether a drop lands. The layout is stated
+        /// for the same kind of reason: inherited from the enclosing
+        /// `horizontal`, the sidebar lays itself out sideways.
+        fn in_a_panel(ui: &mut Ui, size: egui::Vec2, contents: impl FnOnce(&mut Ui)) -> egui::Rect {
+            let rect = egui::Rect::from_min_size(ui.available_rect_before_wrap().min, size);
+            let mut inner = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            inner.shrink_clip_rect(rect);
+            contents(&mut inner);
+            ui.advance_cursor_after_rect(rect);
+            rect
+        }
+
+        /// Wide enough for the browser to have room beside it, and tall enough
+        /// that a short collection does not scroll.
+        const PANEL: egui::Vec2 = egui::vec2(200.0, 560.0);
+        /// Short enough that any collection overruns it.
+        const SHORT_PANEL: egui::Vec2 = egui::vec2(200.0, 200.0);
+
+        /// Where the panel's bottom edge ended up, noted as it was drawn.
+        ///
+        /// "Below the fold" is a claim about the edge the harness actually put
+        /// there. A number typed in beside the test would go on passing after
+        /// it moved.
+        #[derive(Clone, Default)]
+        struct Fold(std::sync::Arc<std::sync::atomic::AtomicU32>);
+
+        impl Fold {
+            fn note(&self, at: f32) {
+                self.0.store(at.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
+
+            fn at(&self) -> f32 {
+                f32::from_bits(self.0.load(std::sync::atomic::Ordering::Relaxed))
+            }
+        }
+
+        /// A collection with more playlists than any panel could show at once.
+        fn with_many_playlists(name: &str, count: usize) -> App {
             let mut app = app(name);
-            let id = app.library.add(std::path::Path::new("/music/Sirens.flac"));
-            let track = app.library.get_mut(id).unwrap();
-            track.artist = "Peverelist".into();
-            track.title = "Sirens".into();
-            app.library.add_playlist("Saturday peak", "").unwrap();
+            for i in 0..count {
+                app.library.add_playlist(&format!("list {i:02}"), "").unwrap();
+            }
             app.rebuild();
             app
         }
 
-        #[test]
-        fn a_row_can_be_dragged_onto_a_playlist() {
-            // The thing this was all for. Drag-and-drop is a chain — the row
-            // has to be draggable, the payload has to be set, the sidebar has
-            // to accept it — and any link being missing looks identical from
-            // the outside: nothing happens.
-            let mut harness = Harness::new_ui_state(
-                |ui, app: &mut App| {
-                    ui.horizontal(|ui| {
-                        // A width, as the panel gives it one: the sidebar
-                        // fills what it is handed, and handing it the whole
-                        // harness would leave the list nothing to be dragged
-                        // from.
-                        ui.vertical(|ui| app.sidebar(ui));
-                        ui.vertical(|ui| {
-                            let widths = rows::Layout::default().widths(ui.available_width());
-                            app.rows_table(ui, &widths)
-                        });
-                    });
-                    // As the window does: the panels ask, and what they asked
-                    // for happens once they have all drawn.
-                    let ctx = ui.ctx().clone();
-                    app.apply_pending(&ctx);
-                },
-                with_a_track_and_a_playlist("dragging"),
-            );
-            harness.run();
-
-            let from = harness.get_by_label_contains("Sirens").rect().center();
-            let onto = harness.get_by_label("Saturday peak").rect().center();
-
-            // Pressed, moved, released — a drag is not one event, and egui only
-            // starts one once the pointer has actually travelled.
+        /// Carry something from one place to another with the pointer.
+        ///
+        /// Pressed, moved, released — a drag is not one event, and egui only
+        /// starts one once the pointer has actually travelled.
+        fn drag(harness: &mut Harness<'_, App>, from: egui::Pos2, onto: egui::Pos2) {
             harness.event(egui::Event::PointerMoved(from));
             harness.run();
             harness.event(egui::Event::PointerButton {
@@ -9401,6 +9450,154 @@ mod tests {
             });
             harness.run();
             harness.run();
+        }
+
+        /// Spin the wheel over the panel, which is how a person reaches the
+        /// bottom of it.
+        ///
+        /// `run_ok` rather than `run`: a scroll bar fades out over a second or
+        /// so, which is a repaint per frame for as long as it takes, and the
+        /// harness treats a ui that keeps asking to be redrawn as a runaway.
+        fn scroll(harness: &mut Harness<'_, App>, over: egui::Pos2, by: f32) {
+            harness.event(egui::Event::PointerMoved(over));
+            harness.run_ok();
+            harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, by),
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run_ok();
+        }
+
+        #[test]
+        fn a_playlist_below_the_fold_can_be_reached() {
+            // What the panel had no answer for. A collection with more
+            // playlists than there is room for used to run them off the bottom
+            // of the screen; once the panel began clipping to its own
+            // rectangle they stopped being drawn at all, and either way there
+            // was no way to get at them.
+            let fold = Fold::default();
+            let edge = fold.clone();
+            let mut harness = Harness::new_ui_state(
+                move |ui, app: &mut App| {
+                    edge.note(in_a_panel(ui, SHORT_PANEL, |ui| app.sidebar(ui)).bottom());
+                },
+                with_many_playlists("scrolling", 40),
+            );
+            harness.run();
+            let fold = fold.at();
+
+            let last = harness.query_by_label("list 39").map(|node| node.rect());
+            assert!(
+                last.is_none_or(|rect| rect.top() >= fold),
+                "the last playlist is already in view, so this proves nothing: {last:?}"
+            );
+
+            scroll(&mut harness, egui::pos2(100.0, 100.0), -4_000.0);
+
+            let last = harness
+                .query_by_label("list 39")
+                .unwrap_or_else(|| panic!("the last playlist is still not drawn"))
+                .rect();
+            assert!(last.top() < fold, "scrolling did not bring it into the panel: {last:?}");
+        }
+
+        #[test]
+        fn a_row_can_be_dropped_on_a_playlist_that_had_to_be_scrolled_to() {
+            // The two halves of this panel meeting: a playlist reachable only
+            // by scrolling still has to be a thing a track can be dropped on.
+            // A scroll area moves its contents without moving the rectangles
+            // egui interacts against unless everything agrees, and a drop that
+            // lands on where a playlist *was* is the kind of fault that looks
+            // from the outside exactly like nothing happening.
+            let mut app = with_many_playlists("dropping-after-scrolling", 40);
+            let id = app.library.add(std::path::Path::new("/music/Sirens.flac"));
+            let track = app.library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+            app.rebuild();
+
+            let fold = Fold::default();
+            let edge = fold.clone();
+            let mut harness = Harness::new_ui_state(
+                move |ui, app: &mut App| {
+                    ui.horizontal(|ui| {
+                        edge.note(in_a_panel(ui, SHORT_PANEL, |ui| app.sidebar(ui)).bottom());
+                        ui.vertical(|ui| {
+                            let widths = rows::Layout::default().widths(ui.available_width());
+                            app.rows_table(ui, &widths)
+                        });
+                    });
+                    let ctx = ui.ctx().clone();
+                    app.apply_pending(&ctx);
+                },
+                app,
+            );
+            harness.run();
+
+            let before = harness.get_by_label("list 39").rect();
+            assert!(
+                before.top() >= fold.at(),
+                "the target is on screen already, so this proves nothing: {before:?}"
+            );
+
+            // To the bottom of the list, so the target is one that was not on
+            // screen a moment ago.
+            scroll(&mut harness, egui::pos2(100.0, 100.0), -4_000.0);
+
+            let from = harness.get_by_label_contains("Sirens").rect().center();
+            let onto = harness.get_by_label("list 39").rect().center();
+            assert!(onto.y < fold.at(), "the target is still below the panel: {onto:?}");
+            drag(&mut harness, from, onto);
+
+            let reached = harness
+                .state()
+                .library
+                .playlists
+                .iter()
+                .find(|playlist| playlist.name == "list 39")
+                .expect("the playlist went missing");
+            assert_eq!(reached.tracks, vec![id], "the drop did not reach the scrolled playlist");
+        }
+
+        fn with_a_track_and_a_playlist(name: &str) -> App {
+            let mut app = app(name);
+            let id = app.library.add(std::path::Path::new("/music/Sirens.flac"));
+            let track = app.library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+            app.library.add_playlist("Saturday peak", "").unwrap();
+            app.rebuild();
+            app
+        }
+
+        #[test]
+        fn a_row_can_be_dragged_onto_a_playlist() {
+            // The thing this was all for. Drag-and-drop is a chain — the row
+            // has to be draggable, the payload has to be set, the sidebar has
+            // to accept it — and any link being missing looks identical from
+            // the outside: nothing happens.
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    ui.horizontal(|ui| {
+                        in_a_panel(ui, PANEL, |ui| app.sidebar(ui));
+                        ui.vertical(|ui| {
+                            let widths = rows::Layout::default().widths(ui.available_width());
+                            app.rows_table(ui, &widths)
+                        });
+                    });
+                    // As the window does: the panels ask, and what they asked
+                    // for happens once they have all drawn.
+                    let ctx = ui.ctx().clone();
+                    app.apply_pending(&ctx);
+                },
+                with_a_track_and_a_playlist("dragging"),
+            );
+            harness.run();
+
+            let from = harness.get_by_label_contains("Sirens").rect().center();
+            let onto = harness.get_by_label("Saturday peak").rect().center();
+            drag(&mut harness, from, onto);
 
             let playlist = &harness.state().library.playlists[0];
             assert_eq!(playlist.tracks.len(), 1, "the drop did not add the track");

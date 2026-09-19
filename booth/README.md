@@ -48,6 +48,13 @@ its contents are clipped to that, so a long path in the inspector or a long
 playlist name in the collection no longer widens the panel it is in, and
 squeezing the window does not overwrite what you dragged to.
 
+**The collection panel scrolls.** Forty playlists are more than any panel is
+tall; they used to run off the bottom of the screen, and once panels began
+clipping to their own rectangles they stopped being drawn at all. Scrolling is
+what turns being clipped into being reached. A track can be dragged onto a
+playlist that had to be scrolled to, the same as onto one that was already
+showing.
+
 ## The query bar is the browser
 
 Every filter is text, which means every filter can be saved, pasted, and read.
