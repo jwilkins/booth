@@ -611,17 +611,24 @@ So the pass is three steps, each skipped when it has already been taken:
 3. **Find what repeats.** Lines that say the same thing are grouped — loosely,
    because a recogniser writes the same sung phrase four slightly different ways
    and matching word-for-word would count a hook sung eight times as eight
-   different lines. The group with the most separate airings is the hook, and
-   where it first lands is a cue, labelled with the line itself.
+   different lines. The group with the most separate airings is the hook.
 
-Around it go the rest: **every time the hook comes back**, **where the singing
-starts**, and **the start of every phrase** the arrangement analysis found —
-intro, build, break, drop, outro. A player holds eight hot cues and a busy track
-offers more than eight moments, so they are ranked: the hook outranks even the
-drop, because a drop can be found by looking at the waveform and the line the
-crowd sings cannot be found by looking at anything. Two moments that land on top
-of each other become one cue, and it keeps the words: a drop that is also where
-the hook falls says so.
+**One cue per line, not one per airing.** A hook sung six times was six cues
+saying the same thing — a player that could jump to one moment of the record,
+with the drops and the breakdowns pushed out of the set entirely. Each of the
+track's repeated lines is now cued once, where it first lands, and at most three
+lines get a cue at all: the hook, a second line and a tag is already generous,
+and everything past that is a slot taken from a drop.
+
+Around them go **where the singing starts** and **the start of every phrase** the
+arrangement analysis found — intro, build, break, drop, outro. A player holds
+eight hot cues and a busy track offers more than eight moments, so they are
+ranked: the hook outranks even the drop, because a drop can be found by looking
+at the waveform and the line the crowd sings cannot be found by looking at
+anything. The other lines sit below the breakdowns, so the arrangement keeps the
+slots the words give back. Two moments that land on top of each other become one
+cue, and it keeps the words: a drop that is also where a line falls says which
+line.
 
 Cues from the words are rounded **down** to the beat rather than to the nearest
 one. A sung line rarely starts on the beat — a pickup is the whole point of a

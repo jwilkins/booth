@@ -9400,10 +9400,12 @@ mod tests {
                 // On the beat before the first word rather than the nearest
                 // one, so the cue cannot land after the word it is for.
                 assert_eq!(hook.time_ms, 40_000);
-                // And its returns are cued too.
+                // Once, wherever it first lands. A line sung three times used
+                // to be three cues saying the same thing, which left the drops
+                // and the breakdowns nowhere to go.
                 assert_eq!(
                     cues.iter().filter(|cue| cue.label == "hold me closer now").count(),
-                    3,
+                    1,
                     "{cues:?}"
                 );
             }

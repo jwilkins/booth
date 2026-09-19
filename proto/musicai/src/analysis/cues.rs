@@ -36,7 +36,7 @@ pub enum Reason {
     /// The first landing of the line the track repeats most, read out of the
     /// words. See [`crate::transcribe`].
     Hook,
-    /// And every landing after that.
+    /// Where another line the track keeps coming back to first lands.
     Refrain,
 }
 
@@ -48,7 +48,7 @@ impl Reason {
             Reason::Section(kind) => kind.label(),
             Reason::Vocal => "vocal",
             Reason::Hook => "hook",
-            Reason::Refrain => "hook again",
+            Reason::Refrain => "refrain",
         }
     }
 
@@ -535,11 +535,49 @@ mod tests {
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         let hook = hot.iter().find(|c| c.time_ms == 30_000).expect("no cue on the hook");
         assert_eq!(hook.comment.as_deref(), Some("hold me closer now"));
-        // And its returns are cued too, with the same words.
+        // Once, not once per airing. Eight cues spent three times over on the
+        // same words leaves the drops nowhere to go.
         assert_eq!(
             hot.iter().filter(|c| c.comment.as_deref() == hook.comment.as_deref()).count(),
-            3
+            1,
+            "{hot:?}"
         );
+    }
+
+    #[test]
+    fn the_slots_the_words_give_back_go_to_the_arrangement() {
+        // The point of the whole change. A track whose hook comes round five
+        // times, with an arrangement to match: before, the words took six of
+        // the eight and the breaks and builds were pushed out.
+        let words = crate::transcribe::Transcript {
+            lines: (0..5).map(|i| line(30_000 + i * 60_000, "hold me closer now")).collect(),
+        };
+        let kinds = [
+            Kind::Intro,
+            Kind::Up,
+            Kind::Chorus,
+            Kind::Down,
+            Kind::Chorus,
+            Kind::Down,
+            Kind::Outro,
+        ];
+        let mut candidates: Vec<Candidate> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, &kind)| Candidate::new(i as u32 * 45_000, Reason::Section(kind)))
+            .collect();
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let hot: Vec<Cue> = assemble(0, candidates).into_iter().filter(Cue::is_hot).collect();
+        let named = |what: &str| hot.iter().filter(|c| c.comment.as_deref() == Some(what)).count();
+
+        assert_eq!(named("hold me closer now"), 1, "the hook took more than one slot: {hot:?}");
+        // And the arrangement got the rest, saying what it is: a drop that
+        // happened to land on a hook return still reads "drop", because that
+        // is what a DJ is reaching for when they are not reaching for the
+        // words.
+        assert_eq!(named("drop"), 2, "{hot:?}");
+        assert_eq!(named("break"), 2, "{hot:?}");
     }
 
     #[test]

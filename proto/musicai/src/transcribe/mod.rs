@@ -52,9 +52,9 @@ impl Refrain {
 pub enum MomentKind {
     /// The first sung word in the track.
     VocalIn,
-    /// The first landing of the line the track repeats most.
+    /// Where the line the track repeats most first lands.
     Hook,
-    /// Every landing after that.
+    /// Where one of the other lines it keeps coming back to first lands.
     Refrain,
 }
 
@@ -93,6 +93,13 @@ const APART_MS: u32 = 4_000;
 /// How many times a line has to come round before it is the hook rather than
 /// just a line.
 const MIN_TIMES: usize = 2;
+
+/// How many of the track's repeated lines get a cue of their own.
+///
+/// One each, and not many. A player has eight hot cues and a record's
+/// arrangement wants most of them: the hook, a second line and a tag is already
+/// generous, and everything past that is a slot taken from a drop.
+const LINES: usize = 3;
 
 /// The longest comment worth putting on a cue. A player shows a line of text
 /// under the cue, not a verse.
@@ -143,20 +150,37 @@ impl Transcript {
 
     /// Everything in the words that is worth a cue, in time order.
     ///
+    /// One cue per line, not one per airing. A hook sung six times used to be
+    /// six cues saying the same thing, which is a player that can jump to one
+    /// moment of a record — and the drops and the breakdowns, the things a DJ
+    /// reaches for between the words, had nowhere left to go. So each of the
+    /// track's repeated lines is cued once, where it first lands, and the
+    /// returns are not cued at all.
+    ///
+    /// Nor are they quietly borrowed as names for whatever section they land
+    /// on. That was tried, and it puts the same words on three differently
+    /// coloured cues, which is the complaint again in another form: a drop
+    /// should say "drop", because that is what a DJ is reaching for when they
+    /// are not reaching for the words.
+    ///
     /// The hook wins any argument with the entry: on a track that opens on its
     /// chorus they are the same moment, and calling it "the voice comes in"
     /// when it is the hook throws away the more useful of the two names.
     pub fn moments(&self) -> Vec<Moment> {
         let mut moments = Vec::new();
-        let hook = self.hook();
 
-        if let Some(hook) = &hook {
-            for (index, &at) in hook.at.iter().enumerate() {
-                let kind = match index {
-                    0 => MomentKind::Hook,
-                    _ => MomentKind::Refrain,
-                };
-                moments.push(Moment { time_ms: at, kind, text: comment(&hook.text) });
+        // Most repeated first, so the top line is the hook and the next ones
+        // are the lesser ones — which is the order they should lose their
+        // slots in when the arrangement wants them.
+        let repeated = self.refrains().into_iter().filter(|line| line.times() >= MIN_TIMES);
+        for (rank, line) in repeated.take(LINES).enumerate() {
+            let text = comment(&line.text);
+            let kind = match rank {
+                0 => MomentKind::Hook,
+                _ => MomentKind::Refrain,
+            };
+            if let Some(&first) = line.at.first() {
+                moments.push(Moment { time_ms: first, kind, text });
             }
         }
 
@@ -418,7 +442,10 @@ mod tests {
     }
 
     #[test]
-    fn moments_name_the_entry_the_hook_and_its_returns() {
+    fn a_line_gets_one_cue_however_often_it_comes_round() {
+        // The complaint this answers: a hook sung six times was six cues
+        // saying the same thing, so a player could jump to one moment of the
+        // record and the drops had nowhere left to go.
         let transcript = said(&[
             (10_000, "walking through the city at night"),
             (30_000, "hold me closer now"),
@@ -430,20 +457,83 @@ mod tests {
         let kinds: Vec<MomentKind> = moments.iter().map(|m| m.kind).collect();
         assert_eq!(
             kinds,
-            vec![MomentKind::VocalIn, MomentKind::Hook, MomentKind::Refrain, MomentKind::Refrain]
+            vec![MomentKind::VocalIn, MomentKind::Hook],
+            "the returns are not moments of their own"
         );
         assert_eq!(moments[0].time_ms, 10_000);
-        assert_eq!(moments[1].time_ms, 30_000);
+        assert_eq!(moments[1].time_ms, 30_000, "where the line first lands");
         assert_eq!(moments[1].text, "hold me closer now");
-        // And they come out in time order.
-        assert!(moments.windows(2).all(|pair| pair[0].time_ms <= pair[1].time_ms));
+    }
+
+    #[test]
+    fn a_second_line_the_track_keeps_returning_to_gets_a_cue_of_its_own() {
+        // One cue each, which is the other half of the rule: the slots saved
+        // by not repeating the hook are worth spending on a different line.
+        let transcript = said(&[
+            (20_000, "hold me closer now"),
+            (40_000, "and I don't want to go home"),
+            (80_000, "hold me closer now"),
+            (100_000, "and I don't want to go home"),
+            (140_000, "hold me closer now"),
+        ]);
+
+        let moments = transcript.moments();
+        let cued: Vec<(MomentKind, &str)> = moments
+            .iter()
+            .filter(|m| m.kind != MomentKind::VocalIn)
+            .map(|m| (m.kind, m.text.as_str()))
+            .collect();
+        // In time order, and the one sung three times is the hook.
+        assert_eq!(
+            cued,
+            vec![
+                (MomentKind::Hook, "hold me closer now"),
+                (MomentKind::Refrain, "and I don't want to go home")
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_handful_of_lines_a_track_leans_on_get_cues() {
+        // A player has eight hot cues and the arrangement wants most of them.
+        // A very repetitive vocal must not take the lot.
+        // Six distinct lines, each sung twice, in the order a recogniser
+        // would emit them — which is always ascending, and which the grouping
+        // relies on to tell one airing from the next.
+        // Six lines with nothing in common, each sung twice, in the order a
+        // recogniser emits them — always ascending, which is what the grouping
+        // relies on to tell one airing from the next.
+        const VERSES: [&str; 6] = [
+            "hold me closer now",
+            "walking through the city at night",
+            "and I don't want to go home",
+            "the rain has not stopped falling",
+            "take me all the way down",
+            "nothing here was ever ours",
+        ];
+        let mut lines: Vec<(u32, &str)> = Vec::new();
+        for round in 0..2u32 {
+            for (index, verse) in VERSES.iter().enumerate() {
+                lines.push((round * 120_000 + index as u32 * 10_000, verse));
+            }
+        }
+        let transcript = said(&lines);
+
+        let cued = transcript
+            .moments()
+            .iter()
+            .filter(|m| matches!(m.kind, MomentKind::Hook | MomentKind::Refrain))
+            .count();
+        assert_eq!(cued, LINES, "every repeated line took a slot: {cued}");
     }
 
     #[test]
     fn a_track_that_opens_on_its_hook_gets_one_cue_not_two() {
         let transcript = said(&[(8_000, "hold me closer now"), (68_000, "hold me closer now")]);
         let moments = transcript.moments();
-        assert_eq!(moments.len(), 2, "{moments:?}");
+        // One: the hook, at the moment the voice also comes in. Not a second
+        // for the entry, and not a third for the line coming round again.
+        assert_eq!(moments.len(), 1, "{moments:?}");
         assert_eq!(moments[0].kind, MomentKind::Hook, "the hook outranks the entry");
     }
 
