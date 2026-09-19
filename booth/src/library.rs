@@ -1493,6 +1493,7 @@ impl Library {
         if take(Field::Stems) {
             kept.stems.fill_from(&copy.stems);
         }
+        let kept_path = kept.path.clone();
         if analysis {
             kept.bpm = copy.bpm;
             kept.grid_confidence = copy.grid_confidence;
@@ -1514,8 +1515,14 @@ impl Library {
         // so taking the listening without them would leave a track that says
         // it is analysed and draws nothing until it is analysed again.
         if analysis {
-            if let Some(bands) = cached_waveform(other) {
-                let _ = cache_waveform(keep, &bands);
+            // Copied across, and noted as being of the file that is staying.
+            // These two are the same recording by hash, so the picture is of
+            // the right audio; it is not of the right *file*, and a note
+            // carried over unchanged would name one that is about to be
+            // thrown away.
+            let of = [kept_path.clone()];
+            if let Some(bands) = cached_waveform(other, &of) {
+                let _ = cache_waveform(keep, &of, &bands);
             }
             if let Some(envelopes) = cached_envelopes(other) {
                 let _ = cache_envelopes(keep, &envelopes);
@@ -1707,18 +1714,77 @@ pub fn waveform_path(id: u32) -> PathBuf {
     data_dir().join("waveforms").join(format!("{id:08}.bands"))
 }
 
-/// Keep a track's picture for next time.
-pub fn cache_waveform(id: u32, bands: &[u8]) -> std::io::Result<()> {
+/// Where the note of what a picture was drawn from sits, beside the picture.
+fn drawn_from_path(id: u32) -> PathBuf {
+    data_dir().join("waveforms").join(format!("{id:08}.from"))
+}
+
+/// What a picture was drawn from: the files, and what they looked like.
+///
+/// `None` when a file cannot be reached, which is not the same as a file that
+/// has changed — see [`cached_waveform`].
+fn drawn_from(sources: &[PathBuf]) -> Option<String> {
+    if sources.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(sources.len());
+    for path in sources {
+        let meta = std::fs::metadata(path).ok()?;
+        let at = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs())
+            .unwrap_or(0);
+        lines.push(format!("{}:{}:{at}", path.display(), meta.len()));
+    }
+    Some(lines.join("\n"))
+}
+
+/// Keep a row's picture for next time, with a note of what it is a picture of.
+///
+/// The note is the whole point. A picture is of a file, but the cache is keyed
+/// by row id — so without it a row whose audio changed underneath it goes on
+/// showing the old picture for ever, and nothing about the row says so. Two
+/// ways that happens: a stem kit rendered again, and a bug that is the reason
+/// this exists, where a stem companion was drawn from its parent's mix and the
+/// mix's picture was cached under the stem's name.
+pub fn cache_waveform(id: u32, sources: &[PathBuf], bands: &[u8]) -> std::io::Result<()> {
     let path = waveform_path(id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, bands)
+    std::fs::write(path, bands)?;
+    match drawn_from(sources) {
+        Some(note) => std::fs::write(drawn_from_path(id), note),
+        // Nothing to say what it is of, so nothing is claimed: the next read
+        // will find no note and draw it again.
+        None => {
+            let _ = std::fs::remove_file(drawn_from_path(id));
+            Ok(())
+        }
+    }
 }
 
-/// Read a cached picture, if there is one.
-pub fn cached_waveform(id: u32) -> Option<Vec<u8>> {
-    std::fs::read(waveform_path(id)).ok().filter(|bands| !bands.is_empty())
+/// Read a cached picture, if there is one and it is still of these files.
+///
+/// A cache with no note beside it is one written before there were notes, or
+/// one whose note was lost. Either way it cannot be vouched for, so it is
+/// redrawn — which is what heals a library full of acapellas showing the mix.
+///
+/// A file that cannot be reached is a different matter. Nothing can be said
+/// about whether the picture is still right, and a row whose audio has been
+/// unplugged is better showing the last picture of it than a blank strip.
+pub fn cached_waveform(id: u32, sources: &[PathBuf]) -> Option<Vec<u8>> {
+    let bands = std::fs::read(waveform_path(id)).ok().filter(|bands| !bands.is_empty())?;
+    match drawn_from(sources) {
+        Some(now) => {
+            let noted = std::fs::read_to_string(drawn_from_path(id)).ok()?;
+            (noted == now).then_some(bands)
+        }
+        None => Some(bands),
+    }
 }
 
 /// Throw away a row's cached picture.
@@ -1730,6 +1796,7 @@ pub fn cached_waveform(id: u32) -> Option<Vec<u8>> {
 /// says it is stale.
 pub fn forget_waveform(id: u32) {
     let _ = std::fs::remove_file(waveform_path(id));
+    let _ = std::fs::remove_file(drawn_from_path(id));
 }
 
 /// Where a track's per-stem loudness is cached.
@@ -2753,6 +2820,120 @@ mod tests {
             .collect();
         assert_eq!(leftovers, vec!["library.json".to_string()], "{leftovers:?}");
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// A cached picture has to say what it is a picture of.
+#[cfg(test)]
+mod a_picture_of_what {
+    use super::*;
+
+    /// Ids well clear of anything another test might use, since the cache is
+    /// one directory shared by the whole suite.
+    fn scratch(name: &str) -> (u32, PathBuf) {
+        let id = 0xA000_0000 + name.bytes().map(u32::from).sum::<u32>();
+        forget_waveform(id);
+        let dir = std::env::temp_dir().join(format!("booth-picture-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (id, dir)
+    }
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_picture_of_these_files_is_the_one_that_comes_back() {
+        let (id, dir) = scratch("kept");
+        let audio = dir.join("stem.wav");
+        write(&audio, b"some audio");
+        let of = [audio.clone()];
+
+        cache_waveform(id, &of, &[1, 2, 3]).unwrap();
+        assert_eq!(cached_waveform(id, &of), Some(vec![1, 2, 3]));
+
+        forget_waveform(id);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_with_no_note_beside_it_is_not_trusted() {
+        // The bug this is here for. A stem companion carries its parent's
+        // path, and an older build drew from it and cached the *mix* under the
+        // stem's name — so every acapella in the library had a picture of the
+        // record, and re-analysing never touched it because the cache was
+        // keyed by id alone and looked perfectly present.
+        let (id, dir) = scratch("unnoted");
+        let audio = dir.join("stem.wav");
+        write(&audio, b"some audio");
+
+        // Written the way the old code wrote it: bands, and nothing saying
+        // what they are of.
+        std::fs::create_dir_all(waveform_path(id).parent().unwrap()).unwrap();
+        write(&waveform_path(id), &[9, 9, 9]);
+        assert_eq!(
+            cached_waveform(id, std::slice::from_ref(&audio)),
+            None,
+            "a picture that cannot vouch for itself was used anyway"
+        );
+
+        forget_waveform(id);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_of_a_file_that_has_changed_since_is_not_trusted() {
+        // A kit rendered again, at another quality or by another separator.
+        let (id, dir) = scratch("changed");
+        let audio = dir.join("stem.wav");
+        write(&audio, b"the first render");
+        let of = [audio.clone()];
+        cache_waveform(id, &of, &[1, 2, 3]).unwrap();
+
+        // Long enough after that the modification time really moves.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        write(&audio, b"a second render, of a different length");
+        assert_eq!(cached_waveform(id, &of), None);
+
+        forget_waveform(id);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_of_a_file_that_is_not_there_is_better_than_no_picture() {
+        // Nothing can be said about whether it is still right, and a row whose
+        // drive has been unplugged is better showing the last picture of it
+        // than an empty strip that reads as a track with no sound in it.
+        let (id, dir) = scratch("unplugged");
+        let audio = dir.join("stem.wav");
+        write(&audio, b"some audio");
+        cache_waveform(id, std::slice::from_ref(&audio), &[4, 5, 6]).unwrap();
+
+        std::fs::remove_file(&audio).unwrap();
+        assert_eq!(cached_waveform(id, &[audio]), Some(vec![4, 5, 6]));
+
+        forget_waveform(id);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_instrumental_is_a_picture_of_both_its_files() {
+        // Two stems summed. Either one changing makes the picture wrong.
+        let (id, dir) = scratch("instrumental");
+        let (melody, drums) = (dir.join("melody.mp3"), dir.join("drums.mp3"));
+        write(&melody, b"melody");
+        write(&drums, b"drums");
+        let of = [melody.clone(), drums.clone()];
+        cache_waveform(id, &of, &[7]).unwrap();
+        assert_eq!(cached_waveform(id, &of), Some(vec![7]));
+
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        write(&drums, b"different drums");
+        assert_eq!(cached_waveform(id, &of), None, "one of the two changed");
+
+        forget_waveform(id);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

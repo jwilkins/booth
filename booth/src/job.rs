@@ -52,12 +52,7 @@ pub enum Job {
     /// loss of every cue somebody moved by hand, for a row that only wanted a
     /// picture. And for a stem it was the wrong audio: a companion carries its
     /// parent's path, so the acapella was handed the whole mix to draw.
-    Draw {
-        id: u32,
-        /// Summed when there is more than one, which is what an instrumental
-        /// is. A companion's own files, so the picture is of what will play.
-        sources: Vec<PathBuf>,
-    },
+    Draw(Vec<Drawable>),
     /// Read the words off tracks' vocal stems.
     Transcribe { tracks: Vec<Transcribable>, whisper: crate::config::Whisper },
     /// Decode one track into memory so it can be auditioned.
@@ -138,6 +133,14 @@ impl Job {
             Job::Keep { .. } => "copying a drive",
         }
     }
+}
+
+/// One row to draw, and the audio to draw it from.
+pub struct Drawable {
+    pub id: u32,
+    /// Summed when there is more than one, which is what an instrumental is. A
+    /// companion's own files, so the picture is of what will play.
+    pub sources: Vec<PathBuf>,
 }
 
 /// A track to read the words off, and the stem to read them off.
@@ -246,6 +249,9 @@ pub enum Update {
     /// One row's waveform, measured from its own audio.
     Drawn {
         id: u32,
+        /// What it was drawn from, carried back so the cache can record what
+        /// the picture is a picture of.
+        sources: Vec<PathBuf>,
         /// The three-band picture, as [`Analyzed::bands`] carries it.
         bands: Vec<u8>,
     },
@@ -271,6 +277,8 @@ pub enum Update {
 /// record the library already holds.
 pub struct Analyzed {
     pub id: u32,
+    /// The file it was listened to, which is what its picture is a picture of.
+    pub path: PathBuf,
     pub bpm: f64,
     pub grid_confidence: f32,
     pub has_grid: bool,
@@ -460,6 +468,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
 
     Ok(Analyzed {
         id,
+        path: path.to_path_buf(),
         bpm: analysis.bpm,
         grid_confidence: analysis.confidence,
         has_grid: analysis.found_beats(),
@@ -660,6 +669,40 @@ pub fn find_stems(stems_in: &crate::config::StemsLocation, source: &Path) -> Ste
 /// halved on the way in: two stems of the same record are already the right
 /// balance against each other, and scaling them apart is a mix decision this
 /// has no business making. Only the total needs to fit.
+/// Draw each row from its own audio.
+///
+/// One at a time, and a row that will not decode does not take the rest with
+/// it: a kit with one corrupt stem should still get the other two drawn.
+fn draw(rows: &[Drawable], reporter: &Channel) -> anyhow::Result<()> {
+    let batch =
+        Batch { inner: reporter, done: std::sync::atomic::AtomicUsize::new(0), total: rows.len() };
+    for row in rows {
+        if reporter.cancelled() {
+            break;
+        }
+        batch.starting();
+        match decode_sum(&row.sources) {
+            Ok(audio) => {
+                let bands = booth_cli::export::waveform::analyze(&audio).band_detail;
+                crate::debug!(
+                    "drew #{} from {}",
+                    row.id,
+                    crate::library::plural(row.sources.len(), "file")
+                );
+                let _ = reporter.tx.send(Update::Drawn {
+                    id: row.id,
+                    sources: row.sources.clone(),
+                    bands,
+                });
+            }
+            Err(e) => crate::warn!("could not draw #{}: {e:#}", row.id),
+        }
+        batch.finished_one();
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
 /// The audio a row is made of, summed when it is made of several.
 ///
 /// The deck's own summing goes through [`crate::player::Sound`], which is
@@ -877,14 +920,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             separate(&tracks, &stems_in, backend, quality, reporter)
         }
         Job::Transcribe { tracks, whisper } => transcribe(&tracks, &whisper, reporter),
-        Job::Draw { id, sources } => {
-            let audio = decode_sum(&sources)?;
-            let bands = booth_cli::export::waveform::analyze(&audio).band_detail;
-            crate::debug!("drew #{id} from {}", crate::library::plural(sources.len(), "file"));
-            let _ = reporter.tx.send(Update::Drawn { id, bands });
-            (reporter.wake)();
-            Ok(())
-        }
+        Job::Draw(rows) => draw(&rows, reporter),
         Job::Sync { args, files } => {
             // The file list was settled when the plan was drawn up, so the
             // command is told exactly what to write rather than walking a

@@ -489,9 +489,20 @@ properties of the record and a cue that did not line up with the one on the
 track would be worse than no cue at all. The waveform is the one thing that
 belongs to the file rather than to the record.
 
-Rendering a kit again throws the stem pictures away, since they were drawings of
-files that no longer exist. The record's own picture is left alone: its file has
-not changed.
+Analysing a record draws its stems with it, so a crate that has just been
+prepared is prepared — waiting to click on each acapella in turn is not the same
+thing. Rendering a kit does the same as soon as the stems exist.
+
+A cached picture records what it is a picture of: the files it was drawn from,
+and what they looked like. The cache is keyed by row, and without that note a
+row whose audio changed underneath it goes on showing the old picture for ever
+with nothing saying so. Two ways that happens — a kit rendered again, and the
+bug this note was added for, where a stem row was drawn from its parent's mix
+and the mix's picture was filed under the stem's name. A picture that cannot
+vouch for itself is drawn again, which is what heals a library full of acapellas
+showing the record. A file that cannot be reached is a different matter: nothing
+can be said either way, and a row whose drive has been unplugged is better
+showing the last picture of it than an empty strip that reads as silence.
 
 ## Colouring the waveform
 

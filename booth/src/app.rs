@@ -1513,6 +1513,24 @@ impl App {
     /// The same call behind the batch button and the one on a single row: a
     /// re-analysis is not a different operation from a first one, and having
     /// two of them is how they come to disagree.
+    /// Every stem row of these tracks that has files to be drawn from.
+    ///
+    /// Taken off the collection rather than off the browser: a crate being
+    /// prepared has its stems drawn whether or not the companion rows happen to
+    /// be showing, and whether or not anybody has clicked on one.
+    fn stem_pictures(&self, ids: &[u32]) -> Vec<job::Drawable> {
+        let mut drawing = Vec::new();
+        for id in ids {
+            let Some(track) = self.library.get(*id) else { continue };
+            for companion in self.library.companions(track) {
+                if let Some(sources) = picture_sources(&companion) {
+                    drawing.push(job::Drawable { id: companion.id, sources });
+                }
+            }
+        }
+        drawing
+    }
+
     fn analyze_tracks(&mut self, ids: &[u32]) {
         let waiting = self.files_for(ids);
         if waiting.is_empty() {
@@ -1538,6 +1556,22 @@ impl App {
         }
         self.ensure_local(&ids);
         self.start(Job::Analyze(waiting.clone()));
+
+        // And the stems, where there are any. Listening to a record is the
+        // moment its pictures are made, and a stem row has a picture of its
+        // own — so leaving those to be drawn one at a time as somebody happens
+        // to click on them means a crate that has just been prepared is not
+        // prepared. The grid, the cues and the phrases are still the record's
+        // and are not measured again here; only the drawing is per file.
+        let drawing = self.stem_pictures(&ids);
+        if !drawing.is_empty() {
+            crate::info!("drawing {}", plural(drawing.len(), "stem"));
+            for row in &drawing {
+                self.remeasured.remove(&row.id);
+                crate::library::forget_waveform(row.id);
+            }
+            self.start(Job::Draw(drawing));
+        }
 
         // Listening to a track and asking what it is are the same errand, so
         // they are queued together — but the lookup is paced by two services'
@@ -1914,6 +1948,9 @@ impl App {
         // reading is queued once, after the whole batch has been folded in,
         // rather than a job per track as each kit lands.
         let mut to_read: Vec<job::Transcribable> = Vec::new();
+        // Tracks whose kit landed this batch, so their stem rows can be drawn
+        // once at the end rather than a job per part as each one arrives.
+        let mut separated: Vec<u32> = Vec::new();
 
         for update in updates {
             match update {
@@ -2129,7 +2166,10 @@ impl App {
                     // An analysis replaces the grid, the cues and the phrases,
                     // which is exactly what a player can also change.
                     self.prep_changed(analyzed.id);
-                    if let Err(e) = crate::library::cache_waveform(analyzed.id, &analyzed.bands) {
+                    let of = [analyzed.path.clone()];
+                    if let Err(e) =
+                        crate::library::cache_waveform(analyzed.id, &of, &analyzed.bands)
+                    {
                         self.note(format!("could not cache the waveform: {e}"), theme::DIM);
                     }
                     if Some(analyzed.id) == self.selected {
@@ -2145,6 +2185,7 @@ impl App {
                     if let Some(track) = self.library.get_mut(id) {
                         track.stems = kit;
                     }
+                    separated.push(id);
                     if self.want_cues.remove(&id) {
                         match vocals {
                             Some(vocals) => to_read.push(job::Transcribable { id, vocals }),
@@ -2156,13 +2197,14 @@ impl App {
                     }
                     changed = true;
                 }
-                Update::Drawn { id, bands } => {
-                    if let Err(e) = crate::library::cache_waveform(id, &bands) {
+                Update::Drawn { id, sources, bands } => {
+                    if let Err(e) = crate::library::cache_waveform(id, &sources, &bands) {
                         self.note(format!("could not cache the waveform: {e}"), theme::DIM);
                     }
                     if Some(id) == self.selected {
                         self.waveform = Some((id, bands));
                     }
+                    changed = true;
                 }
                 Update::Transcribed { id, lyrics } => {
                     let heard = lyrics.len();
@@ -2258,6 +2300,18 @@ impl App {
         }
         if !to_read.is_empty() {
             self.read_words(to_read);
+        }
+        // Stems that have just come into existence have no picture yet, and
+        // this is the other moment they can be drawn without waiting for
+        // somebody to click on them.
+        if !separated.is_empty() {
+            let drawing = self.stem_pictures(&separated);
+            if !drawing.is_empty() {
+                for row in &drawing {
+                    self.remeasured.remove(&row.id);
+                }
+                self.start(Job::Draw(drawing));
+            }
         }
         if changed {
             self.rebuild();
@@ -4493,7 +4547,13 @@ impl App {
         }
 
         if !has_bands && track.analyzed {
-            match crate::library::cached_waveform(track.id) {
+            // Worked out before the cache is consulted, because the cache can
+            // only say whether its picture is still of these files if it knows
+            // which files they are.
+            let sources = picture_sources(&track);
+            let cached =
+                sources.as_deref().and_then(|of| crate::library::cached_waveform(track.id, of));
+            match cached {
                 Some(cached) => self.waveform = Some((track.id, cached)),
                 // Nothing cached — analysed by an older version, the cache was
                 // cleared, or this is a stem companion, which has never had a
@@ -4511,9 +4571,9 @@ impl App {
                 // moved, it will not decode — would otherwise start a job,
                 // fail, and start another for as long as it stayed selected.
                 None if !self.running() && !self.remeasured.contains(&track.id) => {
-                    if let Some(sources) = picture_sources(&track) {
+                    if let Some(sources) = sources {
                         self.remeasured.insert(track.id);
-                        self.start(Job::Draw { id: track.id, sources });
+                        self.start(Job::Draw(vec![job::Drawable { id: track.id, sources }]));
                     }
                 }
                 None => {}
@@ -9065,6 +9125,42 @@ mod tests {
                 assert_eq!(acapella.bpm, parent.bpm);
                 assert!(acapella.has_grid);
                 assert_eq!(acapella.parent, Some(id));
+            }
+
+            #[test]
+            fn analysing_a_record_draws_its_stems_too() {
+                // What "re-analyse" has to mean for a track with a kit. Left
+                // to be drawn one at a time as somebody clicks on them, a
+                // crate that has just been prepared is not prepared.
+                let (app, id) = with_a_kit("batch");
+                let drawing = app.stem_pictures(&[id]);
+
+                assert_eq!(drawing.len(), 3, "one per part of the kit");
+                let mut named: Vec<String> = drawing
+                    .iter()
+                    .flat_map(|row| &row.sources)
+                    .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect();
+                named.sort();
+                assert_eq!(
+                    named,
+                    vec![
+                        "Sirens-drums.mp3".to_string(),
+                        "Sirens-melody.mp3".to_string(),
+                        "Sirens-vocals.mp3".to_string()
+                    ],
+                    "the stems should be drawn from the stems"
+                );
+                // And never from the record, which has its own picture.
+                assert!(drawing.iter().all(|row| row.id != id));
+            }
+
+            #[test]
+            fn a_record_with_no_kit_has_no_stems_to_draw() {
+                let (mut app, id) = with_a_kit("kitless");
+                app.library.get_mut(id).unwrap().stems = Default::default();
+                app.rebuild();
+                assert!(app.stem_pictures(&[id]).is_empty());
             }
 
             #[test]
