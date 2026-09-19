@@ -491,6 +491,41 @@ mod tests {
         assert!(err.to_string().contains("different flavour"), "{err}");
     }
 
+    /// Captured from whisper.cpp itself — `whisper-cli -m ggml-base.en.bin -oj`
+    /// on five seconds of tone and noise, which is the shape of the problem:
+    /// a stretch of a record with no words in it.
+    ///
+    /// Written down rather than described, because what a recogniser does with
+    /// music is the thing every guard here is guarding against, and a fixture
+    /// invented to match the guard proves only that it was written down twice.
+    const NO_WORDS_IN_IT: &str = r#"{
+        "systeminfo": "AVX = 1 | AVX2 = 1 | F16C = 1",
+        "model": { "type": "base" },
+        "params": { "model": "ggml-base.en.bin", "language": "en" },
+        "result": { "language": "en" },
+        "transcription": [
+            { "timestamps": { "from": "00:00:00,000", "to": "00:00:02,240" },
+              "offsets": { "from": 0, "to": 2240 },
+              "text": " (gasping)" },
+            { "timestamps": { "from": "00:00:02,240", "to": "00:00:04,580" },
+              "offsets": { "from": 2240, "to": 4580 },
+              "text": " (screaming)" }
+        ]
+    }"#;
+
+    #[test]
+    fn what_a_recogniser_makes_of_music_is_not_words() {
+        // Both of those are the recogniser describing a noise, and neither is
+        // a lyric. Left in, they would group together into the most repeated
+        // "line" on every instrumental in the library and cue the hook to a
+        // cymbal.
+        let transcript = read(NO_WORDS_IN_IT, Flavour::Cpp).unwrap();
+        assert!(transcript.lines.is_empty(), "{:?}", transcript.lines);
+        assert!(transcript.is_empty());
+        assert!(transcript.hook().is_none());
+        assert!(transcript.moments().is_empty());
+    }
+
     #[test]
     fn annotations_are_not_lyrics() {
         assert!(!is_speech("[Music]"));

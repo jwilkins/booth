@@ -358,6 +358,10 @@ pub struct Config {
     pub whisper: Whisper,
 }
 
+/// What to run when nothing says otherwise: whisper.cpp's own binary name, as
+/// `booth/README.md` tells you to install it.
+const DEFAULT_WHISPER: &str = "whisper-cli";
+
 /// Where the speech recogniser lives and what to ask it for.
 ///
 /// Off by default in the sense that nothing here points anywhere: Booth does
@@ -391,16 +395,33 @@ impl Whisper {
     /// The settings first, then the environment, then the default — the same
     /// order the rekordbox key resolves in, and for the same reason: a feature
     /// should be triable without editing a file.
-    fn setting(stored: &str, variable: &str) -> Option<String> {
+    ///
+    /// The rule is separated from the environment read so that it can be
+    /// tested. A test that reads the real environment passes or fails by what
+    /// the machine happens to be carrying, which this repository's own
+    /// session-start hook demonstrated the moment it was written: it exports
+    /// `BOOTH_WHISPER_BIN`, and two tests that had been green for a week went
+    /// red without a line of the code under test changing.
+    fn chosen(stored: &str, from_env: Option<String>) -> Option<String> {
         let stored = stored.trim();
         if !stored.is_empty() {
             return Some(stored.to_string());
         }
-        std::env::var(variable).ok().filter(|value| !value.trim().is_empty())
+        from_env.filter(|value| !value.trim().is_empty())
+    }
+
+    fn setting(stored: &str, variable: &str) -> Option<String> {
+        Self::chosen(stored, std::env::var(variable).ok())
+    }
+
+    /// The same rule with the fallback on the end, kept apart from the
+    /// environment for the reason [`Self::chosen`] gives.
+    fn program_from(stored: &str, from_env: Option<String>) -> String {
+        Self::chosen(stored, from_env).unwrap_or_else(|| DEFAULT_WHISPER.to_string())
     }
 
     pub fn program(&self) -> String {
-        Self::setting(&self.program, "BOOTH_WHISPER_BIN").unwrap_or_else(|| "whisper-cli".into())
+        Self::program_from(&self.program, std::env::var("BOOTH_WHISPER_BIN").ok())
     }
 
     pub fn model(&self) -> Option<PathBuf> {
@@ -1062,9 +1083,25 @@ mod whisper_settings {
 
     #[test]
     fn a_setting_is_taken_as_written_apart_from_the_spaces() {
+        // A stored setting is the answer whatever the environment says, so
+        // this one can be asked of the real thing.
         let whisper = Whisper { program: "  /opt/whisper-cli  ".into(), ..Default::default() };
         assert_eq!(whisper.program(), "/opt/whisper-cli");
-        assert_eq!(Whisper::default().program(), "whisper-cli", "and there is a default");
+    }
+
+    #[test]
+    fn the_settings_come_first_then_the_environment_then_the_default() {
+        // Asked of the rule rather than of the machine: the environment this
+        // runs in is not the test's to arrange, and a session-start hook that
+        // exports one of these must not be able to turn the suite red.
+        let from_env = || Some("/from/the/environment".to_string());
+
+        assert_eq!(Whisper::chosen(" /typed/in ", from_env()), Some("/typed/in".into()));
+        assert_eq!(Whisper::chosen("", from_env()), Some("/from/the/environment".into()));
+        assert_eq!(Whisper::chosen("   ", None), None);
+        // An empty variable is an unset one. Passed through as `-l ""`,
+        // whisper transcribes nothing at all.
+        assert_eq!(Whisper::chosen("", Some("  ".into())), None);
     }
 
     #[test]
@@ -1082,9 +1119,10 @@ mod whisper_settings {
     }
 
     #[test]
-    fn an_unset_language_is_none_rather_than_an_empty_one() {
-        // Passed through as an empty `-l ""`, whisper transcribes nothing.
-        let whisper = Whisper { language: "   ".into(), ..Default::default() };
-        assert_eq!(whisper.to_cli(PathBuf::new()).language, None);
+    fn with_nothing_set_anywhere_it_is_the_one_the_readme_tells_you_to_install() {
+        assert_eq!(Whisper::program_from("", None), "whisper-cli");
+        // And a setting still beats a default, which is the half of this that
+        // would go unnoticed if the default were the only thing asserted.
+        assert_eq!(Whisper::program_from(" whisper ", None), "whisper");
     }
 }
