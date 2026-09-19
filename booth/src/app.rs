@@ -1727,6 +1727,14 @@ impl App {
         let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
         for id in &ids {
             self.re_enveloped.remove(id);
+            // The companions are about to be made of different audio, so the
+            // pictures measured from the old files are no longer of anything.
+            // The parent's is untouched: its own file has not changed.
+            for role in crate::library::Role::PARTS {
+                let companion = crate::library::companion_id(*id, role);
+                crate::library::forget_waveform(companion);
+                self.remeasured.remove(&companion);
+            }
         }
         self.ensure_local(&ids);
         self.start(Job::Separate {
@@ -2147,6 +2155,14 @@ impl App {
                         }
                     }
                     changed = true;
+                }
+                Update::Drawn { id, bands } => {
+                    if let Err(e) = crate::library::cache_waveform(id, &bands) {
+                        self.note(format!("could not cache the waveform: {e}"), theme::DIM);
+                    }
+                    if Some(id) == self.selected {
+                        self.waveform = Some((id, bands));
+                    }
                 }
                 Update::Transcribed { id, lyrics } => {
                     let heard = lyrics.len();
@@ -4479,20 +4495,26 @@ impl App {
         if !has_bands && track.analyzed {
             match crate::library::cached_waveform(track.id) {
                 Some(cached) => self.waveform = Some((track.id, cached)),
-                // Nothing cached — analysed by an older version, or the cache
-                // was cleared. Measure it again, once, in the background.
+                // Nothing cached — analysed by an older version, the cache was
+                // cleared, or this is a stem companion, which has never had a
+                // picture of its own. Measure one, once, in the background.
                 //
-                // Once, and remembered: this runs every frame the track is
-                // selected, so a track that cannot be measured — its file has
+                // The picture only. This used to run a whole analysis, which
+                // re-derived the grid, the key, the cues and the phrases and
+                // wrote them over whatever the collection had — so selecting a
+                // track whose cache had been cleared quietly discarded every
+                // cue somebody had moved by hand. Re-analysing is a thing to
+                // ask for, not a thing that happens because a row was clicked.
+                //
+                // Once, and remembered: this runs every frame the row is
+                // selected, so one that cannot be measured — its file has
                 // moved, it will not decode — would otherwise start a job,
-                // fail, and start another one for as long as it stayed
-                // selected.
-                None if !self.running()
-                    && !self.remeasured.contains(&track.id)
-                    && track.path.exists() =>
-                {
-                    self.remeasured.insert(track.id);
-                    self.start(Job::Analyze(vec![(track.id, track.path.clone())]));
+                // fail, and start another for as long as it stayed selected.
+                None if !self.running() && !self.remeasured.contains(&track.id) => {
+                    if let Some(sources) = picture_sources(&track) {
+                        self.remeasured.insert(track.id);
+                        self.start(Job::Draw { id: track.id, sources });
+                    }
                 }
                 None => {}
             }
@@ -8777,6 +8799,28 @@ fn what_the_words_decided(
     said
 }
 
+/// The audio a row's picture is measured from, if it is all there.
+///
+/// A row's own files, which for a stem companion are its stems and not the mix
+/// its parent points at: a companion is a clone of its parent with a different
+/// role, so `path` is the record's file and drawing from it put the whole mix
+/// under the acapella's name.
+///
+/// Only the picture works this way. Everything else a companion shows — the
+/// grid, the cues, the phrases, the key — stays the parent's, and should: those
+/// are properties of the record, and a cue that did not line up with the one on
+/// the track would be worse than no cue at all. The waveform is the one thing
+/// that is a property of the file, because it is a drawing of what will come
+/// out of the speaker.
+///
+/// `None` when there is nothing to draw from or a file is missing — a blank
+/// picture looks exactly like a quiet one, so it is better not to cache it.
+fn picture_sources(track: &Track) -> Option<Vec<PathBuf>> {
+    let sources = track.sources();
+    let all_there = !sources.is_empty() && sources.iter().all(|path| path.exists());
+    all_there.then_some(sources)
+}
+
 /// How long ago a moment was, in the roughest terms that are still useful.
 ///
 /// For putting two edits beside each other and saying which came later, which
@@ -8933,6 +8977,109 @@ mod tests {
                 dir.join("config.json"),
                 String::new(),
             )
+        }
+
+        /// A stem's picture is of the stem; everything else it shows is the
+        /// record's.
+        mod what_a_companion_draws {
+            use super::*;
+            use crate::library::{CueMark, Role};
+
+            /// A track with a kit whose files are really on disk, since a row
+            /// with a missing file is deliberately not drawn.
+            fn with_a_kit(name: &str) -> (App, u32) {
+                let mut app = app(name);
+                let dir = app.library_path.parent().unwrap().to_path_buf();
+                let mix = dir.join("Sirens.flac");
+                std::fs::write(&mix, b"a mix").unwrap();
+
+                let id = app.library.add(&mix);
+                let track = app.library.get_mut(id).unwrap();
+                track.artist = "Peverelist".into();
+                track.title = "Sirens".into();
+                track.analyzed = true;
+                track.has_grid = true;
+                track.bpm = 130.0;
+                track.cues = vec![CueMark {
+                    letter: 1,
+                    time_ms: 4_000,
+                    label: "drop".into(),
+                    color: [1, 2, 3],
+                }];
+                for (part, slot) in [("vocals", 0), ("drums", 1), ("melody", 2)] {
+                    let path = dir.join(format!("Sirens-{part}.mp3"));
+                    std::fs::write(&path, b"a stem").unwrap();
+                    let kit = &mut app.library.get_mut(id).unwrap().stems;
+                    match slot {
+                        0 => kit.vocals = Some(path),
+                        1 => kit.drums = Some(path),
+                        _ => kit.melody = Some(path),
+                    }
+                }
+                app.rebuild();
+                (app, id)
+            }
+
+            fn companion(app: &App, id: u32, role: Role) -> Track {
+                app.library
+                    .row(crate::library::companion_id(id, role))
+                    .expect("the companion row was not built")
+            }
+
+            #[test]
+            fn an_acapella_is_drawn_from_the_vocal_stem_and_not_the_mix() {
+                // The fault: a companion is a clone of its parent with a
+                // different role, so its `path` is the record's file. Anything
+                // drawing from that put the whole mix under the acapella's
+                // name — and cached it there, so it stayed wrong.
+                let (app, id) = with_a_kit("acapella");
+                let acapella = companion(&app, id, Role::Vocals);
+
+                let drawn = picture_sources(&acapella).expect("nothing to draw the acapella from");
+                assert_eq!(drawn.len(), 1);
+                assert!(
+                    drawn[0].to_string_lossy().contains("vocals"),
+                    "the acapella would have been drawn from {:?}",
+                    drawn[0]
+                );
+                assert_ne!(drawn[0], acapella.path, "that is the mix, not the stem");
+            }
+
+            #[test]
+            fn the_record_itself_is_still_drawn_from_its_own_file() {
+                let (app, id) = with_a_kit("record");
+                let track = app.library.get(id).unwrap().clone();
+                assert_eq!(picture_sources(&track), Some(vec![track.path.clone()]));
+            }
+
+            #[test]
+            fn everything_but_the_picture_is_still_the_records() {
+                // The other half of the rule, and the half it would be easy to
+                // break while fixing the first: a cue that did not line up
+                // with the one on the track would be worse than no cue at all.
+                let (app, id) = with_a_kit("inherited");
+                let parent = app.library.get(id).unwrap().clone();
+                let acapella = companion(&app, id, Role::Vocals);
+
+                assert_eq!(acapella.cues, parent.cues);
+                assert_eq!(acapella.bpm, parent.bpm);
+                assert!(acapella.has_grid);
+                assert_eq!(acapella.parent, Some(id));
+            }
+
+            #[test]
+            fn a_row_whose_audio_is_missing_is_not_drawn_at_all() {
+                // A blank picture looks exactly like a quiet one, so it is
+                // better not to draw and cache one.
+                let (mut app, id) = with_a_kit("missing");
+                let gone = app.library.get(id).unwrap().stems.vocals.clone().unwrap();
+                std::fs::remove_file(&gone).unwrap();
+                app.rebuild();
+
+                assert_eq!(picture_sources(&companion(&app, id, Role::Vocals)), None);
+                // And its neighbours are unaffected.
+                assert!(picture_sources(&companion(&app, id, Role::Drums)).is_some());
+            }
         }
 
         /// Noting when the prep changed, which is half of telling a player's

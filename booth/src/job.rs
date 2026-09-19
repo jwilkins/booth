@@ -44,6 +44,20 @@ pub enum Job {
         backend: Backend,
         quality: booth_cli::cli::StemQuality,
     },
+    /// Measure one row's waveform, and nothing else.
+    ///
+    /// Deliberately not [`Job::Analyze`], which is where this used to go. That
+    /// re-derives the grid, the key, the cues and the phrases from the audio
+    /// and writes them over whatever the collection had — which is a silent
+    /// loss of every cue somebody moved by hand, for a row that only wanted a
+    /// picture. And for a stem it was the wrong audio: a companion carries its
+    /// parent's path, so the acapella was handed the whole mix to draw.
+    Draw {
+        id: u32,
+        /// Summed when there is more than one, which is what an instrumental
+        /// is. A companion's own files, so the picture is of what will play.
+        sources: Vec<PathBuf>,
+    },
     /// Read the words off tracks' vocal stems.
     Transcribe { tracks: Vec<Transcribable>, whisper: crate::config::Whisper },
     /// Decode one track into memory so it can be auditioned.
@@ -119,6 +133,7 @@ impl Job {
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Transcribe { .. } => "reading the words",
+            Job::Draw { .. } => "drawing",
             Job::Sync { .. } => "writing",
             Job::Keep { .. } => "copying a drive",
         }
@@ -227,6 +242,12 @@ pub enum Update {
     Transcribed {
         id: u32,
         lyrics: Vec<crate::library::Lyric>,
+    },
+    /// One row's waveform, measured from its own audio.
+    Drawn {
+        id: u32,
+        /// The three-band picture, as [`Analyzed::bands`] carries it.
+        bands: Vec<u8>,
     },
     Progress {
         done: usize,
@@ -639,6 +660,23 @@ pub fn find_stems(stems_in: &crate::config::StemsLocation, source: &Path) -> Ste
 /// halved on the way in: two stems of the same record are already the right
 /// balance against each other, and scaling them apart is a mix decision this
 /// has no business making. Only the total needs to fit.
+/// The audio a row is made of, summed when it is made of several.
+///
+/// The deck's own summing goes through [`crate::player::Sound`], which is
+/// interleaved and rate-matched for playback; the waveform wants an [`Audio`]
+/// to measure. Same rule either way: an instrumental is its melody and its
+/// drums added together, and nothing else is more than one file.
+fn decode_sum(sources: &[PathBuf]) -> anyhow::Result<booth_cli::audio::Audio> {
+    let first = sources.first().ok_or_else(|| anyhow::anyhow!("nothing to draw"))?;
+    let mut audio = decode_file(first)?;
+    for path in &sources[1..] {
+        audio
+            .add_assign(&decode_file(path)?)
+            .map_err(|e| anyhow::anyhow!("mixing {} into the picture: {e}", path.display()))?;
+    }
+    Ok(audio)
+}
+
 fn decode_sources(sources: &[PathBuf]) -> anyhow::Result<crate::player::Sound> {
     let first = sources.first().ok_or_else(|| anyhow::anyhow!("nothing to play"))?;
     let mut sound = crate::player::Sound::from_audio(&decode_file(first)?);
@@ -839,6 +877,14 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             separate(&tracks, &stems_in, backend, quality, reporter)
         }
         Job::Transcribe { tracks, whisper } => transcribe(&tracks, &whisper, reporter),
+        Job::Draw { id, sources } => {
+            let audio = decode_sum(&sources)?;
+            let bands = booth_cli::export::waveform::analyze(&audio).band_detail;
+            crate::debug!("drew #{id} from {}", crate::library::plural(sources.len(), "file"));
+            let _ = reporter.tx.send(Update::Drawn { id, bands });
+            (reporter.wake)();
+            Ok(())
+        }
         Job::Sync { args, files } => {
             // The file list was settled when the plan was drawn up, so the
             // command is told exactly what to write rather than walking a
@@ -1418,6 +1464,60 @@ mod tests {
         let audio = Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         write_file(path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+    }
+
+    /// A tone, for when what matters is which file the audio came from rather
+    /// than what is in it.
+    fn write_tone(path: &Path, hz: f32, gain: f32) {
+        let rate = 44_100usize;
+        let plane: Vec<f32> = (0..rate)
+            .map(|i| gain * (std::f32::consts::TAU * hz * i as f32 / rate as f32).sin())
+            .collect();
+        let audio = Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_file(path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn a_picture_is_of_the_files_it_was_given_and_not_of_a_track() {
+        // What a stem companion needs: it carries its parent's path, so
+        // anything that drew from that drew the whole mix under the acapella's
+        // name.
+        let dir = scratch("drawing");
+        let bass = dir.join("bass.wav");
+        let top = dir.join("top.wav");
+        write_tone(&bass, 60.0, 0.8);
+        write_tone(&top, 8_000.0, 0.8);
+
+        let low = decode_sum(std::slice::from_ref(&bass)).unwrap();
+        let high = decode_sum(std::slice::from_ref(&top)).unwrap();
+        let both = decode_sum(&[bass.clone(), top.clone()]).unwrap();
+
+        let bands = |audio: &Audio| {
+            let drawn = booth_cli::export::waveform::analyze(audio).band_detail;
+            // Three bytes a column — mid, high, low, as the format stores them.
+            let at = drawn.len() / 2 / 3 * 3;
+            (drawn[at], drawn[at + 1], drawn[at + 2])
+        };
+
+        let (_, _, only_bass) = bands(&low);
+        let (_, top_high, _) = bands(&high);
+        assert!(only_bass > 0, "a bass tone should have a low band");
+        assert!(top_high > 0, "a treble tone should have a high band");
+
+        // Summed, the picture has both in it — which is what an instrumental
+        // is, and is not what either file alone looks like.
+        let (_, mixed_high, mixed_low) = bands(&both);
+        assert!(mixed_low > 0 && mixed_high > 0, "the sum lost a band: {:?}", bands(&both));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn drawing_nothing_is_an_error_rather_than_an_empty_picture() {
+        // A companion whose kit has no such part has no sources, and a blank
+        // picture would look exactly like a quiet one.
+        assert!(decode_sum(&[]).is_err());
     }
 
     #[test]

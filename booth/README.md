@@ -481,6 +481,18 @@ reference of its own rather than the overview's.
 The same measurement makes the pictures on the drive, so what is on screen
 while prepping is what will be on the CDJ's screen.
 
+**A stem row draws its own waveform.** An acapella is a different sound from the
+record it came from, and a picture of the mix under the acapella's name is a
+picture of something that is not playing. Everything else a stem row shows stays
+the record's — the grid, the cues, the phrases, the key — because those are
+properties of the record and a cue that did not line up with the one on the
+track would be worse than no cue at all. The waveform is the one thing that
+belongs to the file rather than to the record.
+
+Rendering a kit again throws the stem pictures away, since they were drawings of
+files that no longer exist. The record's own picture is left alone: its file has
+not changed.
+
 ## Colouring the waveform
 
 **Red is the bass, green the mid-range, blue the treble** — the convention every

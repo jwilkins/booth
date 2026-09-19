@@ -1721,6 +1721,17 @@ pub fn cached_waveform(id: u32) -> Option<Vec<u8>> {
     std::fs::read(waveform_path(id)).ok().filter(|bands| !bands.is_empty())
 }
 
+/// Throw away a row's cached picture.
+///
+/// For when the audio it was measured from has changed under it — a stem kit
+/// rendered again, at a different quality or by a different separator. The
+/// picture is of a file, so a new file means a new picture; without this the
+/// acapella goes on showing the one it had before, and nothing about the row
+/// says it is stale.
+pub fn forget_waveform(id: u32) {
+    let _ = std::fs::remove_file(waveform_path(id));
+}
+
 /// Where a track's per-stem loudness is cached.
 pub fn envelopes_path(id: u32) -> PathBuf {
     data_dir().join("waveforms").join(format!("{id:08}.stems"))
