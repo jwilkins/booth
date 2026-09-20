@@ -9446,7 +9446,12 @@ mod tests {
             fn a_track_with_no_words_still_gets_its_phrases_cued() {
                 let (mut app, id) = sung("phrases", &[]);
                 app.auto_cue(id);
-                assert_eq!(labels(&app, id), vec!["intro".to_string(), "drop".to_string()]);
+                // The intro is on the memory cue, which is where the player
+                // parks when the track loads, so it costs no hot cue.
+                let cues = &app.library.get(id).unwrap().cues;
+                assert_eq!(cues[0].letter, 0);
+                assert_eq!(cues[0].label, "intro");
+                assert_eq!(labels(&app, id), vec!["drop".to_string()]);
             }
 
             #[test]

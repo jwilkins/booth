@@ -179,13 +179,33 @@ pub fn sections(structure: &Structure, beat_times: &[u32]) -> Vec<Candidate> {
 /// and a wall of markers.
 pub fn assemble(start_ms: u32, candidates: Vec<Candidate>) -> Vec<Cue> {
     let mut kept = fold(rank(candidates));
+
+    // A hot cue where the memory cue already is, is a button that does what
+    // loading the track already did — and eight is not many. The name is worth
+    // keeping: "intro" on the cue a player parks at says something, and it
+    // costs no slot to say it there.
+    //
+    // This is nearly always the first section: an arrangement starts at the
+    // top of the record, and so does the memory cue. It was quietly taking hot
+    // cue A on every track, where it sat invisibly underneath the memory marker
+    // and looked like a cue that had not been set.
+    //
+    // Taken out before the eight are chosen, not after, or the track would
+    // come out with seven.
+    let mut memory = Cue::memory(start_ms);
+    if let Some(at) =
+        kept.iter().position(|(candidate, _)| candidate.time_ms.abs_diff(start_ms) < TOGETHER_MS)
+    {
+        memory = memory.with_comment(&kept.remove(at).0.comment());
+    }
+
     if kept.len() > HOT_CUES {
         kept.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.time_ms.cmp(&b.0.time_ms)));
         kept.truncate(HOT_CUES);
         kept.sort_by_key(|(candidate, _)| candidate.time_ms);
     }
 
-    let mut cues = vec![Cue::memory(start_ms)];
+    let mut cues = vec![memory];
     for (letter, (candidate, _)) in kept.into_iter().enumerate() {
         let color = candidate.reason.color();
         cues.push(
@@ -412,11 +432,17 @@ mod tests {
         let audio = with_voice(4.0, 10.0, 10.0);
         let cues = suggest(&features::extract(&audio), &beats(128), &structure);
 
+        // The first section is the memory cue rather than a hot one: the
+        // player already parks at the top of the record, so a hot cue there is
+        // a button that does what loading the track did. It keeps the name.
+        assert!(!cues[0].is_hot());
+        assert_eq!(cues[0].time_ms, 0);
+        assert_eq!(cues[0].comment.as_deref(), Some("intro"));
+
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
-        assert_eq!(hot.len(), 3);
-        assert_eq!(hot[0].time_ms, 0);
-        assert_eq!(hot[1].time_ms, 8 * 4 * BEAT_MS);
-        assert_eq!(hot[2].time_ms, 16 * 4 * BEAT_MS);
+        assert_eq!(hot.len(), 2);
+        assert_eq!(hot[0].time_ms, 8 * 4 * BEAT_MS);
+        assert_eq!(hot[1].time_ms, 16 * 4 * BEAT_MS);
     }
 
     #[test]
@@ -432,12 +458,13 @@ mod tests {
             suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(128), &structure);
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
 
-        assert_eq!(hot[0].comment.as_deref(), Some("intro"));
-        assert_eq!(hot[1].comment.as_deref(), Some("break"));
-        assert_eq!(hot[2].comment.as_deref(), Some("drop"));
+        // The intro is on the memory cue, where the player parks anyway.
+        assert_eq!(cues[0].comment.as_deref(), Some("intro"));
+        assert_eq!(hot[0].comment.as_deref(), Some("break"));
+        assert_eq!(hot[1].comment.as_deref(), Some("drop"));
         // The drop is red and the breakdown is blue, and they are not the same.
-        assert_ne!(hot[1].color, hot[2].color);
-        assert_eq!(hot[2].color, Some(Rgb { r: 0xc0, g: 0x3a, b: 0x22 }));
+        assert_ne!(hot[0].color, hot[1].color);
+        assert_eq!(hot[1].color, Some(Rgb { r: 0xc0, g: 0x3a, b: 0x22 }));
     }
 
     #[test]
