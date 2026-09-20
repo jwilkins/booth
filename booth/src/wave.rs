@@ -792,7 +792,7 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
 /// What the phrase strip was used for this frame.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Strip {
-    /// A new view, when the map was used to move the window.
+    /// A new view, when the strip was dragged sideways.
     pub zoom: Option<Zoom>,
     /// A change to the sections, when one was dragged, split, merged or named.
     pub edit: Option<PhraseEdit>,
@@ -800,9 +800,15 @@ pub struct Strip {
 
 /// The phrase strip: one block per section, as wide as the section is long.
 ///
-/// The strip always shows the whole track, whatever the waveform above it is
-/// showing, which makes it the map: `zoom` is drawn over it as the window, and
-/// dragging inside a block moves that window.
+/// Shows what the waveform above it shows, through the same zoom, so a block
+/// sits under the music it names. It used to draw the whole track at every
+/// zoom and carry the window as a box over itself, which made it a map but put
+/// the drop's block nowhere near the drop as soon as you zoomed in. A strip
+/// that lines up with the picture is worth more than a map of a track you can
+/// already see the whole of at full width.
+///
+/// Grab it and drag to move the view, which is what a strip showing a window
+/// rather than a whole track can be grabbed for.
 ///
 /// It is also where the sections are corrected. A detector working from onset
 /// strength gets a good many boundaries right and some plainly wrong, and a
@@ -818,8 +824,8 @@ pub fn phrase_strip(
     zoom: Zoom,
 ) -> Strip {
     let width = ui.available_width();
-    // Draggable whatever the zoom is: the map only means something zoomed in,
-    // but the sections are edited at any zoom and mostly at none.
+    // Draggable whatever the zoom is: there is nowhere to scroll to at full
+    // width, but the sections are edited at any zoom and mostly at none.
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(width, STRIP_HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -828,12 +834,23 @@ pub fn phrase_strip(
         return strip;
     }
     let total_ms = duration_secs * 1000.0;
-    let across = |ms: u32| rect.left() + rect.width() * (ms as f64 / total_ms) as f32;
-    let time_at =
-        |x: f32| (((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * total_ms) as u32;
+    // The same two mappings the waveform uses, so a boundary is drawn, grabbed
+    // and dropped at the moment it belongs to whatever the view is.
+    let across = |ms: u32| {
+        let fraction = (ms as f64 / total_ms).clamp(0.0, 1.0);
+        rect.left() + rect.width() * zoom.across(fraction)
+    };
+    let time_at = |x: f32| {
+        let across = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        (zoom.into_track(across) * total_ms) as u32
+    };
 
     for phrase in phrases {
         let (from, to) = (across(phrase.start_ms), across(phrase.end_ms));
+        // Outside the view: nothing to draw and no name to place.
+        if to < rect.left() || from > rect.right() {
+            continue;
+        }
         // A one-pixel gap between blocks, which is what makes them read as
         // separate phrases rather than as a colour bar.
         let block =
@@ -843,6 +860,11 @@ pub fn phrase_strip(
         }
         let color = theme::phrase_color(&phrase.kind);
         painter.rect_filled(block, 0.0, color);
+
+        // Zoomed far enough in, the section you are inside starts off the left
+        // of the panel. Its name goes against that edge rather than off it, so
+        // the strip still says where you are.
+        let seen = block.intersect(rect);
 
         // The name and how long it runs for. A DJ builds in eights and
         // sixteens, and "BREAK 16" is the difference between seeing that a
@@ -858,9 +880,9 @@ pub fn phrase_strip(
         };
         let galley =
             painter.layout_no_wrap(label, theme::sans(9.0), Color32::from_rgb(0x0F, 0x13, 0x16));
-        if galley.size().x + 8.0 < block.width() {
+        if galley.size().x + 8.0 < seen.width() {
             painter.galley(
-                egui::pos2(block.left() + 4.0, block.center().y - galley.size().y / 2.0),
+                egui::pos2(seen.left() + 4.0, seen.center().y - galley.size().y / 2.0),
                 galley,
                 Color32::BLACK,
             );
@@ -953,43 +975,22 @@ pub fn phrase_strip(
         }
     });
 
+    // Nothing left to do at full width — there is nowhere to move to — and
+    // nothing while a boundary is being dragged, or the section would be moved
+    // and the view moved out from under it at once.
     if zoom.is_fit() || held.is_some() {
         return strip;
     }
 
-    // The window, drawn by dimming everything outside it rather than by
-    // outlining it: the phrase colours are the thing being pointed at, and a
-    // box around them competes with them for the same edge.
-    let shade = theme::BOOTH.gamma_multiply(0.72);
-    let left = rect.left() + rect.width() * zoom.start;
-    let right = rect.left() + rect.width() * (zoom.start + zoom.span).min(1.0);
-    painter.rect_filled(
-        Rect::from_min_max(rect.left_top(), egui::pos2(left, rect.bottom())),
-        0.0,
-        shade,
-    );
-    painter.rect_filled(
-        Rect::from_min_max(egui::pos2(right, rect.top()), rect.right_bottom()),
-        0.0,
-        shade,
-    );
-    painter.rect_stroke(
-        Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(right, rect.bottom())),
-        0.0,
-        Stroke::new(1.0_f32, theme::TEXT.gamma_multiply(0.75)),
-        egui::StrokeKind::Inside,
-    );
-
     if response.hovered() && lit.is_none() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    // Clicking the map puts the window where you clicked, which is the whole
-    // point of having one: getting from the intro to the last drop should not
-    // be a scroll.
-    let Some(at) = response.interact_pointer_pos() else { return strip };
-    if response.dragged() || response.clicked() {
-        let across = ((at.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-        strip.zoom = Some(zoom.centred(across));
+    // Away from a boundary, a drag moves the view with the pointer: what is
+    // under your finger stays under it, which is the only behaviour a strip
+    // that draws a window can have without arguing with the picture above it.
+    let moved = response.drag_delta().x;
+    if response.dragged() && moved != 0.0 {
+        strip.zoom = Some(zoom.panned(-moved / rect.width().max(1.0)));
     }
     strip
 }
@@ -1079,16 +1080,26 @@ mod tests {
             .collect()
     }
 
-    /// Drive the strip, and hand back what it asked for.
-    fn worked(
+    /// Drive the strip at a given view, and hand back what it asked for.
+    ///
+    /// The view is fed back in each frame, the way the window does it, so a
+    /// drag that moves the view a little at a time adds up over the frames the
+    /// gesture takes rather than being measured from a standing start.
+    fn worked_at(
+        zoom: Zoom,
         phrases: Vec<Phrase>,
         act: impl Fn(&mut egui_kittest::Harness<'_>, Rect),
-    ) -> Option<PhraseEdit> {
-        let asked = std::cell::RefCell::new(None);
+    ) -> Strip {
+        let asked = std::cell::RefCell::new(Strip::default());
+        let view = std::cell::Cell::new(zoom);
         let mut harness = Harness::new_ui(|ui| {
-            let strip = phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), Zoom::default());
+            let strip = phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), view.get());
+            if let Some(moved) = strip.zoom {
+                view.set(moved);
+                asked.borrow_mut().zoom = Some(moved);
+            }
             if strip.edit.is_some() {
-                *asked.borrow_mut() = strip.edit.clone();
+                asked.borrow_mut().edit = strip.edit.clone();
             }
         });
         harness.run();
@@ -1096,6 +1107,14 @@ mod tests {
         act(&mut harness, rect);
         let out = asked.borrow().clone();
         out
+    }
+
+    /// Drive the strip at full width, and hand back the edit it asked for.
+    fn worked(
+        phrases: Vec<Phrase>,
+        act: impl Fn(&mut egui_kittest::Harness<'_>, Rect),
+    ) -> Option<PhraseEdit> {
+        worked_at(Zoom::default(), phrases, act).edit
     }
 
     #[test]
@@ -1158,14 +1177,69 @@ mod tests {
 
     #[test]
     fn dragging_the_middle_of_a_section_moves_the_view_and_not_the_boundary() {
-        // The strip is a map as well as an editor, and the two gestures share
-        // it. Away from a boundary the drag belongs to the map.
+        // The strip is scrolled as well as edited, and the two gestures share
+        // it. Away from a boundary the drag belongs to the view.
         let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
-        let edit = worked(phrases, |harness, rect| {
+        let half = Zoom { start: 0.25, span: 0.5 };
+        let travel = 40.0_f32;
+        let panel = std::cell::Cell::new(0.0_f32);
+        let worked = worked_at(half, phrases, |harness, rect| {
+            panel.set(rect.width());
             let middle = egui::pos2(rect.left() + rect.width() * 0.7, rect.center().y);
-            drag(harness, middle, middle + egui::vec2(20.0, 0.0));
+            // Leftwards, which pulls later music into the view.
+            drag(harness, middle, middle - egui::vec2(travel, 0.0));
         });
-        assert_eq!(edit, None, "a drag in open ground moved a boundary");
+        assert_eq!(worked.edit, None, "a drag in open ground moved a boundary");
+        let moved = worked.zoom.expect("a drag in open ground did not move the view");
+        assert_eq!(moved.span, half.span, "scrolling the strip changed how much it shows");
+
+        // The view moves by the drag as a fraction of its own width, so what
+        // was under the pointer is still under it. Jumping to put the pointer
+        // in the middle — which is what the strip did while it was a map —
+        // would have landed at 0.45 instead.
+        let want = half.start + travel / panel.get() * half.span;
+        assert!(
+            (moved.start - want).abs() < 0.002,
+            "the view moved to {} rather than {want}",
+            moved.start
+        );
+    }
+
+    #[test]
+    fn a_section_is_drawn_and_grabbed_where_the_waveform_puts_it() {
+        // The strip shows the window, not the whole track, so the boundary at
+        // a third of the way in is half way across a view that starts at a
+        // sixth and holds a third. Drawn anywhere else it would be pointing at
+        // music that is not under it.
+        let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
+        let zoom = Zoom { start: 1.0 / 6.0, span: 1.0 / 3.0 };
+        let worked = worked_at(zoom, phrases, |harness, rect| {
+            let on_the_boundary = egui::pos2(rect.center().x, rect.center().y);
+            drag(harness, on_the_boundary, on_the_boundary + egui::vec2(12.0, 0.0));
+        });
+        let Some(PhraseEdit::Move { at, time_ms }) = worked.edit else {
+            panic!("the boundary was not where the zoom draws it: {:?}", worked.edit)
+        };
+        assert_eq!(at, 1);
+        // Twelve points along a panel showing thirty seconds, so the boundary
+        // should have landed a little after where it was and nowhere near the
+        // place the unzoomed strip would have read.
+        assert!(
+            (30_000..34_000).contains(&time_ms),
+            "the drop landed at {time_ms} ms, which is not where it was dropped"
+        );
+    }
+
+    #[test]
+    fn the_whole_track_showing_leaves_the_view_alone() {
+        // There is nowhere to scroll to, and a strip that lurched on every
+        // stray drag would be worse than one that does nothing.
+        let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
+        let worked = worked_at(Zoom::default(), phrases, |harness, rect| {
+            let middle = egui::pos2(rect.left() + rect.width() * 0.7, rect.center().y);
+            drag(harness, middle, middle - egui::vec2(40.0, 0.0));
+        });
+        assert_eq!(worked.zoom, None);
     }
 
     #[test]

@@ -223,8 +223,9 @@ fifteen marks under it. A boundary dragged into the middle
 of a bar loses that bar rather than rounding up to it, which is what the marks
 show too.
 
-The strip stays the map as well: away from a boundary, dragging still moves the
-zoom window.
+The strip scrolls as well as edits: away from a boundary, dragging moves the
+view with the pointer, and what was under your finger stays under it. At full
+width there is nowhere to scroll to, so nothing moves.
 
 Cue times, names and the track's names all go through the drive delta, so an
 edit shows as *changed* on the next sync — except a cue's name, which the player
@@ -389,9 +390,14 @@ count in, so it shows the clock instead of inventing a position.
 
 The wheel zooms about the pointer — what you were looking at stays where it is
 rather than sliding off while you chase it. Shift, or a sideways wheel, pans.
-The phrase strip underneath always shows the whole track, so it doubles as the
-map: the window is drawn on it, and clicking anywhere on it jumps there. **fit**
-next to the colour modes, or **esc**, goes back to the whole track.
+The phrase strip underneath goes through the same zoom, so a block stays under
+the music it names; grab it away from a boundary and drag to scroll the view.
+**fit** next to the colour modes, or **esc**, goes back to the whole track.
+
+It used to draw the whole track at every zoom and carry the window as a box
+over itself, which made it a map but put the drop's block nowhere near the
+drop as soon as you zoomed in. A strip that lines up with the picture is worth
+more than a map of a track you can already see the whole of at full width.
 
 While something is playing, the view follows the playhead — but only once the
 playhead has actually left it. Recentring every frame would be a scrolling
