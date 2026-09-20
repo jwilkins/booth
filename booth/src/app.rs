@@ -1948,9 +1948,6 @@ impl App {
         // reading is queued once, after the whole batch has been folded in,
         // rather than a job per track as each kit lands.
         let mut to_read: Vec<job::Transcribable> = Vec::new();
-        // Tracks whose kit landed this batch, so their stem rows can be drawn
-        // once at the end rather than a job per part as each one arrives.
-        let mut separated: Vec<u32> = Vec::new();
 
         for update in updates {
             match update {
@@ -2185,7 +2182,6 @@ impl App {
                     if let Some(track) = self.library.get_mut(id) {
                         track.stems = kit;
                     }
-                    separated.push(id);
                     if self.want_cues.remove(&id) {
                         match vocals {
                             Some(vocals) => to_read.push(job::Transcribable { id, vocals }),
@@ -2300,18 +2296,6 @@ impl App {
         }
         if !to_read.is_empty() {
             self.read_words(to_read);
-        }
-        // Stems that have just come into existence have no picture yet, and
-        // this is the other moment they can be drawn without waiting for
-        // somebody to click on them.
-        if !separated.is_empty() {
-            let drawing = self.stem_pictures(&separated);
-            if !drawing.is_empty() {
-                for row in &drawing {
-                    self.remeasured.remove(&row.id);
-                }
-                self.start(Job::Draw(drawing));
-            }
         }
         if changed {
             self.rebuild();
@@ -4546,7 +4530,7 @@ impl App {
             }
         }
 
-        if !has_bands && track.analyzed {
+        if !has_bands && worth_drawing(&track) {
             // Worked out before the cache is consulted, because the cache can
             // only say whether its picture is still of these files if it knows
             // which files they are.
@@ -8859,6 +8843,21 @@ fn what_the_words_decided(
     said
 }
 
+/// Whether this is a row this program draws a picture for at all.
+///
+/// A record has to have been analysed first. Arrowing down a library of
+/// thousands of unprepared tracks should not start a decode per row, and a
+/// track nobody has listened to is one nobody has asked anything of.
+///
+/// A stem row is exempt, and the exemption is the point rather than a special
+/// case: a companion exists only because somebody rendered it, which is a more
+/// deliberate act than analysing, not a less deliberate one. Waiting for the
+/// record to be analysed before drawing the stems that were explicitly asked
+/// for is asking twice for one thing.
+fn worth_drawing(track: &Track) -> bool {
+    track.analyzed || track.role != crate::library::Role::Track
+}
+
 /// The audio a row's picture is measured from, if it is all there.
 ///
 /// A row's own files, which for a stem companion are its stems and not the mix
@@ -9161,6 +9160,23 @@ mod tests {
                 app.library.get_mut(id).unwrap().stems = Default::default();
                 app.rebuild();
                 assert!(app.stem_pictures(&[id]).is_empty());
+            }
+
+            #[test]
+            fn a_stem_is_drawn_whether_or_not_the_record_was_ever_analysed() {
+                // Rendering a kit is a more deliberate act than analysing, not
+                // a less deliberate one. Making somebody analyse the record
+                // before the stems they explicitly asked for will draw is
+                // asking twice for one thing.
+                let (mut app, id) = with_a_kit("unanalysed");
+                app.library.get_mut(id).unwrap().analyzed = false;
+                app.rebuild();
+
+                assert!(worth_drawing(&companion(&app, id, Role::Vocals)));
+                // The record itself still waits to be asked: arrowing down a
+                // library of thousands of unprepared tracks should not start a
+                // decode per row.
+                assert!(!worth_drawing(app.library.get(id).unwrap()));
             }
 
             #[test]

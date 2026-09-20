@@ -135,6 +135,28 @@ impl Job {
     }
 }
 
+/// Each companion row a kit yields, with the file it is drawn from.
+///
+/// Empty for a kit that is not complete: a companion row only exists when all
+/// three parts do, so there is nothing to draw a picture for.
+fn parts_of(kit: &StemKit) -> Vec<(crate::library::Role, Vec<PathBuf>)> {
+    if !kit.is_complete() {
+        return Vec::new();
+    }
+    crate::library::Role::PARTS
+        .into_iter()
+        .filter_map(|role| {
+            let path = match role {
+                crate::library::Role::Vocals => kit.vocals.as_ref(),
+                crate::library::Role::Drums => kit.drums.as_ref(),
+                crate::library::Role::Melody => kit.melody.as_ref(),
+                crate::library::Role::Track => None,
+            }?;
+            Some((role, vec![path.clone()]))
+        })
+        .collect()
+}
+
 /// One row to draw, and the audio to draw it from.
 pub struct Drawable {
     pub id: u32,
@@ -669,6 +691,28 @@ pub fn find_stems(stems_in: &crate::config::StemsLocation, source: &Path) -> Ste
 /// halved on the way in: two stems of the same record are already the right
 /// balance against each other, and scaling them apart is a mix decision this
 /// has no business making. Only the total needs to fit.
+/// Draw one row and report it, saying so rather than failing if it will not
+/// decode.
+///
+/// A kit with one corrupt stem should still get the other two drawn, and a
+/// separation that rendered fine should not be reported as having failed
+/// because the picture of it could not be made.
+fn draw_one(row: &Drawable, reporter: &Channel) {
+    match decode_sum(&row.sources) {
+        Ok(audio) => {
+            let bands = booth_cli::export::waveform::analyze(&audio).band_detail;
+            crate::debug!(
+                "drew #{} from {}",
+                row.id,
+                crate::library::plural(row.sources.len(), "file")
+            );
+            let _ =
+                reporter.tx.send(Update::Drawn { id: row.id, sources: row.sources.clone(), bands });
+        }
+        Err(e) => crate::warn!("could not draw #{}: {e:#}", row.id),
+    }
+}
+
 /// Draw each row from its own audio.
 ///
 /// One at a time, and a row that will not decode does not take the rest with
@@ -681,22 +725,7 @@ fn draw(rows: &[Drawable], reporter: &Channel) -> anyhow::Result<()> {
             break;
         }
         batch.starting();
-        match decode_sum(&row.sources) {
-            Ok(audio) => {
-                let bands = booth_cli::export::waveform::analyze(&audio).band_detail;
-                crate::debug!(
-                    "drew #{} from {}",
-                    row.id,
-                    crate::library::plural(row.sources.len(), "file")
-                );
-                let _ = reporter.tx.send(Update::Drawn {
-                    id: row.id,
-                    sources: row.sources.clone(),
-                    bands,
-                });
-            }
-            Err(e) => crate::warn!("could not draw #{}: {e:#}", row.id),
-        }
+        draw_one(row, reporter);
         batch.finished_one();
         (reporter.wake)();
     }
@@ -1391,6 +1420,22 @@ fn separate(
                     kit.melody.is_some(),
                     kit.drums.is_some()
                 );
+                // The pictures, here, while this track's stems are the most
+                // recent thing that happened — not as a job queued behind the
+                // rest of the batch.
+                //
+                // A kit rendered first in a queue of ten used to wait for the
+                // other nine to separate before anything could draw it, which
+                // is tens of minutes of a stem row that plays and shows
+                // nothing. Drawn here it costs a decode of three files that
+                // were written a second ago, against the minutes of separation
+                // that just produced them.
+                for (role, sources) in parts_of(&kit) {
+                    draw_one(
+                        &Drawable { id: crate::library::companion_id(*id, role), sources },
+                        reporter,
+                    );
+                }
                 let _ = reporter.tx.send(Update::Separated { id: *id, kit });
             }
             Err(e) => {
@@ -1547,6 +1592,38 @@ mod tests {
         assert!(mixed_low > 0 && mixed_high > 0, "the sum lost a band: {:?}", bands(&both));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_finished_kit_names_a_picture_for_each_of_its_parts() {
+        // Drawn as the kit lands, not queued behind the rest of the batch: a
+        // kit rendered first in a queue of ten used to wait for the other nine
+        // to separate before anything could draw it, which is tens of minutes
+        // of a stem row that plays and shows nothing.
+        let dir = scratch("parts");
+        let kit = StemKit {
+            vocals: Some(dir.join("v.mp3")),
+            drums: Some(dir.join("d.mp3")),
+            melody: Some(dir.join("m.mp3")),
+        };
+
+        let parts = parts_of(&kit);
+        let roles: Vec<crate::library::Role> = parts.iter().map(|(role, _)| *role).collect();
+        assert_eq!(roles, crate::library::Role::PARTS.to_vec());
+        // Each from its own single file — a companion is one stem, never a sum.
+        assert!(parts.iter().all(|(_, sources)| sources.len() == 1));
+        assert_eq!(parts[0].1, vec![dir.join("v.mp3")]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_half_rendered_kit_has_no_rows_to_draw() {
+        // A companion row only exists once all three parts do, so there is
+        // nothing for a picture to belong to.
+        let kit = StemKit { vocals: Some(PathBuf::from("v.mp3")), ..StemKit::default() };
+        assert!(parts_of(&kit).is_empty());
+        assert!(parts_of(&StemKit::default()).is_empty());
     }
 
     #[test]
