@@ -147,19 +147,6 @@ impl Length {
         }
     }
 
-    /// Where the playhead is and how much is left, in one compact reading.
-    ///
-    /// Elapsed as a position, remaining as a count with a minus in front of it
-    /// — the way a player shows time and remain. They are different kinds of
-    /// thing and are deliberately not written the same way: a position is
-    /// one-based and a count is not, and printing both as `12.3` would invite
-    /// reading a remainder as a place in the track.
-    pub fn elapsed_and_left(self, beat: usize, total_beats: usize) -> String {
-        let played = beat.min(total_beats);
-        let left = total_beats.saturating_sub(played);
-        format!("{} · -{}", self.position(played), self.count(left))
-    }
-
     /// The count and its unit, singular where it should be.
     pub fn describe(self, beats: usize) -> String {
         let count = self.count(beats);
@@ -169,6 +156,66 @@ impl Length {
             (n, unit) => format!("{n} {}", unit.label()),
         }
     }
+}
+
+/// Which way the transport counts.
+///
+/// The two questions a DJ asks of a running track, and never both at once:
+/// where am I, and how long have I got. A player puts them on one button for
+/// that reason, and so does this.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Counting {
+    /// Where you are: the bar you are in, and how long the track has been
+    /// playing.
+    #[default]
+    Elapsed,
+    /// What is left: bars to the end, and time to the end.
+    Remaining,
+}
+
+impl Counting {
+    pub fn flipped(self) -> Self {
+        match self {
+            Counting::Elapsed => Counting::Remaining,
+            Counting::Remaining => Counting::Elapsed,
+        }
+    }
+
+    /// The transport reading.
+    ///
+    /// Elapsed is a position and a clock; remaining is two counts, each with a
+    /// minus in front of it. They are deliberately not written the same way: a
+    /// position is one-based and a count is not, so printing both as `12.3`
+    /// would invite reading a remainder as a place in the track.
+    pub fn reading(
+        self,
+        length: Length,
+        beat: usize,
+        total_beats: usize,
+        at_ms: u32,
+        total_ms: u32,
+    ) -> String {
+        let played = beat.min(total_beats);
+        match self {
+            Counting::Elapsed => format!("{} · {}", length.position(played), clock(at_ms)),
+            Counting::Remaining => format!(
+                "-{} · -{}",
+                length.count(total_beats.saturating_sub(played)),
+                clock(total_ms.saturating_sub(at_ms.min(total_ms)))
+            ),
+        }
+    }
+}
+
+/// Minutes and seconds, for a reading that changes while it is being read.
+///
+/// Not the hundredths [`crate::app`]'s `time_text` gives a cue position. A cue
+/// is a place, and where it is to the hundredth is worth knowing; a transport
+/// is a number that moves, and two digits flickering under the eye are two
+/// digits nobody can read.
+pub fn clock(ms: u32) -> String {
+    let total = ms / 1000;
+    format!("{}:{:02}", total / 60, total % 60)
 }
 
 /// How much work a separation is worth.
@@ -301,6 +348,9 @@ pub struct Config {
     pub paint: crate::wave::Paint,
     /// Whether a track's length reads as bars or as beats.
     pub length: Length,
+    /// Whether the transport shows where you are or what is left.
+    #[serde(default)]
+    pub counting: Counting,
     /// How much work a separation is worth.
     pub stem_quality: Quality,
     /// Whether analysis also fingerprints a track and looks up what it is.
@@ -552,6 +602,7 @@ impl Default for Config {
             panels: Panels::default(),
             paint: crate::wave::Paint::default(),
             length: Length::default(),
+            counting: Counting::default(),
             stem_quality: Quality::default(),
             identify: true,
             acoustid_key: String::new(),
@@ -865,21 +916,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reading_says_where_it_is_and_how_much_is_left() {
-        let total = 64 * 4;
-        assert_eq!(Length::Bars.elapsed_and_left(64, total), "17.1 · -48");
-        assert_eq!(Length::Bars.elapsed_and_left(0, total), "1.1 · -64");
-        // At the very end nothing is left, and the count does not go negative.
-        assert_eq!(Length::Bars.elapsed_and_left(total, total), "65.1 · -0");
-        assert_eq!(Length::Bars.elapsed_and_left(total + 99, total), "65.1 · -0");
-    }
-
-    #[test]
-    fn a_reading_in_beats_uses_beats_for_both_halves() {
-        assert_eq!(Length::Beats.elapsed_and_left(7, 32), "8 · -25");
-    }
-
-    #[test]
     fn stems_are_rendered_well_by_default() {
         // Rendered once, played for years: the slow one is the right default.
         assert_eq!(Config::default().stem_quality, Quality::High);
@@ -1060,6 +1096,73 @@ mod tests {
             .collect();
         assert_eq!(leftovers, vec!["Marius.flac".to_string()], "{leftovers:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// What the transport says, and which way round.
+#[cfg(test)]
+mod counting_the_track {
+    use super::*;
+
+    /// 128 beats — 32 bars — over four minutes, with the playhead a quarter
+    /// of the way in.
+    const BEATS: usize = 128;
+    const TOTAL_MS: u32 = 240_000;
+    const AT_MS: u32 = 60_000;
+    const BEAT: usize = 32;
+
+    #[test]
+    fn where_you_are_is_the_bar_and_the_clock() {
+        let reading = Counting::Elapsed.reading(Length::Bars, BEAT, BEATS, AT_MS, TOTAL_MS);
+        assert_eq!(reading, "9.1 · 1:00");
+    }
+
+    #[test]
+    fn what_is_left_is_two_counts_and_both_say_so() {
+        // Bars to the end and time to the end, each with a minus in front.
+        // A position is one-based and a count is not, so they are written
+        // differently on purpose: "9.1" and "24" must not be read as the same
+        // kind of number.
+        let reading = Counting::Remaining.reading(Length::Bars, BEAT, BEATS, AT_MS, TOTAL_MS);
+        assert_eq!(reading, "-24 · -3:00");
+    }
+
+    #[test]
+    fn the_unit_is_still_whichever_one_the_settings_ask_for() {
+        assert_eq!(
+            Counting::Remaining.reading(Length::Beats, BEAT, BEATS, AT_MS, TOTAL_MS),
+            "-96 · -3:00"
+        );
+        assert_eq!(
+            Counting::Elapsed.reading(Length::Beats, BEAT, BEATS, AT_MS, TOTAL_MS),
+            "33 · 1:00"
+        );
+    }
+
+    #[test]
+    fn a_playhead_past_the_end_reads_as_the_end_rather_than_as_a_negative() {
+        // The deck can run a moment past the last beat, and a transport that
+        // said "-1 bar" there would be saying something that is not true.
+        let reading = Counting::Remaining.reading(Length::Bars, 999, BEATS, 999_999, TOTAL_MS);
+        assert_eq!(reading, "-0 · -0:00");
+    }
+
+    #[test]
+    fn one_press_turns_it_round_and_another_turns_it_back() {
+        assert_eq!(Counting::Elapsed.flipped(), Counting::Remaining);
+        assert_eq!(Counting::Remaining.flipped(), Counting::Elapsed);
+        assert_eq!(Counting::default(), Counting::Elapsed, "where you are, until asked");
+    }
+
+    #[test]
+    fn the_clock_stops_at_seconds() {
+        // Hundredths belong on a cue position, which is a place worth knowing
+        // exactly. A transport is a number that moves, and two digits
+        // flickering under the eye are two digits nobody can read.
+        assert_eq!(clock(0), "0:00");
+        assert_eq!(clock(9_999), "0:09");
+        assert_eq!(clock(61_500), "1:01");
+        assert_eq!(clock(3_600_000), "60:00");
     }
 }
 

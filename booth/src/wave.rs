@@ -258,6 +258,19 @@ pub fn stacked(peaks: [f32; 3], colors: [Color32; 3]) -> [(f32, Color32); 3] {
     stack
 }
 
+/// How many bars a phrase runs for, at this tempo.
+///
+/// `None` when there is no grid to count against, or when the phrase is shorter
+/// than a bar: a section labelled "0" says less than one with no number at all.
+fn bars_of(phrase: &Phrase, bpm: f64) -> Option<usize> {
+    if bpm <= 0.0 {
+        return None;
+    }
+    let beats = phrase.len_ms() as f64 / (60_000.0 / bpm);
+    let bars = (beats / 4.0).round() as usize;
+    (bars > 0).then_some(bars)
+}
+
 /// Which part of the track the picture is showing.
 ///
 /// Both numbers are fractions of the whole track, so the view survives the
@@ -754,7 +767,13 @@ pub struct Strip {
 /// drop is, on the strip a player draws. So drag a boundary to move it,
 /// right-click a block to rename it, and split or merge to put a boundary
 /// where the detector did not find one or take away one it invented.
-pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64, zoom: Zoom) -> Strip {
+pub fn phrase_strip(
+    ui: &mut Ui,
+    phrases: &[Phrase],
+    duration_secs: f64,
+    bpm: f64,
+    zoom: Zoom,
+) -> Strip {
     let width = ui.available_width();
     // Draggable whatever the zoom is: the map only means something zoomed in,
     // but the sections are edited at any zoom and mostly at none.
@@ -782,9 +801,16 @@ pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64, zoom: Z
         let color = theme::phrase_color(&phrase.kind);
         painter.rect_filled(block, 0.0, color);
 
-        // The name only goes in when it fits; a clipped label is worse than
-        // the colour on its own, which already says what the phrase is.
-        let label = theme::label_text(&phrase.kind);
+        // The name and how long it runs for. A DJ builds in eights and
+        // sixteens, and "BREAK 16" is the difference between seeing that a
+        // breakdown is the usual length and counting the bars to find out.
+        //
+        // Rounded, because a phrase is a musical length and a boundary dragged
+        // by hand lands on a bar rather than on an exact multiple of one.
+        let label = match bars_of(phrase, bpm) {
+            Some(bars) => format!("{} {bars}", theme::label_text(&phrase.kind)),
+            None => theme::label_text(&phrase.kind),
+        };
         let galley =
             painter.layout_no_wrap(label, theme::sans(9.0), Color32::from_rgb(0x0F, 0x13, 0x16));
         if galley.size().x + 8.0 < block.width() {
@@ -1008,7 +1034,7 @@ mod tests {
     ) -> Option<PhraseEdit> {
         let asked = std::cell::RefCell::new(None);
         let mut harness = Harness::new_ui(|ui| {
-            let strip = phrase_strip(ui, &phrases, 90.0, Zoom::default());
+            let strip = phrase_strip(ui, &phrases, 90.0, 128.0, Zoom::default());
             if strip.edit.is_some() {
                 *asked.borrow_mut() = strip.edit.clone();
             }
@@ -1054,7 +1080,7 @@ mod tests {
         let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
         let asked = std::cell::RefCell::new(None);
         let mut harness = Harness::new_ui(|ui| {
-            let strip = phrase_strip(ui, &phrases, 90.0, Zoom::default());
+            let strip = phrase_strip(ui, &phrases, 90.0, 128.0, Zoom::default());
             if strip.edit.is_some() {
                 *asked.borrow_mut() = strip.edit.clone();
             }

@@ -392,6 +392,8 @@ enum Pending {
     TogglePlayback(u32),
     /// Change how the waveform is coloured.
     PaintAs(wave::Paint),
+    /// Turn the transport round: where you are, or what is left.
+    CountDifferently,
     /// Settle one question: the fingerprint's answer, the path's, or the one
     /// the track already had.
     AnswerMatch {
@@ -4356,7 +4358,8 @@ impl App {
         // borrows the cached picture out of the window's own state, and that
         // borrow has to be finished with before the panel changes anything.
         let shown = wave::show(ui, &waveform);
-        let strip = wave::phrase_strip(ui, &track.phrases, track.duration_secs, shown.zoom);
+        let strip =
+            wave::phrase_strip(ui, &track.phrases, track.duration_secs, track.bpm, shown.zoom);
         let zoom = strip.zoom.unwrap_or(shown.zoom);
         if let Some(edit) = strip.edit {
             self.pending.push(Pending::EditPhrase { id: track.id, edit });
@@ -4665,26 +4668,46 @@ impl App {
             false => self.playhead_ms.unwrap_or(0),
         };
         let length = self.config.length;
-        ui.label(
-            RichText::new(match beat_at(track, at_ms) {
-                Some(beat) => length.elapsed_and_left(beat, track.beats),
-                // No grid, so no bars to count in — the clock is all there is.
-                None => format!(
-                    "{} / {}",
-                    time_text(at_ms),
-                    time_text((track.duration_secs * 1000.0) as u32)
-                ),
-            })
-            .font(theme::mono(10.5))
-            .color(if loaded { theme::TEXT } else { theme::DIM }),
-        )
-        .on_hover_text(format!(
-            "{} of {} — {} / {}",
-            length.position(beat_at(track, at_ms).unwrap_or(0)),
-            length.describe(track.beats),
-            time_text(at_ms),
-            time_text((track.duration_secs * 1000.0) as u32)
-        ));
+        let counting = self.config.counting;
+        let total_ms = (track.duration_secs * 1000.0) as u32;
+        let reading = match beat_at(track, at_ms) {
+            Some(beat) => counting.reading(length, beat, track.beats, at_ms, total_ms),
+            // No grid, so no bars to count in — the clock is all there is, and
+            // it still answers whichever question is being asked.
+            None => match counting {
+                crate::config::Counting::Elapsed => crate::config::clock(at_ms),
+                crate::config::Counting::Remaining => {
+                    format!("-{}", crate::config::clock(total_ms.saturating_sub(at_ms)))
+                }
+            },
+        };
+        // Clickable, the way a player's time display is: the two questions a
+        // DJ asks of a running track are where am I and how long have I got,
+        // and they are never both wanted at once.
+        let clicked = ui
+            .add(
+                egui::Label::new(RichText::new(reading).font(theme::mono(10.5)).color(if loaded {
+                    theme::TEXT
+                } else {
+                    theme::DIM
+                }))
+                .sense(egui::Sense::click()),
+            )
+            .on_hover_text(format!(
+                "{} of {} — {} of {}\nclick for {}",
+                length.position(beat_at(track, at_ms).unwrap_or(0)),
+                length.describe(track.beats),
+                time_text(at_ms),
+                time_text(total_ms),
+                match counting {
+                    crate::config::Counting::Elapsed => "what is left",
+                    crate::config::Counting::Remaining => "where you are",
+                }
+            ))
+            .clicked();
+        if clicked {
+            self.pending.push(Pending::CountDifferently);
+        }
 
         let mut gain = player.gain();
         if ui
@@ -5296,6 +5319,12 @@ impl App {
                     self.place_cue(id, letter, time_ms);
                     touched = true;
                 }
+                Pending::CountDifferently => {
+                    self.config.counting = self.config.counting.flipped();
+                    if let Err(e) = self.config.save(&self.config_path) {
+                        crate::warn!("could not save the settings: {e:#}");
+                    }
+                }
                 Pending::PaintAs(mode) => {
                     self.config.paint = mode;
                     if let Err(e) = self.config.save(&self.config_path) {
@@ -5657,9 +5686,26 @@ impl App {
             other => other,
         };
 
+        // Where the boundary is now, so the cues that mark it can be taken
+        // with it. Read before the edit, because afterwards it is gone.
+        let was = match &snapped {
+            PhraseEdit::Move { at, .. } => track.phrases.get(*at).map(|p| p.start_ms),
+            _ => None,
+        };
+        // A beat, or a quarter second on a track with no tempo to ask.
+        let beat_ms = if track.bpm > 0.0 { 60_000.0 / track.bpm } else { 250.0 } as u32;
+
         let Some(track) = self.library.get_mut(id) else { return false };
         let changed = crate::library::edit_phrases(&mut track.phrases, &snapped);
         if changed {
+            if let (Some(from), PhraseEdit::Move { at, .. }) = (was, &snapped) {
+                if let Some(to) = track.phrases.get(*at).map(|p| p.start_ms) {
+                    let moved = drag_cues(&mut track.cues, from, to, beat_ms);
+                    if moved > 0 {
+                        crate::debug!("took {} with the boundary", plural(moved, "cue"));
+                    }
+                }
+            }
             self.prep_changed(id);
         }
         changed
@@ -8843,6 +8889,38 @@ fn what_the_words_decided(
     said
 }
 
+/// Take the cues that mark a boundary with it when it moves.
+///
+/// A cue that marks the drop is a cue for wherever the drop is. Dragging the
+/// line and leaving the cue behind makes the two disagree about the same
+/// moment, and the cue is the one somebody presses in a booth.
+///
+/// Only the cues that mark the section, which is what the name says: a cue
+/// called "drop" or "break" is about the arrangement. One named for what is
+/// sung there — a hook, a vocal entry — is about a moment in the music that has
+/// not moved, and dragging it along would put it somewhere nothing happens.
+///
+/// `within` is how close a cue has to be to count as marking the boundary. A
+/// beat: a section cue is snapped to the bar and so is the line, so they should
+/// be on the same moment, and anything a whole beat away is marking something
+/// else.
+///
+/// Returns how many moved.
+fn drag_cues(cues: &mut [crate::library::CueMark], from: u32, to: u32, within: u32) -> usize {
+    if from == to {
+        return 0;
+    }
+    let mut moved = 0;
+    for cue in cues.iter_mut() {
+        let marks_a_section = crate::library::Phrase::KINDS.contains(&cue.label.as_str());
+        if marks_a_section && cue.time_ms.abs_diff(from) <= within {
+            cue.time_ms = to;
+            moved += 1;
+        }
+    }
+    moved
+}
+
 /// Whether this is a row this program draws a picture for at all.
 ///
 /// A record has to have been analysed first. Arrowing down a library of
@@ -9036,6 +9114,97 @@ mod tests {
                 dir.join("config.json"),
                 String::new(),
             )
+        }
+
+        /// Dragging a phrase boundary takes the cues that mark it along.
+        mod moving_a_boundary {
+            use super::*;
+            use crate::library::{CueMark, Phrase, PhraseEdit};
+
+            fn cue(letter: u8, time_ms: u32, label: &str) -> CueMark {
+                CueMark { letter, time_ms, label: label.to_string(), color: [0; 3] }
+            }
+
+            /// 120 BPM, so a beat is 500 ms and a bar is two seconds.
+            fn with_a_drop(name: &str) -> (App, u32) {
+                let mut app = app(name);
+                let id = app.library.add(std::path::Path::new("/music/track.flac"));
+                let track = app.library.get_mut(id).unwrap();
+                track.bpm = 120.0;
+                track.has_grid = true;
+                track.analyzed = true;
+                track.duration_secs = 300.0;
+                track.beats = 600;
+                track.phrases = vec![
+                    Phrase { start_ms: 0, end_ms: 32_000, kind: "intro".into() },
+                    Phrase { start_ms: 32_000, end_ms: 96_000, kind: "drop".into() },
+                    Phrase { start_ms: 96_000, end_ms: 160_000, kind: "break".into() },
+                ];
+                track.cues = vec![
+                    cue(0, 0, ""),
+                    cue(1, 32_000, "drop"),
+                    cue(2, 40_000, "hold me closer now"),
+                    cue(3, 96_000, "break"),
+                ];
+                app.rebuild();
+                (app, id)
+            }
+
+            #[test]
+            fn a_cue_that_marks_the_drop_goes_where_the_drop_goes() {
+                // Otherwise the line and the cue disagree about the same
+                // moment, and the cue is the one somebody presses in a booth.
+                let (mut app, id) = with_a_drop("dragged");
+                assert!(app.edit_phrase(id, PhraseEdit::Move { at: 1, time_ms: 40_000 }));
+
+                let cues = &app.library.get(id).unwrap().cues;
+                let drop = cues.iter().find(|c| c.label == "drop").unwrap();
+                let boundary = app.library.get(id).unwrap().phrases[1].start_ms;
+                assert_eq!(drop.time_ms, boundary, "the cue was left behind");
+            }
+
+            #[test]
+            fn a_cue_named_for_what_is_sung_there_stays_where_it_is() {
+                // It is about a moment in the music, not about the line above
+                // it, and the music has not moved.
+                let (mut app, id) = with_a_drop("sung");
+                app.edit_phrase(id, PhraseEdit::Move { at: 1, time_ms: 40_000 });
+
+                let cues = &app.library.get(id).unwrap().cues;
+                let hook = cues.iter().find(|c| c.label == "hold me closer now").unwrap();
+                assert_eq!(hook.time_ms, 40_000);
+            }
+
+            #[test]
+            fn a_cue_marking_a_different_boundary_is_not_dragged_along() {
+                let (mut app, id) = with_a_drop("elsewhere");
+                app.edit_phrase(id, PhraseEdit::Move { at: 1, time_ms: 40_000 });
+
+                let cues = &app.library.get(id).unwrap().cues;
+                let other = cues.iter().find(|c| c.label == "break").unwrap();
+                assert_eq!(other.time_ms, 96_000, "the far boundary's cue moved too");
+                // And the memory cue, which anchors the grid, is untouched.
+                assert_eq!(cues.iter().find(|c| c.letter == 0).unwrap().time_ms, 0);
+            }
+
+            #[test]
+            fn a_cue_a_beat_away_from_the_line_is_marking_something_else() {
+                // A section cue and its boundary are both snapped, so they sit
+                // on the same moment. A whole beat of daylight between them
+                // means the cue is for something the line is not.
+                let mut cues = vec![cue(1, 32_000, "drop"), cue(2, 33_000, "drop")];
+                let moved = drag_cues(&mut cues, 32_000, 48_000, 500);
+                assert_eq!(moved, 1);
+                assert_eq!(cues[0].time_ms, 48_000);
+                assert_eq!(cues[1].time_ms, 33_000, "two beats away and dragged anyway");
+            }
+
+            #[test]
+            fn a_boundary_that_did_not_move_moves_nothing() {
+                let mut cues = vec![cue(1, 32_000, "drop")];
+                assert_eq!(drag_cues(&mut cues, 32_000, 32_000, 500), 0);
+                assert_eq!(cues[0].time_ms, 32_000);
+            }
         }
 
         /// A stem's picture is of the stem; everything else it shows is the
