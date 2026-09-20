@@ -620,9 +620,14 @@ fn wheeled(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'_>) 
 }
 
 /// Where a horizontal position falls in the track.
+///
+/// Through the zoom, like everything else that crosses between a time and a
+/// place on the panel. Zoomed in, a pixel is a fraction of the *window* and the
+/// window is a fraction of the track; reading it as a fraction of the track put
+/// a click at the wrong moment by however far the view had been scrolled.
 fn time_at(rect: Rect, wave: &Waveform<'_>, x: f32) -> u32 {
-    let fraction = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
-    (fraction * wave.duration_secs * 1000.0).round() as u32
+    let across = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+    (wave.zoom.into_track(across) * wave.duration_secs * 1000.0).round() as u32
 }
 
 /// Which cue the pointer is over, if any.
@@ -638,9 +643,16 @@ fn cue_under(at: egui::Pos2, rect: Rect, wave: &Waveform<'_>) -> Option<u8> {
         .map(|(letter, _)| letter)
 }
 
+/// Where a moment in the track falls on the panel.
+///
+/// The same mapping [`cue_flags`] draws with, which is the point of it being
+/// one function: they disagreed, so a cue was drawn in the right place and
+/// grabbed in another, and zoomed in the gap between the two was the whole
+/// width of the panel.
 fn cue_x(rect: Rect, wave: &Waveform<'_>, time_ms: u32) -> f32 {
     let total_ms = (wave.duration_secs * 1000.0).max(1.0);
-    rect.left() + rect.width() * (time_ms as f64 / total_ms).clamp(0.0, 1.0) as f32
+    let fraction = (time_ms as f64 / total_ms).clamp(0.0, 1.0);
+    rect.left() + rect.width() * wave.zoom.across(fraction)
 }
 
 /// The cue being dragged, remembered for the length of the drag.
@@ -670,33 +682,54 @@ fn dragged_cue(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'
     ui.ctx().memory(|memory| memory.data.get_temp::<Option<u8>>(id)).flatten()
 }
 
-/// Ticks along the bottom, tall on the downbeat.
+/// The downbeat, in the colour every player draws it in.
+///
+/// Red on the one and white on the other three is not a choice so much as a
+/// convention: it is what a CDJ shows, so it is what a DJ reads without having
+/// to think about it, and a grid that used one colour for all four made the
+/// one indistinguishable from the rest at a glance.
+const DOWNBEAT: Color32 = Color32::from_rgb(0xE5, 0x3E, 0x3E);
+const OFFBEAT: Color32 = Color32::from_rgb(0xD8, 0xDE, 0xE4);
+
+/// Ticks along the bottom, tall and red on the downbeat.
 ///
 /// They are drawn from the grid rather than from the tempo, so a grid that
 /// drifts — which is the case this whole format handles well and most software
 /// handles badly — is visible as ticks that drift.
+///
+/// Through the zoom, like the waveform above them. They were not, so zooming in
+/// left the grid where it was while the music moved out from under it, which is
+/// the one thing a grid must never do.
 fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
     if wave.beat_ms.is_empty() || wave.duration_secs <= 0.0 {
         return;
     }
     let total_ms = wave.duration_secs * 1000.0;
-    let faint = theme::TEXT.gamma_multiply(0.28);
 
     // At a normal window width there are more beats than pixels, so draw every
-    // bar line and only as many beats as will read as separate marks.
-    let spacing = rect.width() / wave.beat_ms.len() as f32;
-    let every_beat = spacing >= 3.0;
+    // bar line and only as many beats as will read as separate marks. Counted
+    // against the beats that are *showing*: zoomed in, a handful of bars have
+    // the whole panel to themselves and every beat has room.
+    let showing = wave.beat_ms.len() as f32 * wave.zoom.span.max(f32::EPSILON);
+    let every_beat = rect.width() / showing.max(1.0) >= 3.0;
 
     for (index, time) in wave.beat_ms.iter().enumerate() {
-        let bar = index % 4 == 0;
-        if !bar && !every_beat {
+        let downbeat = index % 4 == 0;
+        if !downbeat && !every_beat {
             continue;
         }
-        let x = rect.left() + rect.width() * (*time as f64 / total_ms).clamp(0.0, 1.0) as f32;
-        let height = if bar { 9.0 } else { 4.0 };
+        let across = wave.zoom.across((*time as f64 / total_ms).clamp(0.0, 1.0));
+        if !(0.0..=1.0).contains(&across) {
+            continue;
+        }
+        let x = rect.left() + rect.width() * across;
+        let (height, color) = match downbeat {
+            true => (9.0, DOWNBEAT.gamma_multiply(0.9)),
+            false => (4.0, OFFBEAT.gamma_multiply(0.45)),
+        };
         painter.line_segment(
             [egui::pos2(x, rect.bottom() - height), egui::pos2(x, rect.bottom())],
-            Stroke::new(1.0_f32, faint),
+            Stroke::new(1.0_f32, color),
         );
     }
 }
@@ -1283,6 +1316,110 @@ mod tests {
         // And silence is not black, which would be a column that looks like a
         // hole in the picture.
         assert_eq!(frequency_color(0.0, 0.0, 0.0), theme::RULE);
+    }
+
+    /// Everything that crosses between a moment in the track and a place on
+    /// the panel has to go through the zoom, or the picture and the things
+    /// drawn over it stop agreeing.
+    mod zoomed_in {
+        use super::*;
+
+        const TOTAL: f64 = 240.0;
+
+        fn cue(letter: u8, time_ms: u32) -> CueMark {
+            CueMark { letter, time_ms, label: String::new(), color: [1, 2, 3] }
+        }
+
+        fn panel() -> Rect {
+            Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1_000.0, 100.0))
+        }
+
+        /// Showing the second quarter of the track: 60 s to 120 s.
+        fn wave<'a>(cues: &'a [CueMark], beats: &'a [u32]) -> Waveform<'a> {
+            Waveform {
+                bands: &[],
+                duration_secs: TOTAL,
+                beat_ms: beats,
+                cues,
+                position: None,
+                paint: Paint::Bands,
+                stems: None,
+                zoom: Zoom { start: 0.25, span: 0.25 },
+            }
+        }
+
+        #[test]
+        fn a_cue_is_grabbed_where_it_is_drawn() {
+            // They were two different mappings: one through the zoom and one
+            // not. A cue was drawn in the right place and grabbed in another,
+            // and zoomed in the gap between them was the whole panel.
+            let cues = [cue(1, 90_000)];
+            let wave = wave(&cues, &[]);
+            let rect = panel();
+
+            // 90 s is halfway through a window running 60 s to 120 s.
+            let x = cue_x(rect, &wave, 90_000);
+            assert!((x - rect.center().x).abs() < 0.5, "drawn at {x}");
+            assert_eq!(cue_under(egui::pos2(x, 50.0), rect, &wave), Some(1));
+        }
+
+        #[test]
+        fn a_cue_outside_the_window_cannot_be_grabbed_through_it() {
+            // It is not drawn, so grabbing it would be grabbing something
+            // invisible — and before this it was grabbable at whatever place
+            // the unzoomed mapping happened to put it.
+            let cues = [cue(1, 10_000)];
+            let wave = wave(&cues, &[]);
+            let rect = panel();
+            for x in [0.0, 250.0, 500.0, 750.0, 999.0] {
+                assert_eq!(cue_under(egui::pos2(x, 50.0), rect, &wave), None, "grabbed at {x}");
+            }
+        }
+
+        #[test]
+        fn a_click_lands_on_the_moment_under_the_pointer() {
+            let wave = wave(&[], &[]);
+            let rect = panel();
+            // The window runs 60 s to 120 s across a thousand points.
+            assert_eq!(time_at(rect, &wave, rect.left()), 60_000);
+            assert_eq!(time_at(rect, &wave, rect.center().x), 90_000);
+            assert_eq!(time_at(rect, &wave, rect.right()), 120_000);
+        }
+
+        #[test]
+        fn a_moment_survives_the_round_trip_through_the_panel() {
+            let wave = wave(&[], &[]);
+            let rect = panel();
+            for at in [60_000u32, 75_000, 90_000, 119_000] {
+                let back = time_at(rect, &wave, cue_x(rect, &wave, at));
+                assert!(back.abs_diff(at) <= 120, "{at} came back as {back}");
+            }
+        }
+
+        #[test]
+        fn the_whole_track_is_the_same_mapping_it_always_was() {
+            // Zoomed out, nothing should have changed.
+            let cues = [cue(1, 120_000)];
+            let mut wave = wave(&cues, &[]);
+            wave.zoom = Zoom::default();
+            let rect = panel();
+
+            assert!((cue_x(rect, &wave, 120_000) - rect.center().x).abs() < 0.5);
+            assert_eq!(time_at(rect, &wave, rect.center().x), 120_000);
+        }
+    }
+
+    #[test]
+    fn the_grid_marks_the_downbeat_in_the_colour_a_player_uses() {
+        // Red on the one and white on the other three is what a CDJ shows, so
+        // it is what a DJ reads without having to think about it.
+        assert_ne!(DOWNBEAT, OFFBEAT);
+        assert!(DOWNBEAT.r() > DOWNBEAT.g() && DOWNBEAT.r() > DOWNBEAT.b(), "{DOWNBEAT:?}");
+        let spread = |c: Color32| {
+            let v = [c.r(), c.g(), c.b()];
+            v.iter().max().unwrap() - v.iter().min().unwrap()
+        };
+        assert!(spread(OFFBEAT) < 20, "the off-beats should read as white: {OFFBEAT:?}");
     }
 
     /// Where a colour sits on the wheel, in degrees, and how far from grey.

@@ -481,6 +481,18 @@ reference of its own rather than the overview's.
 The same measurement makes the pictures on the drive, so what is on screen
 while prepping is what will be on the CDJ's screen.
 
+**The grid marks the downbeat red and the other three beats white**, which is
+what a player draws and therefore what a DJ reads without having to think about
+it. One colour for all four made the one indistinguishable from the rest at a
+glance, which is the one thing a beat grid exists to show.
+
+Everything that crosses between a moment in the track and a place on the panel
+goes through the zoom: the columns, the cue flags, the playhead, the grid, where
+a click lands, and where a cue is grabbed. They did not all, and the ones that
+did not were fine at full width and wrong by the width of the panel as soon as
+you zoomed in — a cue drawn in one place and picked up in another, and a grid
+that stayed put while the music moved out from under it.
+
 **A stem row draws its own waveform.** An acapella is a different sound from the
 record it came from, and a picture of the mix under the acapella's name is a
 picture of something that is not playing. Everything else a stem row shows stays
