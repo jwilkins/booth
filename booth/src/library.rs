@@ -168,6 +168,14 @@ impl Phrase {
     }
 }
 
+/// Four, and the picture, the transport and the phrase strip all count in it.
+///
+/// Named rather than written out at each of the three, because the bar is the
+/// one number they have to agree on: a red mark every four beats, a bar number
+/// that advances every four, and a section length in fours are the same claim
+/// made three times, and they disagreed once already.
+pub const BEATS_PER_BAR: usize = 4;
+
 /// The shortest a section may be left.
 ///
 /// A boundary dragged past its neighbour would invert the section, and one

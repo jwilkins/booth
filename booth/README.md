@@ -213,6 +213,16 @@ the boundary was missed, not that the name was wrong. A boundary cannot be
 dragged over its neighbour, and a section too short to have two halves is not
 split at all rather than split into a sliver.
 
+**Each block says how long it runs for** — `BREAK 16`, `BUILD 8` — because a
+DJ builds in eights and sixteens, and seeing that a breakdown is the usual
+length is the difference between reading the strip and counting the bars. The
+number is the count of red bar marks under the block, taken off the same grid
+the picture draws rather than worked out again from the tempo: two answers to
+one question come apart, and it showed as a section labelled sixteen with
+fifteen marks under it. A boundary dragged into the middle
+of a bar loses that bar rather than rounding up to it, which is what the marks
+show too.
+
 The strip stays the map as well: away from a boundary, dragging still moves the
 zoom window.
 
@@ -485,6 +495,15 @@ while prepping is what will be on the CDJ's screen.
 what a player draws and therefore what a DJ reads without having to think about
 it. One colour for all four made the one indistinguishable from the rest at a
 glance, which is the one thing a beat grid exists to show.
+
+Which beat is the one is taken from the memory cue. The grid itself is not kept
+in the collection — thousands of numbers a track, belonging in the analysis
+file on the drive — so the picture rebuilds it from the tempo and winds
+it back to the head of the track in whole **bars** from that cue. Winding back a
+beat at a time put beat one on whichever beat happened to land nearest the top
+of the track, and the bar marks, the bar number in the transport and the length
+on a phrase block then all counted from an offbeat: right on a track that starts
+on the one, and three beats out on one that does not.
 
 Everything that crosses between a moment in the track and a place on the panel
 goes through the zoom: the columns, the cue flags, the playhead, the grid, where

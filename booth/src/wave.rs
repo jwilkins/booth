@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui, Vec2};
 
 use booth_cli::export::waveform::loudness;
 
-use crate::library::{CueMark, Phrase, PhraseEdit};
+use crate::library::{CueMark, Phrase, PhraseEdit, BEATS_PER_BAR};
 use crate::theme;
 
 /// How tall the waveform draws, in points.
@@ -258,16 +258,26 @@ pub fn stacked(peaks: [f32; 3], colors: [Color32; 3]) -> [(f32, Color32); 3] {
     stack
 }
 
-/// How many bars a phrase runs for, at this tempo.
+/// How many bars a phrase runs for.
 ///
-/// `None` when there is no grid to count against, or when the phrase is shorter
-/// than a bar: a section labelled "0" says less than one with no number at all.
-fn bars_of(phrase: &Phrase, bpm: f64) -> Option<usize> {
-    if bpm <= 0.0 {
-        return None;
-    }
-    let beats = phrase.len_ms() as f64 / (60_000.0 / bpm);
-    let bars = (beats / 4.0).round() as usize;
+/// Counted off the same grid the marks are drawn from, rather than worked out
+/// from the tempo. The tempo was a second answer to the same question, and the
+/// two came apart wherever a section did not hold a whole number of bars — a
+/// section the tempo rounded up to sixteen with fifteen marks under it — and on
+/// any grid that is not perfectly even, which is every grid a player has bent
+/// by hand.
+///
+/// Every fourth beat, because [`crate::app`]'s grid starts on a downbeat.
+///
+/// `None` when there is no grid to count against, or when the phrase does not
+/// hold a whole bar: a section labelled "0" says less than one with no number
+/// at all.
+fn bars_of(phrase: &Phrase, beat_ms: &[u32]) -> Option<usize> {
+    let bars = beat_ms
+        .iter()
+        .step_by(BEATS_PER_BAR)
+        .filter(|time| (phrase.start_ms..phrase.end_ms).contains(time))
+        .count();
     (bars > 0).then_some(bars)
 }
 
@@ -714,7 +724,7 @@ fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
     let every_beat = rect.width() / showing.max(1.0) >= 3.0;
 
     for (index, time) in wave.beat_ms.iter().enumerate() {
-        let downbeat = index % 4 == 0;
+        let downbeat = index % BEATS_PER_BAR == 0;
         if !downbeat && !every_beat {
             continue;
         }
@@ -804,7 +814,7 @@ pub fn phrase_strip(
     ui: &mut Ui,
     phrases: &[Phrase],
     duration_secs: f64,
-    bpm: f64,
+    beat_ms: &[u32],
     zoom: Zoom,
 ) -> Strip {
     let width = ui.available_width();
@@ -838,9 +848,11 @@ pub fn phrase_strip(
         // sixteens, and "BREAK 16" is the difference between seeing that a
         // breakdown is the usual length and counting the bars to find out.
         //
-        // Rounded, because a phrase is a musical length and a boundary dragged
-        // by hand lands on a bar rather than on an exact multiple of one.
-        let label = match bars_of(phrase, bpm) {
+        // It is the bar marks under the block that are being counted, so the
+        // number can be checked against the picture and always comes out the
+        // same. A boundary dragged to the middle of a bar loses that bar rather
+        // than rounding up to it, which is what the marks show too.
+        let label = match bars_of(phrase, beat_ms) {
             Some(bars) => format!("{} {bars}", theme::label_text(&phrase.kind)),
             None => theme::label_text(&phrase.kind),
         };
@@ -1050,6 +1062,13 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
+    /// An even grid, the way the window reconstructs one from a tempo.
+    fn grid(length_ms: u32, bpm: f64) -> Vec<u32> {
+        let period = 60_000.0 / bpm;
+        let count = (length_ms as f64 / period).floor().max(0.0) as usize;
+        (0..count).map(|i| (i as f64 * period).round() as u32).collect()
+    }
+
     fn sections(runs: &[(u32, u32, &str)]) -> Vec<Phrase> {
         runs.iter()
             .map(|(start, end, kind)| Phrase {
@@ -1067,7 +1086,7 @@ mod tests {
     ) -> Option<PhraseEdit> {
         let asked = std::cell::RefCell::new(None);
         let mut harness = Harness::new_ui(|ui| {
-            let strip = phrase_strip(ui, &phrases, 90.0, 128.0, Zoom::default());
+            let strip = phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), Zoom::default());
             if strip.edit.is_some() {
                 *asked.borrow_mut() = strip.edit.clone();
             }
@@ -1097,6 +1116,47 @@ mod tests {
     }
 
     #[test]
+    fn the_number_on_a_section_is_the_number_of_bar_marks_under_it() {
+        // The two used to be worked out separately — the marks off the grid,
+        // the number off the tempo — and a DJ counting the red lines in a
+        // breakdown could get a different answer from the one on the block.
+        let beats = grid(180_000, 126.0);
+        let phrases = sections(&[
+            (0, beats[64], "intro"),
+            (beats[64], beats[128], "drop"),
+            // The case the two answers came apart on: a section that starts
+            // off the bar and runs fifty-nine beats. Fourteen marks fall
+            // inside it; the tempo divided by four and rounded to fifteen.
+            (beats[129], beats[188], "break"),
+        ]);
+        let lengths: Vec<Option<usize>> =
+            phrases.iter().map(|phrase| bars_of(phrase, &beats)).collect();
+        assert_eq!(lengths, vec![Some(16), Some(16), Some(14)]);
+
+        for phrase in &phrases {
+            let marks = beats
+                .iter()
+                .step_by(BEATS_PER_BAR)
+                .filter(|at| (phrase.start_ms..phrase.end_ms).contains(at))
+                .count();
+            assert_eq!(
+                bars_of(phrase, &beats),
+                Some(marks),
+                "{} says one length and the picture draws another",
+                phrase.kind
+            );
+        }
+    }
+
+    #[test]
+    fn a_section_with_no_grid_under_it_gives_no_length_rather_than_zero() {
+        // Nothing is drawn under it either, so a number would be a claim about
+        // a picture that is not there.
+        let phrases = sections(&[(0, 30_000, "intro")]);
+        assert_eq!(bars_of(&phrases[0], &[]), None);
+    }
+
+    #[test]
     fn dragging_the_middle_of_a_section_moves_the_view_and_not_the_boundary() {
         // The strip is a map as well as an editor, and the two gestures share
         // it. Away from a boundary the drag belongs to the map.
@@ -1113,7 +1173,7 @@ mod tests {
         let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
         let asked = std::cell::RefCell::new(None);
         let mut harness = Harness::new_ui(|ui| {
-            let strip = phrase_strip(ui, &phrases, 90.0, 128.0, Zoom::default());
+            let strip = phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), Zoom::default());
             if strip.edit.is_some() {
                 *asked.borrow_mut() = strip.edit.clone();
             }

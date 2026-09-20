@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::library::data_dir;
+use crate::library::{data_dir, BEATS_PER_BAR};
 
 /// What to do about a file that is not in the library folder.
 ///
@@ -127,7 +127,7 @@ impl Length {
     /// music and lying about the drive.
     pub fn count(self, beats: usize) -> usize {
         match self {
-            Length::Bars => beats / 4,
+            Length::Bars => beats / BEATS_PER_BAR,
             Length::Beats => beats,
         }
     }
@@ -142,7 +142,9 @@ impl Length {
     /// the whole point of the other setting.
     pub fn position(self, beat: usize) -> String {
         match self {
-            Length::Bars => format!("{}.{}", beat / 4 + 1, beat % 4 + 1),
+            Length::Bars => {
+                format!("{}.{}", beat / BEATS_PER_BAR + 1, beat % BEATS_PER_BAR + 1)
+            }
             Length::Beats => format!("{}", beat + 1),
         }
     }

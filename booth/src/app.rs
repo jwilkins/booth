@@ -4359,7 +4359,7 @@ impl App {
         // borrow has to be finished with before the panel changes anything.
         let shown = wave::show(ui, &waveform);
         let strip =
-            wave::phrase_strip(ui, &track.phrases, track.duration_secs, track.bpm, shown.zoom);
+            wave::phrase_strip(ui, &track.phrases, track.duration_secs, &beat_ms, shown.zoom);
         let zoom = strip.zoom.unwrap_or(shown.zoom);
         if let Some(edit) = strip.edit {
             self.pending.push(Pending::EditPhrase { id: track.id, edit });
@@ -8777,13 +8777,25 @@ fn grid_text(track: &Track, length: crate::config::Length) -> String {
 /// track, and the analysis file on the drive is where it belongs. What the
 /// picture needs is where the bars fall, and a constant tempo from the first
 /// downbeat gives that.
+///
+/// Wound back in whole bars rather than whole beats, so that beat zero is a
+/// downbeat on the same bar as the memory cue. Winding back a beat at a time
+/// put beat zero on whichever beat happened to fall nearest the top of the
+/// track, and everything that counts in fours — the red bar marks, the bar
+/// number in the transport, the length on the phrase strip — then counted from
+/// a beat that was not a downbeat at all. It only looked right on a track that
+/// happens to start on one.
+///
+/// The cost is that a track starting part way through a bar has that part bar
+/// unmarked, which is the right way round: a player numbers from the first
+/// whole bar too, and three marks in the wrong colour is the worse trade.
 fn beat_times(track: &Track) -> Vec<u32> {
     if !track.has_grid || track.bpm <= 0.0 || track.duration_secs <= 0.0 {
         return Vec::new();
     }
     let period_ms = 60_000.0 / track.bpm;
     let first = track.cues.first().map(|cue| cue.time_ms).unwrap_or(0) as f64;
-    let start = first % period_ms;
+    let start = first % (period_ms * crate::library::BEATS_PER_BAR as f64);
     let count = ((track.duration_secs * 1000.0 - start) / period_ms).floor().max(0.0) as usize;
     (0..count).map(|i| (start + i as f64 * period_ms).round() as u32).collect()
 }
@@ -11753,6 +11765,36 @@ mod tests {
         assert_eq!(beats[1], 500);
         assert!(beats.contains(&2_000), "the cue should fall on a beat");
         assert!(*beats.last().unwrap() < 10_000);
+    }
+
+    #[test]
+    fn the_first_beat_of_the_grid_is_a_downbeat_on_the_memory_cues_bar() {
+        // Everything that counts in fours counts from beat zero — the red bar
+        // marks, the bar number in the transport, the length on a phrase. Wind
+        // the grid back a beat at a time and beat zero is whichever beat lands
+        // nearest the top of the track, so all three count from an offbeat on
+        // any track that does not happen to start on the one.
+        let mut track = Track::placeholder(1);
+        track.has_grid = true;
+        track.bpm = 126.0;
+        track.duration_secs = 180.0;
+        track.cues.push(CueMark {
+            letter: 0,
+            time_ms: 30_969,
+            label: String::new(),
+            color: [0, 0, 0],
+        });
+
+        let beats = beat_times(&track);
+        let at = beats
+            .iter()
+            .position(|beat| beat.abs_diff(30_969) < 2)
+            .expect("the memory cue should fall on a beat");
+        assert_eq!(at % crate::library::BEATS_PER_BAR, 0, "the memory cue landed on beat {at}");
+        // And it is wound back as far as a downbeat goes, so at most the part
+        // bar at the head of the track is left unmarked.
+        let bar_ms = (crate::library::BEATS_PER_BAR as f64 * 60_000.0 / 126.0) as u32;
+        assert!(beats[0] < bar_ms, "the grid started {} ms in, past the first bar", beats[0]);
     }
 
     #[test]
