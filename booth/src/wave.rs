@@ -593,10 +593,11 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
 
 /// Read the wheel over the panel, and keep a playing track in view.
 ///
-/// Following the playhead only kicks in once it has actually left the view.
-/// Recentring on every frame would make a zoomed picture scroll continuously,
-/// which is a different instrument — what is wanted here is that the thing you
-/// zoomed in on to check does not vanish while you listen to it.
+/// Following the playhead only kicks in once it has actually left the view,
+/// and only while it is running — see [`follows`]. Recentring on every frame
+/// would make a zoomed picture scroll continuously, which is a different
+/// instrument; what is wanted here is that the thing you zoomed in on to check
+/// does not vanish while you listen to it.
 fn wheeled(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'_>) -> Zoom {
     let floor = zoom_floor(wave.columns(), rect.width());
     let mut zoom = wave.zoom.settled();
@@ -622,11 +623,35 @@ fn wheeled(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'_>) 
     }
 
     if let Some(position) = wave.position {
-        if !zoom.is_fit() && !(0.0..=1.0).contains(&zoom.across(position as f64)) {
+        // What the playhead was last frame, which is the only way to tell a
+        // running one from a parked one: the panel is drawn from scratch every
+        // frame and the position alone says nothing about whether it moved.
+        let id = response.id.with("playhead-was");
+        let was = ui.ctx().memory(|memory| memory.data.get_temp::<f32>(id));
+        ui.ctx().memory_mut(|memory| memory.data.insert_temp(id, position));
+        if follows(zoom, position, was, ui.input(|input| input.pointer.any_down())) {
             zoom = zoom.centred(position);
         }
     }
     zoom
+}
+
+/// Whether the view should be pulled back to the playhead.
+///
+/// Only while the playhead is running. A parked one is not going anywhere, and
+/// pulling the view back to it anyway undid every scroll on the frame after it
+/// was made: dragging the phrase strip stuttered and never got more than a few
+/// points from wherever the playhead was sitting, which on a track nobody had
+/// scrubbed was the top of it.
+///
+/// And never while the pointer is down, because then the view is being moved
+/// on purpose and the thing worth following is the hand doing it.
+fn follows(zoom: Zoom, at: f32, was: Option<f32>, held: bool) -> bool {
+    if zoom.is_fit() || held {
+        return false;
+    }
+    let running = was.is_some_and(|before| before != at);
+    running && !(0.0..=1.0).contains(&zoom.across(at as f64))
 }
 
 /// Where a horizontal position falls in the track.
@@ -1324,6 +1349,38 @@ mod tests {
         // And again from somewhere that is not the start of the track.
         let deeper = closer.scaled(0.5, 0.8, 0.0);
         assert!((deeper.into_track(0.8) - closer.into_track(0.8)).abs() < 1e-4, "{deeper:?}");
+    }
+
+    #[test]
+    fn a_playhead_parked_outside_the_view_does_not_pull_it_back() {
+        // The reported bug, in one line: every scroll away from the playhead
+        // was undone on the next frame, so dragging the phrase strip stuttered
+        // and stayed by the top of the track.
+        let looking = Zoom { start: 0.5, span: 0.25 };
+        let parked = 0.0;
+        assert!(!follows(looking, parked, Some(parked), false));
+        // Whole track showing: there is nowhere to pull it back to.
+        assert!(!follows(Zoom::default(), parked, Some(0.5), false));
+    }
+
+    #[test]
+    fn a_playhead_running_out_of_the_view_pulls_it_back() {
+        // The behaviour worth keeping: what you zoomed in on to check should
+        // not silently be left behind while the record plays on.
+        let looking = Zoom { start: 0.5, span: 0.25 };
+        assert!(follows(looking, 0.80, Some(0.79), false));
+        // Still inside the view, so there is nothing to catch up with.
+        assert!(!follows(looking, 0.60, Some(0.59), false));
+        // Nothing to compare against on the first frame a track is shown.
+        assert!(!follows(looking, 0.80, None, false));
+    }
+
+    #[test]
+    fn dragging_the_view_stops_the_playhead_pulling_it_around() {
+        // Otherwise the same fight happens during playback, where the playhead
+        // is moving on its own and would win every frame.
+        let looking = Zoom { start: 0.5, span: 0.25 };
+        assert!(!follows(looking, 0.80, Some(0.79), true));
     }
 
     #[test]

@@ -404,6 +404,12 @@ playhead has actually left it. Recentring every frame would be a scrolling
 waveform, which is a different instrument; what is wanted here is that the thing
 you zoomed in on does not vanish while you listen to it.
 
+Only a **running** playhead pulls the view, and never while the pointer is
+down. A parked one is not going anywhere, and pulling the view back to it
+anyway undid every scroll on the frame after it was made — which showed up as
+a phrase strip that stuttered and never got more than a few points from
+wherever the playhead was sitting.
+
 The picture is cached at the scrolling resolution — 150 columns a second, the
 same detail the player draws from — rather than as a fixed 1,200 columns for the
 whole track. At a normal window it is the same picture either way, because a
