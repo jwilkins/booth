@@ -2148,6 +2148,7 @@ impl App {
                         track.grid_confidence = analyzed.grid_confidence;
                         track.has_grid = analyzed.has_grid;
                         track.beats = analyzed.beats;
+                        track.beat_ms = analyzed.beat_ms.clone();
                         track.key = analyzed.key.clone();
                         track.key_confidence = analyzed.key_confidence;
                         track.energy = analyzed.energy;
@@ -8771,15 +8772,16 @@ fn grid_text(track: &Track, length: crate::config::Length) -> String {
     format!("{:.2} · {}", track.bpm, length.describe(track.beats))
 }
 
-/// A track's beat times, reconstructed from its tempo and its first cue.
+/// A track's beat times: the ones it kept, or rebuilt from its tempo and its
+/// first cue.
 ///
-/// The full grid is not kept in the collection — it is thousands of numbers per
+/// An even grid is not kept in the collection — it is thousands of numbers per
 /// track, and the analysis file on the drive is where it belongs. What the
 /// picture needs is where the bars fall, and a constant tempo from the first
 /// downbeat gives that.
 ///
 /// Wound back in whole bars rather than whole beats, so that beat zero is a
-/// downbeat on the same bar as the memory cue. Winding back a beat at a time
+/// downbeat on the same bar as the anchor. Winding back a beat at a time
 /// put beat zero on whichever beat happened to fall nearest the top of the
 /// track, and everything that counts in fours — the red bar marks, the bar
 /// number in the transport, the length on the phrase strip — then counted from
@@ -8793,8 +8795,15 @@ fn beat_times(track: &Track) -> Vec<u32> {
     if !track.has_grid || track.bpm <= 0.0 || track.duration_secs <= 0.0 {
         return Vec::new();
     }
+    // A grid that bends is kept beat for beat, because no tempo puts those
+    // beats back. It already starts on a downbeat, which is the one thing
+    // everything below counts on.
+    if !track.beat_ms.is_empty() {
+        return track.beat_ms.clone();
+    }
     let period_ms = 60_000.0 / track.bpm;
-    let first = track.cues.first().map(|cue| cue.time_ms).unwrap_or(0) as f64;
+    let first =
+        track.downbeat_ms.or_else(|| track.cues.first().map(|cue| cue.time_ms)).unwrap_or(0) as f64;
     let start = first % (period_ms * crate::library::BEATS_PER_BAR as f64);
     let count = ((track.duration_secs * 1000.0 - start) / period_ms).floor().max(0.0) as usize;
     (0..count).map(|i| (start + i as f64 * period_ms).round() as u32).collect()
@@ -8810,13 +8819,14 @@ fn beat_at(track: &Track, at_ms: u32) -> Option<usize> {
         return None;
     }
     let beats = beat_times(track);
-    let first = beats.first().copied().unwrap_or(0);
-    if at_ms < first {
-        return Some(0);
+    if beats.is_empty() {
+        return None;
     }
-    let period_ms = 60_000.0 / track.bpm;
-    let index = ((at_ms - first) as f64 / period_ms).floor() as usize;
-    Some(index.min(track.beats.saturating_sub(1)))
+    // Found in the grid rather than divided out of the tempo. They are the
+    // same answer on an even grid and different ones on a grid that bends,
+    // and the grid is the thing the marks are drawn from.
+    let after = beats.partition_point(|beat| *beat <= at_ms);
+    Some(after.saturating_sub(1))
 }
 
 /// Write down what the words decided, and why.
@@ -11795,6 +11805,52 @@ mod tests {
         // bar at the head of the track is left unmarked.
         let bar_ms = (crate::library::BEATS_PER_BAR as f64 * 60_000.0 / 126.0) as u32;
         assert!(beats[0] < bar_ms, "the grid started {} ms in, past the first bar", beats[0]);
+    }
+
+    #[test]
+    fn a_grid_that_bends_is_drawn_as_it_was_kept() {
+        // No tempo puts these beats back, which is the whole reason they are
+        // kept. Rebuilding one from the tempo would straighten a grid somebody
+        // bent on a player, and the straightened version is what would then go
+        // back on the drive.
+        let mut track = Track::placeholder(1);
+        track.has_grid = true;
+        track.bpm = 120.0;
+        track.duration_secs = 10.0;
+        track.beat_ms = vec![0, 500, 1_010, 1_480, 2_030, 2_500];
+
+        assert_eq!(beat_times(&track), track.beat_ms);
+        // And the transport counts against those beats, not against the tempo:
+        // 1_600 ms is past the fourth beat although a steady 120 would have
+        // called it the third.
+        assert_eq!(beat_at(&track, 1_600), Some(3));
+        assert_eq!(beat_at(&track, 0), Some(0));
+    }
+
+    #[test]
+    fn the_anchor_says_where_the_one_is_rather_than_the_memory_cue() {
+        // They were the same thing, so setting the grid moved a cue and moving
+        // a cue moved the grid. A DJ does both, and rarely means the other.
+        let mut track = Track::placeholder(1);
+        track.has_grid = true;
+        track.bpm = 120.0;
+        track.duration_secs = 20.0;
+        track.cues.push(CueMark {
+            letter: 0,
+            time_ms: 3_000,
+            label: String::new(),
+            color: [0, 0, 0],
+        });
+
+        let off_the_cue = beat_times(&track);
+        track.downbeat_ms = Some(3_250);
+        let off_the_anchor = beat_times(&track);
+        assert_ne!(off_the_cue[0], off_the_anchor[0], "the anchor was ignored");
+        assert!(
+            off_the_anchor.contains(&3_250),
+            "the anchor should fall on a beat: {:?}",
+            &off_the_anchor[..4]
+        );
     }
 
     #[test]

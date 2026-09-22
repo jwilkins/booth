@@ -17,7 +17,7 @@ use crate::cli::{
 };
 use crate::discover;
 use crate::export::image::{capacity_for, Destination, DriveImage};
-use crate::export::{anlz, pdb, waveform};
+use crate::export::{anlz, pdb, waveform, BeatGrid};
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
@@ -821,7 +821,14 @@ fn prepare(
     // the waveform is of the audio and nothing else can supply it, and the
     // grid is what a section in milliseconds has to be placed against — but a
     // cue somebody moved by hand is not something to measure over.
-    let beat_ms: Vec<u32> = listened.grid.beats.iter().map(|beat| beat.time_ms).collect();
+    // The collection's grid where it kept one. A grid that bends is the only
+    // copy of work a player did, and re-measuring it would hand the drive a
+    // flattened version of what the drive gave us.
+    let grid = match supplied {
+        Some(prep) if !prep.beat_ms.is_empty() => BeatGrid::from_beat_times(&prep.beat_ms),
+        _ => listened.grid.clone(),
+    };
+    let beat_ms: Vec<u32> = grid.beats.iter().map(|beat| beat.time_ms).collect();
     let cues = match supplied {
         Some(prep) if !prep.cues.is_empty() => prep.cues.clone(),
         _ => listened.cues.clone(),
@@ -851,6 +858,9 @@ fn prepare(
         if let Some(bpm) = prep.bpm {
             kept.push(format!("{bpm:.2} BPM"));
         }
+        if !prep.beat_ms.is_empty() {
+            kept.push(format!("a bent grid of {}", report::plural(prep.beat_ms.len(), "beat")));
+        }
         report::detail(reporter, format!("{name}: writes the collection's {}", kept.join(", ")));
     }
     report::detail(
@@ -875,7 +885,7 @@ fn prepare(
     let seek = seek_index(path);
     let files = anlz::Analysis {
         on_drive_path: &on_drive,
-        grid: &listened.grid,
+        grid: &grid,
         cues: &cues,
         waveforms: &waveforms,
         structure: structure.as_ref(),

@@ -324,7 +324,14 @@ pub fn lyrics_from(transcript: &booth_cli::transcribe::Transcript) -> Vec<Lyric>
 ///
 /// Returns whether anything changed.
 pub fn take_prep(track: &mut Track, found: &booth_cli::rekordbox::anlz::Analysis) -> bool {
-    let before = (track.bpm, track.cues.clone(), track.phrases.clone(), track.beats);
+    let before = (
+        track.bpm,
+        track.cues.clone(),
+        track.phrases.clone(),
+        track.beats,
+        track.beat_ms.clone(),
+        track.downbeat_ms,
+    );
 
     if let Some(bpm) = found.bpm() {
         track.bpm = bpm;
@@ -332,6 +339,18 @@ pub fn take_prep(track: &mut Track, found: &booth_cli::rekordbox::anlz::Analysis
     if !found.grid.beats.is_empty() {
         track.beats = found.grid.beats.len();
         track.has_grid = true;
+        // A grid a tempo cannot describe is kept beat for beat. A player bends
+        // grids by hand and this is the only copy of that work: rebuilding it
+        // from the tempo on the way back out would hand the drive a flattened
+        // version of what it just gave us.
+        track.beat_ms = match found.grid.bends() {
+            true => found.grid.times_from_downbeat(),
+            false => Vec::new(),
+        };
+        // Where the drive says the one is. Phasing an even grid off the memory
+        // cue instead is a guess that happens to be right when the cue is on a
+        // downbeat, and silently wrong when it is not.
+        track.downbeat_ms = found.grid.times_from_downbeat().first().copied();
     }
 
     track.cues = found
@@ -373,7 +392,15 @@ pub fn take_prep(track: &mut Track, found: &booth_cli::rekordbox::anlz::Analysis
         track.phrases = phrases;
     }
 
-    let changed = before != (track.bpm, track.cues.clone(), track.phrases.clone(), track.beats);
+    let changed = before
+        != (
+            track.bpm,
+            track.cues.clone(),
+            track.phrases.clone(),
+            track.beats,
+            track.beat_ms.clone(),
+            track.downbeat_ms,
+        );
     if changed {
         track.edited = Some(now());
     }
@@ -444,6 +471,34 @@ pub struct Track {
     #[serde(default)]
     pub intensity: f32,
     pub beats: usize,
+    /// Every beat, for a track whose grid bends.
+    ///
+    /// Empty for almost every record, and that is not a track without a grid:
+    /// a grid at one steady tempo is a tempo and a downbeat, and the picture
+    /// rebuilds it from those two. It fills in only where those two cannot say
+    /// it — a live take, a disco record, one somebody bent by hand on a player
+    /// — because that grid cannot be rebuilt, and dropping it would flatten
+    /// their work the next time a drive is written.
+    ///
+    /// From the first downbeat on, like the grid the picture rebuilds, so that
+    /// everything counting in fours counts from the same beat either way.
+    ///
+    /// What goes on the drive is every beat regardless: a player reads the
+    /// beats, not the tempo.
+    #[serde(default)]
+    pub beat_ms: Vec<u32>,
+    /// Where the first downbeat of an even grid falls.
+    ///
+    /// `None` falls back to the memory cue, which is where the phase came from
+    /// before there was a field for it — so a collection written by an older
+    /// build keeps the grid it had.
+    ///
+    /// It has a field of its own because saying "the one is here" and saying
+    /// "start the track here" are two different things a DJ does, and folding
+    /// them together means setting the grid quietly moves a cue. Ignored where
+    /// [`Track::beat_ms`] has the beats, since then there is nothing to phase.
+    #[serde(default)]
+    pub downbeat_ms: Option<u32>,
     pub phrases: Vec<Phrase>,
     pub cues: Vec<CueMark>,
     /// What is sung, and when, once the vocal stem has been through a speech
@@ -554,6 +609,8 @@ impl Track {
             energy: 0,
             intensity: 0.0,
             beats: 0,
+            beat_ms: Vec::new(),
+            downbeat_ms: None,
             phrases: Vec::new(),
             cues: Vec::new(),
             lyrics: Vec::new(),

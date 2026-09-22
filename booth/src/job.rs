@@ -312,6 +312,8 @@ pub struct Analyzed {
     /// show it and so a miscalibrated meter is diagnosable rather than just
     /// wrong.
     pub intensity: f32,
+    /// Every beat, when the grid bends. Empty when a tempo says it all.
+    pub beat_ms: Vec<u32>,
     pub phrases: Vec<Phrase>,
     pub cues: Vec<CueMark>,
     pub loudness_lufs: Option<f64>,
@@ -467,6 +469,14 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
     let loudness = booth_cli::loudness::measure(&audio).ok();
 
     let beat_ms: Vec<u32> = analysis.grid.beats.iter().map(|b| b.time_ms).collect();
+    // Kept only when a tempo and a downbeat could not put these beats back.
+    // The tracker here runs at one tempo, so this is almost always empty; it
+    // is here so a track whose grid was bent keeps its shape through a
+    // re-analysis rather than being quietly straightened.
+    let bent = match analysis.grid.bends() {
+        true => analysis.grid.times_from_downbeat(),
+        false => Vec::new(),
+    };
     let phrases = analysis
         .structure
         .sections
@@ -499,6 +509,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
         key_confidence: analysis.key.as_ref().map(|k| k.confidence).unwrap_or(0.0),
         energy: energy_from(intensity),
         intensity,
+        beat_ms: bent,
         phrases,
         cues,
         loudness_lufs: loudness.as_ref().map(|l| l.integrated_lufs),

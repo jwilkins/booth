@@ -1247,7 +1247,16 @@ mod what_the_collection_knows {
 
         let (_right, drive, analysis) = exported_with(
             "prepared-empty",
-            Prep { bpm: None, key: String::new(), cues: Vec::new(), parts: Vec::new() },
+            // Spelled out rather than `..default()`: a field added to `Prep`
+            // should stop here and be thought about, because this is the test
+            // that says an empty prep changes nothing.
+            Prep {
+                bpm: None,
+                key: String::new(),
+                cues: Vec::new(),
+                parts: Vec::new(),
+                beat_ms: Vec::new(),
+            },
         );
         assert_eq!(on_drive(&drive, &analysis, ".EXT"), measured);
         assert!(

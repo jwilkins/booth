@@ -238,6 +238,15 @@ pub fn fingerprint(track: &Track) -> u64 {
     eat(format!("{:.2}", track.bpm).as_bytes());
     eat(track.key.as_bytes());
     eat(&[track.has_grid as u8]);
+    // A bent grid goes on the drive beat for beat, so moving one beat is a
+    // change the drive has not got — and the tempo alone will not show it,
+    // since bending a grid need not change the tempo at all.
+    for beat in &track.beat_ms {
+        eat(&beat.to_le_bytes());
+    }
+    // Moving the one moves every bar line on the drive, and it can be moved
+    // without the tempo or any cue changing.
+    eat(&track.downbeat_ms.unwrap_or_default().to_le_bytes());
     for cue in &track.cues {
         eat(&[cue.letter]);
         eat(&cue.time_ms.to_le_bytes());
@@ -301,6 +310,10 @@ pub fn prep(track: &Track) -> booth_cli::export::Prep {
         // confidently wrong rather than measured.
         bpm: (track.has_grid && track.bpm > 0.0).then_some(track.bpm),
         key: track.key.clone(),
+        // Empty for almost every record, and that is the tracker's grid being
+        // as good as the collection's. It fills in for a grid that bends,
+        // which is the one case re-measuring would destroy.
+        beat_ms: track.beat_ms.clone(),
     }
 }
 

@@ -508,14 +508,42 @@ what a player draws and therefore what a DJ reads without having to think about
 it. One colour for all four made the one indistinguishable from the rest at a
 glance, which is the one thing a beat grid exists to show.
 
-Which beat is the one is taken from the memory cue. The grid itself is not kept
-in the collection — thousands of numbers a track, belonging in the analysis
-file on the drive — so the picture rebuilds it from the tempo and winds
-it back to the head of the track in whole **bars** from that cue. Winding back a
-beat at a time put beat one on whichever beat happened to land nearest the top
-of the track, and the bar marks, the bar number in the transport and the length
-on a phrase block then all counted from an offbeat: right on a track that starts
-on the one, and three beats out on one that does not.
+### What the collection keeps of a grid
+
+An even grid is a tempo and a downbeat, and that is all the collection stores
+for one: thousands of beat times saying what two numbers already say belong in
+the analysis file on the drive, not in the library. The picture rebuilds the
+rest, winding back to the head of the track in whole **bars** from the
+downbeat. Winding back a beat at a time put beat one on whichever beat happened
+to land nearest the top of the track, and the bar marks, the bar number in the
+transport and the length on a phrase block then all counted from an offbeat:
+right on a track that starts on the one, and three beats out on one that does
+not.
+
+**A grid that bends is kept beat for beat.** A live take, a disco record, or
+one somebody bent by hand on a player is a grid no tempo can put back, and it
+is usually the only copy of that work — rebuilding it from a tempo on the way
+back out would hand the drive a flattened version of what the drive gave us.
+Which it is gets decided on the way in, by asking whether an even grid through
+the two ends misses any beat by more than five milliseconds. Five, because an
+even grid rounded to whole milliseconds is already off by up to one (the
+analyser here measures 0.85 ms across three minutes) and five is far below the
+point where a beat sounds like it is somewhere else. A grid that speeds up and
+comes back is caught by the bulge in the middle rather than passed for landing
+in the right place.
+
+**The drive gets every beat either way.** A CDJ reads beats, not tempos, so the
+`PQTZ` section is always a full per-beat list with a bar position and a tempo
+against each one — an even grid is written out beat by beat from its tempo, and
+a bent one beat by beat from what was kept. No database column changes: the
+OneLibrary `content` row carries `bpmx100` and points at the analysis file, and
+the grid has always lived in the file.
+
+**Where the one is has a field of its own.** Saying "the one is here" and
+saying "start the track here" are two things a DJ does and rarely means the
+other, so the grid's downbeat is no longer read off the memory cue. A
+collection written before that field existed still phases off the cue, which is
+where the phase used to come from.
 
 Everything that crosses between a moment in the track and a place on the panel
 goes through the zoom: the columns, the cue flags, the playhead, the grid, where
