@@ -843,6 +843,18 @@ night.
 
 ## The sync sheet
 
+**Which drive** is a menu in the dock, listing every one the collection knows
+with the ones actually in a socket marked as such, and offering to add another
+or forget the one in use. Forgetting takes a drive off that list and touches
+nothing on the stick.
+
+Adding used to be offered only while the list was empty, and switching only
+while it held more than one, so setting up a first drive took away every way to
+reach a second: one entry, no picker, no add button. A drive that is not there
+now says *not plugged in* rather than sitting in the dock looking ready — a
+remembered drive is a place and a history, not a stick, and the two read
+identically until something asks.
+
 The delta in the dock is the difference between the drive's playlist and what
 was last written to it, so a moved cue shows as *changed* rather than as a
 re-add. Play counts and tags do not count as changes: they are not things the

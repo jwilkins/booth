@@ -143,6 +143,23 @@ fn worth_keeping(seen: Option<&Seen>, state: &str) -> Worth {
     }
 }
 
+/// Whether a drive is there to be written to right now.
+///
+/// A drive in the collection is a place and a history of what went on it, not
+/// a stick in a socket, and the two read identically in a list until something
+/// asks. Saying which is which is the difference between a sync that does
+/// nothing and a sync that was the wrong button.
+///
+/// An image is a file and a stick is a mounted folder, so the question is not
+/// the same one twice. Neither asks whether the drive has been written yet: a
+/// blank stick about to have a library put on it is plugged in.
+fn plugged_in(drive: &crate::library::Drive) -> bool {
+    match drive.is_image {
+        true => drive.path.is_file(),
+        false => drive.path.is_dir(),
+    }
+}
+
 /// What to call a drive: the name it is mounted under, or the label it gave
 /// when there is no mount point to read.
 ///
@@ -355,6 +372,10 @@ enum Pending {
         name: String,
         on: bool,
     },
+    /// Work with this drive from now on, by its place in the list.
+    UseDrive(usize),
+    /// Take this drive off the list. Nothing on the drive itself is touched.
+    ForgetDrive(usize),
     /// Put these tracks in the playlist of that name, making it if it is new.
     AddToPlaylist(Vec<u32>, String),
     /// Fold each of these copies into the track it is paired with, then send
@@ -5234,6 +5255,25 @@ impl App {
                         }
                     }
                 }
+                Pending::UseDrive(at) => {
+                    if at < self.library.drives.len() && at != self.drive {
+                        self.drive = at;
+                        self.replan();
+                    }
+                }
+                Pending::ForgetDrive(at) => {
+                    if at >= self.library.drives.len() {
+                        continue;
+                    }
+                    let gone = self.library.drives.remove(at);
+                    crate::info!("forgot {} \u{2014} nothing on it was touched", gone.label);
+                    // Whatever is left, and the end of the list rather than a
+                    // hole in it: an index kept past a removal points at the
+                    // wrong drive, which is the worst kind of right-looking.
+                    self.drive = self.drive.min(self.library.drives.len().saturating_sub(1));
+                    self.replan();
+                    touched = true;
+                }
                 Pending::DrivePlaylist { name, on } => {
                     let Some(drive) = self.library.drives.get_mut(self.drive) else { continue };
                     // Migrate off the single-playlist field the first time a
@@ -5859,6 +5899,12 @@ impl App {
                     }
                 }
                 Some(drive) => {
+                    // Whether this one is actually in a socket. A remembered
+                    // drive is a place and a history, not a stick, and the two
+                    // read identically until something asks — which is how a
+                    // drive that went home in a bag stays on screen as the
+                    // thing sync is about to write to.
+                    let here = plugged_in(&drive);
                     let mark = if drive.is_image { "▢" } else { "▣" };
                     let carries = drive.playlist_names();
                     let what = match carries.len() {
@@ -5866,11 +5912,24 @@ impl App {
                         1 => carries[0].clone(),
                         n => format!("{n} playlists"),
                     };
-                    ui.label(format!(
-                        "{mark} {} — {what} · {}",
-                        drive.label,
-                        plural(drive.written.len(), "track")
-                    ));
+                    ui.label(
+                        RichText::new(format!(
+                            "{mark} {} — {what} · {}",
+                            drive.label,
+                            plural(drive.written.len(), "track")
+                        ))
+                        .color(match here {
+                            true => theme::TEXT,
+                            false => theme::DIM,
+                        }),
+                    )
+                    .on_hover_text(match here {
+                        true => drive.path.display().to_string(),
+                        false => format!("{} is not there", drive.path.display()),
+                    });
+                    if !here {
+                        ui.label(RichText::new("not plugged in").color(theme::AMBER));
+                    }
                     // Which playlists go on the stick is the decision the dock
                     // exists for, so it is a menu here rather than a setting
                     // somewhere else.
@@ -5900,10 +5959,53 @@ impl App {
                             }
                         }
                     });
-                    if self.library.drives.len() > 1 && ui.button("next").clicked() {
-                        self.drive = (self.drive + 1) % self.library.drives.len();
-                        self.replan();
-                    }
+                    // Every drive the collection knows, named, with the ones
+                    // actually here marked as such — and a way to add another
+                    // from the same place. Adding used to be offered only
+                    // while the list was empty and switching only while it
+                    // held more than one, so the first drive set up was the
+                    // last: no way to add a second, no way to reach it, and
+                    // nothing saying the one on screen was in a drawer.
+                    ui.menu_button("drives\u{2026}", |ui| {
+                        ui.set_min_width(240.0);
+                        for (at, other) in self.library.drives.iter().enumerate() {
+                            let there = plugged_in(other);
+                            let mark = if other.is_image { "\u{25a2}" } else { "\u{25a3}" };
+                            let state = match there {
+                                true => String::new(),
+                                false => " · not plugged in".to_string(),
+                            };
+                            let label = RichText::new(format!("{mark} {}{state}", other.label))
+                                .color(match there {
+                                    true => theme::TEXT,
+                                    false => theme::DIM,
+                                });
+                            if ui.radio(at == self.drive, label).clicked() {
+                                self.pending.push(Pending::UseDrive(at));
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Add a drive\u{2026}").clicked() {
+                            self.want_pick = Some(Picking::Drive);
+                            ui.close();
+                        }
+                        if ui.button("Add an image\u{2026}").clicked() {
+                            self.want_pick = Some(Picking::Image);
+                            ui.close();
+                        }
+                        // Forgetting is not unplugging: what goes is this
+                        // program's record of what it wrote, and the stick
+                        // keeps everything on it.
+                        if ui
+                            .button("Forget this one")
+                            .on_hover_text("Takes it off this list. Nothing on the drive changes.")
+                            .clicked()
+                        {
+                            self.pending.push(Pending::ForgetDrive(self.drive));
+                            ui.close();
+                        }
+                    });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Open whenever there is a drive and nothing running,
@@ -11180,6 +11282,100 @@ mod tests {
             harness.run();
 
             assert!(harness.state().sheet, "the sync sheet did not open for an idle drive");
+        }
+
+        #[test]
+        fn another_drive_can_be_reached_when_one_is_already_set_up() {
+            // The hole this closes: adding was offered only while the list was
+            // empty and switching only while it held more than one, so setting
+            // up a first drive took away every way to add or reach a second.
+            let mut app = a_drive_up_to_date("pick");
+            // A second drive the dock is not currently on, so finding it can
+            // only mean the menu listed it rather than the dock naming the one
+            // already in use.
+            app.library.drives.push(crate::library::Drive {
+                label: "SPARE".into(),
+                path: std::path::PathBuf::from("/media/spare"),
+                ..Default::default()
+            });
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.dock(ui), app);
+            harness.run();
+
+            harness.get_by_label_contains("drives").click();
+            harness.run();
+            harness.get_by_label_contains("Add a drive");
+            harness.get_by_label_contains("Add an image");
+            harness.get_by_label_contains("SPARE").click();
+            harness.run();
+
+            // The dock only asks; the window is what acts, so the ask has to
+            // be carried out here the way a frame would carry it out.
+            let ctx = egui::Context::default();
+            harness.state_mut().apply_pending(&ctx);
+            assert_eq!(harness.state().drive, 1, "picking a drive did not switch to it");
+        }
+
+        #[test]
+        fn a_drive_that_is_not_there_says_so_rather_than_looking_ready() {
+            // `/media/usb` is not mounted while a test runs, which is the whole
+            // point: the collection remembers a place and a history, and a
+            // place is not a stick. Told nothing, you line up a sync against a
+            // drive that went home in somebody's bag.
+            let mut harness =
+                Harness::new_ui_state(|ui, app: &mut App| app.dock(ui), a_drive_up_to_date("gone"));
+            harness.run();
+            harness.get_by_label_contains("not plugged in");
+        }
+
+        #[test]
+        fn what_counts_as_plugged_in_is_different_for_an_image() {
+            // One is a mounted folder and the other is a file, so asking the
+            // same question of both would call every image missing.
+            let dir = std::env::temp_dir().join(format!("booth-plugged-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let image = dir.join("drive.img");
+            std::fs::write(&image, b"not really an image").unwrap();
+
+            let stick = crate::library::Drive { path: dir.clone(), ..Default::default() };
+            let missing = crate::library::Drive { path: dir.join("nowhere"), ..Default::default() };
+            let made =
+                crate::library::Drive { path: image.clone(), is_image: true, ..Default::default() };
+            // A folder is not an image, and an image is not a folder.
+            let unmade =
+                crate::library::Drive { path: dir.clone(), is_image: true, ..Default::default() };
+
+            assert!(plugged_in(&stick));
+            assert!(!plugged_in(&missing));
+            assert!(plugged_in(&made));
+            assert!(!plugged_in(&unmade));
+
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn forgetting_a_drive_leaves_the_rest_reachable() {
+            // An index kept across a removal points at a different drive, which
+            // is the worst kind of wrong: everything still works and it is the
+            // wrong stick.
+            let mut app = a_drive_up_to_date("forget");
+            app.library.drives.push(crate::library::Drive {
+                label: "SPARE".into(),
+                path: std::path::PathBuf::from("/media/spare"),
+                ..Default::default()
+            });
+            app.drive = 1;
+
+            let ctx = egui::Context::default();
+            app.pending.push(Pending::ForgetDrive(1));
+            app.apply_pending(&ctx);
+
+            assert_eq!(app.library.drives.len(), 1);
+            assert_eq!(app.library.drives[0].label, "USB");
+            assert!(
+                app.library.drives.get(app.drive).is_some(),
+                "the index was left past the end of the list"
+            );
         }
 
         #[test]
