@@ -11,6 +11,7 @@ pub mod commands;
 pub mod compat;
 pub mod discover;
 pub mod dsp;
+pub mod emulator;
 pub mod export;
 pub mod hash;
 pub mod loudness;

@@ -97,6 +97,10 @@ impl OnExternal {
     }
 }
 
+fn default_emulator_port() -> u16 {
+    booth_cli::emulator::DEFAULT_PORT
+}
+
 /// Whether a track's length reads as bars or as beats.
 ///
 /// Bars by default, because that is the unit a set is built in: an intro is
@@ -395,6 +399,13 @@ pub struct Config {
     /// every drive costs megabytes rather than gigabytes.
     #[serde(default = "default_backups_path")]
     pub backups_path: PathBuf,
+    /// Where a CDJ-3000 emulator is listening for machine-protocol calls.
+    ///
+    /// Its first instance is 4445 and each further one is a port along, so
+    /// this is what to change when the emulator in front of you is a second
+    /// one. Only used by "send to the emulator"; nothing connects on its own.
+    #[serde(default = "default_emulator_port")]
+    pub emulator_port: u16,
     /// Whether a drive is copied when it is written or plugged in.
     #[serde(default = "yes")]
     pub keep_drives: bool,
@@ -615,6 +626,7 @@ impl Default for Config {
             rekordbox_key: String::new(),
             onelibrary_key: String::new(),
             backups_path: default_backups_path(),
+            emulator_port: booth_cli::emulator::DEFAULT_PORT,
             keep_drives: true,
             on_foreign: OnForeign::default(),
             whisper: Whisper::default(),

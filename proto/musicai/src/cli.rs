@@ -68,6 +68,39 @@ pub enum Command {
     /// Read rekordbox's own encrypted libraries.
     #[command(subcommand)]
     Rekordbox(RekordboxCommand),
+    /// Put a drive image into a CDJ-3000 emulator's USB slot.
+    Emulator(EmulatorArgs),
+}
+
+/// Where to send an image, and which emulator to send it to.
+#[derive(Args, Debug, Clone)]
+pub struct EmulatorArgs {
+    /// The image to put in the slot.
+    ///
+    /// The one `export --image` writes. It is handed over by path and opened
+    /// by the emulator, not by this program, so it has to be somewhere that
+    /// process can reach.
+    #[arg(long, value_name = "FILE")]
+    pub image: PathBuf,
+
+    /// Where the emulator is listening for machine-protocol calls.
+    ///
+    /// Its first instance is 4445 and each further one is a port along, so
+    /// this is what to change when a second emulator is the one in front of
+    /// you.
+    #[arg(long, default_value_t = crate::emulator::DEFAULT_PORT, value_name = "PORT")]
+    pub port: u16,
+
+    /// The host it is listening on. Loopback, unless it is on another machine.
+    #[arg(long, default_value = "127.0.0.1", value_name = "HOST")]
+    pub host: String,
+
+    /// Fail rather than falling back to showing the image in a file manager.
+    ///
+    /// For scripts, where opening a window on somebody's desktop is not a
+    /// success and should not read as one.
+    #[arg(long)]
+    pub no_reveal: bool,
 }
 
 #[derive(Subcommand, Debug)]

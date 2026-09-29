@@ -376,6 +376,8 @@ enum Pending {
     UseDrive(usize),
     /// Take this drive off the list. Nothing on the drive itself is touched.
     ForgetDrive(usize),
+    /// Put this drive's image into a running emulator's USB slot.
+    ToEmulator(usize),
     /// Put these tracks in the playlist of that name, making it if it is new.
     AddToPlaylist(Vec<u32>, String),
     /// Fold each of these copies into the track it is paired with, then send
@@ -5274,6 +5276,39 @@ impl App {
                     self.replan();
                     touched = true;
                 }
+                Pending::ToEmulator(at) => {
+                    let Some(drive) = self.library.drives.get(at).cloned() else { continue };
+                    if !drive.is_image {
+                        crate::warn!(
+                            "{} is a stick, not an image, and the emulator takes an image",
+                            drive.label
+                        );
+                        continue;
+                    }
+                    if !drive.path.is_file() {
+                        crate::warn!("{} is not there to send", drive.path.display());
+                        continue;
+                    }
+                    // Done here rather than on a worker because it is a
+                    // loopback socket: the emulator not running is a refused
+                    // connection, which comes back at once, and the wait only
+                    // bites on a host that swallows packets.
+                    let port = self.config.emulator_port;
+                    match booth_cli::emulator::send(("127.0.0.1", port), &drive.path) {
+                        booth_cli::emulator::Sent::Attached => {
+                            crate::info!("{} is in the emulator's USB slot", drive.path.display())
+                        }
+                        booth_cli::emulator::Sent::Revealed => crate::info!(
+                            "nothing is listening on port {port}, so {} is showing in a file \
+                             manager \u{2014} attach it with USB \u{2192} Attach virtual image",
+                            drive.path.display()
+                        ),
+                        booth_cli::emulator::Sent::Written(why) => crate::warn!(
+                            "{} did not reach the emulator: {why}",
+                            drive.path.display()
+                        ),
+                    }
+                }
                 Pending::DrivePlaylist { name, on } => {
                     let Some(drive) = self.library.drives.get_mut(self.drive) else { continue };
                     // Migrate off the single-playlist field the first time a
@@ -5992,6 +6027,19 @@ impl App {
                         }
                         if ui.button("Add an image\u{2026}").clicked() {
                             self.want_pick = Some(Picking::Image);
+                            ui.close();
+                        }
+                        // Only for an image: the emulator's slot takes a file,
+                        // and a mounted stick is not one.
+                        if drive.is_image
+                            && ui
+                                .button("Send to the emulator")
+                                .on_hover_text(
+                                    "Puts this image in a running CDJ-3000 emulator's USB slot",
+                                )
+                                .clicked()
+                        {
+                            self.pending.push(Pending::ToEmulator(self.drive));
                             ui.close();
                         }
                         // Forgetting is not unplugging: what goes is this

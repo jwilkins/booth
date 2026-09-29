@@ -855,6 +855,14 @@ now says *not plugged in* rather than sitting in the dock looking ready — a
 remembered drive is a place and a history, not a stick, and the two read
 identically until something asks.
 
+**Send to the emulator** appears in that menu for an image drive. It puts the
+image in a running [cdj3k-emu](https://github.com/nsaintot/cdj3k-emu)'s USB slot
+over QEMU's machine protocol, on the port in Settings (4445, one port per
+emulator instance). Nothing listening means the image is shown in a file manager
+instead, and the log says which happened. Whether the firmware then mounts it is
+the part this cannot promise: the emulator's own attach also nudges its guest,
+and only the medium change is reachable from outside.
+
 The delta in the dock is the difference between the drive's playlist and what
 was last written to it, so a moved cue shows as *changed* rather than as a
 re-add. Play counts and tags do not count as changes: they are not things the

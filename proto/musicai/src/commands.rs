@@ -160,6 +160,58 @@ fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
     )])
 }
 
+/// Put a drive image into a CDJ-3000 emulator's USB slot.
+///
+/// Succeeds when the image reached the emulator, and also when it did not but
+/// somebody was shown where it is instead — both leave the image somewhere it
+/// can be played from, and only one of them is automatic. `--no-reveal` makes
+/// the second one a failure, which is what a script wants.
+pub fn emulator(args: &crate::cli::EmulatorArgs, reporter: &dyn report::Reporter) -> Result<()> {
+    use crate::emulator::{attach, send, Sent};
+
+    let image = &args.image;
+    if !image.is_file() {
+        bail!("{} is not a file. `export --image` writes one.", image.display());
+    }
+    // Absolute, because the emulator opens it and nothing says what its
+    // working directory is — a relative path that works here is a path it
+    // would look for somewhere else.
+    let full = std::fs::canonicalize(image)
+        .with_context(|| format!("working out where {} really is", image.display()))?;
+    let at = (args.host.as_str(), args.port);
+
+    if args.no_reveal {
+        attach(at, &full).map_err(|why| {
+            anyhow::anyhow!("{} did not reach the emulator: {why}", full.display())
+        })?;
+        report::detail(reporter, format!("{} is in the slot", full.display()));
+        return Ok(());
+    }
+
+    match send(at, &full) {
+        Sent::Attached => {
+            report::detail(reporter, format!("{} is in the slot", full.display()));
+            Ok(())
+        }
+        Sent::Revealed => {
+            report::detail(
+                reporter,
+                format!(
+                    "the emulator is not listening on {}:{}, so {} is showing in a file \
+                     manager instead \u{2014} attach it with USB \u{2192} Attach virtual image",
+                    args.host,
+                    args.port,
+                    full.display()
+                ),
+            );
+            Ok(())
+        }
+        Sent::Written(why) => {
+            bail!("{} did not reach the emulator: {why}", full.display())
+        }
+    }
+}
+
 /// The variable-bitrate seek index for a file, when it needs one.
 ///
 /// Only MP3 does: every other format the players read carries its own seek

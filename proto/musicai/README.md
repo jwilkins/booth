@@ -485,7 +485,30 @@ to it:
 booth-cli export ~/Music/set -r --image ~/rekordbox.img
 ```
 
-then in the emulator, **USB → Attach virtual image** and pick `rekordbox.img`. The guest
+Booth can also put it in the slot itself, rather than you going to find the file:
+
+```sh
+booth-cli emulator --image ~/rekordbox.img          # 127.0.0.1:4445 by default
+booth-cli emulator --image ~/rekordbox.img --port 4446   # a second instance
+```
+
+and in the window, the drives menu offers **Send to the emulator** for an image
+drive. Attaching is a QEMU machine-protocol call — `blockdev-change-medium` on the
+block device the emulator calls `usb0` — and QEMU listens for those on 4445, one
+port per instance. When nothing is listening, the image is shown in a file
+manager instead and the log says which of the two happened; `--no-reveal` makes
+that a failure, for scripts.
+
+**One thing this cannot do.** The emulator's own attach also nudges the guest over
+its `cdj3k.cfg` virtio-serial port to run the in-guest mount scripts, and only the
+medium change is reachable from outside. A real player notices a stick going in by
+itself, so the firmware may notice this the same way — but that is an expectation,
+not a measurement. None of it has been run against the emulator, which is Apple
+Silicon macOS only and needs firmware this project does not have; what is tested
+is the conversation, against a QEMU-speaking fake. If the guest turns out to need
+its own nudge, fall back to the manual route below.
+
+Failing all that, in the emulator: **USB → Attach virtual image** and pick `rekordbox.img`. The guest
 mounts it the same way the firmware mounts a real stick: partition 1, FAT32, at
 `/media/usb/sdb1`. What to look at, in the order that things break:
 
