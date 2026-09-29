@@ -2453,6 +2453,53 @@ impl App {
                     .collect::<Vec<_>>()
             })
             .collect();
+        // What is happening about stems, said out loud. A stem that does not go
+        // on is otherwise a silence — the drive simply ends up with fewer files
+        // than expected, and nothing distinguishes the three reasons: the drive
+        // not carrying them, nothing being rendered, or a kit naming files that
+        // have since moved. All three look identical on the stick afterwards.
+        let rendered = wanted
+            .iter()
+            .filter_map(|id| self.library.get(*id))
+            .filter(|track| track.stems.each().iter().any(|(_, part)| part.is_some()))
+            .count();
+        if drive.with_stems {
+            let missing = plan
+                .stems
+                .iter()
+                .filter(|(_, path)| !path.exists())
+                .map(|(_, path)| path.display().to_string())
+                .collect::<Vec<_>>();
+            match plan.stems.len() {
+                0 => crate::warn!(
+                    "this drive carries stems, but none of the {} has one rendered",
+                    plural(wanted.len(), "track")
+                ),
+                n => crate::info!("carrying {n} stem files from {rendered} tracks"),
+            }
+            if !missing.is_empty() {
+                crate::warn!(
+                    "{} named by a kit {} not there, so {} cannot go on: {}",
+                    plural(missing.len(), "stem"),
+                    match missing.len() {
+                        1 => "is",
+                        _ => "are",
+                    },
+                    match missing.len() {
+                        1 => "it",
+                        _ => "they",
+                    },
+                    missing.join(", ")
+                );
+            }
+        } else if rendered > 0 {
+            crate::info!(
+                "{} have stems rendered, and this drive is not carrying them — \
+                 Carry stems is on the sync sheet",
+                plural(rendered, "track")
+            );
+        }
+
         // Nothing to prepare is not nothing to do: a playlist that gained a
         // track already on the drive, or lost one, changes the database and
         // not a single audio file.
@@ -11392,6 +11439,58 @@ mod tests {
             harness.run();
 
             assert!(harness.state().sheet, "the sync sheet did not open for an idle drive");
+        }
+
+        #[test]
+        fn a_carried_stem_goes_into_the_playlist_beside_its_track() {
+            let mut app = a_drive_up_to_date("stems in lists");
+            let id = app.library.playlists[0].tracks[0];
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.stems.vocals = Some("/stems/Sirens-vocals.wav".into());
+                track.stems.drums = Some("/stems/Sirens-drums.wav".into());
+                track.stems.melody = Some("/stems/Sirens-melody.wav".into());
+            }
+            app.library.drives[0].with_stems = true;
+
+            let drive = app.library.drives[0].clone();
+            let specs = app.drive_playlists(&drive);
+            assert_eq!(specs.len(), 1, "{specs:?}");
+            let paths = &specs[0].tracks;
+            assert_eq!(paths.len(), 4, "the track and its three stems: {paths:?}");
+            assert_eq!(paths[0], app.library.get(id).unwrap().path, "the track comes first");
+            for part in ["vocals", "drums", "melody"] {
+                assert!(
+                    paths.iter().any(|p| p.to_string_lossy().contains(part)),
+                    "no {part} in the list: {paths:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_stem_is_in_the_files_the_write_prepares() {
+            // The other half of the same question: a stem named in a playlist
+            // but never written is an entry the database drops on the floor.
+            let mut app = a_drive_up_to_date("stems on disk");
+            let id = app.library.playlists[0].tracks[0];
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.stems.vocals = Some("/stems/Sirens-vocals.wav".into());
+                track.stems.drums = Some("/stems/Sirens-drums.wav".into());
+                track.stems.melody = Some("/stems/Sirens-melody.wav".into());
+            }
+            app.library.drives[0].with_stems = true;
+            app.replan();
+
+            let drive = app.library.drives[0].clone();
+            let carry = sync::carry(&app.library, &drive, &app.plan);
+            for part in ["vocals", "drums", "melody"] {
+                assert!(
+                    carry.files.iter().any(|p| p.to_string_lossy().contains(part)),
+                    "the {part} stem is not among the files to write: {:?}",
+                    carry.files
+                );
+            }
         }
 
         #[test]
