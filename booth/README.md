@@ -374,6 +374,35 @@ is trimmed from the **front**, so the file name is always the part that
 survives — a path clipped at the end is every file in a folder looking
 identical.
 
+## Colours
+
+Eleven schemes, in Settings: this program's own, and ten of the ones people
+already stare at all day in an editor — **gruvbox**, **solarized**,
+**nord**, **dracula**, **monokai**, **tokyonight**, **catppuccin**,
+**everforest**, **onedark** and **papercolor**. A DJ who has spent ten years in
+gruvbox should not have to learn a second set of colours to read a waveform.
+
+Each is given as the eleven numbers its own documentation publishes — a ground,
+a raised ground, a rule, text, a dim, and six accents — and the roles this
+window draws in are filled from those. Nothing is invented except where a
+scheme genuinely has no colour for a role: dracula has no blue, so its purple
+stands in, which is what its own interface does.
+
+The names in the picker are written in each scheme's own accent, so the list is
+a sample rather than eleven words. Every scheme is checked by a test for a
+readable gap between its text and its ground, a dim that is dimmer than the text
+but still visible, and a phrase name that can be read on every phrase block —
+which matters because **papercolor** is light, and a fixed dark ink would be a
+guess at what half those blocks say.
+
+**Two things are deliberately not themed.** The eight **hot cue colours** are
+written into the cues and go on the drive, so they are data: a player lights its
+buttons with them, and repainting them would change somebody's stick and mark
+every track as changed on the next sync. And the waveform's **red/green/blue
+bands** are the convention every other program draws frequency in — a scheme
+that recoloured them would be a picture that no longer means what every other
+picture means.
+
 ## Where you are in a track
 
 The transport reads `12.3 · -172`: bar 12, beat 3, with 172 bars left. Bars and

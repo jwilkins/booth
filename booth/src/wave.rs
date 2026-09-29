@@ -85,9 +85,12 @@ impl StemEnvelopes {
         let at = |plane: &[u8]| plane.get(index).copied().unwrap_or(0) as f32;
         let (vocals, melody, drums) = (at(&self.vocals), at(&self.melody), at(&self.drums));
         if vocals + melody + drums < 1.0 {
-            return theme::RULE;
+            return theme::rule();
         }
-        mix([theme::STEM_VOCALS, theme::STEM_MELODY, theme::STEM_DRUMS], [vocals, melody, drums])
+        mix(
+            [theme::stem_vocals(), theme::stem_melody(), theme::stem_drums()],
+            [vocals, melody, drums],
+        )
     }
 }
 
@@ -215,7 +218,7 @@ pub fn frequency_color(low: f32, mid: f32, high: f32) -> Color32 {
 fn additive(low: f32, mid: f32, high: f32) -> Color32 {
     let peak = low.max(mid).max(high);
     if peak <= f32::EPSILON {
-        return theme::RULE;
+        return theme::rule();
     }
     let share = |band: f32| {
         let ratio = (band / peak).clamp(0.0, 1.0);
@@ -442,7 +445,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::BOOTH);
+    painter.rect_filled(rect, 0.0, theme::booth());
 
     if wave.columns() == 0 {
         let message = "not analysed yet";
@@ -451,7 +454,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
             egui::Align2::CENTER_CENTER,
             message,
             theme::mono(theme::SMALL),
-            theme::DIM,
+            theme::dim(),
         );
         return Shown { touched: None, zoom: Zoom::default() };
     }
@@ -471,7 +474,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
     // stretched copy of the same 1,200.
     let pixels = (rect.width().round() as usize).max(1);
     let paint = wave.effective_paint();
-    let bands = [theme::BAND_LOW, theme::BAND_MID, theme::BAND_HIGH];
+    let bands = [theme::band_low(), theme::band_mid(), theme::band_high()];
     let columns = wave.columns();
     // Which stored columns each pixel covers, once the view has decided how
     // much of the track is across the panel.
@@ -538,7 +541,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
                 let color = wave
                     .stems
                     .map(|stems| stems.color_at(loudest * stems.columns() / wave.columns().max(1)))
-                    .unwrap_or(theme::RULE);
+                    .unwrap_or(theme::rule());
                 bar(loudness(low, mid, high) * reach, color);
             }
         }
@@ -554,7 +557,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
             let x = rect.left() + rect.width() * across;
             painter.line_segment(
                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                Stroke::new(1.0_f32, theme::TEXT),
+                Stroke::new(1.0_f32, theme::text()),
             );
         }
     }
@@ -565,7 +568,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
             egui::Align2::RIGHT_BOTTOM,
             format!("{:.0}\u{d7}", 1.0 / zoom.span),
             theme::mono(9.5),
-            theme::DIM,
+            theme::dim(),
         );
     }
 
@@ -786,7 +789,7 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
         let x = rect.left() + rect.width() * across;
         let mut color = Color32::from_rgb(cue.color[0], cue.color[1], cue.color[2]);
         if held == Some(cue.letter) {
-            color = theme::TEXT;
+            color = theme::text();
         }
 
         painter.line_segment(
@@ -903,13 +906,16 @@ pub fn phrase_strip(
             Some(bars) => format!("{} {bars}", theme::label_text(&phrase.kind)),
             None => theme::label_text(&phrase.kind),
         };
-        let galley =
-            painter.layout_no_wrap(label, theme::sans(9.0), Color32::from_rgb(0x0F, 0x13, 0x16));
+        // Ink chosen against the block it sits on: an accent is near-white in
+        // some schemes and near-black in others, and a fixed dark would be a
+        // guess at what the block says in half of them.
+        let ink = theme::ink_on(color);
+        let galley = painter.layout_no_wrap(label, theme::sans(9.0), ink);
         if galley.size().x + 8.0 < seen.width() {
             painter.galley(
                 egui::pos2(seen.left() + 4.0, seen.center().y - galley.size().y / 2.0),
                 galley,
-                Color32::BLACK,
+                ink,
             );
         }
     }
@@ -949,7 +955,7 @@ pub fn phrase_strip(
         };
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            Stroke::new(1.0_f32, theme::TEXT),
+            Stroke::new(1.0_f32, theme::text()),
         );
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
@@ -968,7 +974,7 @@ pub fn phrase_strip(
         .unwrap_or((None, None));
     response.context_menu(|ui| {
         let (Some(at), Some(time_ms)) = (on, at_ms) else {
-            ui.label(egui::RichText::new("no section here").color(theme::DIM));
+            ui.label(egui::RichText::new("no section here").color(theme::dim()));
             return;
         };
         ui.set_min_width(160.0);
@@ -1461,18 +1467,18 @@ mod tests {
         // drawn low, mid, high regardless of height, and the mid band — which
         // on most music is the tallest — painted over the low band every time.
         // The kick, which is the whole reason for this mode, was never visible.
-        let colors = [theme::BAND_LOW, theme::BAND_MID, theme::BAND_HIGH];
+        let colors = [theme::band_low(), theme::band_mid(), theme::band_high()];
 
         // A typical column of a modern master: mid loudest, the kick under it.
         let order = stacked([0.37, 1.0, 0.46], colors);
-        assert_eq!(order[0].1, theme::BAND_MID, "the tallest band must go down first");
-        assert_eq!(order[2].1, theme::BAND_LOW, "the kick is still buried");
+        assert_eq!(order[0].1, theme::band_mid(), "the tallest band must go down first");
+        assert_eq!(order[2].1, theme::band_low(), "the kick is still buried");
         assert!(order[0].0 >= order[1].0 && order[1].0 >= order[2].0);
 
         // And a bass-heavy one, where the old fixed order happened to be right.
         let order = stacked([1.0, 0.4, 0.2], colors);
-        assert_eq!(order[0].1, theme::BAND_LOW);
-        assert_eq!(order[2].1, theme::BAND_HIGH);
+        assert_eq!(order[0].1, theme::band_low());
+        assert_eq!(order[2].1, theme::band_high());
     }
 
     #[test]
@@ -1506,7 +1512,7 @@ mod tests {
 
         // And silence is not black, which would be a column that looks like a
         // hole in the picture.
-        assert_eq!(frequency_color(0.0, 0.0, 0.0), theme::RULE);
+        assert_eq!(frequency_color(0.0, 0.0, 0.0), theme::rule());
     }
 
     /// Everything that crosses between a moment in the track and a place on
@@ -1721,9 +1727,9 @@ mod tests {
             melody: vec![0, 255, 0],
             drums: vec![0, 0, 255],
         };
-        assert_eq!(envelopes.color_at(0), theme::STEM_VOCALS);
-        assert_eq!(envelopes.color_at(1), theme::STEM_MELODY);
-        assert_eq!(envelopes.color_at(2), theme::STEM_DRUMS);
+        assert_eq!(envelopes.color_at(0), theme::stem_vocals());
+        assert_eq!(envelopes.color_at(1), theme::stem_melody());
+        assert_eq!(envelopes.color_at(2), theme::stem_drums());
     }
 
     #[test]
@@ -1731,7 +1737,7 @@ mod tests {
         let envelopes = StemEnvelopes { vocals: vec![0], melody: vec![0], drums: vec![0] };
         // A blend of three colours at zero weight would be black, which reads
         // as "nothing here" only by accident; this says it deliberately.
-        assert_eq!(envelopes.color_at(0), theme::RULE);
+        assert_eq!(envelopes.color_at(0), theme::rule());
     }
 
     #[test]

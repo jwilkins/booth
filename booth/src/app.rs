@@ -545,10 +545,15 @@ enum Picking {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
-        theme::install(&cc.egui_ctx);
-
+        // The scheme is chosen before the style is built, because the style is
+        // built out of it — installing first would paint one frame in the
+        // wrong colours and then correct itself.
         let config_path = Config::path();
         let config = Config::load(&config_path);
+        if !theme::use_scheme(&config.theme) {
+            crate::warn!("no colour scheme called {}, so this is the usual one", config.theme);
+        }
+        theme::install(&cc.egui_ctx);
         let library_path = Library::default_path();
         let (library, status) = match Library::load(&library_path) {
             Ok(library) => {
@@ -781,10 +786,14 @@ impl App {
     /// file recorded cannot disagree about a run.
     fn note(&mut self, text: impl Into<String>, color: Color32) {
         let text = text.into();
-        let level = match color {
-            theme::ALERT => crate::log::Level::Error,
-            theme::AMBER => crate::log::Level::Warn,
-            _ => crate::log::Level::Info,
+        // Compared rather than matched on, because the colours are a scheme's
+        // now and a scheme is chosen while the program runs.
+        let level = if color == theme::alert() {
+            crate::log::Level::Error
+        } else if color == theme::amber() {
+            crate::log::Level::Warn
+        } else {
+            crate::log::Level::Info
         };
         crate::log::record(level, text);
     }
@@ -902,7 +911,7 @@ impl App {
                             ui.label(
                                 RichText::new(theme::label_text(pane.title()))
                                     .size(theme::LABEL)
-                                    .color(theme::DIM)
+                                    .color(theme::dim())
                                     .strong(),
                             );
                             ui.with_layout(
@@ -963,7 +972,7 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.label(
                 RichText::new("The list and the prep editor are in windows of their own.")
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             );
             ui.add_space(8.0);
             if ui.button("Put them back").clicked() {
@@ -979,9 +988,9 @@ impl App {
     /// is the one strip that never goes anywhere: a control that popped out
     /// along with the thing it controls would be a door that shuts behind you.
     fn panes_menu(&mut self, ui: &mut Ui) {
-        ui.menu_button(RichText::new("⧉").font(theme::mono(11.0)).color(theme::DIM), |ui| {
+        ui.menu_button(RichText::new("⧉").font(theme::mono(11.0)).color(theme::dim()), |ui| {
             ui.set_min_width(230.0);
-            ui.label(RichText::new("In its own window").color(theme::DIM).size(theme::SMALL));
+            ui.label(RichText::new("In its own window").color(theme::dim()).size(theme::SMALL));
             ui.separator();
             for pane in Pane::ALL {
                 let mut out = self.is_out(pane);
@@ -1210,7 +1219,7 @@ impl App {
             crate::info!("took what the player left on {}", plural(taken, "track"));
             self.note(
                 format!("{} now show what the player made of them", plural(taken, "track")),
-                theme::TEXT,
+                theme::text(),
             );
         }
         // Said rather than passed over. The drive's copy is still protected —
@@ -1227,7 +1236,7 @@ impl App {
                         _ => "their",
                     }
                 ),
-                theme::AMBER,
+                theme::amber(),
             );
         }
     }
@@ -1559,7 +1568,7 @@ impl App {
     fn analyze_tracks(&mut self, ids: &[u32]) {
         let waiting = self.files_for(ids);
         if waiting.is_empty() {
-            self.note("nothing to analyse", theme::DIM);
+            self.note("nothing to analyse", theme::dim());
             return;
         }
         crate::info!("analysing {}", plural(waiting.len(), "track"));
@@ -1618,7 +1627,7 @@ impl App {
             Ok(key) => key,
             Err(e) => {
                 crate::warn!("{e:#}");
-                self.note(format!("{e:#}"), theme::AMBER);
+                self.note(format!("{e:#}"), theme::amber());
                 return;
             }
         };
@@ -1738,7 +1747,7 @@ impl App {
             .map(|(id, path)| job::Convertible { id, path })
             .collect();
         if waiting.is_empty() {
-            self.note("nothing to convert", theme::DIM);
+            self.note("nothing to convert", theme::dim());
             return;
         }
         crate::info!("converting {}", plural(waiting.len(), "file"));
@@ -1750,7 +1759,7 @@ impl App {
     fn analyze_unprepared(&mut self) {
         let waiting = self.acting_on(|track| !track.analyzed);
         if waiting.is_empty() {
-            self.note("nothing showing needs analysing", theme::DIM);
+            self.note("nothing showing needs analysing", theme::dim());
             return;
         }
         self.analyze_tracks(&waiting);
@@ -1770,7 +1779,7 @@ impl App {
     fn analyze_showing(&mut self) {
         let waiting = self.acting_on(|_| true);
         if waiting.is_empty() {
-            self.note("nothing showing to analyse", theme::DIM);
+            self.note("nothing showing to analyse", theme::dim());
             return;
         }
         self.analyze_tracks(&waiting);
@@ -1780,7 +1789,7 @@ impl App {
     fn separate_tracks(&mut self, ids: &[u32]) {
         let waiting = self.files_for(ids);
         if waiting.is_empty() {
-            self.note("nothing to separate", theme::DIM);
+            self.note("nothing to separate", theme::dim());
             return;
         }
         let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
@@ -1807,7 +1816,7 @@ impl App {
     fn render_stems(&mut self) {
         let waiting = self.acting_on(|track| track.stems.is_empty());
         if waiting.is_empty() {
-            self.note("everything showing already has a stem kit", theme::DIM);
+            self.note("everything showing already has a stem kit", theme::dim());
             return;
         }
         self.separate_tracks(&waiting);
@@ -1852,7 +1861,7 @@ impl App {
         if !known.is_empty() {
             self.note(
                 format!("{} from words already read", crate::library::plural(placed, "cue")),
-                theme::TEXT,
+                theme::text(),
             );
         }
 
@@ -1863,7 +1872,7 @@ impl App {
         // finishes and only then finds there is no recogniser to hand the stem
         // to has wasted the expensive half of the work.
         if let Err(why) = self.config.whisper.ready() {
-            self.note(why, theme::AMBER);
+            self.note(why, theme::amber());
             return !known.is_empty();
         }
         if !rendering.is_empty() {
@@ -1873,7 +1882,7 @@ impl App {
                     "rendering stems for {} first",
                     crate::library::plural(rendering.len(), "track")
                 ),
-                theme::DIM,
+                theme::dim(),
             );
             self.separate_tracks(&rendering);
         }
@@ -1952,7 +1961,7 @@ impl App {
     fn auto_cue_showing(&mut self) {
         let waiting = self.acting_on(|track| track.lyrics.is_empty());
         if waiting.is_empty() {
-            self.note("the words have been read for everything showing", theme::DIM);
+            self.note("the words have been read for everything showing", theme::dim());
             return;
         }
         self.auto_cue_tracks(&waiting);
@@ -2074,7 +2083,7 @@ impl App {
                     }
                 }
                 Update::Kept(kept) => {
-                    self.note(format!("kept {}: {}", kept.drive, kept.summary()), theme::TEXT);
+                    self.note(format!("kept {}: {}", kept.drive, kept.summary()), theme::text());
                     // Music copied into the library is music the collection
                     // should know about, and importing is what reads a file and
                     // makes a row out of it.
@@ -2134,7 +2143,7 @@ impl App {
                 }
                 Update::Rekordbox(collection) => {
                     let brought = self.merge_rekordbox(&collection);
-                    self.note(brought, theme::GO);
+                    self.note(brought, theme::go());
                     changed = true;
                 }
                 Update::Converted { id, to } => {
@@ -2193,7 +2202,7 @@ impl App {
                     if let Err(e) =
                         crate::library::cache_waveform(analyzed.id, &of, &analyzed.bands)
                     {
-                        self.note(format!("could not cache the waveform: {e}"), theme::DIM);
+                        self.note(format!("could not cache the waveform: {e}"), theme::dim());
                     }
                     if Some(analyzed.id) == self.selected {
                         self.waveform = Some((analyzed.id, analyzed.bands.clone()));
@@ -2213,7 +2222,7 @@ impl App {
                             Some(vocals) => to_read.push(job::Transcribable { id, vocals }),
                             None => self.note(
                                 "the separation produced no vocal stem to read",
-                                theme::AMBER,
+                                theme::amber(),
                             ),
                         }
                     }
@@ -2221,7 +2230,7 @@ impl App {
                 }
                 Update::Drawn { id, sources, bands } => {
                     if let Err(e) = crate::library::cache_waveform(id, &sources, &bands) {
-                        self.note(format!("could not cache the waveform: {e}"), theme::DIM);
+                        self.note(format!("could not cache the waveform: {e}"), theme::dim());
                     }
                     if Some(id) == self.selected {
                         self.waveform = Some((id, bands));
@@ -2238,7 +2247,7 @@ impl App {
                     // track that turns out to have no words should say so
                     // rather than leave somebody waiting for cues.
                     match heard {
-                        0 => self.note("nothing sung was made out", theme::DIM),
+                        0 => self.note("nothing sung was made out", theme::dim()),
                         _ => {
                             let placed = self.auto_cue(id);
                             self.note(
@@ -2247,7 +2256,7 @@ impl App {
                                     crate::library::plural(heard, "line"),
                                     crate::library::plural(placed, "cue")
                                 ),
-                                theme::TEXT,
+                                theme::text(),
                             );
                         }
                     }
@@ -2260,7 +2269,7 @@ impl App {
                     self.step = None;
                 }
                 Update::Step { percent } => self.step = Some(percent),
-                Update::Line(text) => self.note(text, theme::TEXT),
+                Update::Line(text) => self.note(text, theme::text()),
                 Update::Failed { path, message } => {
                     // Whatever failed, nothing is arriving for the deck now.
                     self.loading = None;
@@ -2271,7 +2280,7 @@ impl App {
                             "{}: {message}",
                             name.unwrap_or_else(|| path.display().to_string())
                         ),
-                        theme::ALERT,
+                        theme::alert(),
                     );
                 }
                 Update::Done(result) => {
@@ -2290,7 +2299,7 @@ impl App {
                         Err(message) => {
                             crate::error!("{name} failed{took}: {message}");
                             self.status = message.clone();
-                            self.note(message, theme::ALERT);
+                            self.note(message, theme::alert());
                         }
                     }
                 }
@@ -2339,7 +2348,7 @@ impl App {
                 plural(self.library.tracks.len(), "track"),
                 plural(self.library.playlists.len(), "playlist")
             ),
-            Err(e) => self.note(format!("could not save the collection: {e:#}"), theme::ALERT),
+            Err(e) => self.note(format!("could not save the collection: {e:#}"), theme::alert()),
         }
     }
 
@@ -2448,7 +2457,7 @@ impl App {
         // track already on the drive, or lost one, changes the database and
         // not a single audio file.
         if carry.files.is_empty() && carry.already.is_empty() {
-            self.note("nothing to write", theme::DIM);
+            self.note("nothing to write", theme::dim());
             return;
         }
 
@@ -2551,7 +2560,7 @@ impl App {
         crate::info!("forgot what {label} was holding: {}", plural(held, "track"));
         self.note(
             format!("{label} will be written from scratch — {} to put on", plural(held, "track")),
-            theme::AMBER,
+            theme::amber(),
         );
         self.replan();
         self.save();
@@ -2802,9 +2811,9 @@ fn pinned<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
 /// What colour a log line is drawn in, by how much it matters.
 fn log_color(level: crate::log::Level) -> egui::Color32 {
     match level {
-        crate::log::Level::Error => theme::ALERT,
-        crate::log::Level::Warn => theme::AMBER,
-        _ => theme::DIM,
+        crate::log::Level::Error => theme::alert(),
+        crate::log::Level::Warn => theme::amber(),
+        _ => theme::dim(),
     }
 }
 
@@ -2945,9 +2954,9 @@ impl eframe::App for App {
 
 fn bar_frame() -> egui::Frame {
     egui::Frame::NONE
-        .fill(theme::BOOTH_2)
+        .fill(theme::booth_2())
         .inner_margin(egui::Margin::symmetric(12, 8))
-        .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+        .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
 }
 
 /// The chrome every sheet shares.
@@ -3075,13 +3084,13 @@ fn sheet_height(ctx: &egui::Context) -> f32 {
 
 fn sheet_frame() -> egui::Frame {
     egui::Frame::NONE
-        .fill(theme::BOOTH)
-        .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+        .fill(theme::booth())
+        .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
         .inner_margin(egui::Margin::same(14))
 }
 
 fn pane_frame() -> egui::Frame {
-    egui::Frame::NONE.fill(theme::BOOTH).inner_margin(egui::Margin::same(12))
+    egui::Frame::NONE.fill(theme::booth()).inner_margin(egui::Margin::same(12))
 }
 
 impl App {
@@ -3346,7 +3355,7 @@ impl App {
                     n
                 ),
             },
-            theme::TEXT,
+            theme::text(),
         );
         self.rebuild();
         self.save();
@@ -3417,7 +3426,7 @@ impl App {
                 .hint_text(
                     RichText::new("bpm:124-128 key:~8A -played:30d tag:peak")
                         .monospace()
-                        .color(theme::DIM),
+                        .color(theme::dim()),
                 );
             let response = ui.add(field);
             if self.focus_bar {
@@ -3428,12 +3437,14 @@ impl App {
                 self.rebuild();
             }
 
-            ui.label(RichText::new("⌘K").font(theme::mono(10.5)).color(theme::DIM));
+            ui.label(RichText::new("⌘K").font(theme::mono(10.5)).color(theme::dim()));
             self.panes_menu(ui);
             if ui
                 .add(
-                    egui::Button::new(RichText::new("?").font(theme::mono(10.5)).color(theme::DIM))
-                        .fill(theme::BOOTH),
+                    egui::Button::new(
+                        RichText::new("?").font(theme::mono(10.5)).color(theme::dim()),
+                    )
+                    .fill(theme::booth()),
                 )
                 .on_hover_text("What can be typed here")
                 .clicked()
@@ -3460,16 +3471,17 @@ impl App {
                         }
                         if ui
                             .add(egui::Button::new(
-                                RichText::new("stop").font(theme::mono(10.5)).color(theme::DIM),
+                                RichText::new("stop").font(theme::mono(10.5)).color(theme::dim()),
                             ))
                             .clicked()
                         {
                             runner.cancel();
                         }
-                        ui.label(RichText::new(text).font(theme::mono(11.5)).color(theme::AMBER));
+                        ui.label(RichText::new(text).font(theme::mono(11.5)).color(theme::amber()));
                     }
                     None => {
-                        let color = if self.query.has_errors() { theme::ALERT } else { theme::DIM };
+                        let color =
+                            if self.query.has_errors() { theme::alert() } else { theme::dim() };
                         let shown = if self.query.has_errors() {
                             "unknown term".to_string()
                         } else {
@@ -3492,11 +3504,11 @@ impl App {
                 for token in &self.query.tokens {
                     let Some(text) = self.text.get(token.at.clone()) else { continue };
                     let color = match token.role {
-                        Paint::Field => theme::AMBER,
-                        Paint::Value => theme::TEXT,
-                        Paint::Negated => theme::ALERT,
-                        Paint::Text => theme::DIM,
-                        Paint::Bad => theme::ALERT,
+                        Paint::Field => theme::amber(),
+                        Paint::Value => theme::text(),
+                        Paint::Negated => theme::alert(),
+                        Paint::Text => theme::dim(),
+                        Paint::Bad => theme::alert(),
                     };
                     let mut label = RichText::new(text).font(theme::mono(10.0)).color(color);
                     if token.role == Paint::Bad {
@@ -3536,9 +3548,9 @@ impl App {
         let unprepared = self.library.unprepared_count();
         let attention = self.library.attention_count();
 
-        self.view_row(ui, View::All, "All tracks", all, theme::DIM);
-        self.view_row(ui, View::Unprepared, "Unprepared", unprepared, theme::DIM);
-        self.view_row(ui, View::Attention, "Needs attention", attention, theme::ALERT);
+        self.view_row(ui, View::All, "All tracks", all, theme::dim());
+        self.view_row(ui, View::Unprepared, "Unprepared", unprepared, theme::dim());
+        self.view_row(ui, View::Attention, "Needs attention", attention, theme::alert());
 
         // Offered when there is either something to show or something to look
         // through. A row reading zero when everything has been checked is a
@@ -3557,7 +3569,7 @@ impl App {
             ui.horizontal(|ui| {
                 if ui
                     .add(
-                        egui::Label::new(RichText::new("In here twice").color(theme::AMBER))
+                        egui::Label::new(RichText::new("In here twice").color(theme::amber()))
                             .sense(egui::Sense::click()),
                     )
                     .on_hover_text(match unchecked {
@@ -3578,9 +3590,9 @@ impl App {
                     // were the answer would be a lie in the direction that
                     // stops somebody looking.
                     let (text, colour) = match (copies, unchecked) {
-                        (n, 0) => (n.to_string(), theme::DIM),
-                        (0, _) => ("?".to_string(), theme::AMBER),
-                        (n, _) => (format!("{n}?"), theme::AMBER),
+                        (n, 0) => (n.to_string(), theme::dim()),
+                        (0, _) => ("?".to_string(), theme::amber()),
+                        (n, _) => (format!("{n}?"), theme::amber()),
                     };
                     ui.label(RichText::new(text).font(theme::mono(theme::SMALL)).color(colour));
                 });
@@ -3606,7 +3618,7 @@ impl App {
         let saved: Vec<SavedQuery> = self.library.saved.clone();
         for query in &saved {
             let on = self.text == query.text;
-            let color = if on { theme::AMBER } else { theme::TEXT };
+            let color = if on { theme::amber() } else { theme::text() };
             if ui
                 .add(
                     egui::Label::new(RichText::new(&query.name).color(color))
@@ -3652,7 +3664,7 @@ impl App {
         }
 
         if tree.is_empty() && self.naming.is_none() {
-            ui.label(RichText::new("none yet").color(theme::DIM).size(theme::SMALL));
+            ui.label(RichText::new("none yet").color(theme::dim()).size(theme::SMALL));
         }
 
         let folders: Vec<String> =
@@ -3665,7 +3677,7 @@ impl App {
                 } else {
                     let response = ui.add(
                         egui::Label::new(
-                            RichText::new(format!("\u{25be} {folder}")).color(theme::TEXT),
+                            RichText::new(format!("\u{25be} {folder}")).color(theme::text()),
                         )
                         .sense(egui::Sense::click()),
                     );
@@ -3691,7 +3703,7 @@ impl App {
                     continue;
                 }
                 let on = self.view == View::Playlist && self.playlist == name;
-                let color = if on { theme::AMBER } else { theme::DIM };
+                let color = if on { theme::amber() } else { theme::dim() };
                 let indent = if folder.is_empty() { 0.0 } else { 12.0 };
                 ui.horizontal(|ui| {
                     ui.add_space(indent);
@@ -3707,7 +3719,7 @@ impl App {
                         ui.painter().rect_filled(
                             response.rect.expand2(egui::vec2(4.0, 2.0)),
                             2.0,
-                            theme::AMBER.gamma_multiply(0.22),
+                            theme::amber().gamma_multiply(0.22),
                         );
                     }
                     if let Some(dragged) = response.dnd_release_payload::<rows::Dragged>() {
@@ -3720,7 +3732,7 @@ impl App {
                         self.rebuild();
                     }
                     response.context_menu(|ui| {
-                        ui.label(RichText::new(&name).color(theme::DIM).size(theme::SMALL));
+                        ui.label(RichText::new(&name).color(theme::dim()).size(theme::SMALL));
                         ui.separator();
                         if ui.button("Rename\u{2026}").clicked() {
                             self.naming = Some(Naming::rename_playlist(&name));
@@ -3757,7 +3769,7 @@ impl App {
                         ui.label(
                             RichText::new(count.to_string())
                                 .font(theme::mono(theme::SMALL))
-                                .color(theme::DIM),
+                                .color(theme::dim()),
                         );
                     });
                 });
@@ -3789,7 +3801,7 @@ impl App {
         let response = ui.add(
             egui::TextEdit::singleline(&mut naming.text)
                 .desired_width(f32::INFINITY)
-                .hint_text(RichText::new(naming.what.hint()).color(theme::DIM)),
+                .hint_text(RichText::new(naming.what.hint()).color(theme::dim())),
         );
 
         // Asked for once, on the frame the field appears — never again.
@@ -3829,7 +3841,7 @@ impl App {
                     self.pending_save = true;
                     self.pending_rebuild = true;
                 }
-                Err(message) => self.note(message, theme::ALERT),
+                Err(message) => self.note(message, theme::alert()),
             }
         } else if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.naming = None;
@@ -3846,7 +3858,7 @@ impl App {
     ) {
         let on = self.view == view;
         ui.horizontal(|ui| {
-            let color = if on { theme::AMBER } else { theme::TEXT };
+            let color = if on { theme::amber() } else { theme::text() };
             if ui
                 .add(egui::Label::new(RichText::new(name).color(color)).sense(egui::Sense::click()))
                 .clicked()
@@ -3855,7 +3867,7 @@ impl App {
                 self.rebuild();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let color = if count > 0 { count_color } else { theme::DIM };
+                let color = if count > 0 { count_color } else { theme::dim() };
                 ui.label(
                     RichText::new(count.to_string()).font(theme::mono(theme::SMALL)).color(color),
                 );
@@ -4016,14 +4028,14 @@ impl App {
                     true => "selected to playlist",
                     false => "to playlist",
                 })
-                .color(if chosen { theme::AMBER } else { theme::DIM })
+                .color(if chosen { theme::amber() } else { theme::dim() })
                 .size(theme::SMALL),
             );
             let width = 110.0;
             ui.add(
                 egui::TextEdit::singleline(&mut self.playlist_entry)
                     .desired_width(width)
-                    .hint_text(RichText::new("name").color(theme::DIM)),
+                    .hint_text(RichText::new("name").color(theme::dim())),
             );
             let name = self.playlist_entry.trim().to_string();
             if ui
@@ -4084,7 +4096,7 @@ impl App {
                     crate::warn!("could not trash {}: {e}", path.display());
                     self.note(
                         format!("{} would not go to the trash", path.display()),
-                        theme::ALERT,
+                        theme::alert(),
                     );
                 }
             }
@@ -4104,7 +4116,7 @@ impl App {
         if gone > 0 {
             self.note(
                 format!("{} to the trash, {} freed", plural(gone, "file"), sync::bytes(freed)),
-                theme::TEXT,
+                theme::text(),
             );
         }
         // The copy kept is the one that knows the most about the record, which
@@ -4152,7 +4164,7 @@ impl App {
         let ids: Vec<u32> =
             ids.iter().copied().filter(|id| self.library.get(*id).is_some()).collect();
         if ids.is_empty() {
-            self.note("nothing to add", theme::DIM);
+            self.note("nothing to add", theme::dim());
             return;
         }
         let playlist = match self.library.playlists.iter_mut().find(|p| p.name == name) {
@@ -4172,7 +4184,7 @@ impl App {
                 playlist.tracks.push(id);
             }
         }
-        self.note(format!("{added} added to \u{201c}{name}\u{201d}"), theme::TEXT);
+        self.note(format!("{added} added to \u{201c}{name}\u{201d}"), theme::text());
         self.save();
         self.replan();
         // The list is a built thing and has to follow. Without this a drop
@@ -4335,7 +4347,7 @@ impl App {
                 } else {
                     "Nothing matches."
                 };
-                ui.label(RichText::new(message).color(theme::DIM));
+                ui.label(RichText::new(message).color(theme::dim()));
             });
         }
     }
@@ -4347,7 +4359,7 @@ impl App {
             // Nothing to draw. In the main window that is a strip of nothing
             // under the list, which reads fine; in a window of its own it is
             // an empty window, which reads as broken.
-            ui.label(RichText::new("nothing selected").color(theme::DIM));
+            ui.label(RichText::new("nothing selected").color(theme::dim()));
             return;
         };
 
@@ -4603,12 +4615,12 @@ impl App {
         let Some(track) = self.library.row(id) else { return };
         let sources = track.sources();
         if sources.is_empty() {
-            self.note(format!("no {} rendered for that track", track.role.label()), theme::ALERT);
+            self.note(format!("no {} rendered for that track", track.role.label()), theme::alert());
             return;
         }
         if let Some(missing) = sources.iter().find(|path| !path.exists()) {
             crate::warn!("cannot play #{id}: {} is gone", missing.display());
-            self.note("that file is not where it was", theme::ALERT);
+            self.note("that file is not where it was", theme::alert());
             return;
         }
 
@@ -4655,7 +4667,7 @@ impl App {
             // Short, because this row is mostly cue buttons and the reason is
             // rarely actionable; the whole of it is one hover away.
             if let Some(problem) = &self.player_problem {
-                ui.label(RichText::new("no audio out").color(theme::DIM).size(theme::SMALL))
+                ui.label(RichText::new("no audio out").color(theme::dim()).size(theme::SMALL))
                     .on_hover_text(problem);
             }
             return;
@@ -4672,9 +4684,11 @@ impl App {
         };
         if ui
             .add(
-                egui::Button::new(RichText::new(label).font(theme::mono(12.0)).color(theme::BOOTH))
-                    .fill(if playing { theme::GO } else { theme::AMBER })
-                    .min_size(egui::vec2(30.0, 18.0)),
+                egui::Button::new(
+                    RichText::new(label).font(theme::mono(12.0)).color(theme::booth()),
+                )
+                .fill(if playing { theme::go() } else { theme::amber() })
+                .min_size(egui::vec2(30.0, 18.0)),
             )
             .on_hover_text("Space")
             .clicked()
@@ -4711,9 +4725,9 @@ impl App {
         let clicked = ui
             .add(
                 egui::Label::new(RichText::new(reading).font(theme::mono(10.5)).color(if loaded {
-                    theme::TEXT
+                    theme::text()
                 } else {
-                    theme::DIM
+                    theme::dim()
                 }))
                 .sense(egui::Sense::click()),
             )
@@ -4777,7 +4791,7 @@ impl App {
             ui.label(
                 RichText::new(theme::label_text("Cues"))
                     .size(theme::LABEL)
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .strong(),
             );
 
@@ -4790,19 +4804,19 @@ impl App {
                 };
                 let color = match cue {
                     Some(cue) => Color32::from_rgb(cue.color[0], cue.color[1], cue.color[2]),
-                    None => theme::RULE,
+                    None => theme::rule(),
                 };
                 let response = ui
                     .add(
                         egui::Button::new(RichText::new(&name).font(theme::mono(10.5)).color(
                             match cue {
-                                Some(_) => theme::BOOTH,
-                                None => theme::DIM,
+                                Some(_) => theme::booth(),
+                                None => theme::dim(),
                             },
                         ))
                         .fill(match cue {
                             Some(_) => color,
-                            None => theme::BOOTH,
+                            None => theme::booth(),
                         })
                         .min_size(egui::vec2(30.0, 18.0)),
                     )
@@ -4846,14 +4860,14 @@ impl App {
             match self.playhead_ms {
                 Some(ms) => {
                     ui.label(
-                        RichText::new(time_text(ms)).font(theme::mono(10.5)).color(theme::TEXT),
+                        RichText::new(time_text(ms)).font(theme::mono(10.5)).color(theme::text()),
                     );
                 }
                 None => {
                     ui.label(
                         RichText::new("click the waveform to place the playhead")
                             .size(theme::SMALL)
-                            .color(theme::DIM),
+                            .color(theme::dim()),
                     );
                 }
             }
@@ -4868,9 +4882,9 @@ impl App {
                     // would hide that the choice is remembered for next time.
                     let ready = mode != wave::Paint::Stems || track.stems.is_complete();
                     let color = match (on, ready) {
-                        (true, _) => theme::BOOTH,
-                        (false, true) => theme::DIM,
-                        (false, false) => theme::RULE,
+                        (true, _) => theme::booth(),
+                        (false, true) => theme::dim(),
+                        (false, false) => theme::rule(),
                     };
                     if ui
                         .add(
@@ -4878,9 +4892,9 @@ impl App {
                                 RichText::new(mode.label()).font(theme::mono(10.0)).color(color),
                             )
                             .fill(if on {
-                                theme::AMBER
+                                theme::amber()
                             } else {
-                                theme::BOOTH
+                                theme::booth()
                             }),
                         )
                         .on_hover_text(match ready {
@@ -4899,7 +4913,7 @@ impl App {
                     ui.add_space(8.0);
                     if ui
                         .add(egui::Button::new(
-                            RichText::new("fit").font(theme::mono(10.0)).color(theme::DIM),
+                            RichText::new("fit").font(theme::mono(10.0)).color(theme::dim()),
                         ))
                         .on_hover_text("Show the whole track again (esc)")
                         .clicked()
@@ -4920,7 +4934,7 @@ impl App {
                     egui::TextEdit::singleline(&mut self.cue_entry.1)
                         .desired_width(140.0)
                         .font(theme::mono(10.5))
-                        .hint_text(RichText::new("name this cue").monospace().color(theme::DIM)),
+                        .hint_text(RichText::new("name this cue").monospace().color(theme::dim())),
                 );
                 if response.changed() || response.lost_focus() {
                     self.pending.push(Pending::RenameCue {
@@ -4946,7 +4960,7 @@ impl App {
     fn inspector(&mut self, ui: &mut Ui) {
         pane_label(ui, "Now inspecting");
         let Some(track) = self.selected_track().cloned() else {
-            ui.label(RichText::new("nothing selected").color(theme::DIM));
+            ui.label(RichText::new("nothing selected").color(theme::dim()));
             self.editing = None;
             return;
         };
@@ -4973,7 +4987,7 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let width = ui.available_width();
             fn field(ui: &mut Ui, width: f32, label: &str, value: &mut String) {
-                let caption = ui.label(RichText::new(label).color(theme::DIM).size(theme::SMALL));
+                let caption = ui.label(RichText::new(label).color(theme::dim()).size(theme::SMALL));
                 let field = ui.add(
                     egui::TextEdit::singleline(value)
                         .desired_width(width)
@@ -5000,7 +5014,7 @@ impl App {
                     self.pending.push(Pending::CancelEdit);
                 }
                 if changed {
-                    ui.label(RichText::new("unsaved").color(theme::AMBER).size(theme::SMALL));
+                    ui.label(RichText::new("unsaved").color(theme::amber()).size(theme::SMALL));
                 }
             });
             // Writing to the file is a separate act from editing the record,
@@ -5018,7 +5032,7 @@ impl App {
                     } else {
                         "The file's own format carries no tags; only the collection changes."
                     })
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
             } else if taggable
@@ -5040,12 +5054,12 @@ impl App {
                     sync::bytes(track.bytes)
                 ))
                 .font(theme::mono(10.0))
-                .color(theme::DIM),
+                .color(theme::dim()),
             );
             ui.label(
                 RichText::new(track.path.display().to_string())
                     .font(theme::mono(9.5))
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             )
             .on_hover_text(track.path.display().to_string());
 
@@ -5053,7 +5067,7 @@ impl App {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!("{} {problem}", theme::WARN))
-                        .color(theme::ALERT)
+                        .color(theme::alert())
                         .size(theme::SMALL),
                 );
             }
@@ -5065,7 +5079,7 @@ impl App {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!("{} the file is not where it was", theme::WARN))
-                        .color(theme::ALERT)
+                        .color(theme::alert())
                         .size(theme::SMALL),
                 );
                 if ui.button("Forget this track").clicked() {
@@ -5079,7 +5093,7 @@ impl App {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!("{} no local copy", theme::WARN))
-                        .color(theme::AMBER)
+                        .color(theme::amber())
                         .size(theme::SMALL),
                 );
                 if ui
@@ -5096,14 +5110,14 @@ impl App {
             for (name, path) in track.stems.each() {
                 ui.horizontal(|ui| {
                     let (mark, color) = match path {
-                        Some(_) => (theme::TICK, theme::GO),
-                        None => ("·", theme::DIM),
+                        Some(_) => (theme::TICK, theme::go()),
+                        None => ("·", theme::dim()),
                     };
                     ui.label(RichText::new(mark).color(color));
                     ui.label(RichText::new(name).color(if path.is_some() {
-                        theme::TEXT
+                        theme::text()
                     } else {
-                        theme::DIM
+                        theme::dim()
                     }));
                 });
             }
@@ -5119,9 +5133,9 @@ impl App {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new(tag).font(theme::mono(10.0)).color(theme::TEXT),
+                                RichText::new(tag).font(theme::mono(10.0)).color(theme::text()),
                             )
-                            .fill(theme::BOOTH_2),
+                            .fill(theme::booth_2()),
                         )
                         .on_hover_text("Remove")
                         .clicked()
@@ -5135,7 +5149,7 @@ impl App {
                     egui::TextEdit::singleline(&mut self.tag_entry)
                         .desired_width(ui.available_width() - 46.0)
                         .font(theme::mono(10.5))
-                        .hint_text(RichText::new("add a tag").monospace().color(theme::DIM)),
+                        .hint_text(RichText::new("add a tag").monospace().color(theme::dim())),
                 );
                 let entered = entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (entered || ui.button("Add").clicked()) && !self.tag_entry.trim().is_empty() {
@@ -5155,9 +5169,9 @@ impl App {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new(tag).font(theme::mono(10.0)).color(theme::DIM),
+                                    RichText::new(tag).font(theme::mono(10.0)).color(theme::dim()),
                                 )
-                                .fill(theme::BOOTH),
+                                .fill(theme::booth()),
                             )
                             .clicked()
                         {
@@ -5184,14 +5198,18 @@ impl App {
                 .collect();
             if neighbours.is_empty() {
                 ui.label(
-                    RichText::new("none in key and in range").color(theme::DIM).size(theme::SMALL),
+                    RichText::new("none in key and in range")
+                        .color(theme::dim())
+                        .size(theme::SMALL),
                 );
             }
             for (id, name) in neighbours {
                 if ui
                     .add(
-                        egui::Label::new(RichText::new(name).color(theme::TEXT).size(theme::SMALL))
-                            .sense(egui::Sense::click()),
+                        egui::Label::new(
+                            RichText::new(name).color(theme::text()).size(theme::SMALL),
+                        )
+                        .sense(egui::Sense::click()),
                     )
                     .clicked()
                 {
@@ -5252,7 +5270,10 @@ impl App {
                         let before = playlist.tracks.len();
                         playlist.tracks.retain(|t| *t != id);
                         if playlist.tracks.len() != before {
-                            self.note(format!("removed from \u{201c}{name}\u{201d}"), theme::TEXT);
+                            self.note(
+                                format!("removed from \u{201c}{name}\u{201d}"),
+                                theme::text(),
+                            );
                             touched = true;
                         }
                     }
@@ -5354,7 +5375,7 @@ impl App {
                             .collect::<Vec<_>>()
                             .join("\n");
                         ctx.copy_text(path.clone());
-                        self.note(format!("copied {path}"), theme::TEXT);
+                        self.note(format!("copied {path}"), theme::text());
                     }
                 }
                 Pending::AddTag(id, tag) => {
@@ -5545,7 +5566,7 @@ impl App {
     fn identify_tracks(&mut self, ids: &[u32], announce: bool) {
         if ids.is_empty() {
             if announce {
-                self.note("nothing to identify", theme::DIM);
+                self.note("nothing to identify", theme::dim());
             }
             return;
         }
@@ -5554,7 +5575,7 @@ impl App {
             if announce {
                 self.note(
                     "no AcoustID key — put one in Settings, or set ACOUSTID_API_KEY",
-                    theme::AMBER,
+                    theme::amber(),
                 );
             }
             return;
@@ -5562,7 +5583,7 @@ impl App {
         let waiting = self.files_for(ids);
         if waiting.is_empty() {
             if announce {
-                self.note("nothing to identify", theme::DIM);
+                self.note("nothing to identify", theme::dim());
             }
             return;
         }
@@ -5576,7 +5597,7 @@ impl App {
     fn identify_showing(&mut self) {
         let waiting = self.acting_on(|track| !track.identified);
         if waiting.is_empty() {
-            self.note("nothing showing needs identifying", theme::DIM);
+            self.note("nothing showing needs identifying", theme::dim());
             return;
         }
         self.identify_tracks(&waiting, true);
@@ -5838,13 +5859,13 @@ impl App {
         // code underneath would have written.
         match booth_cli::tag::tag_kind(&track.path) {
             Some(booth_cli::tag::TagKind::None) => {
-                self.note(format!("a .{} has nowhere to keep tags", track.format), theme::AMBER);
+                self.note(format!("a .{} has nowhere to keep tags", track.format), theme::amber());
                 return;
             }
             None => {
                 self.note(
                     format!("a .{} is not a file whose tags can be written", track.format),
-                    theme::AMBER,
+                    theme::amber(),
                 );
                 return;
             }
@@ -5904,10 +5925,10 @@ impl App {
                     egui::Button::new(
                         RichText::new(theme::label_text("Settings"))
                             .size(theme::LABEL)
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .strong(),
                     )
-                    .fill(theme::BOOTH),
+                    .fill(theme::booth()),
                 )
                 .on_hover_text("Where music is kept, and what to do about music from elsewhere")
                 .clicked()
@@ -5919,13 +5940,13 @@ impl App {
             ui.label(
                 RichText::new(theme::label_text("Drives"))
                     .size(theme::LABEL)
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .strong(),
             );
 
             match self.library.drives.get(self.drive).cloned() {
                 None => {
-                    ui.label(RichText::new("none set up").color(theme::DIM));
+                    ui.label(RichText::new("none set up").color(theme::dim()));
                     if ui.button("Add a drive…").clicked() {
                         self.want_pick = Some(Picking::Drive);
                     }
@@ -5954,8 +5975,8 @@ impl App {
                             plural(drive.written.len(), "track")
                         ))
                         .color(match here {
-                            true => theme::TEXT,
-                            false => theme::DIM,
+                            true => theme::text(),
+                            false => theme::dim(),
                         }),
                     )
                     .on_hover_text(match here {
@@ -5963,7 +5984,7 @@ impl App {
                         false => format!("{} is not there", drive.path.display()),
                     });
                     if !here {
-                        ui.label(RichText::new("not plugged in").color(theme::AMBER));
+                        ui.label(RichText::new("not plugged in").color(theme::amber()));
                     }
                     // Which playlists go on the stick is the decision the dock
                     // exists for, so it is a menu here rather than a setting
@@ -5971,12 +5992,12 @@ impl App {
                     ui.menu_button("playlists\u{2026}", |ui| {
                         ui.set_min_width(190.0);
                         if self.library.playlists.is_empty() {
-                            ui.label(RichText::new("no playlists yet").color(theme::DIM));
+                            ui.label(RichText::new("no playlists yet").color(theme::dim()));
                         }
                         for (folder, lists) in self.library.playlist_tree() {
                             if !folder.is_empty() {
                                 ui.label(
-                                    RichText::new(&folder).color(theme::DIM).size(theme::SMALL),
+                                    RichText::new(&folder).color(theme::dim()).size(theme::SMALL),
                                 );
                             }
                             for playlist in lists {
@@ -6012,8 +6033,8 @@ impl App {
                             };
                             let label = RichText::new(format!("{mark} {}{state}", other.label))
                                 .color(match there {
-                                    true => theme::TEXT,
-                                    false => theme::DIM,
+                                    true => theme::text(),
+                                    false => theme::dim(),
                                 });
                             if ui.radio(at == self.drive, label).clicked() {
                                 self.pending.push(Pending::UseDrive(at));
@@ -6071,16 +6092,16 @@ impl App {
                                     RichText::new(theme::label_text("Sync"))
                                         .size(11.0)
                                         .color(match empty {
-                                            true => theme::TEXT,
-                                            false => theme::BOOTH,
+                                            true => theme::text(),
+                                            false => theme::booth(),
                                         })
                                         .strong(),
                                 )
                                 // Quiet when there is nothing to write, so the
                                 // button being there is not itself a summons.
                                 .fill(match empty {
-                                    true => theme::BOOTH_2,
-                                    false => theme::AMBER,
+                                    true => theme::booth_2(),
+                                    false => theme::amber(),
                                 }),
                             )
                             .on_hover_text(match empty {
@@ -6095,7 +6116,7 @@ impl App {
                         ui.label(
                             RichText::new(self.plan.delta())
                                 .font(theme::mono(11.5))
-                                .color(theme::AMBER),
+                                .color(theme::amber()),
                         );
                     });
                 }
@@ -6112,10 +6133,10 @@ impl App {
                 egui::Button::new(
                     RichText::new(theme::label_text("Log"))
                         .size(theme::LABEL)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .strong(),
                 )
-                .fill(theme::BOOTH),
+                .fill(theme::booth()),
             )
             .on_hover_text("Open the log in its own window")
             .clicked()
@@ -6138,7 +6159,7 @@ impl App {
         ui.add_space(4.0);
 
         if entries.is_empty() {
-            ui.label(RichText::new("nothing yet").font(theme::mono(10.5)).color(theme::DIM));
+            ui.label(RichText::new("nothing yet").font(theme::mono(10.5)).color(theme::dim()));
             return;
         }
 
@@ -6189,7 +6210,7 @@ impl App {
                     RichText::new(
                         "These files are named nothing like the tags about to go into them.                          That is usually a fingerprint that found the wrong record — and                          tagging is the one thing here that writes to your files.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -6200,7 +6221,7 @@ impl App {
                             ui.vertical(|ui| {
                                 ui.label(
                                     RichText::new(format!("{} — {}", write.artist, write.title))
-                                        .color(theme::TEXT),
+                                        .color(theme::text()),
                                 );
                                 ui.label(
                                     RichText::new(format!(
@@ -6212,7 +6233,7 @@ impl App {
                                             .to_string_lossy()
                                     ))
                                     .font(theme::mono(10.0))
-                                    .color(theme::AMBER),
+                                    .color(theme::amber()),
                                 );
                             });
                             ui.with_layout(
@@ -6228,10 +6249,10 @@ impl App {
                                         .add(
                                             egui::Button::new(
                                                 RichText::new("Tag it anyway")
-                                                    .color(theme::BOOTH)
+                                                    .color(theme::booth())
                                                     .strong(),
                                             )
-                                            .fill(theme::AMBER),
+                                            .fill(theme::amber()),
                                         )
                                         .clicked()
                                     {
@@ -6263,7 +6284,7 @@ impl App {
                     }
                     ui.label(
                         RichText::new("Leaving one alone changes nothing, here or on disk.")
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                     );
                 });
@@ -6301,7 +6322,7 @@ impl App {
                          are somebody's answer already.",
                         threshold * 100.0
                     ))
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -6313,11 +6334,12 @@ impl App {
                             ui.label(
                                 RichText::new(format!("{:.0}%", question.candidate.score * 100.0))
                                     .font(theme::mono(11.0))
-                                    .color(if confident { theme::GO } else { theme::AMBER }),
+                                    .color(if confident { theme::go() } else { theme::amber() }),
                             );
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new(question.candidate.describe()).color(theme::TEXT),
+                                    RichText::new(question.candidate.describe())
+                                        .color(theme::text()),
                                 );
                                 ui.label(
                                     RichText::new(format!(
@@ -6325,7 +6347,7 @@ impl App {
                                         question.current, question.source
                                     ))
                                     .font(theme::mono(10.0))
-                                    .color(theme::DIM),
+                                    .color(theme::dim()),
                                 );
                                 // Only when the path says something else. Two
                                 // answers that both look right is the case a
@@ -6334,7 +6356,7 @@ impl App {
                                     ui.label(
                                         RichText::new(format!("path: {}", from_path.describe()))
                                             .font(theme::mono(10.0))
-                                            .color(theme::AMBER),
+                                            .color(theme::amber()),
                                     );
                                 }
                             });
@@ -6359,10 +6381,10 @@ impl App {
                                         .add(
                                             egui::Button::new(
                                                 RichText::new("Use this")
-                                                    .color(theme::BOOTH)
+                                                    .color(theme::booth())
                                                     .strong(),
                                             )
-                                            .fill(theme::AMBER),
+                                            .fill(theme::amber()),
                                         )
                                         .clicked()
                                     {
@@ -6398,7 +6420,7 @@ impl App {
                     }
                     ui.label(
                         RichText::new("Nothing is written to any file by answering these.")
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                     );
                 });
@@ -6516,8 +6538,8 @@ impl App {
             .max_height(sheet_height(ctx))
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -6532,7 +6554,7 @@ impl App {
                             plural(unchecked, "track"),
                             if unchecked == 1 { "has" } else { "have" },
                         ))
-                        .color(theme::AMBER)
+                        .color(theme::amber())
                         .size(theme::SMALL),
                     );
                     ui.add_space(4.0);
@@ -6557,7 +6579,7 @@ impl App {
                             0 => "Nothing is in here twice.",
                             _ => "Nothing among the tracks looked at so far is in here twice.",
                         })
-                        .color(theme::DIM),
+                        .color(theme::dim()),
                     );
                     return;
                 }
@@ -6568,7 +6590,7 @@ impl App {
                          same rip tagged twice is one record here. Ticked is kept; what the \
                          rest know is folded into it before they go.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -6595,7 +6617,7 @@ impl App {
                             if let Some(track) = self.library.get(group.into) {
                                 ui.label(
                                     RichText::new(track.display_title())
-                                        .color(theme::TEXT)
+                                        .color(theme::text())
                                         .size(theme::BODY),
                                 );
                             }
@@ -6646,14 +6668,14 @@ impl App {
                                                 ui,
                                                 &path,
                                                 match kept {
-                                                    true => theme::GO,
-                                                    false => theme::DIM,
+                                                    true => theme::go(),
+                                                    false => theme::dim(),
                                                 },
                                             );
                                             let (note, color) = match (kept, same, answered) {
-                                                (true, _, _) => ("keep".to_string(), theme::GO),
+                                                (true, _, _) => ("keep".to_string(), theme::go()),
                                                 (false, true, _) => {
-                                                    ("identical".to_string(), theme::DIM)
+                                                    ("identical".to_string(), theme::dim())
                                                 }
                                                 (false, false, false) => (
                                                     format!(
@@ -6664,10 +6686,10 @@ impl App {
                                                             .collect::<Vec<_>>()
                                                             .join(", ")
                                                     ),
-                                                    theme::ALERT,
+                                                    theme::alert(),
                                                 ),
                                                 (false, false, true) => {
-                                                    (plan.summary(), theme::AMBER)
+                                                    (plan.summary(), theme::amber())
                                                 }
                                             };
                                             ui.label(
@@ -6688,7 +6710,7 @@ impl App {
                                                         track.tags.join("  ")
                                                     ))
                                                     .font(theme::mono(10.0))
-                                                    .color(theme::DIM),
+                                                    .color(theme::dim()),
                                                 );
                                             });
                                         }
@@ -6712,7 +6734,7 @@ impl App {
                                                 ui.label(
                                                     RichText::new("keep tags")
                                                         .size(theme::SMALL)
-                                                        .color(theme::DIM),
+                                                        .color(theme::dim()),
                                                 );
                                                 // A file kept alongside the
                                                 // first starts as itself rather
@@ -6733,9 +6755,9 @@ impl App {
                                                             RichText::new(tag)
                                                                 .size(theme::SMALL)
                                                                 .color(match (on, mine) {
-                                                                    (false, _) => theme::DIM,
-                                                                    (true, true) => theme::TEXT,
-                                                                    (true, false) => theme::AMBER,
+                                                                    (false, _) => theme::dim(),
+                                                                    (true, true) => theme::text(),
+                                                                    (true, false) => theme::amber(),
                                                                 }),
                                                         )
                                                         .on_hover_text(match mine {
@@ -6765,7 +6787,7 @@ impl App {
                                                         conflict.field.name()
                                                     ))
                                                     .size(theme::SMALL)
-                                                    .color(theme::DIM),
+                                                    .color(theme::dim()),
                                                 );
                                                 for (side, value) in [
                                                     (Side::Kept, &conflict.kept),
@@ -6837,10 +6859,10 @@ impl App {
                                     plural(going.len(), "file"),
                                     crate::sync::bytes(bytes)
                                 ))
-                                .color(theme::BOOTH)
+                                .color(theme::booth())
                                 .strong(),
                             )
-                            .fill(theme::ALERT),
+                            .fill(theme::alert()),
                         )
                         .on_hover_text(
                             "To the trash, not gone: this is the one thing here that touches \
@@ -6866,7 +6888,7 @@ impl App {
                                 if waiting == 1 { "its" } else { "each" },
                             ))
                             .size(theme::SMALL)
-                            .color(theme::ALERT),
+                            .color(theme::alert()),
                         );
                     }
                 });
@@ -6948,7 +6970,7 @@ impl App {
                         "These were kept, and the files they were copied from have gone — so \
                          the plain name is free again.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -6963,16 +6985,16 @@ impl App {
                                 ui.add_space(6.0);
                                 ui.vertical(|ui| {
                                     ui.horizontal_wrapped(|ui| {
-                                        path_label(ui, &from, theme::DIM);
+                                        path_label(ui, &from, theme::dim());
                                     });
                                     ui.horizontal_wrapped(|ui| {
                                         ui.add_space(10.0);
                                         ui.label(
                                             RichText::new("\u{2192}")
                                                 .font(theme::mono(10.0))
-                                                .color(theme::GO),
+                                                .color(theme::go()),
                                         );
-                                        path_label(ui, plain, theme::GO);
+                                        path_label(ui, plain, theme::go());
                                     });
                                 });
                             });
@@ -6987,7 +7009,7 @@ impl App {
                                 RichText::new(format!("Rename {}", plural(offers.len(), "file")))
                                     .strong(),
                             )
-                            .fill(theme::BOOTH_2),
+                            .fill(theme::booth_2()),
                         )
                         .on_hover_text("Renames the files on disk, and follows them here")
                         .clicked()
@@ -7033,12 +7055,12 @@ impl App {
                 }
                 Err(e) => {
                     crate::warn!("could not rename {}: {e}", from.display());
-                    self.note(format!("{} would not rename", from.display()), theme::ALERT);
+                    self.note(format!("{} would not rename", from.display()), theme::alert());
                 }
             }
         }
         if done > 0 {
-            self.note(format!("{} renamed", plural(done, "file")), theme::TEXT);
+            self.note(format!("{} renamed", plural(done, "file")), theme::text());
             self.save();
         }
     }
@@ -7113,8 +7135,8 @@ impl App {
             .max_height(sheet_height(ctx))
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -7130,7 +7152,7 @@ impl App {
                             }
                         ),
                     })
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -7144,7 +7166,7 @@ impl App {
                                       the collection says."
                             }
                         })
-                        .color(theme::GO),
+                        .color(theme::go()),
                     );
                     if !deep {
                         ui.add_space(4.0);
@@ -7153,7 +7175,7 @@ impl App {
                                 "A file edited in place without changing length would not \
                                  show up here. Checking that means reading every byte.",
                             )
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                         );
                     }
@@ -7173,7 +7195,7 @@ impl App {
                             if let Some(track) = self.library.get(report.id) {
                                 ui.label(
                                     RichText::new(track.display_title())
-                                        .color(theme::TEXT)
+                                        .color(theme::text())
                                         .size(theme::BODY),
                                 );
                             }
@@ -7181,7 +7203,7 @@ impl App {
                                 ui.add_space(14.0);
                                 ui.vertical(|ui| {
                                     ui.horizontal_wrapped(|ui| {
-                                        path_label(ui, &report.path, theme::DIM);
+                                        path_label(ui, &report.path, theme::dim());
                                     });
                                     for trouble in &report.troubles {
                                         ui.horizontal_wrapped(|ui| {
@@ -7197,9 +7219,9 @@ impl App {
                                                             trouble.is_a_choice(),
                                                             trouble.is_fixable(),
                                                         ) {
-                                                            (true, _) => theme::TEXT,
-                                                            (_, true) => theme::AMBER,
-                                                            _ => theme::ALERT,
+                                                            (true, _) => theme::text(),
+                                                            (_, true) => theme::amber(),
+                                                            _ => theme::alert(),
                                                         },
                                                     ),
                                             );
@@ -7217,7 +7239,7 @@ impl App {
                                                         "{stored}  \u{2192}  {file}"
                                                     ))
                                                     .font(theme::mono(10.0))
-                                                    .color(theme::TEXT),
+                                                    .color(theme::text()),
                                                 );
                                             }
                                         });
@@ -7246,12 +7268,12 @@ impl App {
                                                 ui.label(
                                                     RichText::new(stored)
                                                         .font(theme::mono(10.0))
-                                                        .color(theme::TEXT),
+                                                        .color(theme::text()),
                                                 );
                                                 ui.label(
                                                     RichText::new("the tags")
                                                         .size(theme::SMALL)
-                                                        .color(theme::DIM),
+                                                        .color(theme::dim()),
                                                 );
                                             });
                                             ui.horizontal_wrapped(|ui| {
@@ -7271,12 +7293,12 @@ impl App {
                                                 ui.label(
                                                     RichText::new(from_path.describe())
                                                         .font(theme::mono(10.0))
-                                                        .color(theme::TEXT),
+                                                        .color(theme::text()),
                                                 );
                                                 ui.label(
                                                     RichText::new("the file name")
                                                         .size(theme::SMALL)
-                                                        .color(theme::DIM),
+                                                        .color(theme::dim()),
                                                 );
                                             });
                                         }
@@ -7296,7 +7318,7 @@ impl App {
                                     "{} in the library folder that no track points at",
                                     plural(orphans.len(), "file")
                                 ))
-                                .color(theme::TEXT)
+                                .color(theme::text())
                                 .size(theme::BODY),
                             );
                             for path in orphans.iter().take(ORPHANS_SHOWN) {
@@ -7304,7 +7326,7 @@ impl App {
                                     ui.add_space(14.0);
                                     ui.vertical(|ui| {
                                         ui.horizontal_wrapped(|ui| {
-                                            path_label(ui, path, theme::DIM);
+                                            path_label(ui, path, theme::dim());
                                         });
                                     });
                                 });
@@ -7318,7 +7340,7 @@ impl App {
                                             orphans.len() - ORPHANS_SHOWN
                                         ))
                                         .size(theme::SMALL)
-                                        .color(theme::DIM),
+                                        .color(theme::dim()),
                                     );
                                 });
                             }
@@ -7337,7 +7359,7 @@ impl App {
                                     ))
                                     .strong(),
                                 )
-                                .fill(theme::BOOTH_2),
+                                .fill(theme::booth_2()),
                             )
                             .on_hover_text(
                                 "A file's size and its tags are facts about the file, so where \
@@ -7355,10 +7377,10 @@ impl App {
                                         "Forget {}",
                                         plural(missing.len(), "missing track")
                                     ))
-                                    .color(theme::BOOTH)
+                                    .color(theme::booth())
                                     .strong(),
                                 )
-                                .fill(theme::ALERT),
+                                .fill(theme::alert()),
                             )
                             .on_hover_text(
                                 "Only the records go. There is no file to delete — though an \
@@ -7378,7 +7400,7 @@ impl App {
                                     ))
                                     .strong(),
                                 )
-                                .fill(theme::BOOTH_2),
+                                .fill(theme::booth_2()),
                             )
                             .on_hover_text("Read them in, as an import would")
                             .clicked()
@@ -7398,7 +7420,7 @@ impl App {
                                     ))
                                     .strong(),
                                 )
-                                .fill(theme::BOOTH_2),
+                                .fill(theme::booth_2()),
                             )
                             .on_hover_text(
                                 "Only the ones set to the file name. Nothing is written to \
@@ -7418,7 +7440,7 @@ impl App {
             for id in &forget {
                 self.library.remove(*id);
             }
-            self.note(format!("{} forgotten", plural(forget.len(), "track")), theme::TEXT);
+            self.note(format!("{} forgotten", plural(forget.len(), "track")), theme::text());
             self.checked = None;
             self.rebuild();
             self.save();
@@ -7483,7 +7505,7 @@ impl App {
         if renamed > 0 {
             self.note(
                 format!("{} renamed from their files", plural(renamed, "track")),
-                theme::TEXT,
+                theme::text(),
             );
             self.checked = None;
             self.rebuild();
@@ -7560,7 +7582,7 @@ impl App {
                         n
                     ),
                 },
-                theme::TEXT,
+                theme::text(),
             );
             self.checked = None;
             self.rebuild();
@@ -7595,8 +7617,8 @@ impl App {
             .anchor(egui::Align2::LEFT_TOP, [24.0, 56.0])
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -7605,7 +7627,7 @@ impl App {
                         "Terms narrow the list together. Put a - or ! in front of one to \
                          exclude it, and quotes around anything with a space in it.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(10.0);
@@ -7622,7 +7644,7 @@ impl App {
                                         egui::Label::new(
                                             RichText::new(help.example)
                                                 .font(theme::mono(11.0))
-                                                .color(theme::AMBER),
+                                                .color(theme::amber()),
                                         )
                                         .sense(egui::Sense::click()),
                                     );
@@ -7634,7 +7656,7 @@ impl App {
                                     }
                                     ui.label(
                                         RichText::new(help.means)
-                                            .color(theme::DIM)
+                                            .color(theme::dim())
                                             .size(theme::SMALL),
                                     );
                                 });
@@ -7672,7 +7694,7 @@ impl App {
                 egui::TopBottomPanel::top("log-bar")
                     .frame(
                         egui::Frame::NONE
-                            .fill(theme::BOOTH_2)
+                            .fill(theme::booth_2())
                             .inner_margin(egui::Margin::symmetric(10, 7)),
                     )
                     .show(ctx, |ui| {
@@ -7684,12 +7706,16 @@ impl App {
                                         egui::Button::new(
                                             RichText::new(shown.label())
                                                 .font(theme::mono(10.5))
-                                                .color(if on { theme::BOOTH } else { theme::DIM }),
+                                                .color(if on {
+                                                    theme::booth()
+                                                } else {
+                                                    theme::dim()
+                                                }),
                                         )
                                         .fill(if on {
-                                            theme::AMBER
+                                            theme::amber()
                                         } else {
-                                            theme::BOOTH
+                                            theme::booth()
                                         }),
                                     )
                                     .on_hover_text(format!("show {shown} and above"))
@@ -7733,7 +7759,7 @@ impl App {
                                             "line",
                                         ))
                                         .font(theme::mono(10.0))
-                                        .color(theme::DIM),
+                                        .color(theme::dim()),
                                     )
                                     .on_hover_text(
                                         crate::log::default_path().display().to_string(),
@@ -7744,7 +7770,9 @@ impl App {
                     });
 
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE.fill(theme::BOOTH).inner_margin(egui::Margin::same(8)))
+                    .frame(
+                        egui::Frame::NONE.fill(theme::booth()).inner_margin(egui::Margin::same(8)),
+                    )
                     .show(ctx, |ui| {
                         egui::ScrollArea::both()
                             .auto_shrink([false, false])
@@ -7752,17 +7780,17 @@ impl App {
                             .show_rows(ui, 14.0, entries.len(), |ui, range| {
                                 for entry in &entries[range] {
                                     let color = match entry.level {
-                                        crate::log::Level::Error => theme::ALERT,
-                                        crate::log::Level::Warn => theme::AMBER,
-                                        crate::log::Level::Info => theme::TEXT,
-                                        _ => theme::DIM,
+                                        crate::log::Level::Error => theme::alert(),
+                                        crate::log::Level::Warn => theme::amber(),
+                                        crate::log::Level::Info => theme::text(),
+                                        _ => theme::dim(),
                                     };
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 8.0;
                                         ui.label(
                                             RichText::new(entry.stamp())
                                                 .font(theme::mono(10.5))
-                                                .color(theme::DIM),
+                                                .color(theme::dim()),
                                         );
                                         ui.label(
                                             RichText::new(entry.level.tag())
@@ -7815,7 +7843,7 @@ impl App {
                             "Where music copied into the collection is kept, one folder per \
                          artist — the same shape a drive gets.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     ui.horizontal(|ui| {
@@ -7846,7 +7874,7 @@ impl App {
                             changed = true;
                         }
                         ui.label(
-                            RichText::new(policy.blurb()).color(theme::DIM).size(theme::SMALL),
+                            RichText::new(policy.blurb()).color(theme::dim()).size(theme::SMALL),
                         );
                         ui.add_space(4.0);
                     }
@@ -7861,7 +7889,7 @@ impl App {
                             changed = true;
                         }
                         ui.label(
-                            RichText::new(quality.blurb()).color(theme::DIM).size(theme::SMALL),
+                            RichText::new(quality.blurb()).color(theme::dim()).size(theme::SMALL),
                         );
                     }
                     ui.label(
@@ -7869,7 +7897,35 @@ impl App {
                             "A kit is rendered once and then played for years, so the slow one is \
                          the default. The fast one is for a first pass over a whole library.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Colours");
+                    ui.horizontal_wrapped(|ui| {
+                        for scheme in theme::SCHEMES {
+                            // Each name written in its own scheme's accent, so
+                            // the list is a sample of what it is offering
+                            // rather than eleven words.
+                            let label = RichText::new(scheme.name).color(scheme.amber);
+                            let picked = self.config.theme == scheme.name;
+                            if ui.radio(picked, label).clicked() && !picked {
+                                self.config.theme = scheme.name.to_string();
+                                theme::use_scheme(scheme.name);
+                                theme::install(ui.ctx());
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.label(
+                        RichText::new(
+                            "Ten colour schemes out of editors and one of this program's own. \
+                             The eight hot cue colours are not among them: those are written \
+                             into the cues and go on the drive, so a player lights its buttons \
+                             with them.",
+                        )
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
 
@@ -7886,7 +7942,7 @@ impl App {
                             RichText::new(
                                 "Four beats to the bar, as the drive's own format counts.",
                             )
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                         );
                     });
@@ -7904,7 +7960,7 @@ impl App {
                     }
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("AcoustID key").color(theme::DIM).size(theme::SMALL),
+                            RichText::new("AcoustID key").color(theme::dim()).size(theme::SMALL),
                         );
                         if ui
                             .add(
@@ -7917,7 +7973,7 @@ impl App {
                                             Err(_) => "free from acoustid.org/new-application",
                                         })
                                         .monospace()
-                                        .color(theme::DIM),
+                                        .color(theme::dim()),
                                     ),
                             )
                             .changed()
@@ -7943,7 +7999,7 @@ impl App {
                          the file's tags, the match is put to you instead. Nothing under 50% \
                          is offered at all.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
 
@@ -7956,7 +8012,9 @@ impl App {
                         {
                             changed = true;
                         }
-                        ui.label(RichText::new(level.blurb()).color(theme::DIM).size(theme::SMALL));
+                        ui.label(
+                            RichText::new(level.blurb()).color(theme::dim()).size(theme::SMALL),
+                        );
                         ui.add_space(4.0);
                     }
                     ui.label(
@@ -7967,7 +8025,7 @@ impl App {
                          FLAC and MP3 only — a WAV has nowhere to put them. The inspector's \
                          own button always overwrites, whatever this says.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
 
@@ -7981,7 +8039,7 @@ impl App {
                          name the program `whisper` here. Everything else in the program \
                          works without this; only the words need it.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     let mut program = self.config.whisper.program.clone();
@@ -8048,7 +8106,7 @@ impl App {
                          nothing to fill in here. It is only worth using if AlphaTheta ever \
                          changes the key: put the new one here, or in REKORDBOX_KEY.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     let mut key = self.config.rekordbox_key.clone();
@@ -8074,7 +8132,7 @@ impl App {
                          This is here for the same reason as the one above: the day the key \
                          changes, it is what keeps the program working.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     let mut onelibrary = self.config.onelibrary_key.clone();
@@ -8113,7 +8171,7 @@ impl App {
                          audio is linked to the library's own copy rather than copied, so a \
                          drive costs megabytes.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     if ui
@@ -8123,7 +8181,7 @@ impl App {
                         changed = true;
                     }
                     ui.horizontal_wrapped(|ui| {
-                        path_label(ui, &self.config.backups_path.clone(), theme::DIM);
+                        path_label(ui, &self.config.backups_path.clone(), theme::dim());
                     });
                     ui.add_space(8.0);
                     ui.label(
@@ -8132,7 +8190,7 @@ impl App {
                          Yours is always linked, whatever this says — a track is recognised by \
                          its sound, so a rename or a retag does not make a second copy of it.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     for what in crate::config::OnForeign::ALL {
@@ -8140,7 +8198,9 @@ impl App {
                         {
                             changed = true;
                         }
-                        ui.label(RichText::new(what.blurb()).color(theme::DIM).size(theme::SMALL));
+                        ui.label(
+                            RichText::new(what.blurb()).color(theme::dim()).size(theme::SMALL),
+                        );
                         ui.add_space(4.0);
                     }
 
@@ -8154,7 +8214,7 @@ impl App {
                             changed = true;
                         }
                         ui.label(
-                            RichText::new(where_.blurb()).color(theme::DIM).size(theme::SMALL),
+                            RichText::new(where_.blurb()).color(theme::dim()).size(theme::SMALL),
                         );
                         ui.add_space(4.0);
                     }
@@ -8177,7 +8237,7 @@ impl App {
                             "Both places are searched whichever is set, so changing this never \
                          loses a kit that is already rendered.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
 
@@ -8191,7 +8251,7 @@ impl App {
                                 outside.len(),
                                 if outside.len() == 1 { "track is" } else { "tracks are" }
                             ))
-                            .color(theme::AMBER)
+                            .color(theme::amber())
                             .size(theme::SMALL),
                         );
                         if ui.button("Copy them all in").clicked() {
@@ -8203,7 +8263,7 @@ impl App {
 
         if changed {
             if let Err(e) = self.config.save(&self.config_path) {
-                self.note(format!("could not save the settings: {e:#}"), theme::ALERT);
+                self.note(format!("could not save the settings: {e:#}"), theme::alert());
             }
         }
         if pick_library {
@@ -8276,27 +8336,27 @@ impl App {
                          written. A CDJ-3000 takes MP3 and AAC at 44.1–48 kHz, and WAV, \
                          AIFF, FLAC and ALAC up to 96 kHz.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
 
                 egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
                     for (_, name, path, problem) in &waiting {
-                        ui.label(RichText::new(name).color(theme::TEXT).size(theme::SMALL));
+                        ui.label(RichText::new(name).color(theme::text()).size(theme::SMALL));
                         ui.label(
                             RichText::new(format!("{} — {}", problem.what(), problem.fix()))
                                 .color(if problem.convertible() {
-                                    theme::AMBER
+                                    theme::amber()
                                 } else {
-                                    theme::ALERT
+                                    theme::alert()
                                 })
                                 .size(theme::SMALL),
                         );
                         ui.label(
                             RichText::new(path.display().to_string())
                                 .font(theme::mono(9.5))
-                                .color(theme::DIM),
+                                .color(theme::dim()),
                         );
                         ui.add_space(4.0);
                     }
@@ -8313,10 +8373,10 @@ impl App {
                                         plural(convertible.len(), "file")
                                     )))
                                     .size(11.0)
-                                    .color(theme::BOOTH)
+                                    .color(theme::booth())
                                     .strong(),
                                 )
-                                .fill(theme::AMBER),
+                                .fill(theme::amber()),
                             )
                             .on_hover_text(
                                 "Writes a FLAC beside each original and points the \
@@ -8342,7 +8402,7 @@ impl App {
                                     waiting.len() - convertible.len()
                                 ),
                             })
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                         );
                     }
@@ -8382,18 +8442,18 @@ impl App {
                         "These play from where they are now. A file on a stick, a share or \
                          a download folder is a file that can be gone on the night.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
 
                 egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                     for (_, name, path) in &waiting {
-                        ui.label(RichText::new(name).color(theme::TEXT).size(theme::SMALL));
+                        ui.label(RichText::new(name).color(theme::text()).size(theme::SMALL));
                         ui.label(
                             RichText::new(path.display().to_string())
                                 .font(theme::mono(9.5))
-                                .color(theme::DIM),
+                                .color(theme::dim()),
                         );
                         ui.add_space(3.0);
                     }
@@ -8406,10 +8466,10 @@ impl App {
                             egui::Button::new(
                                 RichText::new(theme::label_text("Copy in"))
                                     .size(11.0)
-                                    .color(theme::BOOTH)
+                                    .color(theme::booth())
                                     .strong(),
                             )
-                            .fill(theme::AMBER),
+                            .fill(theme::amber()),
                         )
                         .clicked()
                     {
@@ -8460,7 +8520,7 @@ impl App {
                 plural(self.clashes.len(), "track")
             ))
             .font(theme::mono(11.5))
-            .color(theme::AMBER),
+            .color(theme::amber()),
         );
         ui.label(
             RichText::new(
@@ -8470,7 +8530,7 @@ impl App {
                  which is why this asks rather than picking for you.",
             )
             .font(theme::mono(10.0))
-            .color(theme::DIM),
+            .color(theme::dim()),
         );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -8493,7 +8553,7 @@ impl App {
             let side = self.settled.entry(clash.id).or_insert(sync::Side::Mine);
             ui.horizontal(|ui| {
                 ui.add_space(14.0);
-                ui.label(RichText::new(name).font(theme::mono(11.0)).color(theme::TEXT));
+                ui.label(RichText::new(name).font(theme::mono(11.0)).color(theme::text()));
             });
             ui.horizontal(|ui| {
                 ui.add_space(24.0);
@@ -8533,7 +8593,7 @@ impl App {
                     ),
                 })
                 .font(theme::mono(10.5))
-                .color(theme::DIM),
+                .color(theme::dim()),
             );
         });
     }
@@ -8561,8 +8621,8 @@ impl App {
             .max_height(sheet_height(ctx))
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -8576,7 +8636,7 @@ impl App {
                             if drive.is_image { " · into a FAT32 image" } else { "" }
                         ))
                         .font(theme::mono(10.5))
-                        .color(theme::DIM),
+                        .color(theme::dim()),
                     );
                     ui.label(
                         RichText::new(match both {
@@ -8598,8 +8658,8 @@ impl App {
                         })
                         .font(theme::mono(10.5))
                         .color(match both {
-                            true => theme::AMBER,
-                            false => theme::ALERT,
+                            true => theme::amber(),
+                            false => theme::alert(),
                         }),
                     );
 
@@ -8620,7 +8680,7 @@ impl App {
                     ui.label(
                         RichText::new(format!("Playlists: {line}"))
                             .font(theme::mono(10.5))
-                            .color(if specs.is_empty() { theme::ALERT } else { theme::DIM }),
+                            .color(if specs.is_empty() { theme::alert() } else { theme::dim() }),
                     );
                     ui.add_space(10.0);
 
@@ -8663,15 +8723,15 @@ impl App {
                     for check in &checks {
                         ui.horizontal(|ui| {
                             let (mark, color) = match check.level {
-                                Level::Ok => (theme::TICK, theme::GO),
-                                Level::Warn => (theme::WARN, theme::AMBER),
-                                Level::Bad => (theme::CROSS, theme::ALERT),
+                                Level::Ok => (theme::TICK, theme::go()),
+                                Level::Warn => (theme::WARN, theme::amber()),
+                                Level::Bad => (theme::CROSS, theme::alert()),
                             };
                             ui.label(RichText::new(mark).color(color).font(theme::mono(11.5)));
                             ui.label(
                                 RichText::new(&check.text)
                                     .font(theme::mono(11.5))
-                                    .color(theme::TEXT),
+                                    .color(theme::text()),
                             );
                         });
                     }
@@ -8689,7 +8749,7 @@ impl App {
                          passes, this is not a finished drive.",
                     )
                     .font(theme::mono(10.0))
-                    .color(theme::DIM),
+                    .color(theme::dim()),
                 );
 
                     ui.add_space(12.0);
@@ -8702,13 +8762,13 @@ impl App {
                                 egui::Button::new(
                                     RichText::new(theme::label_text(verb))
                                         .size(11.0)
-                                        .color(theme::BOOTH)
+                                        .color(theme::booth())
                                         .strong(),
                                 )
                                 .fill(if worst == Level::Bad {
-                                    theme::ALERT
+                                    theme::alert()
                                 } else {
-                                    theme::AMBER
+                                    theme::amber()
                                 }),
                             )
                             .on_disabled_hover_text(
@@ -8741,7 +8801,7 @@ impl App {
                         if worst == Level::Bad {
                             ui.label(
                                 RichText::new("the files above will be skipped; the rest still go")
-                                    .color(theme::DIM)
+                                    .color(theme::dim())
                                     .size(theme::SMALL),
                             );
                         }
@@ -8877,7 +8937,7 @@ impl App {
                 if let Some(path) = paths.into_iter().next() {
                     self.config.library_path = path;
                     if let Err(e) = self.config.save(&self.config_path) {
-                        self.note(format!("could not save the settings: {e:#}"), theme::ALERT);
+                        self.note(format!("could not save the settings: {e:#}"), theme::alert());
                     }
                 }
             }
@@ -8891,23 +8951,25 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 fn pane_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(theme::label_text(text)).size(theme::LABEL).color(theme::DIM).strong());
+    ui.label(
+        RichText::new(theme::label_text(text)).size(theme::LABEL).color(theme::dim()).strong(),
+    );
     ui.add_space(4.0);
 }
 
 fn measurement(ui: &mut Ui, name: &str, value: &str, good: bool) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        ui.label(RichText::new(name).font(theme::mono(11.0)).color(theme::DIM));
+        ui.label(RichText::new(name).font(theme::mono(11.0)).color(theme::dim()));
         ui.label(
             RichText::new(if good { theme::TICK } else { "·" })
                 .font(theme::mono(11.0))
-                .color(if good { theme::GO } else { theme::AMBER }),
+                .color(if good { theme::go() } else { theme::amber() }),
         );
         ui.label(RichText::new(value).font(theme::mono(11.0)).color(if good {
-            theme::GO
+            theme::go()
         } else {
-            theme::AMBER
+            theme::amber()
         }));
     });
 }
@@ -9183,7 +9245,7 @@ fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
                 ui.label(
                     RichText::new(theme::label_text(operation))
                         .size(theme::LABEL)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .strong(),
                 );
             },
@@ -9192,11 +9254,11 @@ fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
             egui::vec2(ui.available_width() - 100.0, 18.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.label(RichText::new(what).color(theme::TEXT));
+                ui.label(RichText::new(what).color(theme::text()));
             },
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(size).font(theme::mono(11.5)).color(theme::DIM));
+            ui.label(RichText::new(size).font(theme::mono(11.5)).color(theme::dim()));
         });
     });
 }

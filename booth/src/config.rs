@@ -97,6 +97,10 @@ impl OnExternal {
     }
 }
 
+fn default_theme() -> String {
+    crate::theme::SCHEMES[0].name.to_string()
+}
+
 fn default_emulator_port() -> u16 {
     booth_cli::emulator::DEFAULT_PORT
 }
@@ -399,6 +403,12 @@ pub struct Config {
     /// every drive costs megabytes rather than gigabytes.
     #[serde(default = "default_backups_path")]
     pub backups_path: PathBuf,
+    /// Which colour scheme the window draws in, by name.
+    ///
+    /// A name rather than an index, so a scheme added or reordered later does
+    /// not silently repaint somebody's window into a different one.
+    #[serde(default = "default_theme")]
+    pub theme: String,
     /// Where a CDJ-3000 emulator is listening for machine-protocol calls.
     ///
     /// Its first instance is 4445 and each further one is a port along, so
@@ -626,6 +636,7 @@ impl Default for Config {
             rekordbox_key: String::new(),
             onelibrary_key: String::new(),
             backups_path: default_backups_path(),
+            theme: default_theme(),
             emulator_port: booth_cli::emulator::DEFAULT_PORT,
             keep_drives: true,
             on_foreign: OnForeign::default(),
