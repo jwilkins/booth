@@ -209,6 +209,26 @@ impl Backup {
 /// drive that has changed every time it is looked at — which is a drive copied
 /// again every time it is looked at. None of them is anything a player reads.
 fn is_noise(relative: &Path) -> bool {
+    // SQLite's scratch files, which say nothing about what is on the drive.
+    // A `-shm` is a shared-memory index rebuilt from the database, and it is
+    // written merely by *opening* one — including read-only, and including by
+    // this program, which reads the drive's play history the moment a copy
+    // finishes. Counting it meant every copy invalidated its own snapshot: the
+    // next look saw a drive that had changed, waited out the settle window,
+    // and copied all of it again, every five minutes, for as long as the stick
+    // stayed plugged in. A `-journal` is the same kind of thing for the older
+    // rollback mode.
+    //
+    // A `-wal` is deliberately not in here. It can hold committed rows the
+    // database has not taken in yet, so a `-wal` that changed is a drive that
+    // really did change — a player writing history looks exactly like that.
+    if relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with("-shm") || name.ends_with("-journal"))
+    {
+        return true;
+    }
     relative.components().any(|part| {
         let name = part.as_os_str().to_str().unwrap_or_default();
         name.starts_with("._")
@@ -931,6 +951,42 @@ mod tests {
         // And something that is the drive changing still counts.
         scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a longer database");
         assert_ne!(fingerprint(&drive), before);
+    }
+
+    #[test]
+    fn reading_the_drives_database_is_not_the_drive_changing() {
+        // The loop this closes: a copy finishes, the play history is read off
+        // the drive, and opening that database writes its `-shm` — so the very
+        // next look decided the drive had changed since it was copied. Five
+        // minutes later it was copied again, and again, forty-five seconds at
+        // a time for as long as the stick was in.
+        let scratch = Scratch::new("shm");
+        let (drive, _) = a_drive(&scratch);
+        scratch.file("drive/PIONEER/rekordbox/exportLibrary.db", b"an encrypted library");
+        let before = fingerprint(&drive);
+
+        // What opening it read-only leaves behind.
+        scratch.file("drive/PIONEER/rekordbox/exportLibrary.db-shm", b"shared memory");
+        assert_eq!(fingerprint(&drive), before, "a shared-memory file counted as a change");
+        scratch.file("drive/PIONEER/rekordbox/exportLibrary.db-shm", b"more shared memory");
+        assert_eq!(fingerprint(&drive), before, "a changed one counted too");
+        scratch.file("drive/PIONEER/rekordbox/exportLibrary.db-journal", b"a rollback journal");
+        assert_eq!(fingerprint(&drive), before, "a rollback journal counted as a change");
+    }
+
+    #[test]
+    fn a_write_ahead_log_is_the_drive_changing() {
+        // The other half of the same rule. A `-wal` can hold committed rows the
+        // database has not taken in yet, so it is where a player's newest
+        // history lives — ignoring it would mean a night's plays looked like
+        // nothing had happened.
+        let scratch = Scratch::new("wal");
+        let (drive, _) = a_drive(&scratch);
+        scratch.file("drive/PIONEER/rekordbox/exportLibrary.db", b"an encrypted library");
+        let before = fingerprint(&drive);
+
+        scratch.file("drive/PIONEER/rekordbox/exportLibrary.db-wal", b"two more plays");
+        assert_ne!(fingerprint(&drive), before, "a write-ahead log was ignored");
     }
 
     #[test]
