@@ -101,16 +101,34 @@ pub struct Candidate {
     /// What to write on the cue, when there is something better to say than the
     /// reason's own name — the words of a hook, say.
     pub label: Option<String>,
+    /// Whether this may only ever be a memory cue.
+    ///
+    /// A player has eight buttons and as many memory cues as a track needs, so
+    /// a moment that is worth marking but not worth a button — a line coming
+    /// round for the fourth time — says so here rather than being ranked
+    /// against the drops and losing every time by a different margin.
+    pub memory_only: bool,
 }
 
 impl Candidate {
     pub fn new(time_ms: u32, reason: Reason) -> Self {
-        Self { time_ms, reason, label: None }
+        Self { time_ms, reason, label: None, memory_only: false }
     }
 
     pub fn named(time_ms: u32, reason: Reason, label: &str) -> Self {
         let label = label.trim();
-        Self { time_ms, reason, label: (!label.is_empty()).then(|| label.to_string()) }
+        Self {
+            time_ms,
+            reason,
+            label: (!label.is_empty()).then(|| label.to_string()),
+            memory_only: false,
+        }
+    }
+
+    /// The same moment, marked as one that never takes a button.
+    pub fn memory_only(mut self) -> Self {
+        self.memory_only = true;
+        self
     }
 
     fn comment(&self) -> String {
@@ -123,10 +141,14 @@ pub fn from_moment(moment: &crate::transcribe::Moment) -> Candidate {
     use crate::transcribe::MomentKind;
     let reason = match moment.kind {
         MomentKind::VocalIn => Reason::Vocal,
-        MomentKind::Hook => Reason::Hook,
+        MomentKind::Hook | MomentKind::Return => Reason::Hook,
         MomentKind::Refrain => Reason::Refrain,
     };
-    Candidate::named(moment.time_ms, reason, &moment.text)
+    let candidate = Candidate::named(moment.time_ms, reason, &moment.text);
+    match moment.kind {
+        MomentKind::Return => candidate.memory_only(),
+        _ => candidate,
+    }
 }
 
 /// How close two moments have to be before they are one moment.
@@ -153,7 +175,10 @@ pub fn suggest(features: &Features, beat_times: &[u32], structure: &Structure) -
     // concerned: the first downbeat, or the first beat if the grid has no bar
     // lines yet.
     let start = first_downbeat(beat_times, structure).unwrap_or(beat_times[0]);
-    assemble(start, candidates)
+    // The last beat the grid names, which is the last bar a player will let you
+    // park on rather than wherever the file happens to stop.
+    let end = beat_times.last().copied();
+    assemble(start, end, candidates)
 }
 
 /// A cue at the start of every section the phrase analysis found.
@@ -177,8 +202,14 @@ pub fn sections(structure: &Structure, beat_times: &[u32]) -> Vec<Candidate> {
 /// player has eight hot cues and a busy track has more than eight moments, and
 /// which eight it keeps is the whole difference between a useful set of cues
 /// and a wall of markers.
-pub fn assemble(start_ms: u32, candidates: Vec<Candidate>) -> Vec<Cue> {
+pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) -> Vec<Cue> {
     let mut kept = fold(rank(candidates));
+
+    // Every moment worth cueing becomes a memory cue, whether or not it also
+    // gets one of the eight buttons. A player holds as many of these as the
+    // track needs, and what they cost is a line in the list rather than a hot
+    // cue somebody wanted for something else.
+    let mut cues = memory_cues(start_ms, end_ms, &kept);
 
     // A hot cue where the memory cue already is, is a button that does what
     // loading the track already did — and eight is not many. The name is worth
@@ -192,12 +223,12 @@ pub fn assemble(start_ms: u32, candidates: Vec<Candidate>) -> Vec<Cue> {
     //
     // Taken out before the eight are chosen, not after, or the track would
     // come out with seven.
-    let mut memory = Cue::memory(start_ms);
     if let Some(at) =
         kept.iter().position(|(candidate, _)| candidate.time_ms.abs_diff(start_ms) < TOGETHER_MS)
     {
-        memory = memory.with_comment(&kept.remove(at).0.comment());
+        kept.remove(at);
     }
+    kept.retain(|(candidate, _)| !candidate.memory_only);
 
     if kept.len() > HOT_CUES {
         kept.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.time_ms.cmp(&b.0.time_ms)));
@@ -205,7 +236,6 @@ pub fn assemble(start_ms: u32, candidates: Vec<Candidate>) -> Vec<Cue> {
         kept.sort_by_key(|(candidate, _)| candidate.time_ms);
     }
 
-    let mut cues = vec![memory];
     for (letter, (candidate, _)) in kept.into_iter().enumerate() {
         let color = candidate.reason.color();
         cues.push(
@@ -215,6 +245,95 @@ pub fn assemble(start_ms: u32, candidates: Vec<Candidate>) -> Vec<Cue> {
         );
     }
     cues
+}
+
+/// What a section is called on a marker, in the words a DJ uses about a record.
+fn section_word(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Intro => "Intro",
+        Kind::Up => "Build",
+        Kind::Down => "Break",
+        Kind::Chorus => "Drop",
+        Kind::Outro => "Outro",
+    }
+}
+
+/// A named memory cue for every moment, in time order.
+///
+/// The names are what a DJ would write on the markers themselves: Start, then
+/// each section numbered within its own kind — Build 1, Drop 1, Break 1, Drop 2
+/// — and End on the last bar. Numbering within the kind rather than across all
+/// of them is the whole point: six markers all called "drop" say nothing that
+/// looking at the waveform does not.
+///
+/// A sung line gets a verse number and its words the first time it lands, and
+/// the number alone every time it comes back: "V1 Get Down", then "V1", "V1".
+/// A player shows a memory cue's comment while the track is loaded, so the
+/// second time round the line is already known and the number is what says
+/// where in the record you are.
+///
+/// `kept` is the folded, time-ordered list [`assemble`] works from.
+fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) -> Vec<Cue> {
+    let mut out = vec![Cue::memory(start_ms).with_comment("Start")];
+    let mut sections: Vec<(&'static str, usize)> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut plain_vocals = 0usize;
+
+    for (candidate, _) in kept {
+        // The section that sits on the start is what Start is: naming it twice
+        // would put two markers on the same bar, which is one to step over
+        // every time the track is loaded. It is still counted, so a second
+        // intro reads "Intro 2" rather than starting again at one.
+        let at_start = candidate.time_ms.abs_diff(start_ms) < TOGETHER_MS;
+        let label = match candidate.reason {
+            Reason::Section(kind) => {
+                let word = section_word(kind);
+                let count = match sections.iter_mut().find(|(seen, _)| *seen == word) {
+                    Some((_, count)) => {
+                        *count += 1;
+                        *count
+                    }
+                    None => {
+                        sections.push((word, 1));
+                        1
+                    }
+                };
+                format!("{word} {count}")
+            }
+            _ => match candidate.label.as_deref() {
+                Some(text) => {
+                    match lines.iter().position(|seen| crate::transcribe::same_line(seen, text)) {
+                        Some(at) => format!("V{}", at + 1),
+                        None => {
+                            lines.push(text.to_string());
+                            format!("V{} {text}", lines.len())
+                        }
+                    }
+                }
+                // A voice the mix found and the words did not. Numbered on its
+                // own, because calling it V1 would claim it is a line that has
+                // been read when nothing has read it.
+                None => {
+                    plain_vocals += 1;
+                    format!("Vocal {plain_vocals}")
+                }
+            },
+        };
+        if !at_start {
+            out.push(Cue::memory(candidate.time_ms).with_comment(&label));
+        }
+    }
+
+    // The last bar, so that running out of record is a marker rather than a
+    // surprise. Only when it is clear of everything else: a marker half a
+    // second after the outro cue is two markers on one moment.
+    if let Some(end) = end_ms {
+        let clear = out.iter().all(|cue| cue.time_ms + TOGETHER_MS <= end);
+        if clear {
+            out.push(Cue::memory(end).with_comment("End"));
+        }
+    }
+    out
 }
 
 /// Put the candidates in time order and price each one.
@@ -259,19 +378,39 @@ fn fold(ranked: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
             kept.push((candidate, priority));
             continue;
         }
-        let beaten = match (last.reason.is_section(), candidate.reason.is_section()) {
-            (true, false) => false,
-            (false, true) => true,
-            _ => priority > *last_priority,
+        // A moment that may only ever be a memory cue never takes the place of
+        // one that could have been a button, whatever it is worth: the line
+        // coming round for the fourth time is worth a marker and is not worth
+        // the drop's slot.
+        let beaten = match (last.memory_only, candidate.memory_only) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => match (last.reason.is_section(), candidate.reason.is_section()) {
+                (true, false) => false,
+                (false, true) => true,
+                _ => priority > *last_priority,
+            },
         };
+        // Nor does it lend its words to whatever swallowed it. A drop that
+        // happens to land on a hook coming round should still read "drop",
+        // because that is what a DJ is reaching for when they are not
+        // reaching for the words.
+        let (winner_only, loser) = match beaten {
+            true => (candidate.memory_only, last.memory_only),
+            false => (last.memory_only, candidate.memory_only),
+        };
+        let lend = !loser && !winner_only;
         match beaten {
             true => {
-                let words = last.label.take();
+                let words = last.label.take().filter(|_| lend);
                 *last = candidate;
                 *last_priority = priority;
                 last.label = last.label.take().or(words);
             }
-            false => last.label = last.label.take().or(candidate.label),
+            false => {
+                let words = candidate.label.filter(|_| lend);
+                last.label = last.label.take().or(words);
+            }
         }
     }
     kept
@@ -437,7 +576,7 @@ mod tests {
         // a button that does what loading the track did. It keeps the name.
         assert!(!cues[0].is_hot());
         assert_eq!(cues[0].time_ms, 0);
-        assert_eq!(cues[0].comment.as_deref(), Some("intro"));
+        assert_eq!(cues[0].comment.as_deref(), Some("Start"));
 
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         assert_eq!(hot.len(), 2);
@@ -459,7 +598,7 @@ mod tests {
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
 
         // The intro is on the memory cue, where the player parks anyway.
-        assert_eq!(cues[0].comment.as_deref(), Some("intro"));
+        assert_eq!(cues[0].comment.as_deref(), Some("Start"));
         assert_eq!(hot[0].comment.as_deref(), Some("break"));
         assert_eq!(hot[1].comment.as_deref(), Some("drop"));
         // The drop is red and the breakdown is blue, and they are not the same.
@@ -546,6 +685,81 @@ mod tests {
         }
     }
 
+    /// The memory cues a set came out with, in the order they were written.
+    fn marks(cues: &[Cue]) -> Vec<String> {
+        cues.iter()
+            .filter(|cue| !cue.is_hot())
+            .map(|cue| cue.comment.clone().unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn sections_are_numbered_within_their_own_kind() {
+        // Six markers all reading "drop" say nothing the waveform does not.
+        // Numbered within the kind, the list is the arrangement.
+        let kinds = [Kind::Intro, Kind::Up, Kind::Chorus, Kind::Down, Kind::Up, Kind::Chorus];
+        let candidates = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, &kind)| Candidate::new(i as u32 * 30_000, Reason::Section(kind)))
+            .collect();
+
+        assert_eq!(
+            marks(&assemble(0, Some(200_000), candidates)),
+            ["Start", "Build 1", "Drop 1", "Break 1", "Build 2", "Drop 2", "End"]
+        );
+    }
+
+    #[test]
+    fn the_first_section_is_start_and_is_still_counted() {
+        // Start is the intro, so a second intro has to read "Intro 2" — one
+        // that started again at one would say there were two first sections.
+        let candidates = vec![
+            Candidate::new(0, Reason::Section(Kind::Intro)),
+            Candidate::new(60_000, Reason::Section(Kind::Intro)),
+        ];
+        assert_eq!(marks(&assemble(0, None, candidates)), ["Start", "Intro 2"]);
+    }
+
+    #[test]
+    fn a_sung_line_is_named_once_and_numbered_ever_after() {
+        // What a player shows while a track is loaded is the comment on the
+        // marker. The words are worth reading the first time the line lands;
+        // after that the number is what says where in the record you are.
+        let words = crate::transcribe::Transcript {
+            lines: vec![
+                line(30_000, "get down"),
+                line(60_000, "everybody in the room"),
+                line(90_000, "get down"),
+                line(120_000, "everybody in the room"),
+                line(150_000, "get down"),
+            ],
+        };
+        let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let marks = marks(&assemble(0, None, candidates));
+        assert_eq!(marks[0], "Start");
+        assert!(marks.contains(&"V1 get down".to_string()), "{marks:?}");
+        assert_eq!(
+            marks.iter().filter(|mark| *mark == "V1").count(),
+            2,
+            "the repeats should carry the number alone: {marks:?}"
+        );
+        assert!(
+            marks.iter().any(|mark| mark.starts_with("V2 ")),
+            "the other line is another verse: {marks:?}"
+        );
+    }
+
+    #[test]
+    fn the_end_marker_is_only_written_where_nothing_else_is() {
+        // A marker half a second after the outro cue is two markers on one
+        // moment, which is one to step over every time.
+        let candidates = vec![Candidate::new(200_000, Reason::Section(Kind::Outro))];
+        assert_eq!(marks(&assemble(0, Some(200_100), candidates)), ["Start", "Outro 1"]);
+    }
+
     #[test]
     fn the_hook_is_cued_with_the_words_that_make_it_one() {
         let words = crate::transcribe::Transcript {
@@ -557,7 +771,7 @@ mod tests {
         };
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
-        let cues = assemble(0, candidates);
+        let cues = assemble(0, None, candidates);
 
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         let hook = hot.iter().find(|c| c.time_ms == 30_000).expect("no cue on the hook");
@@ -595,7 +809,7 @@ mod tests {
             .collect();
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let hot: Vec<Cue> = assemble(0, candidates).into_iter().filter(Cue::is_hot).collect();
+        let hot: Vec<Cue> = assemble(0, None, candidates).into_iter().filter(Cue::is_hot).collect();
         let named = |what: &str| hot.iter().filter(|c| c.comment.as_deref() == Some(what)).count();
 
         assert_eq!(named("hold me closer now"), 1, "the hook took more than one slot: {hot:?}");
@@ -615,7 +829,7 @@ mod tests {
             (0..10).map(|i| Candidate::new(i * 20_000, Reason::Section(Kind::Chorus))).collect();
         candidates.push(Candidate::named(95_000, Reason::Hook, "hold me closer now"));
 
-        let cues = assemble(0, candidates);
+        let cues = assemble(0, None, candidates);
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         assert_eq!(hot.len(), 8);
         assert!(
@@ -630,7 +844,7 @@ mod tests {
             Candidate::new(60_000, Reason::Section(Kind::Chorus)),
             Candidate::named(60_200, Reason::Hook, "hold me closer now"),
         ];
-        let cues = assemble(0, candidates);
+        let cues = assemble(0, None, candidates);
 
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         assert_eq!(hot.len(), 1, "two markers half a second apart: {hot:?}");

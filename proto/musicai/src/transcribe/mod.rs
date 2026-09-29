@@ -56,6 +56,13 @@ pub enum MomentKind {
     Hook,
     /// Where one of the other lines it keeps coming back to first lands.
     Refrain,
+    /// A line coming back round, after the airing that named it.
+    ///
+    /// Never worth a hot cue — eight buttons spent on one line is the
+    /// complaint this whole arrangement exists to answer — and always worth a
+    /// memory cue, which costs nothing and is what turns a list of markers
+    /// into a map of the record.
+    Return,
 }
 
 /// One of those, placed.
@@ -150,12 +157,13 @@ impl Transcript {
 
     /// Everything in the words that is worth a cue, in time order.
     ///
-    /// One cue per line, not one per airing. A hook sung six times used to be
-    /// six cues saying the same thing, which is a player that can jump to one
-    /// moment of a record — and the drops and the breakdowns, the things a DJ
-    /// reaches for between the words, had nowhere left to go. So each of the
-    /// track's repeated lines is cued once, where it first lands, and the
-    /// returns are not cued at all.
+    /// One *hot* cue per line, not one per airing. A hook sung six times used
+    /// to be six hot cues saying the same thing, which is a player that can
+    /// jump to one moment of a record — and the drops and the breakdowns, the
+    /// things a DJ reaches for between the words, had nowhere left to go. So
+    /// each of the track's repeated lines is worth a button once, where it
+    /// first lands, and the returns come back as [`MomentKind::Return`], which
+    /// takes a memory cue and never a button.
     ///
     /// Nor are they quietly borrowed as names for whatever section they land
     /// on. That was tried, and it puts the same words on three differently
@@ -179,8 +187,13 @@ impl Transcript {
                 0 => MomentKind::Hook,
                 _ => MomentKind::Refrain,
             };
-            if let Some(&first) = line.at.first() {
-                moments.push(Moment { time_ms: first, kind, text });
+            let Some((&first, again)) = line.at.split_first() else { continue };
+            moments.push(Moment { time_ms: first, kind, text: text.clone() });
+            // Every time it comes round after that. The words are on the first
+            // one, so these carry the same text for the cue set to recognise
+            // them by and are marked as returns so they stay off the buttons.
+            for &at in again {
+                moments.push(Moment { time_ms: at, kind: MomentKind::Return, text: text.clone() });
             }
         }
 
@@ -269,6 +282,15 @@ fn wording(heard: &[(Vec<String>, String)]) -> String {
 /// punctuation taken off, ready to be read on a player.
 fn tidy(text: &str) -> String {
     text.trim().trim_matches(|c: char| c == '"' || c == '\'').trim().to_string()
+}
+
+/// Whether two written-out lines are the same sung line.
+///
+/// The question a cue set asks about its own labels: a hook heard four times is
+/// four moments, and they have to be recognised as one line so that the second
+/// and third can say "V1" rather than repeating the words.
+pub fn same_line(a: &str, b: &str) -> bool {
+    similarity(&words(a), &words(b)) >= SAME
 }
 
 /// How alike two lines are, from 0 to 1: Dice's measure over their words,
@@ -457,11 +479,16 @@ mod tests {
         let kinds: Vec<MomentKind> = moments.iter().map(|m| m.kind).collect();
         assert_eq!(
             kinds,
-            vec![MomentKind::VocalIn, MomentKind::Hook],
-            "the returns are not moments of their own"
+            vec![MomentKind::VocalIn, MomentKind::Hook, MomentKind::Return, MomentKind::Return],
+            "the line is named once and comes back as returns"
         );
         assert_eq!(moments[0].time_ms, 10_000);
         assert_eq!(moments[1].time_ms, 30_000, "where the line first lands");
+        assert_eq!(
+            moments.iter().filter(|m| m.kind == MomentKind::Hook).count(),
+            1,
+            "only the first landing is worth a button"
+        );
         assert_eq!(moments[1].text, "hold me closer now");
     }
 
@@ -480,7 +507,7 @@ mod tests {
         let moments = transcript.moments();
         let cued: Vec<(MomentKind, &str)> = moments
             .iter()
-            .filter(|m| m.kind != MomentKind::VocalIn)
+            .filter(|m| matches!(m.kind, MomentKind::Hook | MomentKind::Refrain))
             .map(|m| (m.kind, m.text.as_str()))
             .collect();
         // In time order, and the one sung three times is the hook.
@@ -490,6 +517,13 @@ mod tests {
                 (MomentKind::Hook, "hold me closer now"),
                 (MomentKind::Refrain, "and I don't want to go home")
             ]
+        );
+        // And each comes back, carrying the same words so a cue set can tell
+        // which line it is without reading it again.
+        assert_eq!(
+            moments.iter().filter(|m| m.kind == MomentKind::Return).count(),
+            3,
+            "{moments:?}"
         );
     }
 
@@ -531,10 +565,17 @@ mod tests {
     fn a_track_that_opens_on_its_hook_gets_one_cue_not_two() {
         let transcript = said(&[(8_000, "hold me closer now"), (68_000, "hold me closer now")]);
         let moments = transcript.moments();
-        // One: the hook, at the moment the voice also comes in. Not a second
-        // for the entry, and not a third for the line coming round again.
-        assert_eq!(moments.len(), 1, "{moments:?}");
+        // The hook, at the moment the voice also comes in, and no second
+        // moment for the entry — calling it "the voice comes in" when it is
+        // the hook throws away the more useful of the two names.
         assert_eq!(moments[0].kind, MomentKind::Hook, "the hook outranks the entry");
+        assert!(
+            !moments.iter().any(|m| m.kind == MomentKind::VocalIn),
+            "the entry was cued twice: {moments:?}"
+        );
+        // The line coming round again is a marker, and only a marker.
+        assert_eq!(moments.len(), 2, "{moments:?}");
+        assert_eq!(moments[1].kind, MomentKind::Return);
     }
 
     #[test]

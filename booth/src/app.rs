@@ -1944,7 +1944,10 @@ impl App {
         let name = format!("{} \u{2014} {}", track.artist, track.display_title());
         let lines = track.lyrics.len();
 
-        let placed = crate::job::cue_marks(&cues::assemble(start, candidates));
+        // The last bar the grid names, so "End" lands somewhere a player will
+        // park rather than wherever the file stops.
+        let end = beats.last().copied();
+        let placed = crate::job::cue_marks(&cues::assemble(start, end, candidates));
         let hot = placed.iter().filter(|cue| cue.letter != 0).count();
         crate::info!("cueing #{id} {name} from {}", plural(lines, "line"));
         for line in what_the_words_decided(&words, &before, &placed) {
@@ -10075,12 +10078,24 @@ mod tests {
             fn a_track_with_no_words_still_gets_its_phrases_cued() {
                 let (mut app, id) = sung("phrases", &[]);
                 app.auto_cue(id);
-                // The intro is on the memory cue, which is where the player
-                // parks when the track loads, so it costs no hot cue.
+                // The first section is on the memory cue, which is where the
+                // player parks when the track loads, so it costs no hot cue.
                 let cues = &app.library.get(id).unwrap().cues;
                 assert_eq!(cues[0].letter, 0);
-                assert_eq!(cues[0].label, "intro");
+                assert_eq!(cues[0].label, "Start");
                 assert_eq!(labels(&app, id), vec!["drop".to_string()]);
+
+                // And every section it did not take is a named memory cue, so
+                // the list reads as an arrangement rather than as a row of
+                // identical markers.
+                let marks: Vec<&str> = cues
+                    .iter()
+                    .filter(|cue| cue.letter == 0)
+                    .map(|cue| cue.label.as_str())
+                    .collect();
+                assert_eq!(marks.first(), Some(&"Start"));
+                assert!(marks.contains(&"Drop 1"), "{marks:?}");
+                assert_eq!(marks.last(), Some(&"End"), "{marks:?}");
             }
 
             #[test]

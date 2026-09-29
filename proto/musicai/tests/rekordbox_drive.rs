@@ -428,6 +428,19 @@ fn the_cues_on_the_drive_are_named_and_coloured() {
         .expect("no hot cue list");
     let count: usize = hot.trim_end_matches(" hot cues").parse().unwrap();
     assert!((1..=8).contains(&count), "{count} hot cues");
+
+    // And the memory list, which is where the arrangement goes: a player holds
+    // as many of these as a track needs, so every section and every time the
+    // hook comes round gets a named marker rather than competing for one of
+    // the eight buttons.
+    let memory = sections
+        .iter()
+        .filter(|s| s.fourcc == "PCOB" && s.summary.contains("memory"))
+        .map(|s| s.summary.clone())
+        .next()
+        .expect("no memory cue list");
+    let marks: usize = memory.trim_end_matches(" memory cues").parse().unwrap();
+    assert!(marks > 1, "the drive got {marks} memory cues, so the arrangement is not on it");
 }
 
 #[test]
