@@ -2354,6 +2354,22 @@ impl App {
 
     // -- the sync ----------------------------------------------------------
 
+    /// How many of the drive's tracks have a kit rendered.
+    ///
+    /// Counted off the collection rather than off the plan, because the plan
+    /// counts files and the question being asked on the sheet is about records:
+    /// three files from one track and three from three read the same otherwise.
+    fn kits_going_on(&self) -> usize {
+        sync::wanted(
+            &self.library,
+            self.library.drives.get(self.drive).unwrap_or(&Drive::default()),
+        )
+        .iter()
+        .filter_map(|id| self.library.get(*id))
+        .filter(|track| track.stems.each().iter().any(|(_, part)| part.is_some()))
+        .count()
+    }
+
     /// The drive's playlists, as the exporter wants them: paths in play order.
     ///
     /// A stem companion follows its parent rather than going to the end, so
@@ -2375,7 +2391,7 @@ impl App {
                     .filter_map(|id| self.library.get(*id))
                     .flat_map(|track| {
                         let mut paths = vec![track.path.clone()];
-                        if drive.with_stems {
+                        if !drive.skip_stems {
                             paths.extend(
                                 track.stems.each().into_iter().filter_map(|(_, s)| s.cloned()),
                             );
@@ -2387,11 +2403,56 @@ impl App {
             .collect()
     }
 
+    /// Notice kits that were rendered but never recorded, for these tracks.
+    ///
+    /// What goes on a drive is decided from the collection, so a kit the
+    /// collection does not know about is a kit that stays on the laptop — and
+    /// that is a silence rather than an error. The files are named after their
+    /// track, so asking the disk is cheap and the answer is not a guess.
+    ///
+    /// Returns how many tracks gained one, so the write can say so.
+    fn notice_rendered_kits(&mut self, ids: &[u32]) -> usize {
+        let stems_in = self.config.stems_location();
+        let mut found = 0;
+        for id in ids {
+            let Some(track) = self.library.get(*id) else { continue };
+            if track.stems.is_complete() {
+                continue;
+            }
+            let on_disk = crate::job::find_stems(&stems_in, &track.path);
+            if on_disk.is_empty() {
+                continue;
+            }
+            let Some(track) = self.library.get_mut(*id) else { continue };
+            if track.stems.fill_from(&on_disk) {
+                found += 1;
+            }
+        }
+        found
+    }
+
     fn write_drive(&mut self) {
         let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
         // What should be on the drive when this is done: the union of its
         // playlists, which is what the plan was worked out against.
         let wanted: Vec<u32> = sync::wanted(&self.library, &drive);
+
+        // Before anything is counted: a kit rendered in an earlier run, or by
+        // hand into the stems folder, is one the collection may never have been
+        // told about. Everything below decides from the collection, so this is
+        // the last moment the drive can gain it.
+        if !drive.skip_stems {
+            match self.notice_rendered_kits(&wanted) {
+                0 => {}
+                found => {
+                    crate::info!(
+                        "found a kit on disk for {} that the collection had not recorded",
+                        plural(found, "track")
+                    );
+                    self.save();
+                }
+            }
+        }
 
         // Tracks the player has edited since this drive was written, and that
         // the person has said to leave as they are. Taken out of the plan
@@ -2458,12 +2519,8 @@ impl App {
         // than expected, and nothing distinguishes the three reasons: the drive
         // not carrying them, nothing being rendered, or a kit naming files that
         // have since moved. All three look identical on the stick afterwards.
-        let rendered = wanted
-            .iter()
-            .filter_map(|id| self.library.get(*id))
-            .filter(|track| track.stems.each().iter().any(|(_, part)| part.is_some()))
-            .count();
-        if drive.with_stems {
+        let rendered = self.kits_going_on();
+        if !drive.skip_stems {
             let missing = plan
                 .stems
                 .iter()
@@ -2630,7 +2687,7 @@ impl App {
             playlist: String::new(),
             playlists,
             written: Vec::new(),
-            with_stems: false,
+            skip_stems: false,
             bytes: 0,
             last_sync: None,
         });
@@ -8658,7 +8715,7 @@ impl App {
         // Toggled here rather than applied in place: the sheet is drawing a
         // clone of the drive, and the plan under it was worked out before this
         // frame. Read back after the window closes, so one change redraws once.
-        let mut with_stems = drive.with_stems;
+        let mut with_stems = !drive.skip_stems;
         egui::Window::new(format!("SYNC → {}", drive.label))
             .open(&mut open)
             .collapsible(false)
@@ -8748,10 +8805,14 @@ impl App {
                         ui,
                         "Stems",
                         &match with_stems {
-                            false => "not carried".to_string(),
-                            true => match self.plan.stems.len() {
-                                0 => "none rendered".to_string(),
-                                n => format!("{n} files"),
+                            false => "held back".to_string(),
+                            true => match (self.plan.new_stems.len(), self.plan.stems.len()) {
+                                (0, 0) => "none rendered".to_string(),
+                                (0, on) => format!("{on} already on"),
+                                (n, _) => format!(
+                                    "{n} files from {}",
+                                    plural(self.kits_going_on(), "track")
+                                ),
                             },
                         },
                         &sync::bytes(self.plan.stem_bytes),
@@ -8759,10 +8820,11 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add_space(74.0);
                         ui.checkbox(&mut with_stems, "Carry stems").on_hover_text(
-                            "Put each track's vocals, drums and melody on the drive beside it, \
-                             in the same folder and next to it in the playlist. Only tracks \
-                             with a kit rendered are affected; it is roughly three times the \
-                             space, and the same again in analysis.",
+                            "On by default: a kit that has been rendered goes on the drive \
+                             beside its track, in the same folder and next to it in the \
+                             playlist. Only tracks with a kit are affected. Turn it off for a \
+                             smaller stick — three files a track, and the same again in \
+                             analysis.",
                         );
                     });
 
@@ -8855,9 +8917,9 @@ impl App {
                     });
                 });
             });
-        if with_stems != drive.with_stems {
+        if with_stems == drive.skip_stems {
             if let Some(drive) = self.library.drives.get_mut(self.drive) {
-                drive.with_stems = with_stems;
+                drive.skip_stems = !with_stems;
             }
             // The plan changes by three files a track, and so does the space
             // check under it. Both are on screen, so both are redone now rather
@@ -11451,7 +11513,6 @@ mod tests {
                 track.stems.drums = Some("/stems/Sirens-drums.wav".into());
                 track.stems.melody = Some("/stems/Sirens-melody.wav".into());
             }
-            app.library.drives[0].with_stems = true;
 
             let drive = app.library.drives[0].clone();
             let specs = app.drive_playlists(&drive);
@@ -11479,7 +11540,6 @@ mod tests {
                 track.stems.drums = Some("/stems/Sirens-drums.wav".into());
                 track.stems.melody = Some("/stems/Sirens-melody.wav".into());
             }
-            app.library.drives[0].with_stems = true;
             app.replan();
 
             let drive = app.library.drives[0].clone();
@@ -11491,6 +11551,56 @@ mod tests {
                     carry.files
                 );
             }
+        }
+
+        #[test]
+        fn a_rendered_kit_goes_on_without_anyone_ticking_a_box() {
+            // Why nobody's stems reached a stick: carrying them was a choice
+            // that defaulted to no, made on a sheet most people never opened.
+            // A kit exists because somebody asked for one, so the drive it goes
+            // with is the answer unless they say otherwise.
+            let mut app = a_drive_up_to_date("kits by default");
+            let id = app.library.playlists[0].tracks[0];
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.stems.vocals = Some("/stems/Sirens-vocals.wav".into());
+                track.stems.drums = Some("/stems/Sirens-drums.wav".into());
+                track.stems.melody = Some("/stems/Sirens-melody.wav".into());
+            }
+            app.replan();
+
+            assert_eq!(app.plan.stems.len(), 3, "a rendered kit was left off a fresh drive");
+            assert!(app.plan.delta().contains("3 stems"), "{}", app.plan.delta());
+        }
+
+        #[test]
+        fn a_kit_on_disk_the_collection_never_heard_about_is_noticed() {
+            // A kit rendered in a run that ended before the collection was
+            // saved, or dropped into the folder by hand, is three files the
+            // drive would otherwise never be told about. The write is the last
+            // chance to look, and the files are named after their track, so
+            // looking is cheap and the answer is not a guess.
+            let dir = std::env::temp_dir().join(format!("booth-found-kit-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let track = dir.join("Sirens.flac");
+            std::fs::write(&track, b"").unwrap();
+            for part in ["vocals", "drums", "melody"] {
+                std::fs::write(dir.join(format!("Sirens-{part}.wav")), b"").unwrap();
+            }
+
+            let mut app = app("found kit");
+            let id = app.library.add(&track);
+            assert!(app.library.get(id).unwrap().stems.is_empty(), "the fixture starts with none");
+
+            assert_eq!(app.notice_rendered_kits(&[id]), 1);
+            let kit = &app.library.get(id).unwrap().stems;
+            assert!(kit.is_complete(), "the kit beside the track was not picked up: {kit:?}");
+            // Asking twice must not report a second find, or every write would
+            // save the collection for nothing.
+            assert_eq!(app.notice_rendered_kits(&[id]), 0);
+
+            let _ = std::fs::remove_dir_all(&dir);
         }
 
         #[test]

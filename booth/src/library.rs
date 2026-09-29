@@ -115,16 +115,22 @@ impl StemKit {
     }
 
     /// Take the parts this kit lacks from `other`, leaving the rest alone.
-    pub fn fill_from(&mut self, other: &StemKit) {
+    ///
+    /// Says whether it took any, so a caller that is about to save the
+    /// collection can tell a kit that arrived from one that was already there.
+    pub fn fill_from(&mut self, other: &StemKit) -> bool {
+        let mut took = false;
         for (mine, theirs) in [
             (&mut self.vocals, &other.vocals),
             (&mut self.drums, &other.drums),
             (&mut self.melody, &other.melody),
         ] {
-            if mine.is_none() {
+            if mine.is_none() && theirs.is_some() {
                 mine.clone_from(theirs);
+                took = true;
             }
         }
+        took
     }
 
     /// Whether `path` is one of the parts this kit names.
@@ -1096,8 +1102,16 @@ pub struct Drive {
     pub playlists: Vec<String>,
     /// What was on it after the last sync.
     pub written: Vec<Written>,
-    /// Whether the stem companions went on too.
-    pub with_stems: bool,
+    /// Whether the stem companions are held back.
+    ///
+    /// A rendered kit goes on the drive with its track unless this says not to,
+    /// because a kit exists only because somebody asked for one and a stick
+    /// that quietly leaves it behind is a stick with no acapella in the booth.
+    /// The name is the negative one so that a collection written before this —
+    /// which stored the question the other way round, and stored it as "no" for
+    /// every drive that was never told otherwise — starts carrying them.
+    #[serde(default)]
+    pub skip_stems: bool,
     pub bytes: u64,
     pub last_sync: Option<u64>,
 }
@@ -1556,7 +1570,7 @@ impl Library {
         // copy it came from, and it is not something to be asked about.
         kept.last_played = kept.last_played.max(copy.last_played);
         if take(Field::Stems) {
-            kept.stems.fill_from(&copy.stems);
+            let _ = kept.stems.fill_from(&copy.stems);
         }
         let kept_path = kept.path.clone();
         if analysis {
@@ -2053,6 +2067,59 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn a_drive_written_before_the_kits_were_default_starts_carrying_them() {
+        // The reason nobody's stems reached a stick. The old field said whether
+        // to carry them and every drive was made with it off, so a kit that had
+        // been rendered stayed on the laptop unless somebody found the tick box.
+        // Reading a collection from that build has to come back carrying them,
+        // or the fix only helps drives added from now on.
+        let older = r#"{
+            "tracks": [],
+            "playlists": [],
+            "saved": [],
+            "next_id": 1,
+            "drives": [{
+                "label": "TRANSCEND",
+                "path": "/Volumes/TRANSCEND",
+                "is_image": false,
+                "playlists": ["Saturday"],
+                "written": [],
+                "with_stems": false,
+                "bytes": 0,
+                "last_sync": null
+            }]
+        }"#;
+        let read: Library = serde_json::from_str(older).expect("an older collection should open");
+        assert!(!read.drives[0].skip_stems, "the drive still will not carry its kits");
+    }
+
+    #[test]
+    fn a_drive_remembers_that_its_kits_are_held_back() {
+        // The other half: somebody who wants a small stick unticks the box, and
+        // that has to survive a restart too, or the drive quietly triples.
+        let mut library = Library::default();
+        library.drives.push(Drive {
+            label: "USB".into(),
+            path: PathBuf::from("/Volumes/USB"),
+            skip_stems: true,
+            playlists: vec!["Saturday".into()],
+            ..Drive::default()
+        });
+        let mut track = Track::placeholder(1);
+        track.stems.vocals = Some("/stems/a-vocals.wav".into());
+        track.stems.drums = Some("/stems/a-drums.wav".into());
+        track.stems.melody = Some("/stems/a-melody.wav".into());
+        library.tracks.push(track);
+
+        let written = serde_json::to_string(&library).expect("a collection should serialise");
+        let read: Library = serde_json::from_str(&written).expect("and read back");
+
+        assert!(read.drives[0].skip_stems, "the drive forgot that its kits are held back");
+        let kit = &read.tracks[0].stems;
+        assert!(kit.vocals.is_some() && kit.drums.is_some() && kit.melody.is_some(), "{kit:?}");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("booth-{name}-{}", std::process::id()));

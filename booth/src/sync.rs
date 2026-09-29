@@ -25,13 +25,21 @@ pub struct Plan {
     /// artist — the checks below have to ask the same question the writer
     /// does, and the stem's own tags are not what it answers with.
     pub stems: Vec<(u32, PathBuf)>,
+    /// The subset of `stems` this write would actually copy: the rest are
+    /// already on the drive and carried. A drive holding its kits has a full
+    /// `stems` and an empty one of these, which is the difference between "up
+    /// to date" and "three files a track, every time, for ever".
+    pub new_stems: Vec<(u32, PathBuf)>,
     pub add_bytes: u64,
     pub stem_bytes: u64,
 }
 
 impl Plan {
     pub fn is_empty(&self) -> bool {
-        self.add.is_empty() && self.update.is_empty() && self.remove.is_empty()
+        self.add.is_empty()
+            && self.update.is_empty()
+            && self.remove.is_empty()
+            && self.new_stems.is_empty()
     }
 
     /// The line the dock shows, permanently, because it is the number that
@@ -50,8 +58,8 @@ impl Plan {
         if !self.remove.is_empty() {
             parts.push(format!("{} to remove", self.remove.len()));
         }
-        if !self.stems.is_empty() {
-            parts.push(format!("{} stems", self.stems.len()));
+        if !self.new_stems.is_empty() {
+            parts.push(format!("{} stems", self.new_stems.len()));
         }
         parts.join(" · ")
     }
@@ -107,11 +115,23 @@ pub fn plan(library: &Library, drive: &Drive) -> Plan {
                 }
             }
         }
-        if drive.with_stems {
+        if !drive.skip_stems {
+            // A stem is already on the drive only if the drive's record names
+            // that very file and its parent is not being written again — the
+            // same two conditions `carry` decides by, asked here so the sheet
+            // and the space check describe the write that is about to happen.
+            let rewriting = plan.add.contains(id) || plan.update.iter().any(|(w, _)| w == id);
+            let recorded = drive.written.iter().find(|w| w.id == *id);
             for (_, path) in track.stems.each() {
                 let Some(path) = path else { continue };
-                plan.stem_bytes += std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
                 plan.stems.push((*id, path.clone()));
+                let on_drive = !drive.is_image
+                    && !rewriting
+                    && recorded.is_some_and(|w| w.stems.iter().any(|(had, _)| had == path));
+                if !on_drive {
+                    plan.stem_bytes += std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    plan.new_stems.push((*id, path.clone()));
+                }
             }
         }
     }
@@ -172,7 +192,7 @@ pub fn carry(library: &Library, drive: &Drive, plan: &Plan) -> Carry {
             };
             out.already.push((track.path.clone(), row));
             out.carried.push(track.id);
-            if !drive.with_stems {
+            if drive.skip_stems {
                 continue;
             }
             for (path, row) in &written.stems {
@@ -641,7 +661,7 @@ fn space(plan: &Plan, destination: &Path, is_image: bool) -> Check {
 /// Stems count. Each one is a row on the player with its own grid, waveform and
 /// cues, so a drive carrying them needs four times this, not one.
 fn analysis_allowance(plan: &Plan) -> u64 {
-    (plan.writes().len() + plan.stems.len()) as u64 * 2 * 1024 * 1024
+    (plan.writes().len() + plan.new_stems.len()) as u64 * 2 * 1024 * 1024
 }
 
 /// Free bytes on the filesystem holding `path`, if it can be found out.
@@ -1107,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn stems_go_on_only_when_the_drive_carries_them() {
+    fn a_rendered_kit_goes_on_unless_the_drive_is_told_not_to() {
         let (mut library, ids) = library_with(1);
         let track = library.get_mut(ids[0]).unwrap();
         track.stems.vocals = Some("/stems/a-vocals.wav".into());
@@ -1115,10 +1135,26 @@ mod tests {
         track.stems.drums = Some("/stems/a-drums.wav".into());
 
         let mut drive = drive_for(&library, &[]);
-        assert!(plan(&library, &drive).stems.is_empty());
+        assert_eq!(plan(&library, &drive).stems.len(), 3, "a rendered kit was left behind");
 
-        drive.with_stems = true;
-        assert_eq!(plan(&library, &drive).stems.len(), 3);
+        drive.skip_stems = true;
+        assert!(plan(&library, &drive).stems.is_empty());
+    }
+
+    #[test]
+    fn stems_already_on_the_drive_do_not_keep_it_looking_out_of_date() {
+        // Carrying kits by default is only bearable if a drive that has them
+        // says so. Counting every stem as work would put "3 stems" on the dock
+        // for ever and copy them again on every write.
+        let (mut library, ids) = library_with(1);
+        give_stems(&mut library, ids[0]);
+        let drive = written_drive(&library, &ids, true);
+
+        let plan = plan(&library, &drive);
+        assert_eq!(plan.stems.len(), 3, "the drive is still meant to hold them");
+        assert!(plan.new_stems.is_empty(), "they would be copied again: {:?}", plan.new_stems);
+        assert!(plan.is_empty(), "{}", plan.delta());
+        assert_eq!(plan.stem_bytes, 0, "space was reserved for files already there");
     }
 
     #[test]
@@ -1131,7 +1167,7 @@ mod tests {
         library.get_mut(ids[0]).unwrap().stems.vocals =
             Some(PathBuf::from(format!("/stems/{}-vocals.wav", "B".repeat(240))));
 
-        let drive = Drive { with_stems: true, ..drive_for(&library, &[]) };
+        let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
         let checks = preflight(&library, &plan, Path::new("/tmp"), false);
         assert!(
@@ -1148,11 +1184,11 @@ mod tests {
         track.stems.drums = Some("/stems/a-drums.wav".into());
         track.stems.melody = Some("/stems/a-melody.wav".into());
 
-        let bare = analysis_allowance(&plan(&library, &drive_for(&library, &[])));
-        let carrying = analysis_allowance(&plan(
+        let bare = analysis_allowance(&plan(
             &library,
-            &Drive { with_stems: true, ..drive_for(&library, &[]) },
+            &Drive { skip_stems: true, ..drive_for(&library, &[]) },
         ));
+        let carrying = analysis_allowance(&plan(&library, &drive_for(&library, &[])));
         // Each stem is a row on the player, with a grid, a waveform and cues of
         // its own on the drive. A drive carrying them needs four times the room
         // for analysis, not the same amount.
@@ -1195,7 +1231,7 @@ mod tests {
                 theirs: None,
             });
         }
-        Drive { with_stems, written, ..drive_for(library, &[]) }
+        Drive { skip_stems: !with_stems, written, ..drive_for(library, &[]) }
     }
 
     #[test]
@@ -1268,7 +1304,7 @@ mod tests {
     fn a_drive_that_no_longer_carries_stems_carries_none_of_their_rows() {
         let (mut library, ids) = library_with(1);
         give_stems(&mut library, ids[0]);
-        let drive = Drive { with_stems: false, ..written_drive(&library, &ids, true) };
+        let drive = Drive { skip_stems: true, ..written_drive(&library, &ids, true) };
 
         let carry = carry(&library, &drive, &plan(&library, &drive));
         assert_eq!(carry.already.len(), 1, "only the track's own row: {:?}", carry.already);
