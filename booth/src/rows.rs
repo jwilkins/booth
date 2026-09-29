@@ -465,7 +465,11 @@ fn columns_menu(response: &egui::Response, layout: &mut Layout, head: &mut Head)
             }
         }
         ui.separator();
-        if ui.button("Reset to default").clicked() {
+        if ui
+            .button("Reset to default")
+            .on_hover_text("Put the columns back to the ones this window opens with.")
+            .clicked()
+        {
             *layout = Layout::default();
             head.chosen = true;
             ui.close();
@@ -532,6 +536,40 @@ impl Action {
             Action::Reveal => "Copy the file path",
             Action::RemoveFromPlaylist => "Remove from this playlist",
             Action::Forget => "Remove from the collection",
+        }
+    }
+
+    /// What resting on the item says, which is what the label has no room for.
+    ///
+    /// The label is a verb and the help is the consequence, because the two
+    /// items a mis-click costs most — taking a track out of a list and taking
+    /// it out of the collection — read almost the same and are not the same.
+    pub fn about(self) -> &'static str {
+        match self {
+            Action::Play => "Hear it on the deck.",
+            Action::AddTo(_) | Action::AddToNew => "Put it at the end of a playlist.",
+            Action::Analyze => {
+                "Listen to it: tempo, grid, key, sections and a waveform. A minute or so a track."
+            }
+            Action::Identify => {
+                "Fingerprint the audio and ask what it is. Nothing already filled in is overwritten."
+            }
+            Action::Separate => {
+                "Render a vocals, drums and melody kit with demucs. Slow, and done once."
+            }
+            Action::AutoCue => {
+                "Read the words off the vocal stem and set the cues from what is sung."
+            }
+            Action::CopyIn => {
+                "Copy the file into the library folder, so a drive being unplugged does not lose it."
+            }
+            Action::Reveal => "Put the file's path on the clipboard.",
+            Action::RemoveFromPlaylist => {
+                "Take it out of this playlist only. It stays in the collection."
+            }
+            Action::Forget => {
+                "Take it out of the collection and out of every playlist. The file is not deleted."
+            }
         }
     }
 }
@@ -755,7 +793,7 @@ fn context_menu(
             if item == Action::AddToNew {
                 ui.menu_button(egui::RichText::new("Add to playlist").color(theme::text()), |ui| {
                     for (at, name) in menu.playlists.iter().enumerate() {
-                        if ui.button(name).clicked() {
+                        if ui.button(name).on_hover_text(format!("Add them to {name}.")).clicked() {
                             chosen = Some(Action::AddTo(at));
                             ui.close();
                         }
@@ -763,11 +801,17 @@ fn context_menu(
                     if !menu.playlists.is_empty() {
                         ui.separator();
                     }
-                    if ui.button("New playlist\u{2026}").clicked() {
+                    if ui
+                        .button("New playlist\u{2026}")
+                        .on_hover_text("Make a playlist and put them in it.")
+                        .clicked()
+                    {
                         chosen = Some(Action::AddToNew);
                         ui.close();
                     }
-                });
+                })
+                .response
+                .on_hover_text("Put the selected tracks at the end of one of your playlists.");
                 continue;
             }
             // Only the one that reaches past the playlist is coloured as a
@@ -775,7 +819,7 @@ fn context_menu(
             // undone, and losing it from the collection is not.
             let label = egui::RichText::new(item.label(track, menu))
                 .color(if item == Action::Forget { theme::alert() } else { theme::text() });
-            if ui.button(label).clicked() {
+            if ui.button(label).on_hover_text(item.about()).clicked() {
                 chosen = Some(item);
                 ui.close();
             }

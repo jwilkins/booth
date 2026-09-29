@@ -252,6 +252,13 @@ pub struct App {
     plan: Plan,
     /// Set while the sync sheet is open.
     sheet: bool,
+    /// Set while the sync sheet's details window is open.
+    ///
+    /// A separate window rather than a taller sheet: the summary answers "is
+    /// this the write I meant", which is four lines, and the details answer
+    /// "which track is that", which is as many lines as the write has changes.
+    /// Putting the second inside the first made the sheet a scroll either way.
+    details: bool,
     /// Set while the settings sheet is open.
     settings: bool,
     /// Tracks found outside the library, waiting for an answer. Only ever set
@@ -641,6 +648,7 @@ impl App {
             drive: 0,
             plan: Plan::default(),
             sheet: false,
+            details: false,
             settings: false,
             asking: Vec::new(),
             questions: Vec::new(),
@@ -975,7 +983,11 @@ impl App {
                     .color(theme::dim()),
             );
             ui.add_space(8.0);
-            if ui.button("Put them back").clicked() {
+            if ui
+                .button("Put them back")
+                .on_hover_text("Bring the browser and the prep pane back into the main window.")
+                .clicked()
+            {
                 self.set_out(Pane::Browser, false);
                 self.set_out(Pane::Prep, false);
             }
@@ -2942,6 +2954,7 @@ fn bitrate(bytes: u64, duration_secs: f64) -> u32 {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.wake_from(ctx);
+        theme::help_delay(ctx, self.config.help_delay_ms);
         self.collect();
         self.collect_picked();
         if let Some(what) = self.want_pick.take() {
@@ -3022,6 +3035,10 @@ impl eframe::App for App {
 
         if self.sheet {
             self.sync_sheet(ctx);
+        }
+        // After the sheet, so it sits over it rather than under it.
+        if self.details {
+            self.details_window(ctx);
         }
         if self.settings {
             self.settings_sheet(ctx);
@@ -3252,6 +3269,11 @@ impl App {
         if std::mem::take(&mut self.settings) {
             return true;
         }
+        // Before the sheet it was opened from, or one press would shut both
+        // and the way back to the summary would be to open the sheet again.
+        if std::mem::take(&mut self.details) {
+            return true;
+        }
         std::mem::take(&mut self.sheet)
     }
 
@@ -3262,6 +3284,12 @@ impl App {
         ctx.input_mut(|i| {
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::K) {
                 self.focus_bar = true;
+            }
+            // Where every other program on the machine keeps its settings. On
+            // a Mac that is cmd-comma; COMMAND is control everywhere else,
+            // which is where the same habit lives there.
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma) {
+                self.settings = true;
             }
             if typing {
                 return;
@@ -3536,7 +3564,11 @@ impl App {
                         .monospace()
                         .color(theme::dim()),
                 );
-            let response = ui.add(field);
+            let response = ui.add(field).on_hover_text(
+                "Narrow the browser to what matches. Words match the artist, title and album; \
+                 bpm:, key:, tag:, played:, added: and missing: ask about one thing each. \
+                 \u{2318}K from anywhere puts the cursor here.",
+            );
             if self.focus_bar {
                 response.request_focus();
                 self.focus_bar = false;
@@ -3742,7 +3774,10 @@ impl App {
         }
         if !self.text.trim().is_empty()
             && !saved.iter().any(|q| q.text == self.text)
-            && ui.button(RichText::new("save this one").size(theme::SMALL)).clicked()
+            && ui
+                .button(RichText::new("save this one").size(theme::SMALL))
+                .on_hover_text("Keep this query in the sidebar, so the same question is one click from now on.")
+                .clicked()
         {
             let name = self.text.clone();
             self.library.saved.push(SavedQuery { name, text: self.text.clone() });
@@ -3790,14 +3825,22 @@ impl App {
                         .sense(egui::Sense::click()),
                     );
                     response.context_menu(|ui| {
-                        if ui.button("Rename\u{2026}").clicked() {
+                        if ui
+                            .button("Rename\u{2026}")
+                            .on_hover_text("Give this folder another name. The playlists in it stay where they are.")
+                            .clicked()
+                        {
                             self.naming = Some(Naming::rename_folder(&folder));
                             ui.close();
                         }
                         // The playlists come back to the top level rather than
                         // going with it, so this loses the filing and not the
                         // work — which is why it needs no confirmation.
-                        if ui.button("Delete folder").clicked() {
+                        if ui
+                            .button("Delete folder")
+                            .on_hover_text("Lose the filing, not the work: the playlists inside come back to the top level.")
+                            .clicked()
+                        {
                             self.library.remove_folder(&folder);
                             self.pending_save = true;
                             ui.close();
@@ -3834,6 +3877,11 @@ impl App {
                         self.pending.push(Pending::AddToPlaylist(dragged.0.clone(), name.clone()));
                     }
 
+                    let response = response.on_hover_text(format!(
+                        "Show {name} \u{2014} {}. Rows can be dragged onto it; right-click to \
+                         rename, move or delete it.",
+                        plural(count, "track")
+                    ));
                     if response.clicked() {
                         self.view = View::Playlist;
                         self.playlist = name.clone();
@@ -3842,22 +3890,37 @@ impl App {
                     response.context_menu(|ui| {
                         ui.label(RichText::new(&name).color(theme::dim()).size(theme::SMALL));
                         ui.separator();
-                        if ui.button("Rename\u{2026}").clicked() {
+                        if ui
+                            .button("Rename\u{2026}")
+                            .on_hover_text("Give this playlist another name. A drive carrying it follows the new one.")
+                            .clicked()
+                        {
                             self.naming = Some(Naming::rename_playlist(&name));
                             ui.close();
                         }
                         ui.menu_button("Move to", |ui| {
-                            if !folder.is_empty() && ui.button("Top level").clicked() {
+                            if !folder.is_empty()
+                                && ui
+                                    .button("Top level")
+                                    .on_hover_text("Take it out of its folder.")
+                                    .clicked()
+                            {
                                 self.move_playlist(&name, "");
                                 ui.close();
                             }
                             for other in folders.iter().filter(|f| **f != folder) {
-                                if ui.button(other).clicked() {
+                                if ui
+                                    .button(other)
+                                    .on_hover_text(format!("File it under {other}."))
+                                    .clicked()
+                                {
                                     self.move_playlist(&name, other);
                                     ui.close();
                                 }
                             }
-                        });
+                        })
+.response
+.on_hover_text("Put this playlist in one of the sidebar's folders.");
                         if ui
                             .button("Delete playlist")
                             .on_hover_text("The tracks stay in the collection")
@@ -3906,11 +3969,15 @@ impl App {
     /// half-typed name left behind by a click elsewhere is not an instruction.
     fn name_field(&mut self, ui: &mut Ui) {
         let Some(naming) = &mut self.naming else { return };
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut naming.text)
-                .desired_width(f32::INFINITY)
-                .hint_text(RichText::new(naming.what.hint()).color(theme::dim())),
-        );
+        let response = ui
+            .add(
+                egui::TextEdit::singleline(&mut naming.text)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(RichText::new(naming.what.hint()).color(theme::dim())),
+            )
+            .on_hover_text(
+                "Enter keeps the name, Escape abandons it. Clicking away abandons it too.",
+            );
 
         // Asked for once, on the frame the field appears — never again.
         //
@@ -4144,7 +4211,8 @@ impl App {
                 egui::TextEdit::singleline(&mut self.playlist_entry)
                     .desired_width(width)
                     .hint_text(RichText::new("name").color(theme::dim())),
-            );
+            )
+            .on_hover_text("What to call the playlist the tracks showing would go into.");
             let name = self.playlist_entry.trim().to_string();
             if ui
                 .add_enabled(
@@ -5038,12 +5106,18 @@ impl App {
                 if self.cue_entry.0 != Some((track.id, letter)) {
                     self.cue_entry = (Some((track.id, letter)), cue.label.clone());
                 }
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.cue_entry.1)
-                        .desired_width(140.0)
-                        .font(theme::mono(10.5))
-                        .hint_text(RichText::new("name this cue").monospace().color(theme::dim())),
-                );
+                let response = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.cue_entry.1)
+                            .desired_width(140.0)
+                            .font(theme::mono(10.5))
+                            .hint_text(
+                                RichText::new("name this cue").monospace().color(theme::dim()),
+                            ),
+                    )
+                    .on_hover_text(
+                        "What a player shows under this cue. It goes on the drive with it.",
+                    );
                 if response.changed() || response.lost_focus() {
                     self.pending.push(Pending::RenameCue {
                         id: track.id,
@@ -5096,11 +5170,13 @@ impl App {
             let width = ui.available_width();
             fn field(ui: &mut Ui, width: f32, label: &str, value: &mut String) {
                 let caption = ui.label(RichText::new(label).color(theme::dim()).size(theme::SMALL));
-                let field = ui.add(
-                    egui::TextEdit::singleline(value)
-                        .desired_width(width)
-                        .font(theme::sans(theme::BODY)),
-                );
+                let field = ui
+                    .add(
+                        egui::TextEdit::singleline(value)
+                            .desired_width(width)
+                            .font(theme::sans(theme::BODY)),
+                    )
+                    .on_hover_text(format!("The track's {}. Save writes it into the file's tags.", label.to_lowercase()));
                 // The caption sits above the box rather than beside it, so
                 // nothing but this says which is which: without it a screen
                 // reader announces four unnamed text boxes, and so does
@@ -5115,10 +5191,20 @@ impl App {
             let changed = editing.differs_from(&track);
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.add_enabled(changed, egui::Button::new("Save")).clicked() {
+                if ui
+                    .add_enabled(changed, egui::Button::new("Save"))
+                    .on_hover_text("Write these fields into the collection, and into the file's tags.")
+                    .on_disabled_hover_text("Nothing has been changed yet.")
+                    .clicked()
+                {
                     self.pending.push(Pending::CommitEdit);
                 }
-                if ui.add_enabled(changed, egui::Button::new("Revert")).clicked() {
+                if ui
+                    .add_enabled(changed, egui::Button::new("Revert"))
+                    .on_hover_text("Put every field back to what the collection says.")
+                    .on_disabled_hover_text("Nothing has been changed yet.")
+                    .clicked()
+                {
                     self.pending.push(Pending::CancelEdit);
                 }
                 if changed {
@@ -5190,7 +5276,11 @@ impl App {
                         .color(theme::alert())
                         .size(theme::SMALL),
                 );
-                if ui.button("Forget this track").clicked() {
+                if ui
+                    .button("Forget this track")
+                    .on_hover_text("Take it out of the collection and out of every playlist. The file is not touched.")
+                    .clicked()
+                {
                     self.pending.push(Pending::Forget(track.id));
                 }
             } else if !self.config.holds(&track.path) {
@@ -5260,7 +5350,11 @@ impl App {
                         .hint_text(RichText::new("add a tag").monospace().color(theme::dim())),
                 );
                 let entered = entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (entered || ui.button("Add").clicked()) && !self.tag_entry.trim().is_empty() {
+                let added = ui
+                    .button("Add")
+                    .on_hover_text("Put this tag on the track. Enter does the same.")
+                    .clicked();
+                if (entered || added) && !self.tag_entry.trim().is_empty() {
                     self.pending.push(Pending::AddTag(track.id, self.tag_entry.trim().to_string()));
                 }
             });
@@ -6055,10 +6149,18 @@ impl App {
             match self.library.drives.get(self.drive).cloned() {
                 None => {
                     ui.label(RichText::new("none set up").color(theme::dim()));
-                    if ui.button("Add a drive…").clicked() {
+                    if ui
+                        .button("Add a drive\u{2026}")
+                        .on_hover_text("Point at a mounted USB stick. It is written the way a player expects to find it.")
+                        .clicked()
+                    {
                         self.want_pick = Some(Picking::Drive);
                     }
-                    if ui.button("Or an image…").clicked() {
+                    if ui
+                        .button("Or an image\u{2026}")
+                        .on_hover_text("Write to a FAT32 disk image file instead, which can be handed to the emulator.")
+                        .clicked()
+                    {
                         self.want_pick = Some(Picking::Image);
                     }
                 }
@@ -6111,18 +6213,25 @@ impl App {
                             for playlist in lists {
                                 let name = playlist.name.clone();
                                 let mut on = carries.contains(&name);
+                                let about = format!(
+                                    "Carry {name} on this drive \u{2014} {}.",
+                                    plural(playlist.tracks.len(), "track")
+                                );
                                 if ui
                                     .checkbox(
                                         &mut on,
                                         format!("{name}  ({})", playlist.tracks.len()),
                                     )
+                                    .on_hover_text(about)
                                     .changed()
                                 {
                                     self.pending.push(Pending::DrivePlaylist { name, on });
                                 }
                             }
                         }
-                    });
+                    })
+.response
+.on_hover_text("Choose which playlists this drive carries. A track in two of them is one track on the stick.");
                     // Every drive the collection knows, named, with the ones
                     // actually here marked as such — and a way to add another
                     // from the same place. Adding used to be offered only
@@ -6144,17 +6253,36 @@ impl App {
                                     true => theme::text(),
                                     false => theme::dim(),
                                 });
-                            if ui.radio(at == self.drive, label).clicked() {
+                            if ui
+                                .radio(at == self.drive, label)
+                                .on_hover_text(match there {
+                                    true => format!("Work with {}.", other.label),
+                                    false => format!(
+                                        "Work with {}. It is not plugged in, so the plan is \
+                                         worked out and nothing is written until it is.",
+                                        other.label
+                                    ),
+                                })
+                                .clicked()
+                            {
                                 self.pending.push(Pending::UseDrive(at));
                                 ui.close();
                             }
                         }
                         ui.separator();
-                        if ui.button("Add a drive\u{2026}").clicked() {
+                        if ui
+                            .button("Add a drive\u{2026}")
+                            .on_hover_text("Point at another mounted USB stick.")
+                            .clicked()
+                        {
                             self.want_pick = Some(Picking::Drive);
                             ui.close();
                         }
-                        if ui.button("Add an image\u{2026}").clicked() {
+                        if ui
+                            .button("Add an image\u{2026}")
+                            .on_hover_text("Write to a FAT32 disk image file, which the emulator can be handed.")
+                            .clicked()
+                        {
                             self.want_pick = Some(Picking::Image);
                             ui.close();
                         }
@@ -6182,7 +6310,9 @@ impl App {
                             self.pending.push(Pending::ForgetDrive(self.drive));
                             ui.close();
                         }
-                    });
+                    })
+.response
+.on_hover_text("Switch between the drives set up here, add another, or hand an image to the emulator.");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Open whenever there is a drive and nothing running,
@@ -6347,7 +6477,11 @@ impl App {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button("Leave it").clicked() {
+                                    if ui
+                                        .button("Leave it")
+                                        .on_hover_text("Keep the name the collection has. Nothing is written to the file.")
+                                        .clicked()
+                                    {
                                         self.pending.push(Pending::AnswerNaming {
                                             id: write.id,
                                             write: false,
@@ -6378,13 +6512,21 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Tag them all").clicked() {
+                    if ui
+                        .button("Tag them all")
+                        .on_hover_text("Write the collection's names into every one of these files' tags.")
+                        .clicked()
+                    {
                         for write in &held {
                             self.pending
                                 .push(Pending::AnswerNaming { id: write.id, write: true });
                         }
                     }
-                    if ui.button("Leave them all").clicked() {
+                    if ui
+                        .button("Leave them all")
+                        .on_hover_text("Answer no to every one. Nothing changes, here or on disk.")
+                        .clicked()
+                    {
                         for write in &held {
                             self.pending
                                 .push(Pending::AnswerNaming { id: write.id, write: false });
@@ -6471,14 +6613,21 @@ impl App {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button("Keep mine").clicked() {
+                                    if ui
+                                        .button("Keep mine")
+                                        .on_hover_text("Keep the names the collection already has for this track.")
+                                        .clicked()
+                                    {
                                         self.pending.push(Pending::AnswerMatch {
                                             id: question.id,
                                             answer: crate::identify::Answer::Mine,
                                         });
                                     }
                                     if question.from_path.is_some()
-                                        && ui.button("Use the path").clicked()
+                                        && ui
+                                            .button("Use the path")
+                                            .on_hover_text("Take the artist and title read out of the file's own name.")
+                                            .clicked()
                                     {
                                         self.pending.push(Pending::AnswerMatch {
                                             id: question.id,
@@ -6510,7 +6659,11 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Use all").clicked() {
+                    if ui
+                        .button("Use all")
+                        .on_hover_text("Take the fingerprint's answer for every question here.")
+                        .clicked()
+                    {
                         for question in &questions {
                             self.pending.push(Pending::AnswerMatch {
                                 id: question.id,
@@ -6518,7 +6671,11 @@ impl App {
                             });
                         }
                     }
-                    if ui.button("Keep all of mine").clicked() {
+                    if ui
+                        .button("Keep all of mine")
+                        .on_hover_text("Leave every one of these tracks named as the collection has it.")
+                        .clicked()
+                    {
                         for question in &questions {
                             self.pending.push(Pending::AnswerMatch {
                                 id: question.id,
@@ -7816,6 +7973,8 @@ impl App {
                                         )
                                         .sense(egui::Sense::click()),
                                     );
+                                    let example = example
+                                        .on_hover_text("Click to put this in the search bar.");
                                     if example.clicked() {
                                         chosen = Some(help.example.to_string());
                                     }
@@ -8027,7 +8186,11 @@ impl App {
                             self.config.library_path = PathBuf::from(shown.trim());
                             changed = true;
                         }
-                        if ui.button("Choose…").clicked() {
+                        if ui
+                            .button("Choose\u{2026}")
+                            .on_hover_text("Pick the folder the collection's own copies of tracks are kept in.")
+                            .clicked()
+                        {
                             pick_library = true;
                         }
                     });
@@ -8070,6 +8233,37 @@ impl App {
                     );
 
                     ui.add_space(14.0);
+                    pane_label(ui, "Hover help");
+                    ui.horizontal(|ui| {
+                        let mut delay = self.config.help_delay_ms;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut delay, 0..=2000)
+                                    .suffix(" ms")
+                                    .step_by(50.0),
+                            )
+                            .on_hover_text(
+                                "How long the pointer has to rest on a control before its help \
+                                 appears. Zero shows it at once; drag it right once you know \
+                                 the window.",
+                            )
+                            .changed()
+                        {
+                            self.config.help_delay_ms = delay;
+                            changed = true;
+                        }
+                    });
+                    ui.label(
+                        RichText::new(
+                            "Every button, box and switch in the window says what it does when \
+                             the pointer rests on it. This is the resting. Settings opens on \
+                             \u{2318}, \u{2014} or ctrl-, where that is the key.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+
+                    ui.add_space(14.0);
                     pane_label(ui, "Colours");
                     ui.horizontal_wrapped(|ui| {
                         for scheme in theme::SCHEMES {
@@ -8078,7 +8272,12 @@ impl App {
                             // rather than eleven words.
                             let label = RichText::new(scheme.name).color(scheme.amber);
                             let picked = self.config.theme == scheme.name;
-                            if ui.radio(picked, label).clicked() && !picked {
+                            if ui
+                                .radio(picked, label)
+                                .on_hover_text(format!("Draw the window in {}.", scheme.name))
+                                .clicked()
+                                && !picked
+                            {
                                 self.config.theme = scheme.name.to_string();
                                 theme::use_scheme(scheme.name);
                                 theme::install(ui.ctx());
@@ -8101,7 +8300,10 @@ impl App {
                     pane_label(ui, "Track length");
                     ui.horizontal(|ui| {
                         for unit in crate::config::Length::ALL {
-                            if ui.radio_value(&mut self.config.length, unit, unit.label()).changed()
+                            if ui
+                                .radio_value(&mut self.config.length, unit, unit.label())
+                                .on_hover_text(format!("Show a track's length in {}.", unit.label()))
+                                .changed()
                             {
                                 changed = true;
                             }
@@ -8144,6 +8346,11 @@ impl App {
                                         .color(theme::dim()),
                                     ),
                             )
+                            .on_hover_text(
+                                "Your own AcoustID key, used when looking up what a track is. \
+                                 Free from acoustid.org; the environment variable is used when \
+                                 this is empty.",
+                            )
                             .changed()
                         {
                             changed = true;
@@ -8155,6 +8362,10 @@ impl App {
                             egui::Slider::new(&mut percent, 50.0..=100.0)
                                 .suffix("%")
                                 .text("apply without asking at"),
+                        )
+                        .on_hover_text(
+                            "How sure a lookup has to be before its answer is written in \
+                             without asking. Below this, the match is put to you.",
                         )
                         .changed()
                     {
@@ -8286,6 +8497,10 @@ impl App {
                                 .password(true)
                                 .font(theme::mono(11.0)),
                         )
+                        .on_hover_text(
+                            "The key rekordbox's own master.db is encrypted with. This build \
+                             carries it; this is here for the day it changes.",
+                        )
                         .changed()
                     {
                         self.config.rekordbox_key = key.trim().to_string();
@@ -8362,7 +8577,10 @@ impl App {
                         .size(theme::SMALL),
                     );
                     for what in crate::config::OnForeign::ALL {
-                        if ui.radio_value(&mut self.config.on_foreign, what, what.label()).changed()
+                        if ui
+                            .radio_value(&mut self.config.on_foreign, what, what.label())
+                            .on_hover_text(what.blurb())
+                            .changed()
                         {
                             changed = true;
                         }
@@ -8394,6 +8612,10 @@ impl App {
                                     .desired_width(ui.available_width())
                                     .font(theme::mono(11.0)),
                             )
+                            .on_hover_text(
+                                "The one folder rendered kits go into. Both places are searched \
+                                 whichever is set, so changing it never loses a kit.",
+                            )
                             .changed()
                         {
                             self.config.stems_path = PathBuf::from(shown.trim());
@@ -8422,7 +8644,11 @@ impl App {
                             .color(theme::amber())
                             .size(theme::SMALL),
                         );
-                        if ui.button("Copy them all in").clicked() {
+                        if ui
+                            .button("Copy them all in")
+                            .on_hover_text("Copy every track that lives outside the library folder into it.")
+                            .clicked()
+                        {
                             self.pending.extend(outside.into_iter().map(Pending::Adopt));
                         }
                     }
@@ -8759,10 +8985,18 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.add_space(14.0);
-            if ui.button("Keep all mine").clicked() {
+            if ui
+                .button("Keep all mine")
+                .on_hover_text("Write the collection's version of every one of these, over what the player left.")
+                .clicked()
+            {
                 all = Some(sync::Side::Mine);
             }
-            if ui.button("Keep all the drive's").clicked() {
+            if ui
+                .button("Keep all the drive's")
+                .on_hover_text("Leave every one of these as the player left it, and read it back into the collection.")
+                .clicked()
+            {
                 all = Some(sync::Side::Theirs);
             }
         });
@@ -8785,12 +9019,14 @@ impl App {
                     side,
                     sync::Side::Mine,
                     format!("mine, {}", how_long_ago(clash.mine)),
-                );
+                )
+                .on_hover_text("Write the collection's cues and grid over what the player left.");
                 ui.radio_value(
                     side,
                     sync::Side::Theirs,
                     format!("the drive's, {}", how_long_ago(clash.theirs)),
-                );
+                )
+                .on_hover_text("Keep what the player did, and read it back into the collection.");
             });
         }
 
@@ -8832,6 +9068,7 @@ impl App {
 
         let mut open = true;
         let mut forget = false;
+        let mut details = false;
         // Toggled here rather than applied in place: the sheet is drawing a
         // clone of the drive, and the plan under it was worked out before this
         // frame. Read back after the window closes, so one change redraws once.
@@ -8937,6 +9174,23 @@ impl App {
                         },
                         &sync::bytes(self.plan.stem_bytes),
                     );
+                    ui.horizontal(|ui| {
+                        ui.add_space(74.0);
+                        let changes = self.plan.add.len()
+                            + self.plan.update.len()
+                            + self.plan.remove.len()
+                            + self.plan.new_stems.len();
+                        if ui
+                            .add_enabled(changes > 0, egui::Button::new("Details"))
+                            .on_hover_text(
+                                "Every change this write would make, one to a line. The                                  summary above names three of each; this names all of them,                                  which is what tells you whether the four it is about to                                  remove are the four you meant.",
+                            )
+                            .on_disabled_hover_text("Nothing to write, so there is nothing to list.")
+                            .clicked()
+                        {
+                            details = true;
+                        }
+                    });
                     ui.horizontal(|ui| {
                         ui.add_space(74.0);
                         ui.checkbox(&mut with_stems, "Carry stems").on_hover_text(
@@ -9047,6 +9301,9 @@ impl App {
             self.replan();
             self.save();
         }
+        if details {
+            self.details = true;
+        }
         if forget {
             self.forget_drive_contents();
         }
@@ -9068,6 +9325,87 @@ impl App {
         match ids.len() {
             n if n <= 3 => format!("{} — {}", plural(n, "track"), names.join(", ")),
             n => format!("{} — {} +{}", plural(n, "track"), names.join(", "), n - 3),
+        }
+    }
+
+    /// Every change the next write would make, one to a line.
+    ///
+    /// The summary above it says how many and names three; this says which,
+    /// which is the question somebody opens it with — a drive about to remove
+    /// four tracks is fine or a disaster depending entirely on which four.
+    ///
+    /// A track that has since left the collection still gets a line: it is
+    /// exactly the case worth seeing, and a row that quietly vanished from the
+    /// list would be the write doing something the list did not mention.
+    fn change_lines(&self) -> Vec<(String, egui::Color32)> {
+        let named = |id: u32| match self.library.get(id) {
+            Some(track) => format!("{} \u{2014} {}", track.artist, track.display_title()),
+            None => format!("#{id}, no longer in the collection"),
+        };
+        let mut lines = Vec::new();
+        for id in &self.plan.add {
+            let size = self.library.get(*id).map(|track| track.bytes).unwrap_or(0);
+            lines.push((format!("+  {}  ({})", named(*id), sync::bytes(size)), theme::go()));
+        }
+        for (id, what) in &self.plan.update {
+            lines.push((format!("~  {}  \u{2014} {what}", named(*id)), theme::amber()));
+        }
+        for id in &self.plan.remove {
+            lines.push((format!("\u{2212}  {}", named(*id)), theme::alert()));
+        }
+        for (id, path) in &self.plan.new_stems {
+            let file = path.file_name().unwrap_or_default().to_string_lossy();
+            lines.push((format!("\u{266a}  {file}  \u{2014} with {}", named(*id)), theme::blue()));
+        }
+        lines
+    }
+
+    /// The whole list of changes, scrolled and wrapped, one to a line.
+    fn details_window(&mut self, ctx: &egui::Context) {
+        let lines = self.change_lines();
+        let mut open = true;
+        egui::Window::new("CHANGES")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(620.0)
+            .default_height(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{} the next write would make, in the order it makes them.",
+                        plural(lines.len(), "change")
+                    ))
+                    .color(theme::dim())
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    // Wrapped rather than cut off: a long title with a long
+                    // reason after it is exactly the line worth reading, and
+                    // it is the one that would run off the edge.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    for (line, color) in &lines {
+                        ui.label(RichText::new(line).font(theme::mono(11.0)).color(*color));
+                    }
+                    if lines.is_empty() {
+                        ui.label(
+                            RichText::new("Nothing to write.")
+                                .font(theme::mono(11.0))
+                                .color(theme::dim()),
+                        );
+                    }
+                });
+            });
+        if !open {
+            self.details = false;
         }
     }
 
@@ -11683,6 +12021,90 @@ mod tests {
                     carry.files
                 );
             }
+        }
+
+        #[test]
+        fn settings_opens_on_the_key_every_other_program_uses() {
+            let mut harness = browsing("comma", 2);
+            assert!(!harness.state().settings);
+            press(&mut harness, egui::Key::Comma, egui::Modifiers::COMMAND);
+            assert!(
+                harness.state().settings,
+                "\u{2318}, did not open Settings, which is where every other program keeps it"
+            );
+        }
+
+        #[test]
+        fn the_hover_delay_setting_reaches_the_window_it_describes() {
+            // A delay that only took effect after a restart would be one
+            // nobody could tune: the whole point is to drag it while looking
+            // at the window.
+            let mut app = app("hover");
+            app.config.help_delay_ms = 1500;
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    theme::help_delay(ui.ctx(), app.config.help_delay_ms);
+                },
+                app,
+            );
+            harness.run();
+            assert_eq!(harness.ctx.style().interaction.tooltip_delay, 1.5);
+
+            harness.state_mut().config.help_delay_ms = 0;
+            harness.run();
+            assert_eq!(harness.ctx.style().interaction.tooltip_delay, 0.0);
+        }
+
+        #[test]
+        fn the_details_button_lists_every_change_one_to_a_line() {
+            // The summary names three of each and says "+7". Which seven is
+            // the question somebody opens the sheet with: a drive about to
+            // remove four tracks is fine or a disaster depending on which four.
+            let mut app = a_drive_up_to_date("details");
+            let added = app.library.add(std::path::Path::new("/music/Second.flac"));
+            app.library.get_mut(added).unwrap().artist = "Peverelist".into();
+            app.library.get_mut(added).unwrap().title = "Roll With The Punches".into();
+            app.library.playlists[0].tracks.push(added);
+            app.replan();
+
+            let lines = app.change_lines();
+            assert_eq!(lines.len(), 1, "one line for the one track being added: {lines:?}");
+            assert!(lines[0].0.starts_with('+'), "{lines:?}");
+            assert!(lines[0].0.contains("Roll With The Punches"), "{lines:?}");
+
+            // And the button on the sheet opens the window that shows them.
+            app.sheet = true;
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.sync_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+            harness.get_by_label("Details").click();
+            harness.run();
+            assert!(harness.state().details, "the Details button did not open the window");
+        }
+
+        #[test]
+        fn a_track_the_collection_has_lost_still_gets_a_line() {
+            // The case worth seeing above all: the drive holds a track that is
+            // no longer in the collection, so the write takes it off. A row
+            // that quietly vanished from the list would be the write doing
+            // something the list did not mention.
+            let mut app = a_drive_up_to_date("gone");
+            let id = app.library.playlists[0].tracks[0];
+            app.library.remove(id);
+            // `remove` clears the drive's record too, so put back the one row
+            // that makes this a removal rather than nothing at all.
+            app.library.drives[0].written =
+                vec![crate::library::Written { id, ..Default::default() }];
+            app.replan();
+
+            let lines = app.change_lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].0.contains("no longer in the collection"), "{lines:?}");
         }
 
         #[test]

@@ -487,6 +487,26 @@ pub const SPINNER: &str = "◐";
 pub const WARN: &str = "⚠";
 
 /// Apply the palette to a context. Called once, at startup.
+/// How long the pointer has to rest on a control before its help appears.
+///
+/// Set every frame rather than once: it is a setting somebody can move while
+/// looking at the window, and a hover delay that only takes effect after a
+/// restart is one nobody can tune.
+pub fn help_delay(ctx: &egui::Context, milliseconds: u32) {
+    let wanted = milliseconds as f32 / 1000.0;
+    if ctx.style().interaction.tooltip_delay == wanted {
+        return;
+    }
+    ctx.style_mut(|style| {
+        style.interaction.tooltip_delay = wanted;
+        // The grace period is how long the help stays reachable while the
+        // pointer moves between two controls. Kept short and tied to the delay,
+        // so that a window set to show help at once does not keep showing the
+        // last control's help over the next one.
+        style.interaction.tooltip_grace_time = (wanted * 0.75).min(0.3);
+    });
+}
+
 pub fn install(ctx: &egui::Context) {
     // The proportional face carries Latin and very little else — a tick, an
     // arrow or a folder marker drawn in it comes out as an empty box. The

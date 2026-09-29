@@ -105,6 +105,12 @@ fn default_emulator_port() -> u16 {
     booth_cli::emulator::DEFAULT_PORT
 }
 
+/// Long enough not to flash up while the pointer crosses the window on its way
+/// somewhere, short enough that resting on a control counts as asking.
+fn default_help_delay_ms() -> u32 {
+    400
+}
+
 /// Whether a track's length reads as bars or as beats.
 ///
 /// Bars by default, because that is the unit a set is built in: an intro is
@@ -414,6 +420,15 @@ pub struct Config {
     /// Its first instance is 4445 and each further one is a port along, so
     /// this is what to change when the emulator in front of you is a second
     /// one. Only used by "send to the emulator"; nothing connects on its own.
+    /// How long the pointer has to rest on a control before its help appears,
+    /// in milliseconds.
+    ///
+    /// A number rather than on/off, because the two complaints about hover help
+    /// are opposite ones: it gets in the way, and it never comes. Zero shows it
+    /// at once, which is what somebody learning the window wants; a second and
+    /// a half is what somebody who knows it wants.
+    #[serde(default = "default_help_delay_ms")]
+    pub help_delay_ms: u32,
     #[serde(default = "default_emulator_port")]
     pub emulator_port: u16,
     /// Whether a drive is copied when it is written or plugged in.
@@ -638,6 +653,7 @@ impl Default for Config {
             backups_path: default_backups_path(),
             theme: default_theme(),
             emulator_port: booth_cli::emulator::DEFAULT_PORT,
+            help_delay_ms: default_help_delay_ms(),
             keep_drives: true,
             on_foreign: OnForeign::default(),
             whisper: Whisper::default(),
