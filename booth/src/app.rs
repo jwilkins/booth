@@ -2328,6 +2328,7 @@ impl App {
         if !imported.is_empty() {
             self.ensure_local(&imported);
             self.check_compatibility(&imported);
+            self.check_storage(&imported);
         }
         if !to_read.is_empty() {
             self.read_words(to_read);
@@ -7632,6 +7633,22 @@ impl App {
         let reports: Vec<crate::verify::Report> =
             checked.troubles.iter().filter(|report| ids.contains(&report.id)).cloned().collect();
 
+        // The one trouble in the sheet put right by changing the file rather
+        // than the record. Done before the rest, because a file that cannot be
+        // read is a file whose flag is why.
+        let flagged: Vec<PathBuf> = reports
+            .iter()
+            .filter(|report| {
+                report
+                    .troubles
+                    .contains(&crate::verify::Trouble::Slow(crate::storage::Slow::Quarantined))
+            })
+            .map(|report| report.path.clone())
+            .collect();
+        if !flagged.is_empty() {
+            self.clear_quarantine(&flagged);
+        }
+
         let mut put_right = 0usize;
         let mut restale = 0usize;
         for report in &reports {
@@ -7692,6 +7709,50 @@ impl App {
             self.rebuild();
             self.save();
         }
+    }
+
+    /// Take the macOS quarantine flag off these files.
+    ///
+    /// A folder holding more than one of them is swept whole, which is what
+    /// `xattr -r -d` does and what a person would run: clearing the files alone
+    /// leaves the folder to hand the flag straight back to the next thing
+    /// copied into it. The rest are cleared one by one, and a file somebody
+    /// else owns is reported rather than allowed to stop the others.
+    fn clear_quarantine(&mut self, paths: &[PathBuf]) {
+        let roots = crate::storage::roots(paths);
+        let mut cleared = 0usize;
+        let mut refused = Vec::new();
+        for root in &roots {
+            let (count, no) = crate::storage::clear_tree(root);
+            crate::info!("{}: cleared {count} entries", crate::storage::command_for(root, true));
+            cleared += count;
+            refused.extend(no);
+        }
+        for path in paths.iter().filter(|path| !roots.iter().any(|root| path.starts_with(root))) {
+            match crate::storage::clear(path) {
+                Ok(()) => cleared += 1,
+                Err(e) => refused.push((path.clone(), e)),
+            }
+        }
+
+        for (path, why) in &refused {
+            crate::warn!("could not unquarantine {}: {why}", path.display());
+        }
+        crate::info!("took the quarantine flag off {}", plural(cleared, "file"));
+        self.note(
+            match refused.is_empty() {
+                true => format!("unquarantined {}", plural(cleared, "file")),
+                false => format!(
+                    "unquarantined {}, {} refused — see the log",
+                    plural(cleared, "file"),
+                    refused.len()
+                ),
+            },
+            match refused.is_empty() {
+                true => theme::text(),
+                false => theme::amber(),
+            },
+        );
     }
 
     /// Read the tracks that have never been hashed, so they can be compared.
@@ -8402,6 +8463,62 @@ impl App {
             if !self.incompatible.contains(id) {
                 self.incompatible.push(*id);
             }
+        }
+    }
+
+    /// What was just imported that will be slow to reach, and why.
+    ///
+    /// Said at import rather than at play, because at play it is too late and
+    /// nothing about the file looks wrong in between. The quarantine flag is
+    /// the half of this Booth can take off — "Check" and then "take the files'
+    /// word" does it — and where somebody keeps their music is theirs to
+    /// decide, so that half is said once and not again.
+    fn check_storage(&mut self, ids: &[u32]) {
+        use crate::storage::Slow;
+
+        let mut flagged = 0usize;
+        let mut downloads = 0usize;
+        let mut synced: Vec<(&'static str, usize)> = Vec::new();
+        for id in ids {
+            let Some(track) = self.library.get(*id) else { continue };
+            for slow in crate::storage::slow(&track.path) {
+                match slow {
+                    Slow::Quarantined => flagged += 1,
+                    Slow::Downloads => downloads += 1,
+                    Slow::Synced(service) => match synced.iter_mut().find(|(s, _)| *s == service) {
+                        Some((_, count)) => *count += 1,
+                        None => synced.push((service, 1)),
+                    },
+                }
+            }
+        }
+
+        let mut lines = Vec::new();
+        if flagged > 0 {
+            crate::warn!(
+                "{} carry the macOS quarantine flag, so every play is a Gatekeeper check —                  Check, then take the files' word, takes it off ({})",
+                plural(flagged, "track"),
+                crate::storage::command_for(std::path::Path::new("FOLDER"), true)
+            );
+            lines.push(format!("{} quarantined", plural(flagged, "track")));
+        }
+        if downloads > 0 {
+            crate::warn!(
+                "{} sit in the Downloads folder, where macOS re-flags what lands in it —                  move them into the library folder to be done with it",
+                plural(downloads, "track")
+            );
+            lines.push(format!("{downloads} in Downloads"));
+        }
+        for (service, count) in &synced {
+            crate::warn!(
+                "{} are inside {service}, so playing one may mean fetching it first —                  copy them onto this machine before the night rather than during it",
+                plural(*count, "track")
+            );
+            lines.push(format!("{count} in {service}"));
+        }
+
+        if !lines.is_empty() {
+            self.note(format!("slow to reach: {}", lines.join(", ")), theme::amber());
         }
     }
 

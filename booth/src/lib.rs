@@ -25,6 +25,7 @@ pub mod log;
 pub mod player;
 pub mod query;
 pub mod rows;
+pub mod storage;
 pub mod sync;
 pub mod theme;
 pub mod verify;

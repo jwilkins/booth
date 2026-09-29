@@ -35,6 +35,12 @@ pub enum Trouble {
     Field { field: Field, stored: String, file: String },
     /// A stem kit lists a part that is not on disk.
     StemGone { part: &'static str },
+    /// The file is there and is the right file, and reaching it is slower
+    /// than it should be. Not a disagreement with the collection at all — the
+    /// only trouble here about the disk rather than the record — but this is
+    /// the sweep that already opens every file, and the cost of not saying so
+    /// lands in a booth rather than here.
+    Slow(crate::storage::Slow),
     /// The file's own name says this is something else.
     ///
     /// The only trouble here that is a question rather than a correction, and
@@ -59,6 +65,7 @@ impl Trouble {
             Trouble::StemGone { .. } => 3,
             Trouble::Field { .. } => 4,
             Trouble::Unlike { .. } => 5,
+            Trouble::Slow(_) => 6,
         }
     }
 
@@ -80,7 +87,14 @@ impl Trouble {
     /// date. A missing file is not a disagreement to settle — there is nothing
     /// to read — and what to do about it is the user's call.
     pub fn is_fixable(&self) -> bool {
-        !matches!(self, Trouble::Missing | Trouble::Unlike { .. })
+        match self {
+            Trouble::Missing | Trouble::Unlike { .. } => false,
+            // A quarantine flag comes off. Where the file lives does not:
+            // moving somebody's music out of Dropbox is their decision and
+            // not one to sweep up in a button marked "take the files' word".
+            Trouble::Slow(slow) => slow.fixable(),
+            _ => true,
+        }
     }
 
     pub fn what(&self) -> String {
@@ -95,6 +109,7 @@ impl Trouble {
             Trouble::Field { field, .. } => format!("{} disagrees with the file", field.name()),
             Trouble::StemGone { part } => format!("the {part} stem is gone"),
             Trouble::Unlike { .. } => "the file's own name says otherwise".to_string(),
+            Trouble::Slow(slow) => slow.text(),
         }
     }
 }
@@ -171,6 +186,14 @@ pub fn check(track: &Track, deep: bool) -> Report {
         if at.is_some_and(|path| !path.exists()) {
             troubles.push(Trouble::StemGone { part });
         }
+    }
+
+    // How fast the file is going to answer when a deck asks for it. Cheap —
+    // one attribute lookup and a walk up the path — and the only place in the
+    // program that already has every file's path in hand at a moment when
+    // somebody is asking what is wrong with their library.
+    for slow in crate::storage::slow(&track.path) {
+        troubles.push(Trouble::Slow(slow));
     }
 
     // And what the file is called, which is evidence of its own and the one
@@ -405,6 +428,34 @@ mod tests {
         let report = check(library.get(id).unwrap(), false);
         assert_eq!(report.troubles, vec![Trouble::StemGone { part: "vocals" }]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_track_kept_inside_a_sync_folder_is_reported_as_slow_rather_than_wrong() {
+        // Nothing disagrees: the file is there and is the file. What the check
+        // has to say is that opening it may mean downloading it, which is the
+        // sort of thing a deck finds out two bars before the drop.
+        let dir = std::env::temp_dir()
+            .join(format!("booth-verify-synced-{}", std::process::id()))
+            .join("Dropbox")
+            .join("Music");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("track.flac");
+        std::fs::write(&path, b"some audio").unwrap();
+
+        let mut library = Library::new();
+        let id = library.add(&path);
+        library.get_mut(id).unwrap().bytes = 10;
+
+        let report = check(library.get(id).unwrap(), false);
+        assert_eq!(report.troubles, vec![Trouble::Slow(crate::storage::Slow::Synced("Dropbox"))]);
+        assert!(
+            !report.troubles[0].is_fixable(),
+            "moving somebody's music out of Dropbox is their decision, not a button's"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
     }
 
     #[test]
