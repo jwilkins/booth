@@ -169,6 +169,10 @@ pub struct Backup {
     pub copied_bytes: u64,
     /// Audio the library did not have and which is not in this backup either.
     pub absent: usize,
+    /// Tracks the collection named and the disk had lost, put back off the
+    /// drive at the path the collection already gave them.
+    #[serde(default)]
+    pub restored: usize,
     /// What was on the drive and is not in this backup.
     pub missing: Vec<String>,
     /// Files copied into the library, for the collection to be told about.
@@ -192,6 +196,12 @@ impl Backup {
                 "{} copied in ({})",
                 self.copied,
                 crate::sync::bytes(self.copied_bytes)
+            ));
+        }
+        if self.restored > 0 {
+            parts.push(format!(
+                "{} put back",
+                crate::library::plural(self.restored, "missing track")
             ));
         }
         if self.absent > 0 {
@@ -425,6 +435,34 @@ pub fn keep(
         let owned = owner(&by_name, &by_sound, name, size, &file);
 
         if let Some(track) = owned {
+            // A row the collection has, pointing at a file that is not there:
+            // a greyed-out track. The drive has the file, and the collection
+            // already says where it belongs, so putting it back there is the
+            // one repair that cannot be done afterwards — the names are in the
+            // collection, the music is on the stick, and once the stick is
+            // gone neither half answers for the other.
+            //
+            // Not governed by `foreign`, which is about music the library does
+            // not have. This is the library's own track, and a row that cannot
+            // be played is broken rather than absent.
+            if !track.path.exists() {
+                if let Some(parent) = track.path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                match std::fs::copy(&file, &track.path) {
+                    Ok(_) => {
+                        crate::info!(
+                            "put back {} \u{2014} the collection had it and the disk did not",
+                            track.path.display()
+                        );
+                        backup.restored += 1;
+                    }
+                    Err(e) => crate::warn!(
+                        "could not put {} back from the drive: {e}",
+                        track.path.display()
+                    ),
+                }
+            }
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -473,11 +511,25 @@ pub fn keep(
                 backup.copied_bytes += size;
             }
             OnForeign::Adopt => {
+                // A stem is not a track. It goes beside the record it was cut
+                // from — the library's copy of that record where there is one,
+                // otherwise where this same walk is about to put it — because
+                // beside the record is where the collection looks for a kit.
+                // And it is kept out of `adopted`, so the import never makes a
+                // row of it: three rows per record called "…-vocals" are three
+                // pieces of a record offered as records.
+                let cut_from = crate::job::cut_from(&file);
+                let beside = cut_from.as_ref().and_then(|record| {
+                    let name = record.file_name()?.to_str()?;
+                    let size = record.metadata().ok()?.len();
+                    let known = owner(&by_name, &by_sound, name, size, record)?;
+                    Some(known.path.with_file_name(file.file_name()?))
+                });
                 // Into the library under the drive's own artist and album
                 // folders, which is the layout it was written in and the one
                 // the library uses. An existing file is left alone: this is
                 // somebody's music folder, not scratch space.
-                let at = library.join(relative);
+                let at = beside.unwrap_or_else(|| library.join(relative));
                 crate::debug!(
                     "not in the library, and copied into it: {} ({}) -> {}",
                     relative.display(),
@@ -497,7 +549,9 @@ pub fn keep(
                 let _ = link(&at, &to);
                 backup.copied += 1;
                 backup.copied_bytes += size;
-                backup.adopted.push(at);
+                if cut_from.is_none() {
+                    backup.adopted.push(at);
+                }
             }
         }
     }
@@ -945,6 +999,128 @@ mod tests {
         assert_eq!(kept.adopted, vec![landed.clone()], "the collection is told what arrived");
         assert!(landed.exists(), "under the drive's own artist folder, which the library uses too");
         assert_eq!(std::fs::read(&landed).unwrap(), b"the audio itself, which is the big part");
+    }
+
+    #[test]
+    fn a_greyed_out_track_is_put_back_off_the_drive_that_still_has_it() {
+        // The failure this whole default exists for, in its worst form: the
+        // collection has the row, the row points nowhere, and the stick that
+        // could answer for it is in somebody's hand right now. Match it, put
+        // the file back where the collection already says it lives, and the
+        // row plays again.
+        let scratch = Scratch::new("greyed-out");
+        let (into, library_at) = into(&scratch);
+        let audio = b"the audio itself, which is the big part".to_vec();
+        scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a database");
+        scratch.file("drive/Contents/Peverelist/Roll With The Punches.flac", &audio);
+
+        // A row naming a file that is not on this machine.
+        let lost = scratch.path("library/Peverelist/Roll With The Punches.flac");
+        assert!(!lost.exists());
+        let known = vec![Known {
+            path: lost.clone(),
+            bytes: audio.len() as u64,
+            audio_hash: String::new(),
+        }];
+
+        let kept = keep(
+            &scratch.path("drive"),
+            &into,
+            "HERS",
+            "fp",
+            &known,
+            OnForeign::Ignore,
+            &library_at,
+        )
+        .unwrap();
+
+        assert_eq!(kept.restored, 1, "the track was not put back");
+        assert_eq!(std::fs::read(&lost).unwrap(), audio, "and it is the audio, at the row's path");
+        assert_eq!(kept.linked, 1, "which is also what makes the backup's link work");
+        assert!(kept.summary().contains("1 missing track put back"), "{}", kept.summary());
+        // Nothing was adopted: the collection already had the row, so there is
+        // nothing to tell it about.
+        assert!(kept.adopted.is_empty(), "{:?}", kept.adopted);
+    }
+
+    #[test]
+    fn keeping_the_music_is_what_a_strange_drive_does_by_default() {
+        // The whole point. A collection full of rows nobody can play is what
+        // happens when a stick was the only copy and the stick is gone, and
+        // there is no recovering from it afterwards — the names are there and
+        // the music is not. Every other outcome here costs disk.
+        assert_eq!(OnForeign::default(), OnForeign::Adopt);
+        assert_eq!(OnForeign::ALL[0], OnForeign::Adopt, "the one that is on reads first");
+        assert_eq!(crate::config::Config::default().from_other_drives, OnForeign::Adopt);
+    }
+
+    #[test]
+    fn a_stem_off_a_strange_drive_joins_its_record_rather_than_becoming_one() {
+        // Three rows per record reading "…-vocals" are three pieces of a
+        // record offered as records: in the browser, and on the next stick
+        // written from it. A kit goes beside the record it was cut from, which
+        // is where the collection looks for one, and is never handed to the
+        // import.
+        let scratch = Scratch::new("adopt-stems");
+        let (into, library_at) = into(&scratch);
+        scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a database");
+        scratch.file("drive/Contents/Pev/Punches.flac", b"the record itself");
+        scratch.file("drive/Contents/Pev/Punches-vocals.wav", b"just the voice");
+        // A record whose own name ends in a part's name, which is a record.
+        scratch.file("drive/Contents/Pev/Midnight-Drums.flac", b"a record about drums");
+
+        let kept =
+            keep(&scratch.path("drive"), &into, "HERS", "fp", &[], OnForeign::Adopt, &library_at)
+                .unwrap();
+
+        assert_eq!(kept.copied, 3, "all three were copied in");
+        let record = library_at.join("Pev/Punches.flac");
+        let drums = library_at.join("Pev/Midnight-Drums.flac");
+        assert!(library_at.join("Pev/Punches-vocals.wav").exists(), "the kit is not beside it");
+        assert_eq!(
+            kept.adopted.iter().collect::<std::collections::BTreeSet<_>>(),
+            [&record, &drums].into_iter().collect(),
+            "the stem was offered to the collection as a record of its own: {:?}",
+            kept.adopted
+        );
+    }
+
+    #[test]
+    fn a_stem_goes_beside_the_librarys_copy_of_the_record_it_came_from() {
+        // The case that decides where it lands: the library already has the
+        // record, filed wherever the library files things, and the kit has to
+        // end up in that folder rather than in a copy of the drive's layout —
+        // beside the record is the only place anything looks for one.
+        let scratch = Scratch::new("adopt-stem-beside");
+        let (into, library_at) = into(&scratch);
+        let audio = b"the record itself".to_vec();
+        scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a database");
+        scratch.file("drive/Contents/Pev/Punches.flac", &audio);
+        scratch.file("drive/Contents/Pev/Punches-vocals.wav", b"just the voice");
+        let mine = scratch.file("library/sorted by hand/Punches.flac", &audio);
+        let known = vec![Known {
+            path: mine.clone(),
+            bytes: audio.len() as u64,
+            audio_hash: String::new(),
+        }];
+
+        let kept = keep(
+            &scratch.path("drive"),
+            &into,
+            "HERS",
+            "fp",
+            &known,
+            OnForeign::Adopt,
+            &library_at,
+        )
+        .unwrap();
+
+        assert_eq!(kept.linked, 1, "the record itself was already the library's");
+        assert!(
+            mine.with_file_name("Punches-vocals.wav").exists(),
+            "the kit did not land beside the record the library has"
+        );
+        assert!(kept.adopted.is_empty(), "a stem is not a record: {:?}", kept.adopted);
     }
 
     #[test]

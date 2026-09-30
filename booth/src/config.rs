@@ -11,50 +11,64 @@ use serde::{Deserialize, Serialize};
 
 use crate::library::{data_dir, BEATS_PER_BAR};
 
-/// What to do about a file that is not in the library folder.
-///
-/// A track played from a download folder, a network share or someone else's
-/// stick is a track that will be missing the night it matters. The default is
-/// to take a copy, because the cost of being wrong in that direction is some
-/// disk, and the cost of being wrong in the other is an empty deck.
 /// What to do about music on a drive that the library has no copy of.
 ///
-/// Only ever somebody else's drive: a drive this program wrote holds the
-/// library's own files, which are linked rather than copied. The question is
-/// what a copy of a stranger's stick should be — a record of what was on it, a
-/// complete thing that can be put back, or an invitation to keep the music.
+/// Only music the library really has no copy of: a drive this program wrote
+/// holds the library's own files, and a track or a stem it recognises is linked
+/// rather than copied. What is left is another laptop's stick, or somebody
+/// else's.
+///
+/// The default is to keep it, and the reason is the failure that prevents. A
+/// library full of greyed-out rows is a collection that describes files nobody
+/// can find, and the copy that would have answered for them was on a stick
+/// since lost, reformatted, or taken to a gig by somebody else. There is no
+/// recovering from it afterwards: the names are there and the music is not.
+/// Every other outcome here is measured in disk, which can be bought.
+///
+/// It is still a setting, because a DJ who swaps sticks with strangers all
+/// night will fill a library with records that are not theirs — which is a real
+/// objection to the default rather than a reason not to have one.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnForeign {
-    /// Name it in the manifest and store none of it.
+    /// Copy it into the library and add it to the collection.
     #[default]
-    Ignore,
+    Adopt,
     /// Copy it into the backup, so that copy is complete on its own.
     Keep,
-    /// Copy it into the library and add it to the collection.
-    Adopt,
+    /// Name it in the manifest and store none of it.
+    Ignore,
 }
 
 impl OnForeign {
-    pub const ALL: [OnForeign; 3] = [OnForeign::Ignore, OnForeign::Keep, OnForeign::Adopt];
+    /// Offered in this order, so the one that is on reads first.
+    pub const ALL: [OnForeign; 3] = [OnForeign::Adopt, OnForeign::Keep, OnForeign::Ignore];
 
     pub fn label(self) -> &'static str {
         match self {
-            OnForeign::Ignore => "Note what was on it",
-            OnForeign::Keep => "Copy it into the backup",
             OnForeign::Adopt => "Copy it into the library",
+            OnForeign::Keep => "Copy it into the backup",
+            OnForeign::Ignore => "Note what was on it",
         }
     }
 
     pub fn blurb(self) -> &'static str {
         match self {
-            OnForeign::Ignore => {
-                "The drive's databases, cues and analysis are kept; its music is named in the                  manifest and not stored. Costs nothing, and the music is gone if the drive is."
+            OnForeign::Adopt => {
+                "On by default. Anything on the drive the collection does not already have is \
+                 copied into the library and added to it, where it can be analysed and played \
+                 like anything else \u{2014} so a stick from another laptop fills in what this \
+                 one is missing, and a library of greyed-out rows waiting on a stick nobody can \
+                 find never happens. Costs whatever the drive holds that you do not."
             }
             OnForeign::Keep => {
-                "The backup holds the music too, so it can be put back on a stick as it was.                  Costs whatever the drive holds that you do not — gigabytes, for a stranger's."
+                "The backup holds the music, so the drive can be put back as it was, and the \
+                 collection is left alone. The same cost in disk, without somebody else's \
+                 records in the browser."
             }
-            OnForeign::Adopt => {
-                "The music is copied into the library and added to the collection, where it can                  be analysed and played like anything else. The same cost, and a browser with                  somebody else's records in it."
+            OnForeign::Ignore => {
+                "The drive's databases, cues and analysis are kept; its music is named in the \
+                 manifest and not stored. Costs nothing, and the music is gone when the drive \
+                 is."
             }
         }
     }
@@ -436,7 +450,16 @@ pub struct Config {
     pub keep_drives: bool,
     /// What to do about music on a drive that the library has no copy of.
     #[serde(default)]
-    pub on_foreign: OnForeign,
+    /// Named for what it answers rather than for the old spelling, on purpose.
+    ///
+    /// The default used to be to store none of it, which is how a library comes
+    /// to be full of rows nobody can play. Renaming the setting is what makes
+    /// the new default reach a collection that already exists: a saved "store
+    /// none of it" was almost always nobody having opened the setting, since
+    /// that is what it said before anybody looked, and the two are
+    /// indistinguishable on disk. Somebody who really wants it can set it again
+    /// in one click, and a whole library cannot be un-lost in one.
+    pub from_other_drives: OnForeign,
     /// How wide or tall each panel was left.
     #[serde(default)]
     pub panels: Panels,
@@ -655,7 +678,7 @@ impl Default for Config {
             emulator_port: booth_cli::emulator::DEFAULT_PORT,
             help_delay_ms: default_help_delay_ms(),
             keep_drives: true,
-            on_foreign: OnForeign::default(),
+            from_other_drives: OnForeign::default(),
             whisper: Whisper::default(),
         }
     }

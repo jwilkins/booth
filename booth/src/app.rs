@@ -3513,7 +3513,7 @@ impl App {
             state: state.to_string(),
             into: self.config.backups_path.clone(),
             known,
-            foreign: self.config.on_foreign,
+            foreign: self.config.from_other_drives,
             library: self.config.library_path.clone(),
             key: booth_cli::rekordbox::onelibrary_key(self.config.onelibrary_key()),
         });
@@ -8550,16 +8550,20 @@ impl App {
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
-                            "Music on somebody else's drive that the library has no copy of. \
-                         Yours is always linked, whatever this says — a track is recognised by \
-                         its sound, so a rename or a retag does not make a second copy of it.",
+                            "Music on another laptop's stick, or somebody else's, that the \
+                             library has no copy of. Yours is always linked, whatever this says \
+                             \u{2014} a track is recognised by its sound, so a rename or a \
+                             retag does not make a second copy of it. And a track the \
+                             collection names but the disk has lost is put back off the drive \
+                             whichever of these is set: that row is broken rather than absent, \
+                             and the stick that can fix it will not be here for ever.",
                         )
                         .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     for what in crate::config::OnForeign::ALL {
                         if ui
-                            .radio_value(&mut self.config.on_foreign, what, what.label())
+                            .radio_value(&mut self.config.from_other_drives, what, what.label())
                             .on_hover_text(what.blurb())
                             .changed()
                         {

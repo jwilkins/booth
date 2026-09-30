@@ -668,6 +668,31 @@ pub fn stem_envelopes(kit: &StemKit) -> anyhow::Result<crate::wave::StemEnvelope
     })
 }
 
+/// The record this file is a stem of, when its name says it is one and that
+/// record is beside it.
+///
+/// The mirror of [`find_stems`], which builds the name; this reads it back. The
+/// rule is the separator's: `<record>-<part>` beside `<record>`. Both halves
+/// have to hold — a record legitimately called "Midnight-Drums" is a record, and
+/// the thing that tells it from a kit's drum part is whether there is a
+/// "Midnight" next to it.
+///
+/// Asked when music arrives from somewhere this program did not put it, because
+/// a stem that becomes a track of its own is three junk rows per record in the
+/// browser and three rows the player will show as separate music.
+pub fn cut_from(path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_str()?;
+    let (record, part) = stem.rsplit_once('-')?;
+    if !Stem::ALL.iter().any(|known| known.name() == part) {
+        return None;
+    }
+    let folder = path.parent()?;
+    ["wav", "flac", "mp3", "m4a", "aac", "aiff", "aif"]
+        .iter()
+        .map(|extension| folder.join(format!("{record}.{extension}")))
+        .find(|beside| beside.is_file())
+}
+
 /// Which stems were written for a track, by looking for them.
 ///
 /// The separator names its outputs `<stem-name>` beside the track's file stem,
