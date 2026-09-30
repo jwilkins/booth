@@ -29,6 +29,17 @@ left, the browser in the middle with the prep editor beneath it rather than in
 place of it, the inspector on the right, and the drive dock along the bottom
 where the delta is always visible.
 
+![Booth](../docs/booth.png)
+
+Every button, box, switch, menu and field says what it does when the pointer
+rests on it, and how long it has to rest is a setting — zero for somebody
+learning the window, a second and a half for somebody who knows it. A test reads
+the source and fails on a control that has nothing to say, so one added later
+cannot quietly arrive without it. `⌘,` opens Settings, which is where the
+hover delay and the colour scheme live: eleven schemes out of editors, plus this
+program's own. The eight hot-cue colours are not among them — those are written
+into the cues and go on the drive, so a player lights its buttons with them.
+
 **Any of the five sections can go to a window of its own** — the collection,
 the browser, the prep editor, the inspector, the drive dock. The **⧉** menu on
 the query bar sends one out and brings it back; so does closing the window it
@@ -196,6 +207,18 @@ snapped on the way in — hot cues to the beat, the memory cue to the bar, becau
 starting a track mid-bar is a different mistake from starting it four
 milliseconds early. A track with no grid can still be marked up: the cue is what
 you are sure of.
+
+**Resting on a block says what that section is and why.** Not all five at once
+— a strip that explained every name would be a paragraph nobody reads, and the
+question somebody actually has is "why is that bit a break". So it gives the
+name, the bar count, the rule that produced it, and how the busyness those rules
+are about is measured: onset strength with the bottom of the spectrum counted
+twice, averaged over the section and placed in the track's own quietest-to-
+loudest range. Everything is relative to the record, because one that never
+takes its drums out still has a quietest part and that part is its breakdown.
+The rules live beside the function that applies them, so an explanation cannot
+outlive the rule; a section renamed by hand says it was named by hand rather
+than quoting a rule nothing measured.
 
 **The phrase strip is editable.** A detector working from onset strength gets a
 good many boundaries right and some plainly wrong, and a wrong one is worth
@@ -744,8 +767,25 @@ watching" forty times over a breakdown.
 
 The words are kept in the collection once they have been heard, so cueing the
 same track again is instant and costs no stem render and no recogniser. The
-memory cue is never moved — the grid is anchored to it — but the hot cues are
-replaced wholesale, which is what the button says it does.
+memory cue the grid is anchored to is never moved, but the hot cues are replaced
+wholesale, which is what the button says it does.
+
+### The memory cues, which are the map
+
+A player holds eight hot cues and as many memory cues as a track needs, so every
+moment worth marking gets one of the latter whether or not it earns one of the
+former. They are named the way a DJ writes on the markers themselves: **Start**,
+then each section numbered within its own kind — Build 1, Drop 1, Break 1,
+Drop 2 — and **End** on the last bar. Numbering within the kind is the point;
+six markers all reading "drop" say nothing that looking at the waveform does not.
+
+A sung line gets a verse number and its words the first time it lands, and the
+number alone every time it comes back: `V1 Get Down`, then `V1`, `V1`. A player
+shows a memory cue's comment while the track is loaded, so the second time round
+the line is already known and the number is what says where in the record you
+are. Those returns cost no button — they are marked as moments that can only
+ever be memory cues, so they never take a slot from a drop and never lend their
+words to a section they happen to land on.
 
 ### Installing a recogniser
 
@@ -835,12 +875,37 @@ be wrong.
 
 ## What a player will actually open
 
-A CDJ-3000 takes **MP3 and AAC at 44.1–48 kHz**, and **WAV, AIFF, FLAC and
-ALAC at 16 or 24-bit up to 96 kHz**. An `.m4a` is fine — it is an MP4 container
-holding AAC or ALAC, and the player reads both.
+"A player" is not one thing, so the answer is one row per generation. Which of
+them a drive is checked against is **the oldest player it has to work on**, in
+Settings.
 
-What is not fine, and is checked when a file is imported rather than when a
-drive is written:
+| | CDJ-3000X | CDJ-3000 | CDJ-2000NXS2 | CDJ-2000NXS |
+| --- | --- | --- | --- | --- |
+| Lossless | WAV, AIFF, FLAC, ALAC | same | same | WAV and AIFF only |
+| Ceiling | 96 kHz | 96 kHz | 48 kHz | 48 kHz |
+| exFAT | yes | yes | no | no |
+| `exportLibrary.db` | read | — | — | — |
+| Phrase bar, three-band waveform | drawn | drawn | — | — |
+
+MP3 and AAC are 44.1–48 kHz everywhere. An `.m4a` is fine — it is an MP4
+container holding AAC or ALAC, and every player here reads both.
+
+Every generation's files go on the drive whatever the target is: `.DAT` is what
+a 2009 player reads, `.EXT` adds the nexus 2 line's colour waveforms and named
+cues, `.2EX` carries the CDJ-3000's three-band waveforms, and a player reads the
+richest one it knows about and ignores the rest. Writing all of them costs a few
+kilobytes a track and means one stick works everywhere.
+
+What the target changes is **what the drive carries**. A track this player
+cannot open, or one above its ceiling, is re-encoded on the way onto the stick:
+a **320 kbps MP3** at the highest of MPEG-1's three rates the hardware and the
+source share, preferring a whole-number ratio — 88.2 goes to 44.1, 96 to 48.
+LAME does the resampling, and only ever for a copy bound for a drive. **The
+library keeps its FLAC**, so the same collection writes a lossless stick for a
+CDJ-3000 and an MP3 one for a nexus deck, and nobody has to choose.
+
+Because the write fixes it, a FLAC bound for an older booth is not something the
+collection needs attention for. What is:
 
 | | |
 | --- | --- |
@@ -848,6 +913,9 @@ drive is written:
 | 32-bit float WAV | offered a conversion to FLAC |
 | above 96 kHz | reported; resample it in an editor first |
 | a protected purchase | reported; nothing here can convert one |
+
+None of those is reachable by re-encoding for a drive, which is why they are
+still asked about at import.
 
 Import is the moment to ask, because it is the moment there is still time to do
 something. The check before a write is the last chance to catch a file that
@@ -858,11 +926,11 @@ it. The original is never touched, moved or deleted: a conversion that turns
 out wrong should leave the thing it was made from behind. Names come across
 with it.
 
-Two things are deliberately not offered. **Resampling**, because there is no
-resampler here worth writing a library through, and doing it badly once is
-permanent in a way that saying so is not. And a **format nothing here
-decodes** — an offer that would fail is worse than no offer, because it costs
-the time to find out.
+Two things are deliberately not offered *for the library's own files*.
+**Resampling**, because doing it badly once is permanent in a way that saying so
+is not — the drive writer resamples, but only into a copy, and the original is
+still there afterwards. And a **format nothing here decodes** — an offer that
+would fail is worse than no offer, because it costs the time to find out.
 
 A protected file is not a broken file: it plays perfectly in whatever sold it.
 It is encrypted, and the only way to a playable copy is to get an unprotected
@@ -871,6 +939,9 @@ been renamed to `.m4a` — so it turns up when it is added rather than on the
 night.
 
 ## The sync sheet
+
+![The sync sheet](../docs/booth-sync.png)
+
 
 **Which drive** is a menu in the dock, listing every one the collection knows
 with the ones actually in a socket marked as such, and offering to add another
@@ -897,8 +968,19 @@ was last written to it, so a moved cue shows as *changed* rather than as a
 re-add. Play counts and tags do not count as changes: they are not things the
 player will see.
 
+**Details** opens the whole list of changes: one to a line, scrolled and
+wrapped, colour-coded by what is happening to it — added, changed with the
+reason, removed, or a stem going on beside its track. The four lines above it
+answer "is this the write I meant"; this answers "which track is that", which is
+the question a drive about to remove four tracks really raises. A track the
+collection has since lost still gets a line saying so, because that is the one
+worth seeing.
+
 **Carry stems** puts each track's vocals, drums and melody on the drive with
-it. They go in the same folder as the record they were cut from — filed under
+it. It is **on** by default: a kit exists because somebody asked for one, and
+when carrying them was a choice that defaulted to no, made on a sheet most
+people never open, rendered kits stayed on the laptop and the drive said nothing
+about it. Turn it off for a smaller stick. They go in the same folder as the record they were cut from — filed under
 its artist, not their own, which is what keeps them together when the stems are
 wavs and have nowhere to keep a tag — and they follow it in the playlist, so
 the browse list reads track, vocals, drums, melody and a companion is a turn of
@@ -1071,6 +1153,42 @@ That is a few lines per file, so it sits at the log's most detailed level and
 tool the same detail is `-v`, on stderr, so redirecting the results still
 captures only results.
 
+## How fast the disk will answer
+
+Two paths that look alike in a collection can be seconds apart to open, and none
+of it shows while a library is being built, because building one reads
+everything once and slowly anyway. It shows on the night.
+
+- A file macOS has **quarantined** is checked by Gatekeeper on every open.
+  Anything downloaded arrives that way, and anything in **Downloads** keeps
+  being re-flagged.
+- A file inside **Dropbox, iCloud Drive, Google Drive, OneDrive or pCloud** may
+  be a placeholder rather than a file, and the thing that finds out is the deck,
+  two bars before the drop.
+
+Both are reported when a track is imported and again by **Check**, which already
+has every path in hand. The quarantine flag is the half Booth can take off, and
+"take the files' word" does: it calls `removexattr` rather than shelling out,
+and a folder holding more than one flagged track is swept whole the way
+`xattr -r -d com.apple.quarantine` would, so the folder stops handing the flag
+to the next thing copied into it. The log prints the equivalent command.
+
+Where somebody keeps their music is not Booth's to change, so the other half is
+said once and left alone. A sync folder is matched on a whole path component,
+which is why a record called *Dropbox EP* is a record.
+
+## Settings
+
+![Settings](../docs/booth-settings.png)
+
+`⌘,` opens it, as in everything else on the machine. What is in it, roughly in
+the order it appears: the library folder and what to do about music from
+elsewhere; stem quality and where kits go; which generation of player the drives
+have to work on; how long hover help waits; the colour scheme; how a track's
+length reads; the AcoustID key and how sure a lookup has to be before it is
+applied without asking; the rekordbox and OneLibrary keys; and whether a copy is
+kept of every drive.
+
 ## Where things are kept
 
 `$XDG_DATA_HOME/booth` on Linux, `~/Library/Application Support/Booth` on macOS,
@@ -1089,6 +1207,7 @@ or wherever `BOOTH_DATA_DIR` points.
 - `stems/` — rendered stem kits, when they are set to go in one folder rather
   than beside their tracks.
 - `waveforms/*.stems` — per-stem loudness, for colouring by what is playing.
+- `booth-drives/` — a copy of every drive written or plugged in.
 - `booth.log`, `booth.log.1` — this run and the one before it.
 
 The collection itself never writes audio or changes a tag — it describes what is
@@ -1128,22 +1247,37 @@ A track counts as the library's if a file there has the same name and length,
 which is true of everything on a drive this wrote. Where that fails the drive's
 file is hashed the way the duplicate finder hashes one — the audio alone, tags
 skipped — so somebody else's copy of a record you own is linked rather than
-stored again, however they named it.
+stored again, however they named it. Rendered stems count too: a companion row
+is derived from its parent rather than stored, so nothing in the collection's
+track list names `Punches-vocals.wav`, and without saying so every stem on every
+drive would come back as music the library has not got.
+
+**A row the collection has whose file the disk has lost is put back**, off the
+drive, at the path the collection already gives it. That is the greyed-out
+track, and it is the one repair that cannot be done afterwards: the names are in
+the collection, the music is on the stick, and once the stick is gone neither
+half answers for the other. It happens whichever of the three settings below is
+chosen, because a row that cannot be played is broken rather than absent.
 
 What is left is music the library genuinely has not got, and there are three
 things Settings can do with it:
 
-- **Note what was on it** (the default) — the databases and analysis are kept
-  and the music is named in the manifest, not stored. Costs nothing, and the
-  music is gone if the drive is.
+- **Copy it into the library** (the default) — the music lands under the
+  library's own artist folders and joins the collection, where it can be
+  analysed and played. A file already there is never written over, and a stem
+  goes beside the record it was cut from rather than becoming a record.
 - **Copy it into the backup** — the copy holds the music too and can be put
-  back on a stick as it was. Costs whatever the drive holds that you do not.
-- **Copy it into the library** — the music lands under the library's own artist
-  folders and joins the collection, where it can be analysed and played. A file
-  already there is never written over.
+  back on a stick as it was, and the collection is left alone.
+- **Note what was on it** — the databases and analysis are kept and the music
+  is named in the manifest, not stored. Costs nothing, and the music is gone
+  when the drive is.
 
-The default is the cheap one deliberately: plugging in a stranger's stick is
-not a decision to spend gigabytes.
+The default is the expensive one deliberately. A library full of greyed-out rows
+is a collection describing files nobody can find, and the copy that would have
+answered for them was on a stick since lost, reformatted or taken to a gig by
+somebody else. There is no recovering from that; every other outcome here is
+measured in disk, which can be bought. Somebody who swaps sticks with strangers
+all night has a real reason to change it, which is why it is still a setting.
 
 Nothing is archived yet. A whole drive cannot be, since a zip holds contents
 rather than links — but the copied half can: `PIONEER` could become one
@@ -1175,10 +1309,15 @@ drive played only on older hardware has a history nothing here can see.
 
 ## What it does not do yet
 
-- **A CDJ-3000 cannot read a drive this writes.** The legacy `export.pdb` is
-  refused outright by one on firmware 2.05 — the file parses under two
-  independent parsers, so what is wrong is something a parser tolerates and a
-  player does not. Only the newer players work today.
+- **No player older than a CDJ-3000X has been seen to browse a drive this
+  writes.** The legacy `export.pdb` was refused outright by a CDJ-3000 on
+  firmware 2.05 — the file parses under two independent parsers, so what is
+  wrong is something a parser tolerates and a player does not, and it is not
+  known to be fixed. Choosing an older target in Settings changes what is
+  *checked* and what the drive *carries*, which is real and useful, but it
+  cannot make a database a player refuses acceptable to it. Everything a nexus
+  deck reads is written; whether it loads has not been demonstrated. Try a
+  stick on the hardware before the night.
 - Phrase data and the three-band waveform have not been seen on a player. The
   colour waveform, beat grid and hot cues have; those two sit in parts of the
   analysis files nobody has reported on yet.

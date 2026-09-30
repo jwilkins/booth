@@ -67,11 +67,18 @@ pub struct EncodeOptions {
     pub mp3_vbr: Option<u8>,
     /// Apply TPDF dither when truncating to a 16-bit integer output.
     pub dither: bool,
+    /// The rate to write an mp3 at, when it should differ from the input's.
+    ///
+    /// LAME resamples on the way in, which is the one resampler in this program
+    /// worth handing somebody's audio to — and the only place it is used is a
+    /// copy bound for a drive, never the library's own file. `None` keeps the
+    /// input's rate, which is what everything but that wants.
+    pub mp3_out_rate: Option<u32>,
 }
 
 impl Default for EncodeOptions {
     fn default() -> Self {
-        Self { bit_depth: 16, mp3_bitrate: 192, mp3_vbr: None, dither: true }
+        Self { bit_depth: 16, mp3_bitrate: 192, mp3_vbr: None, dither: true, mp3_out_rate: None }
     }
 }
 
@@ -199,6 +206,20 @@ fn mark_fixed_block_size(bytes: &mut [u8]) -> Result<()> {
 }
 
 fn write_mp3(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<WriteReport> {
+    let (bytes, report) = encode_mp3(audio, opts)?;
+    std::fs::write(path, &bytes)?;
+    Ok(report)
+}
+
+/// An mp3 in memory, for a caller that is not writing it to a file here.
+///
+/// The drive writer's case: a file an older player cannot open goes onto the
+/// stick as an mp3, and nothing wants a temporary file in between.
+pub fn to_mp3(audio: &Audio, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    Ok(encode_mp3(audio, opts)?.0)
+}
+
+fn encode_mp3(audio: &Audio, opts: &EncodeOptions) -> Result<(Vec<u8>, WriteReport)> {
     use mp3lame_encoder::{Builder, FlushNoGap, InterleavedPcm};
 
     let channels = audio.channels();
@@ -231,6 +252,13 @@ fn write_mp3(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<WriteRe
         None => builder
             .set_brate(mp3_bitrate(opts.mp3_bitrate)?)
             .map_err(|e| anyhow!("LAME rejected bitrate: {e}"))?,
+    }
+    if let Some(rate) = opts.mp3_out_rate.filter(|rate| *rate != audio.sample_rate) {
+        let rate = std::num::NonZeroU32::new(rate)
+            .ok_or_else(|| anyhow!("an mp3 cannot be written at 0 Hz"))?;
+        builder
+            .set_output_sample_rate(Some(rate))
+            .map_err(|e| anyhow!("LAME rejected an output rate of {rate}: {e}"))?;
     }
     builder
         .set_quality(mp3lame_encoder::Quality::Best)
@@ -270,8 +298,7 @@ fn write_mp3(path: &Path, audio: &Audio, opts: &EncodeOptions) -> Result<WriteRe
         }
     }
 
-    std::fs::write(path, &out)?;
-    Ok(report)
+    Ok((out, report))
 }
 
 /// LAME's `-V` scale, 0 being the best.

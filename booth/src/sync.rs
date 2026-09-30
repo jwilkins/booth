@@ -579,11 +579,12 @@ pub fn preflight(
         checks.push(Check {
             level: Level::Warn,
             text: format!(
-                "{} files are formats a {} does not open ({}) \u{2014} they go on, and it will \
-                 not load them",
+                "{} files are formats a {} does not open ({}) \u{2014} they go on as {} kbps \
+                 mp3, and stay as they are here",
                 too_new.len(),
                 player.name(),
                 list(too_new.iter().map(|t| t.format.as_str())),
+                booth_cli::compat::Player::MP3_KBPS,
             ),
         });
     }
@@ -630,8 +631,8 @@ pub fn preflight(
         checks.push(Check {
             level: Level::Warn,
             text: format!(
-                "{over} files are above the {khz:.0} kHz a {} will take \u{2014} they go on, \
-                 and it will not load them",
+                "{over} files are above the {khz:.0} kHz a {} will take \u{2014} they go on as \
+                 {khz:.0} kHz mp3, and stay as they are here",
                 player.name()
             ),
         });
@@ -1353,21 +1354,23 @@ mod tests {
         assert!(now.contains("all sample rates are 96 kHz or below"), "{now}");
         assert!(!now.contains("will not load"), "nothing is wrong with this track: {now}");
 
-        // Same file, older booth. The write still happens — 96 kHz is inside
-        // what the writer accepts — so this is a warning about the hardware
-        // rather than a refusal, and it says which hardware.
+        // Same file, older booth. The track still goes on, as an mp3 the deck
+        // can play, and the collection's own FLAC is left where it is — so
+        // this is a note about what the drive will carry, not a refusal.
         let older = said(Player::Cdj2000Nxs2);
         assert!(
             older.contains("Warn") && older.contains("48 kHz a CDJ-2000NXS2 will take"),
             "{older}"
         );
-        assert!(older.contains("will not load them"), "{older}");
+        assert!(older.contains("go on as 48 kHz mp3"), "{older}");
+        assert!(older.contains("stay as they are here"), "{older}");
 
-        // A generation back it is the format, and the same distinction holds:
-        // a FLAC is written, because the writer opens one and a newer deck
-        // plays it, and this deck will not.
+        // A generation back it is the format, and the same thing happens to
+        // it. "They will be skipped" is what is said about a file the writer
+        // refuses, and a FLAC is not one.
         let oldest = said(Player::Cdj2000Nexus);
         assert!(oldest.contains("a CDJ-2000NXS does not open"), "{oldest}");
+        assert!(oldest.contains("go on as 320 kbps mp3"), "{oldest}");
         assert!(
             !oldest.contains("they will be skipped"),
             "a FLAC is not skipped by the writer, and saying so would be a lie: {oldest}"

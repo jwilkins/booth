@@ -347,9 +347,24 @@ is not one thing, so these are per generation, and the one a drive is checked ag
 Every generation's files are written whatever the target is — `.DAT` for a 2009 player,
 `.EXT` for the nexus 2 line, `.2EX` for the CDJ-3000's three-band waveforms, and
 `exportLibrary.db` when its key is known — because a player reads the richest file it
-knows about and ignores the rest. What the target changes is what is *checked*, at import
-and again in the preflight: a 96 kHz FLAC is a fine track for a CDJ-3000 and one that
-copies, browses and will not load on an NXS2.
+knows about and ignores the rest.
+
+What the target changes is **what the drive carries**. A track the target cannot open, or
+one above its sample-rate ceiling, is re-encoded on the way onto the stick: a 320 kbps MP3
+at the highest of MPEG-1's three rates the hardware and the source share, preferring a
+whole-number ratio (88.2 → 44.1, 96 → 48). LAME resamples, which is the one resampler in
+the program trusted with audio, and only ever for a copy bound for a drive. The library's
+own file is untouched, so the same collection writes a lossless stick for a CDJ-3000 and
+an MP3 one for a nexus deck.
+
+The grid, key, cues and phrases are measured from the original, not from what is written,
+and the analysis directory is hashed from the on-drive name — so the rename to `.mp3`
+happens before that hash is taken or the player looks for the grid in the wrong place.
+
+Because the write fixes it, this is **not** something the collection needs attention for:
+the sidebar's attention count asks the writer's own limits (a container nothing decodes,
+a protected purchase, 32-bit float, past 96 kHz), and the re-encode is reported on the
+sync sheet, which is where it happens.
 
 - Audio: MP3 and AAC at 16-bit / 44.1–48 kHz; the lossless formats and ceiling above at
   16 or 24-bit. No 32-bit float, no AIFF-C, no DRM'd AAC, nothing above 96 kHz anywhere.

@@ -1082,7 +1082,7 @@ impl App {
             .filter(|track| match self.view {
                 View::All => true,
                 View::Unprepared => track.unprepared(),
-                View::Attention => track.needs_attention(self.config.oldest_player).is_some(),
+                View::Attention => track.needs_attention().is_some(),
                 View::Playlist => self
                     .library
                     .playlists
@@ -2588,6 +2588,7 @@ impl App {
         } else {
             args.drive = Some(drive.path.clone());
         }
+        args.player = self.config.oldest_player;
         args.playlists = self.drive_playlists(&drive);
         args.companions = companions;
         args.already = carry.already;
@@ -3667,7 +3668,7 @@ impl App {
         pane_label(ui, "Collection");
         let all = self.library.tracks.len();
         let unprepared = self.library.unprepared_count();
-        let attention = self.library.attention_count(self.config.oldest_player);
+        let attention = self.library.attention_count();
 
         self.view_row(ui, View::All, "All tracks", all, theme::dim());
         self.view_row(ui, View::Unprepared, "Unprepared", unprepared, theme::dim());
@@ -5238,7 +5239,7 @@ impl App {
             )
             .on_hover_text(track.path.display().to_string());
 
-            if let Some(problem) = track.needs_attention(self.config.oldest_player) {
+            if let Some(problem) = track.needs_attention() {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!("{} {problem}", theme::WARN))
@@ -8220,10 +8221,11 @@ impl App {
                             "Every generation's files go on whatever this says \u{2014} .DAT for \
                              a 2009 player, .EXT for the nexus 2 line, .2EX for the CDJ-3000's \
                              three-band waveforms \u{2014} because a player reads the richest \
-                             one it knows and ignores the rest. What this changes is what gets \
-                             checked. A 96 kHz FLAC is a fine track for a CDJ-3000 and one that \
-                             copies, browses and will not load on an NXS2, and the only way to \
-                             catch that at the desk is to say which booth it is going to.",
+                             one it knows and ignores the rest. What this changes is what the \
+                             drive carries. A track this player cannot open, or one above its \
+                             sample-rate ceiling, goes on as a 320 kbps mp3 at the best rate \
+                             the hardware takes; the library's own file is not touched, so the \
+                             same collection still writes a lossless stick for a CDJ-3000.",
                         )
                         .color(theme::dim())
                         .size(theme::SMALL),
@@ -8701,7 +8703,7 @@ impl App {
     fn check_compatibility(&mut self, ids: &[u32]) {
         for id in ids {
             let Some(track) = self.library.get(*id) else { continue };
-            let Some(problem) = track.incompatibility(self.config.oldest_player) else { continue };
+            let Some(problem) = track.incompatibility() else { continue };
             crate::warn!(
                 "{}: {} — {}",
                 track.path.file_name().unwrap_or_default().to_string_lossy(),
@@ -8778,7 +8780,7 @@ impl App {
             .filter_map(|id| self.library.get(*id))
             .filter_map(|track| {
                 track
-                    .incompatibility(self.config.oldest_player)
+                    .incompatibility()
                     .map(|problem| (track.id, track.display_title(), track.path.clone(), problem))
             })
             .collect();
@@ -9177,16 +9179,25 @@ impl App {
                             }),
                         );
                     } else {
+                        // Not a tick. Everything a player of this generation
+                        // reads is written — export.pdb and all three analysis
+                        // files — and no player older than a CDJ-3000X has been
+                        // seen to browse a drive from here. One on firmware
+                        // 2.05 refused the database outright, and that is not
+                        // known to have been fixed, so the sheet says so rather
+                        // than letting "the files are there" stand in for "it
+                        // works". See booth/README.md.
                         ui.label(
                             RichText::new(format!(
-                                "{} A {} reads export.pdb and the analysis files, all of which \
-                                 go on. OneLibrary is only read by the {}.",
-                                theme::TICK,
+                                "{} A {} reads export.pdb and the analysis files, which all go \
+                                 on \u{2014} but no player older than a {} has yet been seen to \
+                                 browse a drive written here. Try it before the night.",
+                                theme::WARN,
                                 target.name(),
                                 needs_onelibrary.name()
                             ))
                             .font(theme::mono(10.5))
-                            .color(theme::go()),
+                            .color(theme::amber()),
                         );
                     }
 

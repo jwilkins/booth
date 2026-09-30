@@ -41,6 +41,7 @@ use std::path::Path;
     Ord,
     serde::Serialize,
     serde::Deserialize,
+    clap::ValueEnum,
 )]
 pub enum Player {
     /// The current line, and the only one that reads a OneLibrary database.
@@ -132,6 +133,43 @@ impl Player {
         let extension = extension.to_ascii_lowercase();
         self.plays().contains(&extension.as_str())
     }
+
+    /// Whether a file has to be re-encoded to reach this player at all.
+    ///
+    /// Two reasons and no others: a format it does not open, and a rate above
+    /// its ceiling. Both are answered the same way — an MP3 at the best rate
+    /// and bitrate the hardware takes — because both are the same problem, and
+    /// because the alternative for a nexus deck is a WAV four times the size of
+    /// the FLAC it came from.
+    pub fn must_recode(self, extension: &str, sample_rate: u32) -> bool {
+        !self.opens(extension) || sample_rate > self.max_sample_rate()
+    }
+
+    /// The rate to write that MP3 at, given what the source is.
+    ///
+    /// MPEG-1 Layer III has three: 32, 44.1 and 48 kHz. The highest of them
+    /// this player takes and this source can reach, preferring a whole-number
+    /// ratio where there is one — 88.2 goes to 44.1 rather than to 48, because
+    /// halving is a cleaner thing to do to audio than resampling it.
+    pub fn mp3_rate_from(self, source: u32) -> u32 {
+        const RATES: [u32; 3] = [48_000, 44_100, 32_000];
+        let ceiling = self.max_sample_rate().min(source.max(RATES[2]));
+        for rate in [44_100, 48_000] {
+            if rate <= ceiling && source % rate == 0 {
+                return rate;
+            }
+        }
+        RATES.into_iter().find(|rate| *rate <= ceiling).unwrap_or(RATES[2])
+    }
+
+    /// The bitrate to write it at: the most a player will take, which is the
+    /// most LAME will write.
+    ///
+    /// Constant rather than variable, and for the drive rather than for taste:
+    /// a player seeks a constant-bitrate file by arithmetic and needs no seek
+    /// table, so a cue lands where it was set without depending on a `PVBR`
+    /// section being read correctly.
+    pub const MP3_KBPS: u32 = 320;
 }
 
 /// Why a file will not play on the hardware.
@@ -177,12 +215,14 @@ impl Problem {
     /// What can be done about it.
     pub fn fix(&self) -> &'static str {
         match self {
-            // A format the hardware will not take but this program can read:
-            // for a nexus deck that is a FLAC, and FLAC is not the answer.
-            Problem::Format { player, .. } if self.convertible() => match player.opens("flac") {
-                true => "convert it to FLAC",
-                false => "convert it to AIFF",
-            },
+            // A format the hardware will not take but this program can read.
+            // For an older deck that is a FLAC, and there is nothing to do
+            // about it: a drive written for that deck carries the track as an
+            // mp3 and leaves the library's own copy alone.
+            Problem::Format { player, .. } if !player.opens("flac") => {
+                "nothing — a drive for this player carries it as mp3"
+            }
+            Problem::Format { .. } if self.convertible() => "convert it to FLAC",
             Problem::Format { .. } => "re-encode it elsewhere — this cannot decode it",
             // Not a limitation of this program: a protected file is encrypted,
             // and the only lawful way to a playable copy is to get one from
@@ -335,12 +375,39 @@ mod tests {
             "{}",
             nexus[0].what()
         );
-        // And the way out is not the one offered everywhere else, because the
-        // format it would convert to is the format that is the problem.
-        assert_eq!(nexus[0].fix(), "convert it to AIFF");
+        // And there is nothing to do about it by hand: a drive written for
+        // this deck re-encodes on the way on and the library keeps its FLAC.
+        assert!(nexus[0].fix().contains("carries it as mp3"), "{}", nexus[0].fix());
 
         assert!(problems(Player::Cdj2000Nexus, nowhere(), "aiff", 48_000, false).is_empty());
         assert!(problems(Player::Cdj2000Nxs2, nowhere(), "flac", 48_000, false).is_empty());
+    }
+
+    #[test]
+    fn what_has_to_be_re_encoded_is_a_format_or_a_rate_and_nothing_else() {
+        // A 96 kHz FLAC is two problems for a nexus 2 deck and one answer, and
+        // a 44.1 kHz FLAC is one problem for the deck before it.
+        assert!(!Player::Cdj3000.must_recode("flac", 96_000));
+        assert!(Player::Cdj2000Nxs2.must_recode("flac", 96_000));
+        assert!(!Player::Cdj2000Nxs2.must_recode("flac", 48_000));
+        assert!(Player::Cdj2000Nexus.must_recode("flac", 44_100));
+        assert!(!Player::Cdj2000Nexus.must_recode("mp3", 44_100));
+    }
+
+    #[test]
+    fn the_mp3_is_written_at_the_best_rate_the_source_and_the_deck_share() {
+        // The most the hardware takes, and a whole-number ratio where there is
+        // one: halving is a cleaner thing to do to audio than resampling it.
+        assert_eq!(Player::Cdj2000Nxs2.mp3_rate_from(96_000), 48_000, "2:1");
+        assert_eq!(Player::Cdj2000Nxs2.mp3_rate_from(88_200), 44_100, "2:1");
+        assert_eq!(Player::Cdj2000Nxs2.mp3_rate_from(192_000), 48_000, "4:1");
+        assert_eq!(Player::Cdj2000Nexus.mp3_rate_from(44_100), 44_100, "nothing to do");
+        assert_eq!(Player::Cdj2000Nexus.mp3_rate_from(48_000), 48_000);
+        // And never above what MPEG-1 has, even for a deck that would take it.
+        assert_eq!(Player::Cdj3000.mp3_rate_from(96_000), 48_000);
+        // A source below every standard rate still gets a legal one rather
+        // than a number LAME would refuse.
+        assert_eq!(Player::Cdj3000.mp3_rate_from(22_050), 32_000);
     }
 
     #[test]
