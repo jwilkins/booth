@@ -3425,19 +3425,9 @@ impl App {
         root: &std::path::Path,
         sessions: Vec<crate::history::Session>,
     ) {
-        let known: Vec<crate::backup::Known> = self
-            .library
-            .tracks
-            .iter()
-            .map(|track| crate::backup::Known {
-                path: track.path.clone(),
-                bytes: track.bytes,
-                audio_hash: track.audio_hash.clone(),
-            })
-            .collect();
+        let known = crate::backup::what_the_library_has(&self.library);
         let (by_name, by_sound) = crate::backup::index(&known);
-        let ids: std::collections::HashMap<&std::path::Path, u32> =
-            self.library.tracks.iter().map(|track| (track.path.as_path(), track.id)).collect();
+        let ids = crate::backup::whose(&self.library);
 
         let folder = crate::history::folder(drive);
         let (mut made, mut played, mut strangers) = (0usize, 0usize, 0usize);
@@ -3447,7 +3437,7 @@ impl App {
                 let file = track.file(root);
                 let owner =
                     crate::backup::owner(&by_name, &by_sound, &track.file_name, track.bytes, &file);
-                match owner.and_then(|known| ids.get(known.path.as_path())) {
+                match owner.and_then(|known| ids.get(&known.path)) {
                     Some(id) => tracks.push(*id),
                     None => strangers += 1,
                 }
@@ -3505,16 +3495,7 @@ impl App {
         state: &str,
         listing: Vec<String>,
     ) {
-        let known: Vec<crate::backup::Known> = self
-            .library
-            .tracks
-            .iter()
-            .map(|track| crate::backup::Known {
-                path: track.path.clone(),
-                bytes: track.bytes,
-                audio_hash: track.audio_hash.clone(),
-            })
-            .collect();
+        let known = crate::backup::what_the_library_has(&self.library);
         crate::info!("keeping a copy of {name} from {}", root.display());
         crate::debug!(
             "in state {state}, {} files on it, into {}",

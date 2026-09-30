@@ -70,6 +70,49 @@ impl Kind {
         }
     }
 
+    /// Why a section came out with this name, in the words the code decides by.
+    ///
+    /// Kept beside [`label`], which is the function that actually decides, so
+    /// that the two cannot drift: an explanation of a rule that has since
+    /// changed is worse than no explanation.
+    ///
+    /// Every threshold here is against the track's own range, which is the
+    /// thing worth saying out loud — a record that never takes its drums out
+    /// still has a quietest part, and that part is its breakdown.
+    pub fn rules(self) -> &'static str {
+        match self {
+            Kind::Intro => {
+                "The first section of the record, whatever it sounds like. Where a player parks \
+                 when the track loads."
+            }
+            Kind::Up => {
+                "Busier than the section before it, or quieter than the one after it: energy on \
+                 the way somewhere. Measured as a rise of a tenth of the track's range behind, \
+                 or a fifth ahead."
+            }
+            Kind::Down => {
+                "In the quietest third of the track, or level with its neighbours and not \
+                 heading anywhere. The quietest parts are breaks even when a drop follows \
+                 \u{2014} what matters about the section is that everything went away."
+            }
+            Kind::Chorus => {
+                "In the busiest third of the track. The format calls this a chorus; the \
+                 markers call it a drop."
+            }
+            Kind::Outro => {
+                "The last section, and in the quieter half of the track. A record that ends on \
+                 its loudest passage ends on a drop instead, because that is what it is."
+            }
+        }
+    }
+
+    /// How the number every threshold above is measured against is arrived at.
+    pub const MEASURE: &'static str = "Busyness is onset strength with the bottom of the \
+                                       spectrum counted twice \u{2014} a section with drums in \
+                                       it is a different section \u{2014} averaged over the \
+                                       section and placed in the track's own quietest-to-\
+                                       loudest range.";
+
     /// And back from the number the format stores, for a phrase read off a
     /// drive. The values a low- or mid-mood track uses are not these and are
     /// not written here, so they come back as `None` rather than as the wrong

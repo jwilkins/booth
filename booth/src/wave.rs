@@ -844,6 +844,31 @@ pub struct Strip {
 /// drop is, on the strip a player draws. So drag a boundary to move it,
 /// right-click a block to rename it, and split or merge to put a boundary
 /// where the detector did not find one or take away one it invented.
+/// What the pointer resting on one section says.
+///
+/// The name, how long it runs, the rule that gave it that name, and how the
+/// number that rule is about is measured. The last two come from the engine that
+/// decides, not from here, so an explanation cannot outlive the rule.
+fn phrase_help(phrase: &Phrase, beat_ms: &[u32]) -> String {
+    use booth_cli::analysis::structure::Kind;
+
+    let length = match bars_of(phrase, beat_ms) {
+        Some(bars) => format!(" \u{2014} {}", crate::library::plural(bars, "bar")),
+        None => String::new(),
+    };
+    // Plain capitals, not the letter-spaced form the block is painted with:
+    // spacing is what makes a four-letter label read as a heading at nine
+    // points, and what makes a sentence of help unreadable.
+    let name = phrase.kind.to_uppercase();
+    match Kind::from_label(&phrase.kind) {
+        Some(kind) => format!("{name}{length}\n\n{}\n\n{}", kind.rules(), Kind::MEASURE),
+        // A section renamed by hand, or read off a drive under a name the
+        // format has no phrase for. There is no rule behind it, and inventing
+        // one would be worse than saying so.
+        None => format!("{name}{length}\n\nNamed by hand rather than measured."),
+    }
+}
+
 pub fn phrase_strip(
     ui: &mut Ui,
     phrases: &[Phrase],
@@ -858,6 +883,9 @@ pub fn phrase_strip(
         ui.allocate_exact_size(Vec2::new(width, STRIP_HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let mut strip = Strip::default();
+    // The help for whichever block the pointer is over, filled in while they
+    // are drawn and shown once they all have been.
+    let mut about: Option<String> = None;
     if phrases.is_empty() || duration_secs <= 0.0 {
         return strip;
     }
@@ -888,6 +916,18 @@ pub fn phrase_strip(
         }
         let color = theme::phrase_color(&phrase.kind);
         painter.rect_filled(block, 0.0, color);
+
+        // What this section is and why it came out that way. Only the one the
+        // pointer is over: a strip that explained all five at once would be a
+        // paragraph nobody reads, and the question somebody actually has is
+        // "why is that bit a break".
+        //
+        // Hung off the strip's own response rather than a widget per block,
+        // because the blocks are painted — the strip is one control that can be
+        // dragged, and adding a widget per section would take the drag away.
+        if response.hover_pos().is_some_and(|at| block.contains(at)) {
+            about = Some(phrase_help(phrase, beat_ms));
+        }
 
         // Zoomed far enough in, the section you are inside starts off the left
         // of the panel. Its name goes against that edge rather than off it, so
@@ -924,6 +964,17 @@ pub fn phrase_strip(
     // says the strip is there and that it can be worked — and it is what lets a
     // test find it and drag one of its boundaries.
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "phrases"));
+    // Not while a boundary is being dragged: the help would sit over the very
+    // thing being lined up.
+    let response = match about.filter(|_| !response.dragged()) {
+        Some(about) => response.on_hover_text(about),
+        // Still says what the strip is for when the pointer is between blocks
+        // or past the end of the record.
+        None => response.on_hover_text(
+            "The arrangement, section by section. Drag a boundary to move it, or the strip \
+             itself to pan. Rest on a section to read why it is called what it is.",
+        ),
+    };
 
     // Which section the pointer is over, and which boundary — if any — it is
     // near enough to take hold of. The first section has no boundary before it:
@@ -1089,6 +1140,37 @@ mod tests {
             stems: None,
             zoom: Zoom::default(),
         }
+    }
+
+    #[test]
+    fn the_help_on_a_section_says_what_it_is_and_why() {
+        let break_ = Phrase { start_ms: 0, end_ms: 8_000, kind: "break".into() };
+        let beats: Vec<u32> = (0..16).map(|i| i * 500).collect();
+        let said = phrase_help(&break_, &beats);
+
+        assert!(
+            said.starts_with("BREAK \u{2014} 4 bars"),
+            "the name and its length come first: {said}"
+        );
+        assert!(said.contains("quietest third"), "the rule is not in it: {said}");
+        assert!(said.contains("onset strength"), "how it is measured is not in it: {said}");
+
+        // Each kind gets its own rule and not a general description of the
+        // strip, which is the whole point of hanging it off the block.
+        let drop = Phrase { start_ms: 0, end_ms: 8_000, kind: "drop".into() };
+        assert!(phrase_help(&drop, &beats).contains("busiest third"), "{said}");
+        assert_ne!(phrase_help(&drop, &beats), said);
+    }
+
+    #[test]
+    fn a_section_named_by_hand_says_so_rather_than_inventing_a_rule() {
+        // A name the format has no phrase for — renamed in the window, or read
+        // off a drive somebody else wrote. Nothing measured it, so there is no
+        // rule to quote.
+        let mine = Phrase { start_ms: 0, end_ms: 4_000, kind: "the bit I like".into() };
+        let said = phrase_help(&mine, &[]);
+        assert!(said.contains("Named by hand"), "{said}");
+        assert!(!said.contains("onset strength"), "{said}");
     }
 
     use egui_kittest::kittest::Queryable;

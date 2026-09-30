@@ -540,6 +540,58 @@ pub fn owner<'a>(
     })
 }
 
+/// Every file the library holds: each track, and each part of a rendered kit.
+///
+/// Stems are here because a drive this program wrote has them on it, and they
+/// are not tracks. A companion row is derived from its parent rather than
+/// stored, so nothing in `library.tracks` names `Sirens-vocals.wav` — which
+/// meant every stem on every drive came back as music the library does not
+/// have, and was either listed as lost or copied in whole, by the gigabyte,
+/// depending on [`OnForeign`]. A stem that came off this machine is the
+/// library's, and is linked like anything else.
+///
+/// A stem's length is read off the disk rather than out of the collection,
+/// which does not keep one. That is a stat per part, once per drive, against a
+/// walk of the whole drive — and a part whose file is not there is left out,
+/// because a length that cannot be read is not a file to match against.
+pub fn what_the_library_has(library: &crate::library::Library) -> Vec<Known> {
+    let mut known = Vec::with_capacity(library.tracks.len());
+    for track in &library.tracks {
+        known.push(Known {
+            path: track.path.clone(),
+            bytes: track.bytes,
+            audio_hash: track.audio_hash.clone(),
+        });
+        for (_, part) in track.stems.each() {
+            let Some(path) = part else { continue };
+            let Ok(bytes) = std::fs::metadata(path).map(|meta| meta.len()) else { continue };
+            // No audio hash: nothing ever reads one for a stem, and an empty
+            // one is left out of the by-sound index rather than matching
+            // everything that also has none.
+            known.push(Known { path: path.clone(), bytes, audio_hash: String::new() });
+        }
+    }
+    known
+}
+
+/// Which track each of those files belongs to.
+///
+/// A stem answers with its parent, because an acapella is that record cut down
+/// rather than a record of its own — so a play history naming one is that track
+/// having been played, not a stranger.
+pub fn whose(library: &crate::library::Library) -> HashMap<PathBuf, u32> {
+    let mut whose = HashMap::new();
+    for track in &library.tracks {
+        whose.insert(track.path.clone(), track.id);
+        for (_, part) in track.stems.each() {
+            if let Some(path) = part {
+                whose.insert(path.clone(), track.id);
+            }
+        }
+    }
+    whose
+}
+
 /// The library indexed by file name and length, for the cheap half of the
 /// question.
 pub type ByName<'a> = HashMap<(&'a str, u64), &'a Known>;
@@ -1019,6 +1071,72 @@ mod tests {
             keep(&drive, &into, "MY STICK", &decided, &known, OnForeign::Ignore, &library).unwrap();
         assert_eq!(kept.fingerprint, decided);
         assert!(already_kept(&into, "MY STICK", &decided), "the next look finds it and stops");
+    }
+
+    #[test]
+    fn a_stem_this_machine_rendered_is_the_librarys_and_is_linked() {
+        // What was wrong: a companion row is derived from its parent rather
+        // than stored, so nothing in `library.tracks` names a stem file. The
+        // index was built from the tracks alone, so every stem on every drive —
+        // including drives this program had just written from those very files
+        // — came back as music the library does not have. Under the default
+        // policy that listed them as lost; under the other one it copied them
+        // in, by the gigabyte.
+        let scratch = Scratch::new("stems-known");
+        let (into, library_dir) = into(&scratch);
+        let audio = b"the audio itself, which is the big part".to_vec();
+        let vocals = b"just the voice".to_vec();
+        scratch.file("drive/PIONEER/rekordbox/export.pdb", b"a database");
+        scratch.file("drive/Contents/Peverelist/Roll With The Punches.flac", &audio);
+        scratch.file("drive/Contents/Peverelist/Roll With The Punches-vocals.wav", &vocals);
+        let track_file = scratch.file("library/Peverelist/Roll With The Punches.flac", &audio);
+        let stem_file = scratch.file("stems/Roll With The Punches-vocals.wav", &vocals);
+
+        let mut collection = crate::library::Library::new();
+        let id = collection.add(&track_file);
+        {
+            let track = collection.get_mut(id).unwrap();
+            track.bytes = audio.len() as u64;
+            track.stems.vocals = Some(stem_file.clone());
+        }
+
+        let known = what_the_library_has(&collection);
+        assert_eq!(known.len(), 2, "the kit's one rendered part is a file too: {known:?}");
+        assert!(known.iter().any(|file| file.path == stem_file), "{known:?}");
+        assert_eq!(
+            whose(&collection).get(&stem_file),
+            Some(&id),
+            "an acapella is its parent's, not a record of its own"
+        );
+
+        let kept = keep(
+            &scratch.path("drive"),
+            &into,
+            "MY STICK",
+            "fp",
+            &known,
+            OnForeign::Ignore,
+            &library_dir,
+        )
+        .unwrap();
+        assert_eq!(kept.linked, 2, "the stem was not recognised: {:?}", kept.missing);
+        assert_eq!(kept.absent, 0, "{:?}", kept.missing);
+    }
+
+    #[test]
+    fn a_stem_whose_file_has_gone_is_not_something_to_match_against() {
+        // A kit can name a file that has since moved. Its length is read off
+        // the disk, so there is nothing to match on, and a zero-length entry
+        // would claim every empty file on the drive.
+        let scratch = Scratch::new("stems-gone");
+        let track_file = scratch.file("library/a.flac", b"audio");
+        let mut collection = crate::library::Library::new();
+        let id = collection.add(&track_file);
+        collection.get_mut(id).unwrap().stems.vocals = Some(scratch.path("nowhere-vocals.wav"));
+
+        let known = what_the_library_has(&collection);
+        assert_eq!(known.len(), 1, "{known:?}");
+        assert_eq!(known[0].path, track_file);
     }
 
     #[test]
