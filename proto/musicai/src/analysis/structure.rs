@@ -69,6 +69,77 @@ impl Kind {
             Kind::Outro => "outro",
         }
     }
+
+    /// Why a section came out with this name, in the words the code decides by.
+    ///
+    /// Kept beside [`label`], which is the function that actually decides, so
+    /// that the two cannot drift: an explanation of a rule that has since
+    /// changed is worse than no explanation.
+    ///
+    /// Every threshold here is against the track's own range, which is the
+    /// thing worth saying out loud — a record that never takes its drums out
+    /// still has a quietest part, and that part is its breakdown.
+    pub fn rules(self) -> &'static str {
+        match self {
+            Kind::Intro => {
+                "The first section of the record, whatever it sounds like. Where a player parks \
+                 when the track loads."
+            }
+            Kind::Up => {
+                "Busier than the section before it, or quieter than the one after it: energy on \
+                 the way somewhere. Measured as a rise of a tenth of the track's range behind, \
+                 or a fifth ahead."
+            }
+            Kind::Down => {
+                "In the quietest third of the track, or level with its neighbours and not \
+                 heading anywhere. The quietest parts are breaks even when a drop follows \
+                 \u{2014} what matters about the section is that everything went away."
+            }
+            Kind::Chorus => {
+                "In the busiest third of the track. The format calls this a chorus; the \
+                 markers call it a drop."
+            }
+            Kind::Outro => {
+                "The last section, and in the quieter half of the track. A record that ends on \
+                 its loudest passage ends on a drop instead, because that is what it is."
+            }
+        }
+    }
+
+    /// How the number every threshold above is measured against is arrived at.
+    pub const MEASURE: &'static str = "Busyness is onset strength with the bottom of the \
+                                       spectrum counted twice \u{2014} a section with drums in \
+                                       it is a different section \u{2014} averaged over the \
+                                       section and placed in the track's own quietest-to-\
+                                       loudest range.";
+
+    /// And back from the number the format stores, for a phrase read off a
+    /// drive. The values a low- or mid-mood track uses are not these and are
+    /// not written here, so they come back as `None` rather than as the wrong
+    /// name.
+    pub fn from_id(id: u16) -> Option<Self> {
+        match id {
+            1 => Some(Kind::Intro),
+            2 => Some(Kind::Up),
+            3 => Some(Kind::Down),
+            5 => Some(Kind::Chorus),
+            6 => Some(Kind::Outro),
+            _ => None,
+        }
+    }
+
+    /// And back again, for sections that have been round a library and come
+    /// back as the words the strip shows.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "intro" => Some(Kind::Intro),
+            "build" => Some(Kind::Up),
+            "break" => Some(Kind::Down),
+            "drop" => Some(Kind::Chorus),
+            "outro" => Some(Kind::Outro),
+            _ => None,
+        }
+    }
 }
 
 /// One stretch of a track, measured in beats from the first one.
@@ -96,6 +167,42 @@ pub struct Structure {
 impl Structure {
     pub fn is_empty(&self) -> bool {
         self.sections.is_empty()
+    }
+
+    /// The same sections, given in milliseconds by something that kept them
+    /// rather than measured them, placed against a grid.
+    ///
+    /// A collection keeps where a section starts, not which beat that was: the
+    /// position in the record survives the grid being measured again and a beat
+    /// number does not. So the beat number is worked out here, against the grid
+    /// actually being written. A section whose name is not one of the five is
+    /// dropped rather than guessed at — a strip with a hole in it is better
+    /// than one that says the wrong thing about where the drop is.
+    ///
+    /// The intensity comes out zero. Nothing downstream of here reads it: it is
+    /// what [`label`] decided a section's name with, and by this point the name
+    /// has already been decided by a person.
+    pub fn from_parts(parts: &[crate::export::Part], beat_times: &[u32]) -> Self {
+        let at = |ms: u32| -> u16 {
+            match beat_times.iter().rposition(|&beat| beat <= ms) {
+                Some(index) => (index + 1).min(u16::MAX as usize - 1) as u16,
+                None => 1,
+            }
+        };
+        let sections = parts
+            .iter()
+            .filter_map(|part| {
+                let kind = Kind::from_label(&part.kind)?;
+                let start_beat = at(part.start_ms);
+                Some(Section {
+                    start_beat,
+                    end_beat: at(part.end_ms).max(start_beat + 1),
+                    kind,
+                    intensity: 0.0,
+                })
+            })
+            .collect();
+        Self { sections }
     }
 
     /// The form the analysis files store, ready to be written into `PSSI`.
@@ -357,6 +464,85 @@ fn mean(values: &[f32]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    mod sections_a_collection_kept {
+        use super::super::*;
+        use crate::export::Part;
+
+        /// Half-second beats, so a bar is two seconds.
+        fn beats(count: usize) -> Vec<u32> {
+            (0..count).map(|i| i as u32 * 500).collect()
+        }
+
+        fn part(start_ms: u32, end_ms: u32, kind: &str) -> Part {
+            Part { start_ms, end_ms, kind: kind.to_string() }
+        }
+
+        #[test]
+        fn milliseconds_become_the_beat_numbers_the_file_wants() {
+            let parts = vec![part(0, 16_000, "intro"), part(16_000, 32_000, "drop")];
+            let found = Structure::from_parts(&parts, &beats(64));
+
+            assert_eq!(found.sections.len(), 2);
+            // Beat numbers count the first beat as 1, so 16 s at two beats a
+            // second is beat 33.
+            assert_eq!(found.sections[0].start_beat, 1);
+            assert_eq!(found.sections[0].end_beat, 33);
+            assert_eq!(found.sections[1].start_beat, 33);
+            assert_eq!(found.sections[1].kind, Kind::Chorus);
+        }
+
+        #[test]
+        fn a_boundary_between_two_beats_takes_the_one_before_it() {
+            // A section starts where it starts. Rounding forward would put its
+            // first beat inside the section before it.
+            let parts = vec![part(1_800, 4_000, "build")];
+            let found = Structure::from_parts(&parts, &beats(16));
+            assert_eq!(found.sections[0].start_beat, 4, "1.8 s is three and a half beats in");
+        }
+
+        #[test]
+        fn a_name_the_format_has_no_phrase_for_is_dropped_rather_than_guessed() {
+            let parts = vec![
+                part(0, 4_000, "intro"),
+                part(4_000, 8_000, "chorus"),
+                part(8_000, 12_000, "outro"),
+            ];
+            let found = Structure::from_parts(&parts, &beats(32));
+
+            let kinds: Vec<Kind> = found.sections.iter().map(|s| s.kind).collect();
+            assert_eq!(kinds, vec![Kind::Intro, Kind::Outro], "{:?}", found.sections);
+        }
+
+        #[test]
+        fn every_section_ends_after_it_starts() {
+            // A section shorter than a beat would otherwise come out inverted,
+            // and the format has no way to say that.
+            let parts = vec![part(1_000, 1_100, "drop")];
+            let found = Structure::from_parts(&parts, &beats(16));
+            assert!(found.sections[0].end_beat > found.sections[0].start_beat);
+        }
+
+        #[test]
+        fn sections_with_no_grid_to_place_them_against_all_land_on_the_first_beat() {
+            // Not useful, but not a panic and not an inverted section either.
+            let found = Structure::from_parts(&[part(0, 4_000, "intro")], &[]);
+            assert_eq!(found.sections[0].start_beat, 1);
+            assert_eq!(found.sections[0].end_beat, 2);
+        }
+
+        #[test]
+        fn what_comes_out_is_what_the_analysis_file_writes() {
+            let parts = vec![part(0, 16_000, "intro"), part(16_000, 32_000, "drop")];
+            let song = Structure::from_parts(&parts, &beats(64)).to_song_structure().unwrap();
+            assert_eq!(song.phrases.len(), 2);
+            assert_eq!(song.phrases[0].beat, 1);
+            assert_eq!(song.phrases[1].beat, 33);
+            // The grid has 64 beats and the last one is at 31.5 s, so a
+            // section running to 32 s ends on the last beat there is.
+            assert_eq!(song.end_beat, 64);
+        }
+    }
+
     use super::super::{features, tempo};
     use super::*;
     use crate::audio::Audio;

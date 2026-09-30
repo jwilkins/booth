@@ -176,9 +176,13 @@ fn editing_a_cue_makes_the_drive_out_of_date() {
 }
 
 #[test]
-fn naming_a_cue_is_not_something_the_player_sees() {
-    // The label is for the person prepping, and does not reach the drive, so
-    // renaming one must not mark a whole track for rewriting.
+fn naming_a_cue_is_something_the_player_sees() {
+    // This used to assert the opposite, and was right to: the exporter
+    // measured its own cues and wrote those, so a label was for the person
+    // prepping and reached nothing. Now the collection's cues are what go on
+    // the drive, names and colours with them, so a rename is a change the
+    // drive has not got — and a track that is not rewritten is a player
+    // showing the wrong word under a cue.
     let mut track = Track::placeholder(1);
     track.cues.push(booth::library::CueMark {
         letter: 1,
@@ -187,12 +191,13 @@ fn naming_a_cue_is_not_something_the_player_sees() {
         color: [0, 0, 0],
     });
     let before = booth::sync::fingerprint(&track);
+
     track.cues[0].label = "first drop".into();
-    assert_eq!(
-        booth::sync::fingerprint(&track),
-        before,
-        "renaming a cue should not rewrite the drive"
-    );
+    assert_ne!(booth::sync::fingerprint(&track), before, "a renamed cue must reach the drive");
+
+    // And putting it back is putting it back, rather than a second change.
+    track.cues[0].label = String::new();
+    assert_eq!(booth::sync::fingerprint(&track), before);
 }
 
 #[test]

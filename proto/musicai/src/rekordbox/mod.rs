@@ -20,6 +20,7 @@
 //! neither falls back to the other. What stands between this program and a
 //! drive a CDJ-3000X is *known* to play is hardware to prove it on.
 
+pub mod anlz;
 pub mod master;
 pub mod onelibrary;
 

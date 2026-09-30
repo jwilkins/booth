@@ -9,52 +9,66 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::library::data_dir;
+use crate::library::{data_dir, BEATS_PER_BAR};
 
-/// What to do about a file that is not in the library folder.
-///
-/// A track played from a download folder, a network share or someone else's
-/// stick is a track that will be missing the night it matters. The default is
-/// to take a copy, because the cost of being wrong in that direction is some
-/// disk, and the cost of being wrong in the other is an empty deck.
 /// What to do about music on a drive that the library has no copy of.
 ///
-/// Only ever somebody else's drive: a drive this program wrote holds the
-/// library's own files, which are linked rather than copied. The question is
-/// what a copy of a stranger's stick should be — a record of what was on it, a
-/// complete thing that can be put back, or an invitation to keep the music.
+/// Only music the library really has no copy of: a drive this program wrote
+/// holds the library's own files, and a track or a stem it recognises is linked
+/// rather than copied. What is left is another laptop's stick, or somebody
+/// else's.
+///
+/// The default is to keep it, and the reason is the failure that prevents. A
+/// library full of greyed-out rows is a collection that describes files nobody
+/// can find, and the copy that would have answered for them was on a stick
+/// since lost, reformatted, or taken to a gig by somebody else. There is no
+/// recovering from it afterwards: the names are there and the music is not.
+/// Every other outcome here is measured in disk, which can be bought.
+///
+/// It is still a setting, because a DJ who swaps sticks with strangers all
+/// night will fill a library with records that are not theirs — which is a real
+/// objection to the default rather than a reason not to have one.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnForeign {
-    /// Name it in the manifest and store none of it.
+    /// Copy it into the library and add it to the collection.
     #[default]
-    Ignore,
+    Adopt,
     /// Copy it into the backup, so that copy is complete on its own.
     Keep,
-    /// Copy it into the library and add it to the collection.
-    Adopt,
+    /// Name it in the manifest and store none of it.
+    Ignore,
 }
 
 impl OnForeign {
-    pub const ALL: [OnForeign; 3] = [OnForeign::Ignore, OnForeign::Keep, OnForeign::Adopt];
+    /// Offered in this order, so the one that is on reads first.
+    pub const ALL: [OnForeign; 3] = [OnForeign::Adopt, OnForeign::Keep, OnForeign::Ignore];
 
     pub fn label(self) -> &'static str {
         match self {
-            OnForeign::Ignore => "Note what was on it",
-            OnForeign::Keep => "Copy it into the backup",
             OnForeign::Adopt => "Copy it into the library",
+            OnForeign::Keep => "Copy it into the backup",
+            OnForeign::Ignore => "Note what was on it",
         }
     }
 
     pub fn blurb(self) -> &'static str {
         match self {
-            OnForeign::Ignore => {
-                "The drive's databases, cues and analysis are kept; its music is named in the                  manifest and not stored. Costs nothing, and the music is gone if the drive is."
+            OnForeign::Adopt => {
+                "On by default. Anything on the drive the collection does not already have is \
+                 copied into the library and added to it, where it can be analysed and played \
+                 like anything else \u{2014} so a stick from another laptop fills in what this \
+                 one is missing, and a library of greyed-out rows waiting on a stick nobody can \
+                 find never happens. Costs whatever the drive holds that you do not."
             }
             OnForeign::Keep => {
-                "The backup holds the music too, so it can be put back on a stick as it was.                  Costs whatever the drive holds that you do not — gigabytes, for a stranger's."
+                "The backup holds the music, so the drive can be put back as it was, and the \
+                 collection is left alone. The same cost in disk, without somebody else's \
+                 records in the browser."
             }
-            OnForeign::Adopt => {
-                "The music is copied into the library and added to the collection, where it can                  be analysed and played like anything else. The same cost, and a browser with                  somebody else's records in it."
+            OnForeign::Ignore => {
+                "The drive's databases, cues and analysis are kept; its music is named in the \
+                 manifest and not stored. Costs nothing, and the music is gone when the drive \
+                 is."
             }
         }
     }
@@ -97,6 +111,20 @@ impl OnExternal {
     }
 }
 
+fn default_theme() -> String {
+    crate::theme::SCHEMES[0].name.to_string()
+}
+
+fn default_emulator_port() -> u16 {
+    booth_cli::emulator::DEFAULT_PORT
+}
+
+/// Long enough not to flash up while the pointer crosses the window on its way
+/// somewhere, short enough that resting on a control counts as asking.
+fn default_help_delay_ms() -> u32 {
+    400
+}
+
 /// Whether a track's length reads as bars or as beats.
 ///
 /// Bars by default, because that is the unit a set is built in: an intro is
@@ -127,7 +155,7 @@ impl Length {
     /// music and lying about the drive.
     pub fn count(self, beats: usize) -> usize {
         match self {
-            Length::Bars => beats / 4,
+            Length::Bars => beats / BEATS_PER_BAR,
             Length::Beats => beats,
         }
     }
@@ -142,22 +170,11 @@ impl Length {
     /// the whole point of the other setting.
     pub fn position(self, beat: usize) -> String {
         match self {
-            Length::Bars => format!("{}.{}", beat / 4 + 1, beat % 4 + 1),
+            Length::Bars => {
+                format!("{}.{}", beat / BEATS_PER_BAR + 1, beat % BEATS_PER_BAR + 1)
+            }
             Length::Beats => format!("{}", beat + 1),
         }
-    }
-
-    /// Where the playhead is and how much is left, in one compact reading.
-    ///
-    /// Elapsed as a position, remaining as a count with a minus in front of it
-    /// — the way a player shows time and remain. They are different kinds of
-    /// thing and are deliberately not written the same way: a position is
-    /// one-based and a count is not, and printing both as `12.3` would invite
-    /// reading a remainder as a place in the track.
-    pub fn elapsed_and_left(self, beat: usize, total_beats: usize) -> String {
-        let played = beat.min(total_beats);
-        let left = total_beats.saturating_sub(played);
-        format!("{} · -{}", self.position(played), self.count(left))
     }
 
     /// The count and its unit, singular where it should be.
@@ -169,6 +186,66 @@ impl Length {
             (n, unit) => format!("{n} {}", unit.label()),
         }
     }
+}
+
+/// Which way the transport counts.
+///
+/// The two questions a DJ asks of a running track, and never both at once:
+/// where am I, and how long have I got. A player puts them on one button for
+/// that reason, and so does this.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Counting {
+    /// Where you are: the bar you are in, and how long the track has been
+    /// playing.
+    #[default]
+    Elapsed,
+    /// What is left: bars to the end, and time to the end.
+    Remaining,
+}
+
+impl Counting {
+    pub fn flipped(self) -> Self {
+        match self {
+            Counting::Elapsed => Counting::Remaining,
+            Counting::Remaining => Counting::Elapsed,
+        }
+    }
+
+    /// The transport reading.
+    ///
+    /// Elapsed is a position and a clock; remaining is two counts, each with a
+    /// minus in front of it. They are deliberately not written the same way: a
+    /// position is one-based and a count is not, so printing both as `12.3`
+    /// would invite reading a remainder as a place in the track.
+    pub fn reading(
+        self,
+        length: Length,
+        beat: usize,
+        total_beats: usize,
+        at_ms: u32,
+        total_ms: u32,
+    ) -> String {
+        let played = beat.min(total_beats);
+        match self {
+            Counting::Elapsed => format!("{} · {}", length.position(played), clock(at_ms)),
+            Counting::Remaining => format!(
+                "-{} · -{}",
+                length.count(total_beats.saturating_sub(played)),
+                clock(total_ms.saturating_sub(at_ms.min(total_ms)))
+            ),
+        }
+    }
+}
+
+/// Minutes and seconds, for a reading that changes while it is being read.
+///
+/// Not the hundredths [`crate::app`]'s `time_text` gives a cue position. A cue
+/// is a place, and where it is to the hundredth is worth knowing; a transport
+/// is a number that moves, and two digits flickering under the eye are two
+/// digits nobody can read.
+pub fn clock(ms: u32) -> String {
+    let total = ms / 1000;
+    format!("{}:{:02}", total / 60, total % 60)
 }
 
 /// How much work a separation is worth.
@@ -301,6 +378,9 @@ pub struct Config {
     pub paint: crate::wave::Paint,
     /// Whether a track's length reads as bars or as beats.
     pub length: Length,
+    /// Whether the transport shows where you are or what is left.
+    #[serde(default)]
+    pub counting: Counting,
     /// How much work a separation is worth.
     pub stem_quality: Quality,
     /// Whether analysis also fingerprints a track and looks up what it is.
@@ -343,15 +423,153 @@ pub struct Config {
     /// every drive costs megabytes rather than gigabytes.
     #[serde(default = "default_backups_path")]
     pub backups_path: PathBuf,
+    /// Which colour scheme the window draws in, by name.
+    ///
+    /// A name rather than an index, so a scheme added or reordered later does
+    /// not silently repaint somebody's window into a different one.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Where a CDJ-3000 emulator is listening for machine-protocol calls.
+    ///
+    /// Its first instance is 4445 and each further one is a port along, so
+    /// this is what to change when the emulator in front of you is a second
+    /// one. Only used by "send to the emulator"; nothing connects on its own.
+    /// How long the pointer has to rest on a control before its help appears,
+    /// in milliseconds.
+    ///
+    /// A number rather than on/off, because the two complaints about hover help
+    /// are opposite ones: it gets in the way, and it never comes. Zero shows it
+    /// at once, which is what somebody learning the window wants; a second and
+    /// a half is what somebody who knows it wants.
+    #[serde(default = "default_help_delay_ms")]
+    pub help_delay_ms: u32,
+    #[serde(default = "default_emulator_port")]
+    pub emulator_port: u16,
     /// Whether a drive is copied when it is written or plugged in.
     #[serde(default = "yes")]
     pub keep_drives: bool,
     /// What to do about music on a drive that the library has no copy of.
     #[serde(default)]
-    pub on_foreign: OnForeign,
+    /// Named for what it answers rather than for the old spelling, on purpose.
+    ///
+    /// The default used to be to store none of it, which is how a library comes
+    /// to be full of rows nobody can play. Renaming the setting is what makes
+    /// the new default reach a collection that already exists: a saved "store
+    /// none of it" was almost always nobody having opened the setting, since
+    /// that is what it said before anybody looked, and the two are
+    /// indistinguishable on disk. Somebody who really wants it can set it again
+    /// in one click, and a whole library cannot be un-lost in one.
+    pub from_other_drives: OnForeign,
     /// How wide or tall each panel was left.
     #[serde(default)]
     pub panels: Panels,
+    /// Where to find a speech recogniser, for reading the words off a vocal
+    /// stem and cueing the hook.
+    #[serde(default)]
+    pub whisper: Whisper,
+}
+
+/// What to run when nothing says otherwise: whisper.cpp's own binary name, as
+/// `booth/README.md` tells you to install it.
+const DEFAULT_WHISPER: &str = "whisper-cli";
+
+/// Where the speech recogniser lives and what to ask it for.
+///
+/// Off by default in the sense that nothing here points anywhere: Booth does
+/// not ship a recogniser and will not download one, so the one thing that needs
+/// it says what to install rather than failing quietly. Everything else in the
+/// program works without it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Whisper {
+    /// The program to run. `whisper-cli` is whisper.cpp's; `whisper` is
+    /// OpenAI's Python one, and is called differently — which of the two it is
+    /// is worked out from this name.
+    ///
+    /// Empty means fall back to `BOOTH_WHISPER_BIN`, and then to `whisper-cli`.
+    pub program: String,
+    /// The weights. A path to a `.bin` for whisper.cpp, which cannot run
+    /// without one; a name like `small` or `turbo` for the Python program,
+    /// which picks its own when this is empty.
+    ///
+    /// Empty means fall back to `BOOTH_WHISPER_MODEL`.
+    pub model: String,
+    /// The language to transcribe as, e.g. `en`.
+    ///
+    /// Worth setting. Left to itself the recogniser guesses the language from
+    /// the first few seconds, and the first few seconds of an isolated vocal
+    /// are usually a breath.
+    pub language: String,
+}
+
+impl Whisper {
+    /// The settings first, then the environment, then the default — the same
+    /// order the rekordbox key resolves in, and for the same reason: a feature
+    /// should be triable without editing a file.
+    ///
+    /// The rule is separated from the environment read so that it can be
+    /// tested. A test that reads the real environment passes or fails by what
+    /// the machine happens to be carrying, which this repository's own
+    /// session-start hook demonstrated the moment it was written: it exports
+    /// `BOOTH_WHISPER_BIN`, and two tests that had been green for a week went
+    /// red without a line of the code under test changing.
+    fn chosen(stored: &str, from_env: Option<String>) -> Option<String> {
+        let stored = stored.trim();
+        if !stored.is_empty() {
+            return Some(stored.to_string());
+        }
+        from_env.filter(|value| !value.trim().is_empty())
+    }
+
+    fn setting(stored: &str, variable: &str) -> Option<String> {
+        Self::chosen(stored, std::env::var(variable).ok())
+    }
+
+    /// The same rule with the fallback on the end, kept apart from the
+    /// environment for the reason [`Self::chosen`] gives.
+    fn program_from(stored: &str, from_env: Option<String>) -> String {
+        Self::chosen(stored, from_env).unwrap_or_else(|| DEFAULT_WHISPER.to_string())
+    }
+
+    pub fn program(&self) -> String {
+        Self::program_from(&self.program, std::env::var("BOOTH_WHISPER_BIN").ok())
+    }
+
+    pub fn model(&self) -> Option<PathBuf> {
+        Self::setting(&self.model, "BOOTH_WHISPER_MODEL").map(PathBuf::from)
+    }
+
+    pub fn language(&self) -> Option<String> {
+        Self::setting(&self.language, "BOOTH_WHISPER_LANGUAGE")
+    }
+
+    /// The form the engine takes, pointed at a scratch directory of its own.
+    pub fn to_cli(&self, work_dir: PathBuf) -> booth_cli::transcribe::whisper::Config {
+        booth_cli::transcribe::whisper::Config {
+            program: self.program().into(),
+            model: self.model(),
+            language: self.language(),
+            flavour: None,
+            work_dir,
+        }
+    }
+
+    /// Whether this is set up far enough to be worth starting.
+    ///
+    /// whisper.cpp needs a model file naming and will not run without one, so a
+    /// library with no model set is told that before a stem is rendered rather
+    /// than after.
+    pub fn ready(&self) -> Result<(), String> {
+        let program = self.program();
+        let cpp = booth_cli::transcribe::whisper::Flavour::of(Path::new(&program))
+            == booth_cli::transcribe::whisper::Flavour::Cpp;
+        match cpp && self.model().is_none() {
+            true => Err(format!(
+                "{program} needs a model file. Set one in Settings, or in BOOTH_WHISPER_MODEL."
+            )),
+            false => Ok(()),
+        }
+    }
 }
 
 /// The panel sizes, in points, as the window was last left.
@@ -445,6 +663,7 @@ impl Default for Config {
             panels: Panels::default(),
             paint: crate::wave::Paint::default(),
             length: Length::default(),
+            counting: Counting::default(),
             stem_quality: Quality::default(),
             identify: true,
             acoustid_key: String::new(),
@@ -455,8 +674,12 @@ impl Default for Config {
             rekordbox_key: String::new(),
             onelibrary_key: String::new(),
             backups_path: default_backups_path(),
+            theme: default_theme(),
+            emulator_port: booth_cli::emulator::DEFAULT_PORT,
+            help_delay_ms: default_help_delay_ms(),
             keep_drives: true,
-            on_foreign: OnForeign::default(),
+            from_other_drives: OnForeign::default(),
+            whisper: Whisper::default(),
         }
     }
 }
@@ -757,21 +980,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reading_says_where_it_is_and_how_much_is_left() {
-        let total = 64 * 4;
-        assert_eq!(Length::Bars.elapsed_and_left(64, total), "17.1 · -48");
-        assert_eq!(Length::Bars.elapsed_and_left(0, total), "1.1 · -64");
-        // At the very end nothing is left, and the count does not go negative.
-        assert_eq!(Length::Bars.elapsed_and_left(total, total), "65.1 · -0");
-        assert_eq!(Length::Bars.elapsed_and_left(total + 99, total), "65.1 · -0");
-    }
-
-    #[test]
-    fn a_reading_in_beats_uses_beats_for_both_halves() {
-        assert_eq!(Length::Beats.elapsed_and_left(7, 32), "8 · -25");
-    }
-
-    #[test]
     fn stems_are_rendered_well_by_default() {
         // Rendered once, played for years: the slow one is the right default.
         assert_eq!(Config::default().stem_quality, Quality::High);
@@ -952,5 +1160,136 @@ mod tests {
             .collect();
         assert_eq!(leftovers, vec!["Marius.flac".to_string()], "{leftovers:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// What the transport says, and which way round.
+#[cfg(test)]
+mod counting_the_track {
+    use super::*;
+
+    /// 128 beats — 32 bars — over four minutes, with the playhead a quarter
+    /// of the way in.
+    const BEATS: usize = 128;
+    const TOTAL_MS: u32 = 240_000;
+    const AT_MS: u32 = 60_000;
+    const BEAT: usize = 32;
+
+    #[test]
+    fn where_you_are_is_the_bar_and_the_clock() {
+        let reading = Counting::Elapsed.reading(Length::Bars, BEAT, BEATS, AT_MS, TOTAL_MS);
+        assert_eq!(reading, "9.1 · 1:00");
+    }
+
+    #[test]
+    fn what_is_left_is_two_counts_and_both_say_so() {
+        // Bars to the end and time to the end, each with a minus in front.
+        // A position is one-based and a count is not, so they are written
+        // differently on purpose: "9.1" and "24" must not be read as the same
+        // kind of number.
+        let reading = Counting::Remaining.reading(Length::Bars, BEAT, BEATS, AT_MS, TOTAL_MS);
+        assert_eq!(reading, "-24 · -3:00");
+    }
+
+    #[test]
+    fn the_unit_is_still_whichever_one_the_settings_ask_for() {
+        assert_eq!(
+            Counting::Remaining.reading(Length::Beats, BEAT, BEATS, AT_MS, TOTAL_MS),
+            "-96 · -3:00"
+        );
+        assert_eq!(
+            Counting::Elapsed.reading(Length::Beats, BEAT, BEATS, AT_MS, TOTAL_MS),
+            "33 · 1:00"
+        );
+    }
+
+    #[test]
+    fn a_playhead_past_the_end_reads_as_the_end_rather_than_as_a_negative() {
+        // The deck can run a moment past the last beat, and a transport that
+        // said "-1 bar" there would be saying something that is not true.
+        let reading = Counting::Remaining.reading(Length::Bars, 999, BEATS, 999_999, TOTAL_MS);
+        assert_eq!(reading, "-0 · -0:00");
+    }
+
+    #[test]
+    fn one_press_turns_it_round_and_another_turns_it_back() {
+        assert_eq!(Counting::Elapsed.flipped(), Counting::Remaining);
+        assert_eq!(Counting::Remaining.flipped(), Counting::Elapsed);
+        assert_eq!(Counting::default(), Counting::Elapsed, "where you are, until asked");
+    }
+
+    #[test]
+    fn the_clock_stops_at_seconds() {
+        // Hundredths belong on a cue position, which is a place worth knowing
+        // exactly. A transport is a number that moves, and two digits
+        // flickering under the eye are two digits nobody can read.
+        assert_eq!(clock(0), "0:00");
+        assert_eq!(clock(9_999), "0:09");
+        assert_eq!(clock(61_500), "1:01");
+        assert_eq!(clock(3_600_000), "60:00");
+    }
+}
+
+#[cfg(test)]
+mod whisper_settings {
+    use super::*;
+
+    #[test]
+    fn the_python_recogniser_needs_no_model_file_and_the_cpp_one_does() {
+        // OpenAI's downloads and picks its own weights from a name; whisper.cpp
+        // has to be handed a file and will not start without one. Saying so
+        // before a stem is rendered is the difference between a clear message
+        // and minutes of work thrown away.
+        let mut whisper = Whisper { program: "whisper".into(), ..Default::default() };
+        assert!(whisper.ready().is_ok(), "{:?}", whisper.ready());
+
+        whisper.program = "whisper-cli".into();
+        whisper.model = "/models/ggml-base.en.bin".into();
+        assert!(whisper.ready().is_ok(), "{:?}", whisper.ready());
+    }
+
+    #[test]
+    fn a_setting_is_taken_as_written_apart_from_the_spaces() {
+        // A stored setting is the answer whatever the environment says, so
+        // this one can be asked of the real thing.
+        let whisper = Whisper { program: "  /opt/whisper-cli  ".into(), ..Default::default() };
+        assert_eq!(whisper.program(), "/opt/whisper-cli");
+    }
+
+    #[test]
+    fn the_settings_come_first_then_the_environment_then_the_default() {
+        // Asked of the rule rather than of the machine: the environment this
+        // runs in is not the test's to arrange, and a session-start hook that
+        // exports one of these must not be able to turn the suite red.
+        let from_env = || Some("/from/the/environment".to_string());
+
+        assert_eq!(Whisper::chosen(" /typed/in ", from_env()), Some("/typed/in".into()));
+        assert_eq!(Whisper::chosen("", from_env()), Some("/from/the/environment".into()));
+        assert_eq!(Whisper::chosen("   ", None), None);
+        // An empty variable is an unset one. Passed through as `-l ""`,
+        // whisper transcribes nothing at all.
+        assert_eq!(Whisper::chosen("", Some("  ".into())), None);
+    }
+
+    #[test]
+    fn the_settings_reach_the_engine() {
+        let whisper = Whisper {
+            program: "whisper-cli".into(),
+            model: "ggml-base.en.bin".into(),
+            language: "en".into(),
+        };
+        let engine = whisper.to_cli(PathBuf::from("/tmp/words"));
+        assert_eq!(engine.program, std::ffi::OsString::from("whisper-cli"));
+        assert_eq!(engine.model, Some(PathBuf::from("ggml-base.en.bin")));
+        assert_eq!(engine.language.as_deref(), Some("en"));
+        assert_eq!(engine.work_dir, PathBuf::from("/tmp/words"));
+    }
+
+    #[test]
+    fn with_nothing_set_anywhere_it_is_the_one_the_readme_tells_you_to_install() {
+        assert_eq!(Whisper::program_from("", None), "whisper-cli");
+        // And a setting still beats a default, which is the half of this that
+        // would go unnoticed if the default were the only thing asserted.
+        assert_eq!(Whisper::program_from(" whisper ", None), "whisper");
     }
 }

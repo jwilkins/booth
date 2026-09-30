@@ -17,7 +17,7 @@ use crate::cli::{
 };
 use crate::discover;
 use crate::export::image::{capacity_for, Destination, DriveImage};
-use crate::export::{anlz, pdb, waveform};
+use crate::export::{anlz, pdb, waveform, BeatGrid};
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
@@ -158,6 +158,58 @@ fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
         listened.cues.iter().filter(|c| c.is_hot()).count(),
         written.join("\n  ")
     )])
+}
+
+/// Put a drive image into a CDJ-3000 emulator's USB slot.
+///
+/// Succeeds when the image reached the emulator, and also when it did not but
+/// somebody was shown where it is instead — both leave the image somewhere it
+/// can be played from, and only one of them is automatic. `--no-reveal` makes
+/// the second one a failure, which is what a script wants.
+pub fn emulator(args: &crate::cli::EmulatorArgs, reporter: &dyn report::Reporter) -> Result<()> {
+    use crate::emulator::{attach, send, Sent};
+
+    let image = &args.image;
+    if !image.is_file() {
+        bail!("{} is not a file. `export --image` writes one.", image.display());
+    }
+    // Absolute, because the emulator opens it and nothing says what its
+    // working directory is — a relative path that works here is a path it
+    // would look for somewhere else.
+    let full = std::fs::canonicalize(image)
+        .with_context(|| format!("working out where {} really is", image.display()))?;
+    let at = (args.host.as_str(), args.port);
+
+    if args.no_reveal {
+        attach(at, &full).map_err(|why| {
+            anyhow::anyhow!("{} did not reach the emulator: {why}", full.display())
+        })?;
+        report::detail(reporter, format!("{} is in the slot", full.display()));
+        return Ok(());
+    }
+
+    match send(at, &full) {
+        Sent::Attached => {
+            report::detail(reporter, format!("{} is in the slot", full.display()));
+            Ok(())
+        }
+        Sent::Revealed => {
+            report::detail(
+                reporter,
+                format!(
+                    "the emulator is not listening on {}:{}, so {} is showing in a file \
+                     manager instead \u{2014} attach it with USB \u{2192} Attach virtual image",
+                    args.host,
+                    args.port,
+                    full.display()
+                ),
+            );
+            Ok(())
+        }
+        Sent::Written(why) => {
+            bail!("{} did not reach the emulator: {why}", full.display())
+        }
+    }
 }
 
 /// The variable-bitrate seek index for a file, when it needs one.
@@ -785,31 +837,92 @@ fn prepare(
     let analyze_dir = anlz::analysis_dir(&on_drive);
     let analyze_path = anlz::analysis_paths(&analyze_dir, 0)[0].clone();
 
-    // A stem takes its parent's grid, cues, key and phrases. Its own would be
-    // measured from audio with most of the track removed — a vocal with no
-    // drums under it — and a cue that does not line up with the one on the
-    // parent is worse than no cue at all.
+    // Everything but the picture is the record's rather than the file's, so a
+    // stem is looked up under its parent: its own answers would be measured
+    // from audio with most of the track removed — a vocal with no drums under
+    // it — and a cue that does not line up with the one on the parent is worse
+    // than no cue at all.
+    let source = parent.map(PathBuf::as_path).unwrap_or(path);
+    let supplied = args
+        .prepared
+        .iter()
+        .find(|(named, _)| named == source)
+        .map(|(_, prep)| prep)
+        .filter(|prep| !prep.is_empty());
+
+    // A tempo the collection is sure of is passed to the tracker, which still
+    // tracks the beats rather than assuming them: a tempo says how far apart
+    // they are, not where they fall.
     let listening = std::time::Instant::now();
+    let bpm = supplied.and_then(|prep| prep.bpm).or(args.bpm);
     let listened = match parent {
         Some(parent) => {
             report::detail(
                 reporter,
                 format!("{name}: takes its grid, cues, key and phrases from {}", short(parent)),
             );
-            analyses.of(parent, args.bpm).with_context(|| {
+            analyses.of(parent, bpm).with_context(|| {
                 format!("analysing {} for its stem {}", parent.display(), path.display())
             })?
         }
-        None => analyses.of(path, args.bpm)?,
+        None => analyses.of(path, bpm)?,
     };
+
+    // What actually goes on the drive: the collection's answers where it has
+    // them, the measured ones where it does not. Measuring is still done —
+    // the waveform is of the audio and nothing else can supply it, and the
+    // grid is what a section in milliseconds has to be placed against — but a
+    // cue somebody moved by hand is not something to measure over.
+    // The collection's grid where it kept one. A grid that bends is the only
+    // copy of work a player did, and re-measuring it would hand the drive a
+    // flattened version of what the drive gave us.
+    let grid = match supplied {
+        Some(prep) if !prep.beat_ms.is_empty() => BeatGrid::from_beat_times(&prep.beat_ms),
+        _ => listened.grid.clone(),
+    };
+    let beat_ms: Vec<u32> = grid.beats.iter().map(|beat| beat.time_ms).collect();
+    let cues = match supplied {
+        Some(prep) if !prep.cues.is_empty() => prep.cues.clone(),
+        _ => listened.cues.clone(),
+    };
+    let structure = match supplied {
+        Some(prep) if !prep.parts.is_empty() => {
+            crate::analysis::structure::Structure::from_parts(&prep.parts, &beat_ms)
+                .to_song_structure()
+        }
+        _ => listened.song_structure(),
+    };
+    let key = match supplied {
+        Some(prep) if !prep.key.is_empty() => prep.key.clone(),
+        _ => listened.camelot(),
+    };
+    if let Some(prep) = supplied {
+        let mut kept = Vec::new();
+        if !prep.cues.is_empty() {
+            kept.push(report::plural(prep.cues.len(), "cue"));
+        }
+        if !prep.parts.is_empty() {
+            kept.push(report::plural(prep.parts.len(), "phrase"));
+        }
+        if !prep.key.is_empty() {
+            kept.push(format!("key {}", prep.key));
+        }
+        if let Some(bpm) = prep.bpm {
+            kept.push(format!("{bpm:.2} BPM"));
+        }
+        if !prep.beat_ms.is_empty() {
+            kept.push(format!("a bent grid of {}", report::plural(prep.beat_ms.len(), "beat")));
+        }
+        report::detail(reporter, format!("{name}: writes the collection's {}", kept.join(", ")));
+    }
     report::detail(
         reporter,
         format!(
             "{name}: {:.2} BPM, {}, {} ({} hot) in {}",
             listened.bpm,
             report::plural(listened.grid.beats.len(), "beat"),
-            report::plural(listened.cues.len(), "cue"),
-            listened.cues.iter().filter(|c| c.is_hot()).count(),
+            report::plural(cues.len(), "cue"),
+            cues.iter().filter(|c| c.is_hot()).count(),
             took(listening)
         ),
     );
@@ -821,12 +934,11 @@ fn prepare(
     let drawing = std::time::Instant::now();
     let waveforms = waveform::analyze(&audio);
     report::detail(reporter, format!("{name}: drew its own waveforms in {}", took(drawing)));
-    let structure = listened.song_structure();
     let seek = seek_index(path);
     let files = anlz::Analysis {
         on_drive_path: &on_drive,
-        grid: &listened.grid,
-        cues: &listened.cues,
+        grid: &grid,
+        cues: &cues,
         waveforms: &waveforms,
         structure: structure.as_ref(),
         vbr: seek.as_ref(),
@@ -842,7 +954,7 @@ fn prepare(
             .clone()
             .or_else(|| parent_tags.as_ref().and_then(|tags| tags.album.clone()))
             .unwrap_or_default(),
-        key: listened.camelot(),
+        key: key.clone(),
         file_path: on_drive.clone(),
         analyze_path,
         tempo_x100: (listened.bpm * 100.0).round() as u32,
@@ -874,9 +986,9 @@ fn prepare(
         analysis,
         beats: listened.grid.beats.len(),
         bpm: listened.bpm,
-        key: listened.camelot(),
-        phrases: listened.structure.sections.len(),
-        cues: listened.cues.iter().filter(|c| c.is_hot()).count(),
+        key,
+        phrases: structure.as_ref().map(|s| s.phrases.len()).unwrap_or(0),
+        cues: cues.iter().filter(|c| c.is_hot()).count(),
     })
 }
 

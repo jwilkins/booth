@@ -384,13 +384,13 @@ pub fn header_row(ui: &mut Ui, layout: &mut Layout, widths: &Widths, sort: Sort)
         let on = sort.column == column;
 
         if over {
-            painter.rect_filled(area, 0.0, theme::BOOTH_2);
+            painter.rect_filled(area, 0.0, theme::booth_2());
         }
         if over && response.clicked() {
             head.sorted = Some(column);
         }
 
-        let color = if on { theme::AMBER } else { theme::DIM };
+        let color = if on { theme::amber() } else { theme::dim() };
         let text = match on {
             true => format!("{} {}", theme::label_text(column.name()), sort.arrow()),
             false => theme::label_text(column.name()),
@@ -421,13 +421,13 @@ pub fn header_row(ui: &mut Ui, layout: &mut Layout, widths: &Widths, sort: Sort)
         if lit {
             painter.line_segment(
                 [grip.center_top(), grip.center_bottom()],
-                egui::Stroke::new(1.0_f32, theme::AMBER),
+                egui::Stroke::new(1.0_f32, theme::amber()),
             );
         }
     }
     painter.line_segment(
         [egui::pos2(rect.left(), rect.bottom()), egui::pos2(rect.right(), rect.bottom())],
-        egui::Stroke::new(1.0_f32, theme::RULE),
+        egui::Stroke::new(1.0_f32, theme::rule()),
     );
 
     columns_menu(&response, layout, &mut head);
@@ -441,7 +441,7 @@ pub fn header_row(ui: &mut Ui, layout: &mut Layout, widths: &Widths, sort: Sort)
 fn columns_menu(response: &egui::Response, layout: &mut Layout, head: &mut Head) {
     response.context_menu(|ui| {
         ui.set_min_width(200.0);
-        ui.label(egui::RichText::new("Columns").color(theme::DIM).size(theme::SMALL));
+        ui.label(egui::RichText::new("Columns").color(theme::dim()).size(theme::SMALL));
         ui.separator();
         let showing = layout.showing();
         let listed: Vec<Slot> = layout.columns.clone();
@@ -465,7 +465,11 @@ fn columns_menu(response: &egui::Response, layout: &mut Layout, head: &mut Head)
             }
         }
         ui.separator();
-        if ui.button("Reset to default").clicked() {
+        if ui
+            .button("Reset to default")
+            .on_hover_text("Put the columns back to the ones this window opens with.")
+            .clicked()
+        {
             *layout = Layout::default();
             head.chosen = true;
             ui.close();
@@ -500,6 +504,8 @@ pub enum Action {
     Analyze,
     Identify,
     Separate,
+    /// Read the vocal stem and cue what it finds.
+    AutoCue,
     CopyIn,
     Reveal,
     /// Take it out of the playlist being shown, leaving it in the collection.
@@ -523,11 +529,47 @@ impl Action {
             Action::Identify => "Look up tags",
             Action::Separate if !track.stems.is_empty() => "Render stems again",
             Action::Separate => "Render stems",
+            Action::AutoCue if !track.lyrics.is_empty() => "Cue from the words again",
+            Action::AutoCue => "Cue from the words",
             Action::AddTo(_) | Action::AddToNew => "Add to playlist",
             Action::CopyIn => "Copy into the library",
             Action::Reveal => "Copy the file path",
             Action::RemoveFromPlaylist => "Remove from this playlist",
             Action::Forget => "Remove from the collection",
+        }
+    }
+
+    /// What resting on the item says, which is what the label has no room for.
+    ///
+    /// The label is a verb and the help is the consequence, because the two
+    /// items a mis-click costs most — taking a track out of a list and taking
+    /// it out of the collection — read almost the same and are not the same.
+    pub fn about(self) -> &'static str {
+        match self {
+            Action::Play => "Hear it on the deck.",
+            Action::AddTo(_) | Action::AddToNew => "Put it at the end of a playlist.",
+            Action::Analyze => {
+                "Listen to it: tempo, grid, key, sections and a waveform. A minute or so a track."
+            }
+            Action::Identify => {
+                "Fingerprint the audio and ask what it is. Nothing already filled in is overwritten."
+            }
+            Action::Separate => {
+                "Render a vocals, drums and melody kit with demucs. Slow, and done once."
+            }
+            Action::AutoCue => {
+                "Read the words off the vocal stem and set the cues from what is sung."
+            }
+            Action::CopyIn => {
+                "Copy the file into the library folder, so a drive being unplugged does not lose it."
+            }
+            Action::Reveal => "Put the file's path on the clipboard.",
+            Action::RemoveFromPlaylist => {
+                "Take it out of this playlist only. It stays in the collection."
+            }
+            Action::Forget => {
+                "Take it out of the collection and out of every playlist. The file is not deleted."
+            }
         }
     }
 }
@@ -612,24 +654,24 @@ pub fn row(
                 0 | 1 => format!("↳ {}", track.display_title()),
                 n => format!("↳ {n} tracks"),
             };
-            ui.label(egui::RichText::new(carrying).color(theme::AMBER).size(11.0));
+            ui.label(egui::RichText::new(carrying).color(theme::amber()).size(11.0));
         });
     }
     let painter = ui.painter_at(rect);
 
     if selected {
-        painter.rect_filled(rect, 0.0, theme::AMBER.gamma_multiply(0.14));
+        painter.rect_filled(rect, 0.0, theme::amber().gamma_multiply(0.14));
     } else if response.hovered() {
-        painter.rect_filled(rect, 0.0, theme::BOOTH_2);
+        painter.rect_filled(rect, 0.0, theme::booth_2());
     }
     painter.line_segment(
         [egui::pos2(rect.left(), rect.bottom()), egui::pos2(rect.right(), rect.bottom())],
-        egui::Stroke::new(1.0_f32, theme::RULE.gamma_multiply(0.55)),
+        egui::Stroke::new(1.0_f32, theme::rule().gamma_multiply(0.55)),
     );
 
     // A companion is dim, and the whole line is dim rather than only its name:
     // it is one thing that belongs under another, not a track with a long title.
-    let ink = if indented { theme::DIM } else { theme::TEXT };
+    let ink = if indented { theme::dim() } else { theme::text() };
     let mut x = rect.left();
 
     // Whichever columns are on, in whatever width they were left at. The row
@@ -669,7 +711,7 @@ pub fn row(
                         rect,
                         x,
                         track.role.label(),
-                        if indented { theme::DIM } else { theme::AMBER },
+                        if indented { theme::dim() } else { theme::amber() },
                     );
                 }
             }
@@ -683,7 +725,7 @@ pub fn row(
                     egui::Align2::LEFT_CENTER,
                     location,
                     font,
-                    theme::DIM,
+                    theme::dim(),
                 );
             }
         }
@@ -702,6 +744,7 @@ pub fn row(
             Action::Analyze,
             Action::Identify,
             Action::Separate,
+            Action::AutoCue,
         ];
         if !menu.in_library {
             items.push(Action::CopyIn);
@@ -740,7 +783,7 @@ fn context_menu(
         ui.set_min_width(190.0);
         // The track it will act on, because a right-click does not select and
         // a menu with no subject is a menu you have to guess at.
-        ui.label(egui::RichText::new(track.display_title()).color(theme::DIM).size(11.0));
+        ui.label(egui::RichText::new(track.display_title()).color(theme::dim()).size(11.0));
         ui.separator();
         for &item in items {
             if matches!(item, Action::CopyIn | Action::RemoveFromPlaylist) {
@@ -748,9 +791,9 @@ fn context_menu(
             }
             // The one item that opens onto a list rather than doing something.
             if item == Action::AddToNew {
-                ui.menu_button(egui::RichText::new("Add to playlist").color(theme::TEXT), |ui| {
+                ui.menu_button(egui::RichText::new("Add to playlist").color(theme::text()), |ui| {
                     for (at, name) in menu.playlists.iter().enumerate() {
-                        if ui.button(name).clicked() {
+                        if ui.button(name).on_hover_text(format!("Add them to {name}.")).clicked() {
                             chosen = Some(Action::AddTo(at));
                             ui.close();
                         }
@@ -758,19 +801,25 @@ fn context_menu(
                     if !menu.playlists.is_empty() {
                         ui.separator();
                     }
-                    if ui.button("New playlist\u{2026}").clicked() {
+                    if ui
+                        .button("New playlist\u{2026}")
+                        .on_hover_text("Make a playlist and put them in it.")
+                        .clicked()
+                    {
                         chosen = Some(Action::AddToNew);
                         ui.close();
                     }
-                });
+                })
+                .response
+                .on_hover_text("Put the selected tracks at the end of one of your playlists.");
                 continue;
             }
             // Only the one that reaches past the playlist is coloured as a
             // warning: taking a track out of a list is a click away from being
             // undone, and losing it from the collection is not.
             let label = egui::RichText::new(item.label(track, menu))
-                .color(if item == Action::Forget { theme::ALERT } else { theme::TEXT });
-            if ui.button(label).clicked() {
+                .color(if item == Action::Forget { theme::alert() } else { theme::text() });
+            if ui.button(label).on_hover_text(item.about()).clicked() {
                 chosen = Some(item);
                 ui.close();
             }
@@ -942,7 +991,7 @@ fn meter(painter: &egui::Painter, rect: Rect, x: f32, energy: u8) {
             Vec2::new(5.0, 9.0),
         );
         let filled = step < energy;
-        painter.rect_filled(block, 0.0, if filled { theme::AMBER } else { theme::RULE });
+        painter.rect_filled(block, 0.0, if filled { theme::amber() } else { theme::rule() });
     }
 }
 
@@ -956,7 +1005,7 @@ fn pill(painter: &egui::Painter, rect: Rect, x: f32, content: &str, color: Color
     painter.rect_stroke(
         box_rect,
         2.0,
-        egui::Stroke::new(1.0_f32, theme::RULE),
+        egui::Stroke::new(1.0_f32, theme::rule()),
         egui::StrokeKind::Inside,
     );
     painter.galley(egui::pos2(x + 4.0, box_rect.top() + 1.0), galley, color);

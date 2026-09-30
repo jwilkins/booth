@@ -34,6 +34,30 @@ pub struct Beat {
     pub time_ms: u32,
 }
 
+/// Whether beat times bend, meaning no single tempo places them all.
+///
+/// Measured against the even grid through the two ends, so a grid that speeds
+/// up and slows back down is caught by the bulge in the middle rather than
+/// passed because it started and finished in the right place.
+///
+/// Five milliseconds, because an even grid rounded to whole milliseconds is
+/// already off by up to one — the analyser here measures 0.85 ms across a
+/// three-minute track — and five is far below the point where a beat sounds
+/// like it is in a different place. Under three beats nothing can be said, and
+/// nothing is: two points always fit a line.
+pub fn bends(times: &[u32]) -> bool {
+    const ROOM_MS: f64 = 5.0;
+    if times.len() < 3 {
+        return false;
+    }
+    let last = times.len() - 1;
+    let period = (times[last] as f64 - times[0] as f64) / last as f64;
+    times
+        .iter()
+        .enumerate()
+        .any(|(i, at)| (*at as f64 - (times[0] as f64 + period * i as f64)).abs() > ROOM_MS)
+}
+
 /// The beats of a track, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BeatGrid {
@@ -68,6 +92,31 @@ impl BeatGrid {
         Self { beats }
     }
 
+    /// Whether this grid bends: whether it says anything a tempo and a
+    /// downbeat could not say on their own.
+    ///
+    /// What it is for is deciding whether a grid is worth keeping beat by
+    /// beat. A drive always gets every beat written out — that is what a
+    /// player reads — but a collection holding thousands of numbers to repeat
+    /// what two of them already say is a collection doing the analysis file's
+    /// job.
+    pub fn bends(&self) -> bool {
+        let times: Vec<u32> = self.beats.iter().map(|beat| beat.time_ms).collect();
+        bends(&times)
+    }
+
+    /// The beat times from the first downbeat on.
+    ///
+    /// From the downbeat because everything that counts in fours counts from
+    /// the first beat of the list — the bar marks, the bar number in the
+    /// transport, the length of a phrase — so the list has to start on one.
+    /// The beats before it are the part bar at the head of the track, which
+    /// a player does not number either.
+    pub fn times_from_downbeat(&self) -> Vec<u32> {
+        let first = self.beats.iter().position(|beat| beat.number == 1).unwrap_or(0);
+        self.beats[first..].iter().map(|beat| beat.time_ms).collect()
+    }
+
     /// A grid from measured beat times, in milliseconds, assuming the first is
     /// a downbeat.
     ///
@@ -98,6 +147,73 @@ impl BeatGrid {
     pub fn is_empty(&self) -> bool {
         self.beats.is_empty()
     }
+}
+
+/// What a caller already knows about a track, for the exporter to write rather
+/// than measure its own.
+///
+/// The exporter listens to every file it prepares, because it has to: the
+/// waveform is of the audio and nothing else can supply it. But a collection
+/// that has been kept by a person holds answers the audio does not — a cue
+/// moved by hand, a section renamed, a key corrected — and an exporter that
+/// measures its own and writes those instead is an exporter that quietly
+/// discards the work. So the measured answers are the fallback and these are
+/// what is written where they exist.
+///
+/// Every field is optional in the sense that an empty one means "you decide".
+/// A caller with nothing to say passes `Prep::default()`, or does not pass one
+/// at all, and gets exactly what it got before this existed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Prep {
+    /// The cues as the collection has them, memory and hot together, in
+    /// milliseconds. Empty means the exporter suggests its own.
+    pub cues: Vec<Cue>,
+    /// The sections as the collection has them. Empty means the exporter finds
+    /// its own.
+    pub parts: Vec<Part>,
+    /// The tempo the collection has. The beats are still tracked rather than
+    /// assumed from it — a tempo says how far apart they are, not where they
+    /// fall. `None` lets the tracker decide the tempo too.
+    pub bpm: Option<f64>,
+    /// The key as the collection has it, e.g. `8A`. Empty means the exporter
+    /// detects its own.
+    pub key: String,
+    /// Every beat, for a track whose grid bends and could not be rebuilt from
+    /// `bpm`. Empty means the tracker's own grid is used, which is the case for
+    /// almost every record.
+    ///
+    /// What reaches the drive is a full beat list either way — a player reads
+    /// beats, not tempos. This only decides whose beats they are, and it exists
+    /// because a grid somebody bent by hand on a player is not something to
+    /// measure over.
+    pub beat_ms: Vec<u32>,
+}
+
+impl Prep {
+    /// Whether there is anything here worth preferring to a measurement.
+    pub fn is_empty(&self) -> bool {
+        self.cues.is_empty()
+            && self.parts.is_empty()
+            && self.bpm.is_none()
+            && self.key.is_empty()
+            && self.beat_ms.is_empty()
+    }
+}
+
+/// One section of a track, in milliseconds, as a collection keeps it.
+///
+/// Milliseconds rather than beat numbers because that is what a collection can
+/// keep without also keeping the whole grid, and because a section's position
+/// in a record does not change when the grid is re-measured. Turning it back
+/// into the beat number the analysis file wants is the exporter's job, against
+/// the grid it is actually writing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub start_ms: u32,
+    pub end_ms: u32,
+    /// `intro`, `build`, `break`, `drop` or `outro`, as
+    /// [`crate::analysis::structure::Kind::label`] writes them.
+    pub kind: String,
 }
 
 /// Whether a cue is a point to jump to or a loop to fall into.
@@ -205,6 +321,72 @@ pub struct SongStructure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_grid_at_one_tempo_does_not_count_as_bending() {
+        // Including the rounding to whole milliseconds, which is the only
+        // unevenness an even grid has: the analyser here measures 0.85 ms of
+        // it across three minutes, and that must not read as a bent grid or
+        // every track would be kept beat by beat.
+        for bpm in [120.0, 126.0, 128.0, 174.0, 89.7] {
+            let grid = BeatGrid::constant(bpm, 17, 300_000);
+            assert!(!grid.bends(), "{bpm} BPM read as bent");
+        }
+    }
+
+    #[test]
+    fn a_grid_that_drifts_bends() {
+        // A take that creeps: each beat a millisecond and a half shorter than
+        // the last, which is a band speeding up and nothing a single tempo
+        // describes.
+        let mut times = Vec::new();
+        let (mut at, mut gap) = (0.0f64, 500.0f64);
+        for _ in 0..64 {
+            times.push(at.round() as u32);
+            at += gap;
+            gap -= 1.5;
+        }
+        assert!(bends(&times));
+    }
+
+    #[test]
+    fn a_grid_that_speeds_up_and_comes_back_bends() {
+        // The two ends land exactly where a steady tempo would, so anything
+        // measuring only the ends passes it. What gives it away is the middle.
+        let mut times = Vec::new();
+        for i in 0..65u32 {
+            let even = i as f64 * 500.0;
+            let bulge = (i as f64 / 64.0 * std::f64::consts::PI).sin() * 90.0;
+            times.push((even + bulge).round() as u32);
+        }
+        assert_eq!(times[0], 0);
+        assert_eq!(*times.last().unwrap(), 32_000, "the ends fit a steady tempo");
+        assert!(bends(&times), "the bulge in the middle was missed");
+    }
+
+    #[test]
+    fn too_few_beats_say_nothing_about_bending() {
+        // Two points fit a line, so there is nothing to disagree with yet.
+        assert!(!bends(&[]));
+        assert!(!bends(&[1_000]));
+        assert!(!bends(&[1_000, 1_500]));
+    }
+
+    #[test]
+    fn the_times_kept_start_at_the_first_downbeat() {
+        // Everything downstream counts in fours from the first beat of the
+        // list, so a list starting on beat three would put every bar mark,
+        // bar number and phrase length two beats out.
+        let mut grid = BeatGrid::constant(120.0, 0, 10_000);
+        grid.beats.drain(..2);
+        assert_eq!(grid.beats[0].number, 3, "the fixture did not start off the bar");
+
+        // Beats now run 3, 4, 1, 2, ... so the first downbeat is two beats
+        // along, at two seconds, and the two before it are dropped.
+        let times = grid.times_from_downbeat();
+        assert_eq!(times[0], 2_000, "it did not skip to the downbeat");
+        assert_eq!(times[1], 2_500);
+    }
 
     #[test]
     fn constant_grid_counts_beats_and_marks_bars() {

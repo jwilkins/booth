@@ -44,6 +44,17 @@ pub enum Job {
         backend: Backend,
         quality: booth_cli::cli::StemQuality,
     },
+    /// Measure one row's waveform, and nothing else.
+    ///
+    /// Deliberately not [`Job::Analyze`], which is where this used to go. That
+    /// re-derives the grid, the key, the cues and the phrases from the audio
+    /// and writes them over whatever the collection had — which is a silent
+    /// loss of every cue somebody moved by hand, for a row that only wanted a
+    /// picture. And for a stem it was the wrong audio: a companion carries its
+    /// parent's path, so the acapella was handed the whole mix to draw.
+    Draw(Vec<Drawable>),
+    /// Read the words off tracks' vocal stems.
+    Transcribe { tracks: Vec<Transcribable>, whisper: crate::config::Whisper },
     /// Decode one track into memory so it can be auditioned.
     Decode {
         id: u32,
@@ -116,10 +127,52 @@ impl Job {
             Job::Verify { .. } => "checking the collection",
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
+            Job::Transcribe { .. } => "reading the words",
+            Job::Draw { .. } => "drawing",
             Job::Sync { .. } => "writing",
             Job::Keep { .. } => "copying a drive",
         }
     }
+}
+
+/// Each companion row a kit yields, with the file it is drawn from.
+///
+/// Empty for a kit that is not complete: a companion row only exists when all
+/// three parts do, so there is nothing to draw a picture for.
+fn parts_of(kit: &StemKit) -> Vec<(crate::library::Role, Vec<PathBuf>)> {
+    if !kit.is_complete() {
+        return Vec::new();
+    }
+    crate::library::Role::PARTS
+        .into_iter()
+        .filter_map(|role| {
+            let path = match role {
+                crate::library::Role::Vocals => kit.vocals.as_ref(),
+                crate::library::Role::Drums => kit.drums.as_ref(),
+                crate::library::Role::Melody => kit.melody.as_ref(),
+                crate::library::Role::Track => None,
+            }?;
+            Some((role, vec![path.clone()]))
+        })
+        .collect()
+}
+
+/// One row to draw, and the audio to draw it from.
+pub struct Drawable {
+    pub id: u32,
+    /// Summed when there is more than one, which is what an instrumental is. A
+    /// companion's own files, so the picture is of what will play.
+    pub sources: Vec<PathBuf>,
+}
+
+/// A track to read the words off, and the stem to read them off.
+///
+/// The vocal stem rather than the mix. A recogniser handed a club record
+/// transcribes the kick drum, and the whole reason this waits on a separation
+/// is that an isolated voice is the only thing it has a chance with.
+pub struct Transcribable {
+    pub id: u32,
+    pub vocals: PathBuf,
 }
 
 /// A track whose file should be copied into the library.
@@ -209,6 +262,21 @@ pub enum Update {
         id: u32,
         kit: StemKit,
     },
+    /// A vocal stem has been through the recogniser. Empty lines are a real
+    /// answer: it means nothing was sung, or nothing could be made out.
+    Transcribed {
+        id: u32,
+        lyrics: Vec<crate::library::Lyric>,
+    },
+    /// One row's waveform, measured from its own audio.
+    Drawn {
+        id: u32,
+        /// What it was drawn from, carried back so the cache can record what
+        /// the picture is a picture of.
+        sources: Vec<PathBuf>,
+        /// The three-band picture, as [`Analyzed::bands`] carries it.
+        bands: Vec<u8>,
+    },
     Progress {
         done: usize,
         total: usize,
@@ -231,6 +299,8 @@ pub enum Update {
 /// record the library already holds.
 pub struct Analyzed {
     pub id: u32,
+    /// The file it was listened to, which is what its picture is a picture of.
+    pub path: PathBuf,
     pub bpm: f64,
     pub grid_confidence: f32,
     pub has_grid: bool,
@@ -242,6 +312,8 @@ pub struct Analyzed {
     /// show it and so a miscalibrated meter is diagnosable rather than just
     /// wrong.
     pub intensity: f32,
+    /// Every beat, when the grid bends. Empty when a tempo says it all.
+    pub beat_ms: Vec<u32>,
     pub phrases: Vec<Phrase>,
     pub cues: Vec<CueMark>,
     pub loudness_lufs: Option<f64>,
@@ -397,6 +469,14 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
     let loudness = booth_cli::loudness::measure(&audio).ok();
 
     let beat_ms: Vec<u32> = analysis.grid.beats.iter().map(|b| b.time_ms).collect();
+    // Kept only when a tempo and a downbeat could not put these beats back.
+    // The tracker here runs at one tempo, so this is almost always empty; it
+    // is here so a track whose grid was bent keeps its shape through a
+    // re-analysis rather than being quietly straightened.
+    let bent = match analysis.grid.bends() {
+        true => analysis.grid.times_from_downbeat(),
+        false => Vec::new(),
+    };
     let phrases = analysis
         .structure
         .sections
@@ -408,19 +488,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
         })
         .collect();
 
-    let cues = analysis
-        .cues
-        .iter()
-        .map(|cue| CueMark {
-            letter: cue.hot_cue,
-            time_ms: cue.time_ms,
-            label: cue.comment.clone().unwrap_or_default(),
-            color: cue
-                .color
-                .map(|rgb| [rgb.r, rgb.g, rgb.b])
-                .unwrap_or_else(|| cue_color(cue.hot_cue)),
-        })
-        .collect();
+    let cues = cue_marks(&analysis.cues);
 
     // The energy meter reads the loudest stretch rather than the average: what
     // decides where a record sits in a crate is how hard it goes at its peak,
@@ -432,6 +500,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
 
     Ok(Analyzed {
         id,
+        path: path.to_path_buf(),
         bpm: analysis.bpm,
         grid_confidence: analysis.confidence,
         has_grid: analysis.found_beats(),
@@ -440,6 +509,7 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
         key_confidence: analysis.key.as_ref().map(|k| k.confidence).unwrap_or(0.0),
         energy: energy_from(intensity),
         intensity,
+        beat_ms: bent,
         phrases,
         cues,
         loudness_lufs: loudness.as_ref().map(|l| l.integrated_lufs),
@@ -454,6 +524,25 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
 fn beat_time(beats: &[u32], beat_number: u16) -> u32 {
     let index = beat_number.saturating_sub(1) as usize;
     beats.get(index).copied().unwrap_or_else(|| beats.last().copied().unwrap_or(0))
+}
+
+/// The engine's cues, as the collection keeps them.
+///
+/// Shared by the analyser and by the auto-cue pass that runs off a track's
+/// words, so that a cue means the same thing and is the same colour whichever
+/// of the two placed it.
+pub fn cue_marks(cues: &[booth_cli::export::Cue]) -> Vec<CueMark> {
+    cues.iter()
+        .map(|cue| CueMark {
+            letter: cue.hot_cue,
+            time_ms: cue.time_ms,
+            label: cue.comment.clone().unwrap_or_default(),
+            color: cue
+                .color
+                .map(|rgb| [rgb.r, rgb.g, rgb.b])
+                .unwrap_or_else(|| cue_color(cue.hot_cue)),
+        })
+        .collect()
 }
 
 pub fn cue_color(letter: u8) -> [u8; 3] {
@@ -579,6 +668,31 @@ pub fn stem_envelopes(kit: &StemKit) -> anyhow::Result<crate::wave::StemEnvelope
     })
 }
 
+/// The record this file is a stem of, when its name says it is one and that
+/// record is beside it.
+///
+/// The mirror of [`find_stems`], which builds the name; this reads it back. The
+/// rule is the separator's: `<record>-<part>` beside `<record>`. Both halves
+/// have to hold — a record legitimately called "Midnight-Drums" is a record, and
+/// the thing that tells it from a kit's drum part is whether there is a
+/// "Midnight" next to it.
+///
+/// Asked when music arrives from somewhere this program did not put it, because
+/// a stem that becomes a track of its own is three junk rows per record in the
+/// browser and three rows the player will show as separate music.
+pub fn cut_from(path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_str()?;
+    let (record, part) = stem.rsplit_once('-')?;
+    if !Stem::ALL.iter().any(|known| known.name() == part) {
+        return None;
+    }
+    let folder = path.parent()?;
+    ["wav", "flac", "mp3", "m4a", "aac", "aiff", "aif"]
+        .iter()
+        .map(|extension| folder.join(format!("{record}.{extension}")))
+        .find(|beside| beside.is_file())
+}
+
 /// Which stems were written for a track, by looking for them.
 ///
 /// The separator names its outputs `<stem-name>` beside the track's file stem,
@@ -613,6 +727,64 @@ pub fn find_stems(stems_in: &crate::config::StemsLocation, source: &Path) -> Ste
 /// halved on the way in: two stems of the same record are already the right
 /// balance against each other, and scaling them apart is a mix decision this
 /// has no business making. Only the total needs to fit.
+/// Draw one row and report it, saying so rather than failing if it will not
+/// decode.
+///
+/// A kit with one corrupt stem should still get the other two drawn, and a
+/// separation that rendered fine should not be reported as having failed
+/// because the picture of it could not be made.
+fn draw_one(row: &Drawable, reporter: &Channel) {
+    match decode_sum(&row.sources) {
+        Ok(audio) => {
+            let bands = booth_cli::export::waveform::analyze(&audio).band_detail;
+            crate::debug!(
+                "drew #{} from {}",
+                row.id,
+                crate::library::plural(row.sources.len(), "file")
+            );
+            let _ =
+                reporter.tx.send(Update::Drawn { id: row.id, sources: row.sources.clone(), bands });
+        }
+        Err(e) => crate::warn!("could not draw #{}: {e:#}", row.id),
+    }
+}
+
+/// Draw each row from its own audio.
+///
+/// One at a time, and a row that will not decode does not take the rest with
+/// it: a kit with one corrupt stem should still get the other two drawn.
+fn draw(rows: &[Drawable], reporter: &Channel) -> anyhow::Result<()> {
+    let batch =
+        Batch { inner: reporter, done: std::sync::atomic::AtomicUsize::new(0), total: rows.len() };
+    for row in rows {
+        if reporter.cancelled() {
+            break;
+        }
+        batch.starting();
+        draw_one(row, reporter);
+        batch.finished_one();
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// The audio a row is made of, summed when it is made of several.
+///
+/// The deck's own summing goes through [`crate::player::Sound`], which is
+/// interleaved and rate-matched for playback; the waveform wants an [`Audio`]
+/// to measure. Same rule either way: an instrumental is its melody and its
+/// drums added together, and nothing else is more than one file.
+fn decode_sum(sources: &[PathBuf]) -> anyhow::Result<booth_cli::audio::Audio> {
+    let first = sources.first().ok_or_else(|| anyhow::anyhow!("nothing to draw"))?;
+    let mut audio = decode_file(first)?;
+    for path in &sources[1..] {
+        audio
+            .add_assign(&decode_file(path)?)
+            .map_err(|e| anyhow::anyhow!("mixing {} into the picture: {e}", path.display()))?;
+    }
+    Ok(audio)
+}
+
 fn decode_sources(sources: &[PathBuf]) -> anyhow::Result<crate::player::Sound> {
     let first = sources.first().ok_or_else(|| anyhow::anyhow!("nothing to play"))?;
     let mut sound = crate::player::Sound::from_audio(&decode_file(first)?);
@@ -812,6 +984,8 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Separate { tracks, stems_in, backend, quality } => {
             separate(&tracks, &stems_in, backend, quality, reporter)
         }
+        Job::Transcribe { tracks, whisper } => transcribe(&tracks, &whisper, reporter),
+        Job::Draw(rows) => draw(&rows, reporter),
         Job::Sync { args, files } => {
             // The file list was settled when the plan was drawn up, so the
             // command is told exactly what to write rather than walking a
@@ -1282,12 +1456,88 @@ fn separate(
                     kit.melody.is_some(),
                     kit.drums.is_some()
                 );
+                // The pictures, here, while this track's stems are the most
+                // recent thing that happened — not as a job queued behind the
+                // rest of the batch.
+                //
+                // A kit rendered first in a queue of ten used to wait for the
+                // other nine to separate before anything could draw it, which
+                // is tens of minutes of a stem row that plays and shows
+                // nothing. Drawn here it costs a decode of three files that
+                // were written a second ago, against the minutes of separation
+                // that just produced them.
+                for (role, sources) in parts_of(&kit) {
+                    draw_one(
+                        &Drawable { id: crate::library::companion_id(*id, role), sources },
+                        reporter,
+                    );
+                }
                 let _ = reporter.tx.send(Update::Separated { id: *id, kit });
             }
             Err(e) => {
                 let _ = reporter
                     .tx
                     .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
+            }
+        }
+        batch.finished_one();
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// Read the words off each track's vocal stem.
+///
+/// One at a time, with a scratch directory each that is cleaned up either way:
+/// the recogniser writes a converted copy of the audio next to its transcript,
+/// and a job that leaves a wav per track behind in the temp directory is a job
+/// that fills a disk over a library.
+fn transcribe(
+    tracks: &[Transcribable],
+    whisper: &crate::config::Whisper,
+    reporter: &Channel,
+) -> anyhow::Result<()> {
+    let batch = Batch {
+        inner: reporter,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        total: tracks.len(),
+    };
+    for track in tracks {
+        if reporter.cancelled() {
+            break;
+        }
+        batch.starting();
+
+        let work = std::env::temp_dir().join(format!("booth-words-{}", track.id));
+        let _ = std::fs::remove_dir_all(&work);
+        let config = whisper.to_cli(work.clone());
+        crate::info!(
+            "reading the words off {}",
+            track.vocals.file_name().unwrap_or_default().to_string_lossy()
+        );
+
+        let outcome =
+            booth_cli::transcribe::whisper::transcribe(&track.vocals, &config, &|percent| {
+                let _ = reporter.tx.send(Update::Step { percent });
+                (reporter.wake)();
+            });
+        let _ = std::fs::remove_dir_all(&work);
+
+        match outcome {
+            Ok(transcript) => {
+                crate::debug!(
+                    "#{}: {}, hook {:?}",
+                    track.id,
+                    crate::library::plural(transcript.lines.len(), "line"),
+                    transcript.hook().map(|refrain| refrain.text)
+                );
+                let lyrics = crate::library::lyrics_from(&transcript);
+                let _ = reporter.tx.send(Update::Transcribed { id: track.id, lyrics });
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: track.vocals.clone(), message: format!("{e:#}") });
             }
         }
         batch.finished_one();
@@ -1331,6 +1581,92 @@ mod tests {
         let audio = Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         write_file(path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+    }
+
+    /// A tone, for when what matters is which file the audio came from rather
+    /// than what is in it.
+    fn write_tone(path: &Path, hz: f32, gain: f32) {
+        let rate = 44_100usize;
+        let plane: Vec<f32> = (0..rate)
+            .map(|i| gain * (std::f32::consts::TAU * hz * i as f32 / rate as f32).sin())
+            .collect();
+        let audio = Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_file(path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn a_picture_is_of_the_files_it_was_given_and_not_of_a_track() {
+        // What a stem companion needs: it carries its parent's path, so
+        // anything that drew from that drew the whole mix under the acapella's
+        // name.
+        let dir = scratch("drawing");
+        let bass = dir.join("bass.wav");
+        let top = dir.join("top.wav");
+        write_tone(&bass, 60.0, 0.8);
+        write_tone(&top, 8_000.0, 0.8);
+
+        let low = decode_sum(std::slice::from_ref(&bass)).unwrap();
+        let high = decode_sum(std::slice::from_ref(&top)).unwrap();
+        let both = decode_sum(&[bass.clone(), top.clone()]).unwrap();
+
+        let bands = |audio: &Audio| {
+            let drawn = booth_cli::export::waveform::analyze(audio).band_detail;
+            // Three bytes a column — mid, high, low, as the format stores them.
+            let at = drawn.len() / 2 / 3 * 3;
+            (drawn[at], drawn[at + 1], drawn[at + 2])
+        };
+
+        let (_, _, only_bass) = bands(&low);
+        let (_, top_high, _) = bands(&high);
+        assert!(only_bass > 0, "a bass tone should have a low band");
+        assert!(top_high > 0, "a treble tone should have a high band");
+
+        // Summed, the picture has both in it — which is what an instrumental
+        // is, and is not what either file alone looks like.
+        let (_, mixed_high, mixed_low) = bands(&both);
+        assert!(mixed_low > 0 && mixed_high > 0, "the sum lost a band: {:?}", bands(&both));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_finished_kit_names_a_picture_for_each_of_its_parts() {
+        // Drawn as the kit lands, not queued behind the rest of the batch: a
+        // kit rendered first in a queue of ten used to wait for the other nine
+        // to separate before anything could draw it, which is tens of minutes
+        // of a stem row that plays and shows nothing.
+        let dir = scratch("parts");
+        let kit = StemKit {
+            vocals: Some(dir.join("v.mp3")),
+            drums: Some(dir.join("d.mp3")),
+            melody: Some(dir.join("m.mp3")),
+        };
+
+        let parts = parts_of(&kit);
+        let roles: Vec<crate::library::Role> = parts.iter().map(|(role, _)| *role).collect();
+        assert_eq!(roles, crate::library::Role::PARTS.to_vec());
+        // Each from its own single file — a companion is one stem, never a sum.
+        assert!(parts.iter().all(|(_, sources)| sources.len() == 1));
+        assert_eq!(parts[0].1, vec![dir.join("v.mp3")]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_half_rendered_kit_has_no_rows_to_draw() {
+        // A companion row only exists once all three parts do, so there is
+        // nothing for a picture to belong to.
+        let kit = StemKit { vocals: Some(PathBuf::from("v.mp3")), ..StemKit::default() };
+        assert!(parts_of(&kit).is_empty());
+        assert!(parts_of(&StemKit::default()).is_empty());
+    }
+
+    #[test]
+    fn drawing_nothing_is_an_error_rather_than_an_empty_picture() {
+        // A companion whose kit has no such part has no sources, and a blank
+        // picture would look exactly like a quiet one.
+        assert!(decode_sum(&[]).is_err());
     }
 
     #[test]

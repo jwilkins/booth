@@ -6,9 +6,10 @@
 //! command, which reads its own output back with a parser that shares no code
 //! with the writer. Neither half is allowed to stand in for the other.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::library::{Drive, Library, Track};
+use crate::library::{Drive, Library, Stamp, Track};
 
 /// What one sync would do.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -24,13 +25,21 @@ pub struct Plan {
     /// artist — the checks below have to ask the same question the writer
     /// does, and the stem's own tags are not what it answers with.
     pub stems: Vec<(u32, PathBuf)>,
+    /// The subset of `stems` this write would actually copy: the rest are
+    /// already on the drive and carried. A drive holding its kits has a full
+    /// `stems` and an empty one of these, which is the difference between "up
+    /// to date" and "three files a track, every time, for ever".
+    pub new_stems: Vec<(u32, PathBuf)>,
     pub add_bytes: u64,
     pub stem_bytes: u64,
 }
 
 impl Plan {
     pub fn is_empty(&self) -> bool {
-        self.add.is_empty() && self.update.is_empty() && self.remove.is_empty()
+        self.add.is_empty()
+            && self.update.is_empty()
+            && self.remove.is_empty()
+            && self.new_stems.is_empty()
     }
 
     /// The line the dock shows, permanently, because it is the number that
@@ -49,8 +58,8 @@ impl Plan {
         if !self.remove.is_empty() {
             parts.push(format!("{} to remove", self.remove.len()));
         }
-        if !self.stems.is_empty() {
-            parts.push(format!("{} stems", self.stems.len()));
+        if !self.new_stems.is_empty() {
+            parts.push(format!("{} stems", self.new_stems.len()));
         }
         parts.join(" · ")
     }
@@ -106,11 +115,23 @@ pub fn plan(library: &Library, drive: &Drive) -> Plan {
                 }
             }
         }
-        if drive.with_stems {
+        if !drive.skip_stems {
+            // A stem is already on the drive only if the drive's record names
+            // that very file and its parent is not being written again — the
+            // same two conditions `carry` decides by, asked here so the sheet
+            // and the space check describe the write that is about to happen.
+            let rewriting = plan.add.contains(id) || plan.update.iter().any(|(w, _)| w == id);
+            let recorded = drive.written.iter().find(|w| w.id == *id);
             for (_, path) in track.stems.each() {
                 let Some(path) = path else { continue };
-                plan.stem_bytes += std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
                 plan.stems.push((*id, path.clone()));
+                let on_drive = !drive.is_image
+                    && !rewriting
+                    && recorded.is_some_and(|w| w.stems.iter().any(|(had, _)| had == path));
+                if !on_drive {
+                    plan.stem_bytes += std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    plan.new_stems.push((*id, path.clone()));
+                }
             }
         }
     }
@@ -171,7 +192,7 @@ pub fn carry(library: &Library, drive: &Drive, plan: &Plan) -> Carry {
             };
             out.already.push((track.path.clone(), row));
             out.carried.push(track.id);
-            if !drive.with_stems {
+            if drive.skip_stems {
                 continue;
             }
             for (path, row) in &written.stems {
@@ -237,9 +258,24 @@ pub fn fingerprint(track: &Track) -> u64 {
     eat(format!("{:.2}", track.bpm).as_bytes());
     eat(track.key.as_bytes());
     eat(&[track.has_grid as u8]);
+    // A bent grid goes on the drive beat for beat, so moving one beat is a
+    // change the drive has not got — and the tempo alone will not show it,
+    // since bending a grid need not change the tempo at all.
+    for beat in &track.beat_ms {
+        eat(&beat.to_le_bytes());
+    }
+    // Moving the one moves every bar line on the drive, and it can be moved
+    // without the tempo or any cue changing.
+    eat(&track.downbeat_ms.unwrap_or_default().to_le_bytes());
     for cue in &track.cues {
         eat(&[cue.letter]);
         eat(&cue.time_ms.to_le_bytes());
+        // The name and the colour go on the drive too, so a cue renamed from
+        // "drop" to the line that lands there is a change the drive has not
+        // got yet. They were left out while the exporter measured its own
+        // cues and neither ever reached a player.
+        eat(cue.label.as_bytes());
+        eat(&cue.color);
     }
     for phrase in &track.phrases {
         eat(&phrase.start_ms.to_le_bytes());
@@ -247,6 +283,233 @@ pub fn fingerprint(track: &Track) -> u64 {
         eat(phrase.kind.as_bytes());
     }
     hash
+}
+
+/// What the collection knows about a track, for the exporter to write in place
+/// of what it would measure.
+///
+/// The same fields [`fingerprint`] hashes, and deliberately so: the fingerprint
+/// is what decides a track needs writing again, and this is what gets written.
+/// If one covered something the other did not, an edit would either be written
+/// without being noticed or noticed without being written.
+pub fn prep(track: &Track) -> booth_cli::export::Prep {
+    use booth_cli::export::{Cue, Part, Prep, Rgb};
+
+    let cues = track
+        .cues
+        .iter()
+        .map(|cue| {
+            let [r, g, b] = cue.color;
+            let placed = match cue.letter {
+                0 => Cue::memory(cue.time_ms),
+                letter => Cue::hot(letter, cue.time_ms),
+            };
+            Cue {
+                comment: (!cue.label.is_empty()).then(|| cue.label.clone()),
+                color: Some(Rgb { r, g, b }),
+                ..placed
+            }
+        })
+        .collect();
+    let parts = track
+        .phrases
+        .iter()
+        .map(|phrase| Part {
+            start_ms: phrase.start_ms,
+            end_ms: phrase.end_ms,
+            kind: phrase.kind.clone(),
+        })
+        .collect();
+
+    Prep {
+        cues,
+        parts,
+        // Only where there is a grid behind it. A tempo on a track nobody has
+        // analysed is a guess off the file name, and handing a guess to the
+        // beat tracker as a fact is how a drive ends up with a grid that is
+        // confidently wrong rather than measured.
+        bpm: (track.has_grid && track.bpm > 0.0).then_some(track.bpm),
+        key: track.key.clone(),
+        // Empty for almost every record, and that is the tracker's grid being
+        // as good as the collection's. It fills in for a grid that bends,
+        // which is the one case re-measuring would destroy.
+        beat_ms: track.beat_ms.clone(),
+    }
+}
+
+// -- what the drive has been doing on its own ------------------------------
+
+/// The three analysis files that sit beside a track on a drive, given the
+/// `.DAT` path its database row names.
+///
+/// The row names one file and the player finds the other two by changing the
+/// extension, which is why they are derived here rather than stored.
+pub fn analysis_files(analyze_path: &str) -> [String; 3] {
+    let stem = analyze_path.trim_start_matches('/');
+    let stem = stem.strip_suffix(".DAT").unwrap_or(stem);
+    [format!("{stem}.DAT"), format!("{stem}.EXT"), format!("{stem}.2EX")]
+}
+
+/// What the drive is holding for each of the tracks written to it.
+///
+/// Read fresh off the stick: the files as they are now, and the edit counters
+/// the OneLibrary database keeps if there is one and the key opens it. A track
+/// whose files are not there at all gets no stamp rather than an empty one —
+/// nothing was found, which is different from finding nothing changed.
+///
+/// One walk and one query for the whole drive, because this runs every time the
+/// sync sheet is opened and a drive holds thousands of files.
+pub fn on_the_drive(root: &Path, drive: &Drive, key: Option<&str>) -> HashMap<u32, Stamp> {
+    let counters = onelibrary_counters(root, key);
+    let mut found = HashMap::new();
+
+    for written in &drive.written {
+        let Some(row) = &written.row else { continue };
+        let names = analysis_files(&row.analyze_path);
+
+        let mut files = Vec::new();
+        let mut newest: Option<u64> = None;
+        for name in &names {
+            let Ok(meta) = std::fs::metadata(root.join(name)) else { continue };
+            let at = meta
+                .modified()
+                .ok()
+                .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_secs())
+                .unwrap_or(0);
+            newest = Some(newest.map_or(at, |so_far: u64| so_far.max(at)));
+            files.push(format!("{name}:{}:{at}", meta.len()));
+        }
+
+        // The row names the `.DAT`, with a leading slash, which is the form the
+        // OneLibrary database stores too.
+        let counts = counters
+            .as_ref()
+            .and_then(|by_path| by_path.get(row.analyze_path.as_str()).copied())
+            .map(|four| four.to_vec())
+            .unwrap_or_default();
+
+        let stamp = Stamp { files, counts, at: newest };
+        if !stamp.is_empty() {
+            found.insert(written.id, stamp);
+        }
+    }
+    found
+}
+
+/// The edit counters off the drive's OneLibrary database, by analysis path.
+///
+/// `None` when there is no such database, no key for it, or it would not open:
+/// all three mean the question could not be asked, and a caller must not read
+/// that as the answer being no.
+fn onelibrary_counters(root: &Path, key: Option<&str>) -> Option<HashMap<String, [i64; 4]>> {
+    let path = booth_cli::rekordbox::onelibrary::find(root)?;
+    let key = booth_cli::rekordbox::onelibrary_key(key)?;
+    let connection = match booth_cli::rekordbox::open(&path, &key) {
+        Ok(connection) => connection,
+        Err(e) => {
+            crate::debug!("cannot read {} for what the player changed: {e:#}", path.display());
+            return None;
+        }
+    };
+    match booth_cli::rekordbox::onelibrary::edits(&connection) {
+        Ok(rows) => {
+            Some(rows.into_iter().map(|row| (row.analysis_path.clone(), row.counts())).collect())
+        }
+        Err(e) => {
+            crate::debug!("cannot read the edit counters off {}: {e:#}", path.display());
+            None
+        }
+    }
+}
+
+/// Read back what the player left, for a track whose drive copy is being kept.
+///
+/// `None` when the files are not there or will not parse — which is a real
+/// answer and the caller has to have one for it: the drive's copy can still be
+/// protected by leaving it alone, it just cannot be shown.
+pub fn what_the_player_left(
+    root: &Path,
+    written: &crate::library::Written,
+) -> Option<booth_cli::rekordbox::anlz::Analysis> {
+    let row = written.row.as_ref()?;
+    let names = analysis_files(&row.analyze_path);
+    let dat = std::fs::read(root.join(&names[0])).ok()?;
+    let ext = std::fs::read(root.join(&names[1])).ok();
+    booth_cli::rekordbox::anlz::read_files(&dat, ext.as_deref()).ok()
+}
+
+/// Which copy of a track's prep to keep.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The collection's.
+    Mine,
+    /// The drive's.
+    Theirs,
+}
+
+/// A track that has been edited here and on the drive since the two last
+/// agreed.
+///
+/// Nothing can settle this on its own. The times say which is the newer and
+/// that is the one to keep — but a time is not a reason, and the one thing
+/// worse than losing an edit is losing it silently, so this is put to the
+/// person rather than decided for them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflict {
+    pub id: u32,
+    /// When the collection's copy was last edited, if it has ever said.
+    pub mine: Option<u64>,
+    /// When the drive's was, from the newest of its analysis files.
+    pub theirs: Option<u64>,
+}
+
+impl Conflict {
+    /// Which side the clocks say is right, or `None` when they cannot say —
+    /// either because one side has no time, or because they are the same
+    /// second and there is nothing to choose between them.
+    pub fn newer(&self) -> Option<Side> {
+        let (mine, theirs) = (self.mine?, self.theirs?);
+        match mine.cmp(&theirs) {
+            std::cmp::Ordering::Greater => Some(Side::Mine),
+            std::cmp::Ordering::Less => Some(Side::Theirs),
+            std::cmp::Ordering::Equal => None,
+        }
+    }
+
+    /// What to do about it when nobody has said: keep the newer, and keep the
+    /// collection's when the clocks will not choose.
+    ///
+    /// The collection wins a tie because it is the side that can be looked at
+    /// and corrected afterwards. Nothing here can read a player's edits back,
+    /// so keeping the drive's is keeping something nobody can see.
+    pub fn default_side(&self) -> Side {
+        self.newer().unwrap_or(Side::Mine)
+    }
+}
+
+/// Tracks both sides have changed since the last sync.
+///
+/// `found` is what the drive says now, from [`on_the_drive`]. A track with no
+/// stamp on either side is not a conflict: no evidence is not evidence of a
+/// change, and refusing to write on the strength of it would make a drive
+/// written by an older build unwritable.
+pub fn conflicts(library: &Library, drive: &Drive, found: &HashMap<u32, Stamp>) -> Vec<Conflict> {
+    let mut clashing = Vec::new();
+    for written in &drive.written {
+        let Some(track) = library.get(written.id) else { continue };
+        if fingerprint(track) == written.prep {
+            continue;
+        }
+        let (Some(before), Some(now)) = (written.theirs.as_ref(), found.get(&written.id)) else {
+            continue;
+        };
+        if before == now {
+            continue;
+        }
+        clashing.push(Conflict { id: written.id, mine: track.edited, theirs: now.at });
+    }
+    clashing
 }
 
 /// How serious a preflight finding is.
@@ -398,7 +661,7 @@ fn space(plan: &Plan, destination: &Path, is_image: bool) -> Check {
 /// Stems count. Each one is a row on the player with its own grid, waveform and
 /// cues, so a drive carrying them needs four times this, not one.
 fn analysis_allowance(plan: &Plan) -> u64 {
-    (plan.writes().len() + plan.stems.len()) as u64 * 2 * 1024 * 1024
+    (plan.writes().len() + plan.new_stems.len()) as u64 * 2 * 1024 * 1024
 }
 
 /// Free bytes on the filesystem holding `path`, if it can be found out.
@@ -599,6 +862,224 @@ mod tests {
         );
     }
 
+    /// Which copy of a track to keep, when both have moved.
+    mod when_the_player_has_been_at_it {
+        use super::*;
+        use booth_cli::export::pdb;
+
+        /// A drive holding one track, with a row naming its analysis file and
+        /// a record of what that file looked like at the time.
+        fn drive_holding(library: &Library, id: u32, theirs: Option<Stamp>) -> Drive {
+            let mut drive = drive_for(library, &[id]);
+            drive.written[0].row = Some(pdb::Track {
+                analyze_path: "/PIONEER/USBANLZ/P016/0000c1b2/ANLZ0000.DAT".into(),
+                ..pdb::Track::default()
+            });
+            drive.written[0].theirs = theirs;
+            drive
+        }
+
+        fn stamp(size: u64, at: u64) -> Stamp {
+            Stamp {
+                files: vec![format!("PIONEER/USBANLZ/P016/0000c1b2/ANLZ0000.DAT:{size}:{at}")],
+                counts: vec![0, 0, 0, 0],
+                at: Some(at),
+            }
+        }
+
+        /// What the drive says now, as [`on_the_drive`] would return it.
+        fn now(id: u32, stamp: Stamp) -> HashMap<u32, Stamp> {
+            HashMap::from([(id, stamp)])
+        }
+
+        #[test]
+        fn a_track_changed_in_both_places_is_a_question() {
+            let (mut library, ids) = library_with(1);
+            let drive = drive_holding(&library, ids[0], Some(stamp(4_000, 100)));
+            // Edited here since the write.
+            let track = library.get_mut(ids[0]).unwrap();
+            track.bpm = 130.0;
+            track.edited = Some(300);
+
+            let clashing = conflicts(&library, &drive, &now(ids[0], stamp(4_200, 200)));
+            assert_eq!(clashing.len(), 1, "{clashing:?}");
+            assert_eq!(clashing[0].mine, Some(300));
+            assert_eq!(clashing[0].theirs, Some(200));
+            // Ours is the later of the two, so that is what it starts on.
+            assert_eq!(clashing[0].newer(), Some(Side::Mine));
+        }
+
+        #[test]
+        fn a_track_only_the_player_touched_is_not_a_question() {
+            // Nothing here changed, so nothing here is going to be written
+            // over it. There is nothing to ask.
+            let (library, ids) = library_with(1);
+            let drive = drive_holding(&library, ids[0], Some(stamp(4_000, 100)));
+            assert!(conflicts(&library, &drive, &now(ids[0], stamp(4_200, 200))).is_empty());
+        }
+
+        #[test]
+        fn a_track_only_we_touched_is_not_a_question_either() {
+            let (mut library, ids) = library_with(1);
+            let drive = drive_holding(&library, ids[0], Some(stamp(4_000, 100)));
+            library.get_mut(ids[0]).unwrap().bpm = 130.0;
+            // The drive is exactly as it was left.
+            assert!(conflicts(&library, &drive, &now(ids[0], stamp(4_000, 100))).is_empty());
+        }
+
+        #[test]
+        fn a_drive_that_was_never_stamped_is_never_refused() {
+            // Written by a build from before any of this existed. No evidence
+            // is not evidence of a change, and treating it as one would make
+            // every older drive unwritable.
+            let (mut library, ids) = library_with(1);
+            let drive = drive_holding(&library, ids[0], None);
+            library.get_mut(ids[0]).unwrap().bpm = 130.0;
+            assert!(conflicts(&library, &drive, &now(ids[0], stamp(9_999, 999))).is_empty());
+        }
+
+        #[test]
+        fn a_counter_moving_is_a_change_even_when_the_files_have_not() {
+            // The columns the format keeps for exactly this. What a player
+            // writes into them is undocumented, so they are read as evidence
+            // and never as proof of the negative — but evidence is evidence.
+            let (mut library, ids) = library_with(1);
+            let drive = drive_holding(&library, ids[0], Some(stamp(4_000, 100)));
+            library.get_mut(ids[0]).unwrap().bpm = 130.0;
+
+            let bumped = Stamp { counts: vec![1, 2, 0, 0], ..stamp(4_000, 100) };
+            assert_eq!(conflicts(&library, &drive, &now(ids[0], bumped)).len(), 1);
+        }
+
+        #[test]
+        fn the_later_edit_is_the_one_a_row_starts_on() {
+            let later_there = Conflict { id: 1, mine: Some(100), theirs: Some(200) };
+            assert_eq!(later_there.default_side(), Side::Theirs);
+
+            let later_here = Conflict { id: 1, mine: Some(300), theirs: Some(200) };
+            assert_eq!(later_here.default_side(), Side::Mine);
+
+            // Where the clocks will not choose, the collection keeps it: it is
+            // the side somebody can look at and correct afterwards.
+            let same = Conflict { id: 1, mine: Some(200), theirs: Some(200) };
+            assert_eq!(same.newer(), None);
+            assert_eq!(same.default_side(), Side::Mine);
+
+            let unknown = Conflict { id: 1, mine: None, theirs: Some(200) };
+            assert_eq!(unknown.newer(), None);
+            assert_eq!(unknown.default_side(), Side::Mine);
+        }
+
+        #[test]
+        fn the_three_files_beside_a_track_are_found_from_the_one_the_row_names() {
+            assert_eq!(
+                analysis_files("/PIONEER/USBANLZ/P016/0000c1b2/ANLZ0000.DAT"),
+                [
+                    "PIONEER/USBANLZ/P016/0000c1b2/ANLZ0000.DAT".to_string(),
+                    "PIONEER/USBANLZ/P016/0000c1b2/ANLZ0000.EXT".to_string(),
+                    "PIONEER/USBANLZ/P016/0000c1b2/ANLZ0000.2EX".to_string(),
+                ]
+            );
+        }
+
+        #[test]
+        fn reading_a_real_drive_notices_a_file_that_changed_and_nothing_else() {
+            let root =
+                std::env::temp_dir().join(format!("booth-drive-edits-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let folder = root.join("PIONEER/USBANLZ/P016/0000c1b2");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("ANLZ0000.DAT"), b"cues as written").unwrap();
+            std::fs::write(folder.join("ANLZ0000.EXT"), b"named cues").unwrap();
+
+            let (library, ids) = library_with(1);
+            let drive = drive_holding(&library, ids[0], None);
+
+            let before = on_the_drive(&root, &drive, None);
+            let before = before.get(&ids[0]).expect("nothing found for a track that is there");
+            assert_eq!(before.files.len(), 2, "the .2EX is not there and is not invented");
+            assert!(before.at.is_some());
+            // No OneLibrary database to read, which is not the same as four
+            // zeroes and must not read as them.
+            assert!(before.counts.is_empty());
+
+            // What a deck doing something to the track looks like from here.
+            std::fs::write(folder.join("ANLZ0000.EXT"), b"named cues, one of them moved").unwrap();
+            let after = on_the_drive(&root, &drive, None);
+            assert_ne!(after.get(&ids[0]), Some(before), "an edited file read as unchanged");
+
+            // And reading it twice without touching it does not.
+            assert_eq!(on_the_drive(&root, &drive, None), after);
+
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn a_track_whose_files_are_gone_is_not_stamped_as_empty() {
+            // Nothing found is not the same as finding nothing, and an empty
+            // stamp compared against a real one would read as a change on
+            // every sync.
+            let (library, ids) = library_with(1);
+            let drive = drive_holding(&library, ids[0], None);
+            let found = on_the_drive(Path::new("/nowhere-at-all"), &drive, None);
+            assert!(found.is_empty(), "{found:?}");
+        }
+    }
+
+    #[test]
+    fn everything_the_fingerprint_watches_is_something_the_prep_carries() {
+        // The two have to cover the same ground. Something in the prep that is
+        // not in the fingerprint is an edit written without being noticed, and
+        // so never written at all; something in the fingerprint that is not in
+        // the prep is a track rewritten with the same contents for ever.
+        let (mut library, ids) = library_with(1);
+        let id = ids[0];
+        library.get_mut(id).unwrap().cues.push(crate::library::CueMark {
+            letter: 1,
+            time_ms: 4_000,
+            label: "drop".into(),
+            color: [1, 2, 3],
+        });
+        library.get_mut(id).unwrap().phrases.push(Phrase {
+            start_ms: 0,
+            end_ms: 8_000,
+            kind: "intro".into(),
+        });
+
+        let before = (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap()));
+
+        // A cue renamed. It goes on the drive, so it has to count as a change.
+        library.get_mut(id).unwrap().cues[0].label = "hold me closer now".into();
+        let after = (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap()));
+        assert_ne!(after.0, before.0, "renaming a cue left the drive thinking it was up to date");
+        assert_ne!(after.1, before.1);
+
+        // And recoloured.
+        library.get_mut(id).unwrap().cues[0].color = [9, 9, 9];
+        assert_ne!(fingerprint(library.get(id).unwrap()), after.0);
+
+        // A play count is neither.
+        let unchanged = (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap()));
+        library.get_mut(id).unwrap().play_count += 1;
+        assert_eq!(
+            (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap())),
+            unchanged
+        );
+    }
+
+    #[test]
+    fn a_track_nobody_has_analysed_hands_the_exporter_no_tempo_to_trust() {
+        // A tempo with no grid behind it is a guess off a file name, and the
+        // beat tracker given a guess as a fact produces a grid that is
+        // confidently wrong rather than measured.
+        let (mut library, ids) = library_with(1);
+        library.get_mut(ids[0]).unwrap().has_grid = false;
+        assert_eq!(prep(library.get(ids[0]).unwrap()).bpm, None);
+
+        library.get_mut(ids[0]).unwrap().has_grid = true;
+        assert_eq!(prep(library.get(ids[0]).unwrap()).bpm, Some(128.0));
+    }
+
     #[test]
     fn a_tempo_below_the_stored_precision_is_not_a_change() {
         let (mut library, ids) = library_with(1);
@@ -646,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn stems_go_on_only_when_the_drive_carries_them() {
+    fn a_rendered_kit_goes_on_unless_the_drive_is_told_not_to() {
         let (mut library, ids) = library_with(1);
         let track = library.get_mut(ids[0]).unwrap();
         track.stems.vocals = Some("/stems/a-vocals.wav".into());
@@ -654,10 +1135,26 @@ mod tests {
         track.stems.drums = Some("/stems/a-drums.wav".into());
 
         let mut drive = drive_for(&library, &[]);
-        assert!(plan(&library, &drive).stems.is_empty());
+        assert_eq!(plan(&library, &drive).stems.len(), 3, "a rendered kit was left behind");
 
-        drive.with_stems = true;
-        assert_eq!(plan(&library, &drive).stems.len(), 3);
+        drive.skip_stems = true;
+        assert!(plan(&library, &drive).stems.is_empty());
+    }
+
+    #[test]
+    fn stems_already_on_the_drive_do_not_keep_it_looking_out_of_date() {
+        // Carrying kits by default is only bearable if a drive that has them
+        // says so. Counting every stem as work would put "3 stems" on the dock
+        // for ever and copy them again on every write.
+        let (mut library, ids) = library_with(1);
+        give_stems(&mut library, ids[0]);
+        let drive = written_drive(&library, &ids, true);
+
+        let plan = plan(&library, &drive);
+        assert_eq!(plan.stems.len(), 3, "the drive is still meant to hold them");
+        assert!(plan.new_stems.is_empty(), "they would be copied again: {:?}", plan.new_stems);
+        assert!(plan.is_empty(), "{}", plan.delta());
+        assert_eq!(plan.stem_bytes, 0, "space was reserved for files already there");
     }
 
     #[test]
@@ -670,7 +1167,7 @@ mod tests {
         library.get_mut(ids[0]).unwrap().stems.vocals =
             Some(PathBuf::from(format!("/stems/{}-vocals.wav", "B".repeat(240))));
 
-        let drive = Drive { with_stems: true, ..drive_for(&library, &[]) };
+        let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
         let checks = preflight(&library, &plan, Path::new("/tmp"), false);
         assert!(
@@ -687,11 +1184,11 @@ mod tests {
         track.stems.drums = Some("/stems/a-drums.wav".into());
         track.stems.melody = Some("/stems/a-melody.wav".into());
 
-        let bare = analysis_allowance(&plan(&library, &drive_for(&library, &[])));
-        let carrying = analysis_allowance(&plan(
+        let bare = analysis_allowance(&plan(
             &library,
-            &Drive { with_stems: true, ..drive_for(&library, &[]) },
+            &Drive { skip_stems: true, ..drive_for(&library, &[]) },
         ));
+        let carrying = analysis_allowance(&plan(&library, &drive_for(&library, &[])));
         // Each stem is a row on the player, with a grid, a waveform and cues of
         // its own on the drive. A drive carrying them needs four times the room
         // for analysis, not the same amount.
@@ -726,9 +1223,15 @@ mod tests {
                     stems.push((path.clone(), row()));
                 }
             }
-            written.push(Written { id: *id, prep: fingerprint(track), row: Some(parent), stems });
+            written.push(Written {
+                id: *id,
+                prep: fingerprint(track),
+                row: Some(parent),
+                stems,
+                theirs: None,
+            });
         }
-        Drive { with_stems, written, ..drive_for(library, &[]) }
+        Drive { skip_stems: !with_stems, written, ..drive_for(library, &[]) }
     }
 
     #[test]
@@ -801,7 +1304,7 @@ mod tests {
     fn a_drive_that_no_longer_carries_stems_carries_none_of_their_rows() {
         let (mut library, ids) = library_with(1);
         give_stems(&mut library, ids[0]);
-        let drive = Drive { with_stems: false, ..written_drive(&library, &ids, true) };
+        let drive = Drive { skip_stems: true, ..written_drive(&library, &ids, true) };
 
         let carry = carry(&library, &drive, &plan(&library, &drive));
         assert_eq!(carry.already.len(), 1, "only the track's own row: {:?}", carry.already);

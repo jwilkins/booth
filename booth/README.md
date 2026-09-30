@@ -48,6 +48,13 @@ its contents are clipped to that, so a long path in the inspector or a long
 playlist name in the collection no longer widens the panel it is in, and
 squeezing the window does not overwrite what you dragged to.
 
+**The collection panel scrolls.** Forty playlists are more than any panel is
+tall; they used to run off the bottom of the screen, and once panels began
+clipping to their own rectangles they stopped being drawn at all. Scrolling is
+what turns being clipped into being reached. A track can be dragged onto a
+playlist that had to be scrolled to, the same as onto one that was already
+showing.
+
 ## The query bar is the browser
 
 Every filter is text, which means every filter can be saved, pasted, and read.
@@ -133,9 +140,9 @@ drive by itself.
 ## Doing one track at a time
 
 Every batch job has a single-track twin. The prep editor under the waveform has
-**Analyse**, **Look up tags** and **Render stems** for whatever is selected, and
-right-clicking any row offers the same three plus play, copy-into-library, copy
-the path, and remove.
+**Analyse**, **Look up tags**, **Render stems** and **Cue from the words** for
+whatever is selected, and right-clicking any row offers the same four plus play,
+copy-into-library, copy the path, and remove.
 
 A job that has already been done says so: the button reads **Re-analyse** rather
 than **Analyse**, because the honest answer to "will this take twenty minutes"
@@ -206,8 +213,19 @@ the boundary was missed, not that the name was wrong. A boundary cannot be
 dragged over its neighbour, and a section too short to have two halves is not
 split at all rather than split into a sliver.
 
-The strip stays the map as well: away from a boundary, dragging still moves the
-zoom window.
+**Each block says how long it runs for** — `BREAK 16`, `BUILD 8` — because a
+DJ builds in eights and sixteens, and seeing that a breakdown is the usual
+length is the difference between reading the strip and counting the bars. The
+number is the count of red bar marks under the block, taken off the same grid
+the picture draws rather than worked out again from the tempo: two answers to
+one question come apart, and it showed as a section labelled sixteen with
+fifteen marks under it. A boundary dragged into the middle
+of a bar loses that bar rather than rounding up to it, which is what the marks
+show too.
+
+The strip scrolls as well as edits: away from a boundary, dragging moves the
+view with the pointer, and what was under your finger stays under it. At full
+width there is nowhere to scroll to, so nothing moves.
 
 Cue times, names and the track's names all go through the drive delta, so an
 edit shows as *changed* on the next sync — except a cue's name, which the player
@@ -356,6 +374,35 @@ is trimmed from the **front**, so the file name is always the part that
 survives — a path clipped at the end is every file in a folder looking
 identical.
 
+## Colours
+
+Eleven schemes, in Settings: this program's own, and ten of the ones people
+already stare at all day in an editor — **gruvbox**, **solarized**,
+**nord**, **dracula**, **monokai**, **tokyonight**, **catppuccin**,
+**everforest**, **onedark** and **papercolor**. A DJ who has spent ten years in
+gruvbox should not have to learn a second set of colours to read a waveform.
+
+Each is given as the eleven numbers its own documentation publishes — a ground,
+a raised ground, a rule, text, a dim, and six accents — and the roles this
+window draws in are filled from those. Nothing is invented except where a
+scheme genuinely has no colour for a role: dracula has no blue, so its purple
+stands in, which is what its own interface does.
+
+The names in the picker are written in each scheme's own accent, so the list is
+a sample rather than eleven words. Every scheme is checked by a test for a
+readable gap between its text and its ground, a dim that is dimmer than the text
+but still visible, and a phrase name that can be read on every phrase block —
+which matters because **papercolor** is light, and a fixed dark ink would be a
+guess at what half those blocks say.
+
+**Two things are deliberately not themed.** The eight **hot cue colours** are
+written into the cues and go on the drive, so they are data: a player lights its
+buttons with them, and repainting them would change somebody's stick and mark
+every track as changed on the next sync. And the waveform's **red/green/blue
+bands** are the convention every other program draws frequency in — a scheme
+that recoloured them would be a picture that no longer means what every other
+picture means.
+
 ## Where you are in a track
 
 The transport reads `12.3 · -172`: bar 12, beat 3, with 172 bars left. Bars and
@@ -372,14 +419,25 @@ count in, so it shows the clock instead of inventing a position.
 
 The wheel zooms about the pointer — what you were looking at stays where it is
 rather than sliding off while you chase it. Shift, or a sideways wheel, pans.
-The phrase strip underneath always shows the whole track, so it doubles as the
-map: the window is drawn on it, and clicking anywhere on it jumps there. **fit**
-next to the colour modes, or **esc**, goes back to the whole track.
+The phrase strip underneath goes through the same zoom, so a block stays under
+the music it names; grab it away from a boundary and drag to scroll the view.
+**fit** next to the colour modes, or **esc**, goes back to the whole track.
+
+It used to draw the whole track at every zoom and carry the window as a box
+over itself, which made it a map but put the drop's block nowhere near the
+drop as soon as you zoomed in. A strip that lines up with the picture is worth
+more than a map of a track you can already see the whole of at full width.
 
 While something is playing, the view follows the playhead — but only once the
 playhead has actually left it. Recentring every frame would be a scrolling
 waveform, which is a different instrument; what is wanted here is that the thing
 you zoomed in on does not vanish while you listen to it.
+
+Only a **running** playhead pulls the view, and never while the pointer is
+down. A parked one is not going anywhere, and pulling the view back to it
+anyway undid every scroll on the frame after it was made — which showed up as
+a phrase strip that stuttered and never got more than a few points from
+wherever the playhead was sitting.
 
 The picture is cached at the scrolling resolution — 150 columns a second, the
 same detail the player draws from — rather than as a fixed 1,200 columns for the
@@ -474,17 +532,112 @@ reference of its own rather than the overview's.
 The same measurement makes the pictures on the drive, so what is on screen
 while prepping is what will be on the CDJ's screen.
 
+**The grid marks the downbeat red and the other three beats white**, which is
+what a player draws and therefore what a DJ reads without having to think about
+it. One colour for all four made the one indistinguishable from the rest at a
+glance, which is the one thing a beat grid exists to show.
+
+### What the collection keeps of a grid
+
+An even grid is a tempo and a downbeat, and that is all the collection stores
+for one: thousands of beat times saying what two numbers already say belong in
+the analysis file on the drive, not in the library. The picture rebuilds the
+rest, winding back to the head of the track in whole **bars** from the
+downbeat. Winding back a beat at a time put beat one on whichever beat happened
+to land nearest the top of the track, and the bar marks, the bar number in the
+transport and the length on a phrase block then all counted from an offbeat:
+right on a track that starts on the one, and three beats out on one that does
+not.
+
+**A grid that bends is kept beat for beat.** A live take, a disco record, or
+one somebody bent by hand on a player is a grid no tempo can put back, and it
+is usually the only copy of that work — rebuilding it from a tempo on the way
+back out would hand the drive a flattened version of what the drive gave us.
+Which it is gets decided on the way in, by asking whether an even grid through
+the two ends misses any beat by more than five milliseconds. Five, because an
+even grid rounded to whole milliseconds is already off by up to one (the
+analyser here measures 0.85 ms across three minutes) and five is far below the
+point where a beat sounds like it is somewhere else. A grid that speeds up and
+comes back is caught by the bulge in the middle rather than passed for landing
+in the right place.
+
+**The drive gets every beat either way.** A CDJ reads beats, not tempos, so the
+`PQTZ` section is always a full per-beat list with a bar position and a tempo
+against each one — an even grid is written out beat by beat from its tempo, and
+a bent one beat by beat from what was kept. No database column changes: the
+OneLibrary `content` row carries `bpmx100` and points at the analysis file, and
+the grid has always lived in the file.
+
+**Where the one is has a field of its own.** Saying "the one is here" and
+saying "start the track here" are two things a DJ does and rarely means the
+other, so the grid's downbeat is no longer read off the memory cue. A
+collection written before that field existed still phases off the cue, which is
+where the phase used to come from.
+
+Everything that crosses between a moment in the track and a place on the panel
+goes through the zoom: the columns, the cue flags, the playhead, the grid, where
+a click lands, and where a cue is grabbed. They did not all, and the ones that
+did not were fine at full width and wrong by the width of the panel as soon as
+you zoomed in — a cue drawn in one place and picked up in another, and a grid
+that stayed put while the music moved out from under it.
+
+**A stem row draws its own waveform.** An acapella is a different sound from the
+record it came from, and a picture of the mix under the acapella's name is a
+picture of something that is not playing. Everything else a stem row shows stays
+the record's — the grid, the cues, the phrases, the key — because those are
+properties of the record and a cue that did not line up with the one on the
+track would be worse than no cue at all. The waveform is the one thing that
+belongs to the file rather than to the record.
+
+Analysing a record draws its stems with it, so a crate that has just been
+prepared is prepared — waiting to click on each acapella in turn is not the same
+thing. Rendering a kit does the same as soon as the stems exist.
+
+A cached picture records what it is a picture of: the files it was drawn from,
+and what they looked like. The cache is keyed by row, and without that note a
+row whose audio changed underneath it goes on showing the old picture for ever
+with nothing saying so. Two ways that happens — a kit rendered again, and the
+bug this note was added for, where a stem row was drawn from its parent's mix
+and the mix's picture was filed under the stem's name. A picture that cannot
+vouch for itself is drawn again, which is what heals a library full of acapellas
+showing the record. A file that cannot be reached is a different matter: nothing
+can be said either way, and a row whose drive has been unplugged is better
+showing the last picture of it than an empty strip that reads as silence.
+
 ## Colouring the waveform
 
-The colour mode mixes in its own palette rather than the three the stacked mode
-labels its bars with. Those only have to be told apart; these get mixed
-together, and blue and amber sit opposite each other on the wheel — so a column
-holding both, which is most music, cancels to grey. Measured across four kinds
-of column, one with a strong bass and one with none came out at hue 36 and hue
-36: the same colour, for the two passages a DJ most needs to tell apart. Violet
-is a third of the way round from amber rather than opposite it, so mixing them
-rotates the hue instead of cancelling it, and the same columns land 25 degrees
-apart with bass-only a long way from both.
+**Red is the bass, green the mid-range, blue the treble** — the convention every
+other DJ program draws waveforms in, and the one the EQ colour charts a DJ has
+already learned are drawn from. It is not an arbitrary choice: with the three
+bands on the three channels, a column made of two of them lands on the secondary
+that names the pair.
+
+| in the column | comes out |
+| --- | --- |
+| bass alone | red — baseline, intro, outro |
+| bass + mid | yellow — melodic baseline, bridge |
+| mid alone | green — vocals, melodies |
+| mid + treble | cyan — vocals, verse |
+| treble alone | blue — hi-hats, buildup |
+| bass + treble | magenta — the beat |
+| all three | white — the chorus |
+
+Nothing cancels, because no two primaries sit opposite each other. That was the
+fault this replaced: the palette was blue bass and amber mid, which *are*
+opposite, so a column holding both — most music — cancelled to grey. A body with
+a strong bass and a breakdown with none came out at hue 36.0 and hue 35.8, the
+same colour for the two passages a DJ most needs to tell apart. The same two
+columns now land 25 degrees apart, and a kick against a lead is a clean 120 —
+the full distance between two primaries.
+
+The same three numbers go into the analysis files, so the picture on screen and
+the picture on the deck are the same picture. They had drifted apart, and the
+comment claiming they had not was out of date by a release.
+
+Brightness is deliberately left out of the colour. The height of the column is
+already the loudness, and a colour that said it again would leave a quiet
+breakdown too dark to read for the sake of repeating something the shape has
+already shown.
 
 The levels are also undone before they are mixed. They are stored bent by the
 curve that makes heights readable, and it flattens the bands against each other
@@ -500,10 +653,9 @@ Three modes, on the right of the cue row, remembered between runs:
 - **bands** — low, mid and high stacked in their own colours, tallest first so
   the shorter ones land on top. Easiest for finding the kick, because the low
   band is drawn on its own.
-- **colour** — one shape, hue mixed from the frequency content: bass violet,
-  mid-range amber, treble washing towards cyan. A body with everything in it
-  reads orange, a breakdown with the bass gone reads yellower, and bass with
-  nothing over it reads purple.
+- **colour** — one shape, hue added from the frequency content: bass red,
+  mid-range green, treble blue, per the table above. What the player draws, so
+  it is the one to prep against.
 - **stems** — one shape, hue from which stem is loudest: vocals rose, melody
   teal, drums amber. Needs a rendered kit, and measures the stem files
   themselves — a band split can say where the bass is, and only a separation can
@@ -535,6 +687,89 @@ The alternative is one folder for all of them, which is the case for a library
 on a small disk and stems on a big one. Both places are searched whichever is
 set, so changing the setting never makes a rendered kit disappear — it is
 minutes of work a track, and a preference must not look like a delete.
+
+## Cues from the words
+
+The **Words** button, and **Cue from the words** on a row, set a track's hot cues
+from what is sung on it rather than from how loud it gets.
+
+A cue placed by energy can only ever find the loud part. That is worth having —
+the drop is where most mixes turn — but the moment a DJ actually reaches for is
+usually the line the crowd sings, and a hook and the verse before it are the same
+loudness, the same instruments and the same key. Nothing in a spectrum tells them
+apart. The words do.
+
+So the pass is three steps, each skipped when it has already been taken:
+
+1. **Render the vocal stem**, if there is not one. A recogniser handed a club
+   record transcribes the kick drum; an isolated voice is the only thing it has a
+   chance with. This is the expensive step — minutes a track — and it is the same
+   separation the **Stems** button runs, so a track that already has a kit skips
+   straight past it.
+2. **Read the stem**, with whichever Whisper is installed. What comes back is
+   timed lines.
+3. **Find what repeats.** Lines that say the same thing are grouped — loosely,
+   because a recogniser writes the same sung phrase four slightly different ways
+   and matching word-for-word would count a hook sung eight times as eight
+   different lines. The group with the most separate airings is the hook.
+
+**One cue per line, not one per airing.** A hook sung six times was six cues
+saying the same thing — a player that could jump to one moment of the record,
+with the drops and the breakdowns pushed out of the set entirely. Each of the
+track's repeated lines is now cued once, where it first lands, and at most three
+lines get a cue at all: the hook, a second line and a tag is already generous,
+and everything past that is a slot taken from a drop.
+
+Around them go **where the singing starts** and **the start of every phrase** the
+arrangement analysis found — intro, build, break, drop, outro. A player holds
+eight hot cues and a busy track offers more than eight moments, so they are
+ranked: the hook outranks even the drop, because a drop can be found by looking
+at the waveform and the line the crowd sings cannot be found by looking at
+anything. The other lines sit below the breakdowns, so the arrangement keeps the
+slots the words give back. Two moments that land on top of each other become one
+cue, and it keeps the words: a drop that is also where a line falls says which
+line.
+
+Cues from the words are rounded **down** to the beat rather than to the nearest
+one. A sung line rarely starts on the beat — a pickup is the whole point of a
+pickup — and a hook cue that clips its own first word is one nobody presses
+twice.
+
+Two things it will not do. **An ad-lib is not a hook**: a line needs at least two
+words, because "yeah" is the most repeated thing in half the vocal stems ever
+recorded and marks nothing. And **a recogniser stuck in a loop does not invent
+one**: airings less than four seconds apart are one airing, which is true of a
+chorus that sings its line twice over and true of Whisper emitting "thanks for
+watching" forty times over a breakdown.
+
+The words are kept in the collection once they have been heard, so cueing the
+same track again is instant and costs no stem render and no recogniser. The
+memory cue is never moved — the grid is anchored to it — but the hot cues are
+replaced wholesale, which is what the button says it does.
+
+### Installing a recogniser
+
+Booth does not ship a speech recogniser and will not download one. Set it up
+under **Words** in Settings:
+
+- **whisper.cpp** — `brew install whisper-cpp`, or build it. Needs no Python and
+  no network, and needs a ggml model file naming: `ggml-base.en.bin` is a good
+  first choice. This is the one to reach for.
+- **OpenAI's `whisper`** — `pipx install openai-whisper`. Name the program
+  `whisper` and it is called the Python way; anything else is treated as
+  whisper.cpp. It downloads its weights the first time it runs, and shells out to
+  ffmpeg, so it is only offline afterwards.
+
+`BOOTH_WHISPER_BIN`, `BOOTH_WHISPER_MODEL` and `BOOTH_WHISPER_LANGUAGE` are used
+when the corresponding setting is empty, so the feature can be tried without
+editing a file. Setting the **language** is worth doing: left to itself the
+recogniser guesses it off the first few seconds, and the first few seconds of an
+isolated vocal are usually a breath.
+
+Whether there is a recogniser is checked **before** anything is rendered. A
+separation that finishes and only then finds there is nothing to hand the stem to
+has wasted the expensive half of the work. Nothing else in Booth needs any of
+this — only the words do.
 
 ## Importing a rekordbox library
 
@@ -637,6 +872,26 @@ night.
 
 ## The sync sheet
 
+**Which drive** is a menu in the dock, listing every one the collection knows
+with the ones actually in a socket marked as such, and offering to add another
+or forget the one in use. Forgetting takes a drive off that list and touches
+nothing on the stick.
+
+Adding used to be offered only while the list was empty, and switching only
+while it held more than one, so setting up a first drive took away every way to
+reach a second: one entry, no picker, no add button. A drive that is not there
+now says *not plugged in* rather than sitting in the dock looking ready — a
+remembered drive is a place and a history, not a stick, and the two read
+identically until something asks.
+
+**Send to the emulator** appears in that menu for an image drive. It puts the
+image in a running [cdj3k-emu](https://github.com/nsaintot/cdj3k-emu)'s USB slot
+over QEMU's machine protocol, on the port in Settings (4445, one port per
+emulator instance). Nothing listening means the image is shown in a file manager
+instead, and the log says which happened. Whether the firmware then mounts it is
+the part this cannot promise: the emulator's own attach also nudges its guest,
+and only the medium change is reachable from outside.
+
 The delta in the dock is the difference between the drive's playlist and what
 was last written to it, so a moved cue shows as *changed* rather than as a
 re-add. Play counts and tags do not count as changes: they are not things the
@@ -675,6 +930,70 @@ The verification that matters runs *after* the write, and belongs to the export
 command: the database and every analysis file are read back off the drive by a
 parser that shares no code with the writer. Until that passes, the drive is not
 finished.
+
+### What goes on the drive is what the collection says
+
+The exporter listens to every file it prepares, because it has to — the waveform
+is of the audio and nothing else can supply it. But it used to write *everything*
+it heard, including the cues and the phrases, so a cue moved by hand was
+faithfully marked as changed, faithfully rewritten, and faithfully replaced with
+whatever the analyser thought that time. The edit went nowhere and nothing said
+so.
+
+Now the collection's cues, phrases, key and tempo are what get written, and the
+measured ones are the fallback for a track that has none. Cue names and colours
+go with them, which they never did before — so renaming a cue now counts as a
+change the drive has not got. **The first sync after this upgrade reports every
+track as changed**, once, because the drive genuinely does not have them.
+
+### When the player has edited it too
+
+A CDJ-3000X can move a cue, re-grid a track or rename a phrase on the deck, and
+it writes that back to the stick. So a sync is not a copy — it is two sides that
+may both have moved.
+
+Opening the sync sheet reads the drive first: for each track it was written, the
+analysis files beside it and the `hasModified`, `cueUpdateCount`,
+`analysisDataUpdateCount` and `informationUpdateCount` columns in the OneLibrary
+database. Two independent pieces of evidence, because neither is enough alone.
+The counters are the field the format keeps for exactly this question — but what
+a player writes into them is not documented and nobody has published a reading
+of one, so a drive showing no change there has not said it was not edited. The
+analysis files cannot argue: a deck that rewrote a track's cues rewrote the file
+that holds them.
+
+Three cases, and only one of them is a question:
+
+- **Changed only here** — the sync writes it, as it always did.
+- **Changed only on the drive** — nothing here changed, so nothing here is
+  going to be written over it, and the sheet says nothing.
+- **Changed in both places** — the sheet asks. Each track is listed with when
+  each side was last edited, starting on whichever is the later, and there are
+  buttons to take all of one side.
+
+Keeping the drive's copy does two things. The track's analysis files on the
+stick are left exactly as the deck left them — it is not prepared again, and its
+row and its place in the playlists carry through untouched — and **what the deck
+did is read back into the collection**, so the cues, their names and colours, the
+phrases and the tempo become the ones Booth shows. Keeping the drive's copy
+therefore means having it, not merely not losing it. The decision is recorded, so
+a settled question is not asked again on every sync.
+
+The one thing that does not come back is the grid itself, only the tempo it was
+written at. A collection keeps a tempo and a downbeat rather than thousands of
+beat times, so a grid a deck has bent cannot be held here without being
+flattened — which is exactly why the track is not written again afterwards. The
+files on the stick stay as they are, and what comes back here is what can be
+shown beside them.
+
+If a track's analysis files cannot be read — pulled mid-write, or rewritten into
+something this cannot parse — the drive's copy is still protected by leaving it
+alone, and the sheet says that is all that happened rather than passing over it.
+
+A drive written by a build from before any of this existed has no record of what
+it looked like, so its tracks are never treated as edited: no evidence is not
+evidence of a change, and the alternative would make every older drive
+unwritable.
 
 ## The collection against its files
 
@@ -867,11 +1186,31 @@ drive played only on older hardware has a history nothing here can see.
   puts in those three bits for given audio is not published, and ours has never
   been compared against a real export column by column.
 - Stem colouring needs the kit rendered first, which is minutes a track.
+- Cueing by the words needs a recogniser installed separately, and a stem kit
+  rendered first — so the first track costs minutes twice over. What it hears is
+  whatever Whisper hears: a heavily processed vocal, a language it was not told
+  about, or a chopped-up sample comes back as noise, and a hook found in noise is
+  a cue in the wrong place. The inspector shows how many lines were heard and
+  what it decided the hook was, so a bad reading can be seen to be one; there is
+  no way yet to correct it by hand.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with
   its confidence for that reason.
 - Cues and grids are never written back to the source files — they live in the
   collection and on the drive. Names can be, on request.
+- A grid a player bent cannot be held in the collection, only the tempo it was
+  written at, because a collection keeps a tempo and a downbeat rather than
+  every beat time. That is why a track whose drive copy is kept is not written
+  again.
+- What a CDJ-3000X actually writes into the OneLibrary edit counters after an
+  edit on the deck has not been published by anyone, so the file timestamps are
+  doing most of the work. A deck that edited a track without touching its
+  analysis files would go unnoticed.
+- The reader for those analysis files was written from the same understanding of
+  the format as the writer, so the two agreeing says nothing about whether
+  either matches rekordbox. What it is for is reading back a file this program
+  wrote and a player has since edited, which it is tested on; the check against
+  an independent parser is the round trip in `rekordbox_export`.
 - One deck, and no pitch, sync or mixing — it is for auditioning, not
   performing. The spec asks for two decks eventually.
 - Playback resamples linearly, which is right for auditioning and is not what

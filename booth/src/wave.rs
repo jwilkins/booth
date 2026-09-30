@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, Rect, Sense, Stroke, Ui, Vec2};
 
 use booth_cli::export::waveform::loudness;
 
-use crate::library::{CueMark, Phrase, PhraseEdit};
+use crate::library::{CueMark, Phrase, PhraseEdit, BEATS_PER_BAR};
 use crate::theme;
 
 /// How tall the waveform draws, in points.
@@ -85,9 +85,12 @@ impl StemEnvelopes {
         let at = |plane: &[u8]| plane.get(index).copied().unwrap_or(0) as f32;
         let (vocals, melody, drums) = (at(&self.vocals), at(&self.melody), at(&self.drums));
         if vocals + melody + drums < 1.0 {
-            return theme::RULE;
+            return theme::rule();
         }
-        mix([theme::STEM_VOCALS, theme::STEM_MELODY, theme::STEM_DRUMS], [vocals, melody, drums])
+        mix(
+            [theme::stem_vocals(), theme::stem_melody(), theme::stem_drums()],
+            [vocals, melody, drums],
+        )
     }
 }
 
@@ -160,28 +163,27 @@ fn blend(parts: &[(Color32, f32)]) -> Color32 {
     )
 }
 
-/// The hue of a column from its three band levels.
+/// The palette the colour mode mixes in: one band per channel, low to high.
 ///
-/// The same mix the analysis files carry to the player — bass reads blue, the
-/// mid-range amber, and treble washes everything towards white — so the picture
-/// on screen and the picture on the CDJ are the same picture.
-/// The palette the colour mode mixes in, low to high.
+/// The convention every other DJ program uses, and the one the EQ colour charts
+/// a DJ will have seen are drawn from — red is the bass, green the mid-range,
+/// blue the treble. It is not an arbitrary choice and never was: with the three
+/// bands on the three channels, a column made of two of them lands on a
+/// secondary that names the pair. Bass and mid read yellow, mid and treble
+/// cyan, bass and treble magenta, and a column with all three reads white.
+/// Nothing cancels, because no two primaries are opposite each other.
+///
+/// This is also what the analysis files carry, so the picture on screen and the
+/// picture on the deck are the same picture. See
+/// [`booth_cli::export::waveform`], which packs the same three numbers into
+/// three bits each.
 ///
 /// Not the band colours the stacked mode uses. Those are three labels on three
-/// bars and only have to be told apart; these are mixed together, and blue and
-/// amber sit opposite each other on the wheel — so any column with both in it,
-/// which is most music, cancels to grey. Measured across four kinds of column,
-/// one with a strong bass and one with none came out at hue 36 and hue 36:
-/// the same colour, whatever the track was doing.
-///
-/// Violet is a third of the way round from amber rather than opposite it, so
-/// mixing the two rotates the hue instead of cancelling it. The same four
-/// columns now land at 280, 24 and 51 degrees. Bass with no mid over it reads
-/// purple, a full-band body reads orange, and a breakdown with the bass gone
-/// reads yellower — which is the picture a colour waveform is for.
-const FREQ_LOW: Color32 = Color32::from_rgb(0x8B, 0x5C, 0xF6);
-const FREQ_MID: Color32 = theme::BAND_MID;
-const FREQ_HIGH: Color32 = Color32::from_rgb(0x67, 0xE8, 0xF9);
+/// bars that only have to be told apart, and they are read one at a time rather
+/// than mixed.
+const FREQ_LOW: Color32 = Color32::from_rgb(0xFF, 0x00, 0x00);
+const FREQ_MID: Color32 = Color32::from_rgb(0x00, 0xFF, 0x00);
+const FREQ_HIGH: Color32 = Color32::from_rgb(0x00, 0x00, 0xFF);
 
 /// The colour of a column, from what it is made of.
 ///
@@ -193,7 +195,51 @@ const FREQ_HIGH: Color32 = Color32::from_rgb(0x67, 0xE8, 0xF9);
 /// came out.
 pub fn frequency_color(low: f32, mid: f32, high: f32) -> Color32 {
     use booth_cli::export::waveform::unshape;
-    mix([FREQ_LOW, FREQ_MID, FREQ_HIGH], [unshape(low), unshape(mid), unshape(high)])
+    additive(unshape(low), unshape(mid), unshape(high))
+}
+
+/// One band per channel, each measured against the loudest of the three.
+///
+/// Against their sum the three shares always total one, so the strongest band
+/// can never reach the top of its channel and every column comes out a shade of
+/// grey — which is what a CDJ-3000X drew from the exported bytes before they
+/// were measured this way. Against the peak, whatever dominates the column
+/// saturates and the rest fall away from it.
+///
+/// Squared, for the same reason and to the same degree as the exported colour:
+/// a band a third as loud as the leader should tint the colour rather than
+/// dilute it. The two are the same arithmetic on purpose — a screen that
+/// disagreed with the deck about what a column is made of would be worse than
+/// no colour at all.
+///
+/// Brightness is left out of it. The height of the column is already the
+/// loudness, and a colour that said it again would make a quiet break
+/// unreadable to save repeating something the shape has already shown.
+fn additive(low: f32, mid: f32, high: f32) -> Color32 {
+    let peak = low.max(mid).max(high);
+    if peak <= f32::EPSILON {
+        return theme::rule();
+    }
+    let share = |band: f32| {
+        let ratio = (band / peak).clamp(0.0, 1.0);
+        ratio * ratio
+    };
+
+    // Added rather than averaged. Averaging bass and mid gives the dull olive
+    // halfway between red and green; adding them gives yellow, which is the
+    // whole reason the convention is three primaries on three channels.
+    let mut rgb = [0.0f32; 3];
+    for (band, weight) in [(FREQ_LOW, share(low)), (FREQ_MID, share(mid)), (FREQ_HIGH, share(high))]
+    {
+        rgb[0] += band.r() as f32 * weight;
+        rgb[1] += band.g() as f32 * weight;
+        rgb[2] += band.b() as f32 * weight;
+    }
+    Color32::from_rgb(
+        rgb[0].min(255.0).round() as u8,
+        rgb[1].min(255.0).round() as u8,
+        rgb[2].min(255.0).round() as u8,
+    )
 }
 
 /// The bands in the order they have to be drawn: tallest first.
@@ -213,6 +259,29 @@ pub fn stacked(peaks: [f32; 3], colors: [Color32; 3]) -> [(f32, Color32); 3] {
     let mut stack = [(peaks[0], colors[0]), (peaks[1], colors[1]), (peaks[2], colors[2])];
     stack.sort_by(|a, b| b.0.total_cmp(&a.0));
     stack
+}
+
+/// How many bars a phrase runs for.
+///
+/// Counted off the same grid the marks are drawn from, rather than worked out
+/// from the tempo. The tempo was a second answer to the same question, and the
+/// two came apart wherever a section did not hold a whole number of bars — a
+/// section the tempo rounded up to sixteen with fifteen marks under it — and on
+/// any grid that is not perfectly even, which is every grid a player has bent
+/// by hand.
+///
+/// Every fourth beat, because [`crate::app`]'s grid starts on a downbeat.
+///
+/// `None` when there is no grid to count against, or when the phrase does not
+/// hold a whole bar: a section labelled "0" says less than one with no number
+/// at all.
+fn bars_of(phrase: &Phrase, beat_ms: &[u32]) -> Option<usize> {
+    let bars = beat_ms
+        .iter()
+        .step_by(BEATS_PER_BAR)
+        .filter(|time| (phrase.start_ms..phrase.end_ms).contains(time))
+        .count();
+    (bars > 0).then_some(bars)
 }
 
 /// Which part of the track the picture is showing.
@@ -376,7 +445,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::BOOTH);
+    painter.rect_filled(rect, 0.0, theme::booth());
 
     if wave.columns() == 0 {
         let message = "not analysed yet";
@@ -385,7 +454,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
             egui::Align2::CENTER_CENTER,
             message,
             theme::mono(theme::SMALL),
-            theme::DIM,
+            theme::dim(),
         );
         return Shown { touched: None, zoom: Zoom::default() };
     }
@@ -405,7 +474,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
     // stretched copy of the same 1,200.
     let pixels = (rect.width().round() as usize).max(1);
     let paint = wave.effective_paint();
-    let bands = [theme::BAND_LOW, theme::BAND_MID, theme::BAND_HIGH];
+    let bands = [theme::band_low(), theme::band_mid(), theme::band_high()];
     let columns = wave.columns();
     // Which stored columns each pixel covers, once the view has decided how
     // much of the track is across the panel.
@@ -472,7 +541,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
                 let color = wave
                     .stems
                     .map(|stems| stems.color_at(loudest * stems.columns() / wave.columns().max(1)))
-                    .unwrap_or(theme::RULE);
+                    .unwrap_or(theme::rule());
                 bar(loudness(low, mid, high) * reach, color);
             }
         }
@@ -488,7 +557,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
             let x = rect.left() + rect.width() * across;
             painter.line_segment(
                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                Stroke::new(1.0_f32, theme::TEXT),
+                Stroke::new(1.0_f32, theme::text()),
             );
         }
     }
@@ -499,7 +568,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
             egui::Align2::RIGHT_BOTTOM,
             format!("{:.0}\u{d7}", 1.0 / zoom.span),
             theme::mono(9.5),
-            theme::DIM,
+            theme::dim(),
         );
     }
 
@@ -527,10 +596,11 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
 
 /// Read the wheel over the panel, and keep a playing track in view.
 ///
-/// Following the playhead only kicks in once it has actually left the view.
-/// Recentring on every frame would make a zoomed picture scroll continuously,
-/// which is a different instrument — what is wanted here is that the thing you
-/// zoomed in on to check does not vanish while you listen to it.
+/// Following the playhead only kicks in once it has actually left the view,
+/// and only while it is running — see [`follows`]. Recentring on every frame
+/// would make a zoomed picture scroll continuously, which is a different
+/// instrument; what is wanted here is that the thing you zoomed in on to check
+/// does not vanish while you listen to it.
 fn wheeled(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'_>) -> Zoom {
     let floor = zoom_floor(wave.columns(), rect.width());
     let mut zoom = wave.zoom.settled();
@@ -556,17 +626,46 @@ fn wheeled(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'_>) 
     }
 
     if let Some(position) = wave.position {
-        if !zoom.is_fit() && !(0.0..=1.0).contains(&zoom.across(position as f64)) {
+        // What the playhead was last frame, which is the only way to tell a
+        // running one from a parked one: the panel is drawn from scratch every
+        // frame and the position alone says nothing about whether it moved.
+        let id = response.id.with("playhead-was");
+        let was = ui.ctx().memory(|memory| memory.data.get_temp::<f32>(id));
+        ui.ctx().memory_mut(|memory| memory.data.insert_temp(id, position));
+        if follows(zoom, position, was, ui.input(|input| input.pointer.any_down())) {
             zoom = zoom.centred(position);
         }
     }
     zoom
 }
 
+/// Whether the view should be pulled back to the playhead.
+///
+/// Only while the playhead is running. A parked one is not going anywhere, and
+/// pulling the view back to it anyway undid every scroll on the frame after it
+/// was made: dragging the phrase strip stuttered and never got more than a few
+/// points from wherever the playhead was sitting, which on a track nobody had
+/// scrubbed was the top of it.
+///
+/// And never while the pointer is down, because then the view is being moved
+/// on purpose and the thing worth following is the hand doing it.
+fn follows(zoom: Zoom, at: f32, was: Option<f32>, held: bool) -> bool {
+    if zoom.is_fit() || held {
+        return false;
+    }
+    let running = was.is_some_and(|before| before != at);
+    running && !(0.0..=1.0).contains(&zoom.across(at as f64))
+}
+
 /// Where a horizontal position falls in the track.
+///
+/// Through the zoom, like everything else that crosses between a time and a
+/// place on the panel. Zoomed in, a pixel is a fraction of the *window* and the
+/// window is a fraction of the track; reading it as a fraction of the track put
+/// a click at the wrong moment by however far the view had been scrolled.
 fn time_at(rect: Rect, wave: &Waveform<'_>, x: f32) -> u32 {
-    let fraction = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
-    (fraction * wave.duration_secs * 1000.0).round() as u32
+    let across = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+    (wave.zoom.into_track(across) * wave.duration_secs * 1000.0).round() as u32
 }
 
 /// Which cue the pointer is over, if any.
@@ -582,9 +681,16 @@ fn cue_under(at: egui::Pos2, rect: Rect, wave: &Waveform<'_>) -> Option<u8> {
         .map(|(letter, _)| letter)
 }
 
+/// Where a moment in the track falls on the panel.
+///
+/// The same mapping [`cue_flags`] draws with, which is the point of it being
+/// one function: they disagreed, so a cue was drawn in the right place and
+/// grabbed in another, and zoomed in the gap between the two was the whole
+/// width of the panel.
 fn cue_x(rect: Rect, wave: &Waveform<'_>, time_ms: u32) -> f32 {
     let total_ms = (wave.duration_secs * 1000.0).max(1.0);
-    rect.left() + rect.width() * (time_ms as f64 / total_ms).clamp(0.0, 1.0) as f32
+    let fraction = (time_ms as f64 / total_ms).clamp(0.0, 1.0);
+    rect.left() + rect.width() * wave.zoom.across(fraction)
 }
 
 /// The cue being dragged, remembered for the length of the drag.
@@ -614,33 +720,54 @@ fn dragged_cue(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'
     ui.ctx().memory(|memory| memory.data.get_temp::<Option<u8>>(id)).flatten()
 }
 
-/// Ticks along the bottom, tall on the downbeat.
+/// The downbeat, in the colour every player draws it in.
+///
+/// Red on the one and white on the other three is not a choice so much as a
+/// convention: it is what a CDJ shows, so it is what a DJ reads without having
+/// to think about it, and a grid that used one colour for all four made the
+/// one indistinguishable from the rest at a glance.
+const DOWNBEAT: Color32 = Color32::from_rgb(0xE5, 0x3E, 0x3E);
+const OFFBEAT: Color32 = Color32::from_rgb(0xD8, 0xDE, 0xE4);
+
+/// Ticks along the bottom, tall and red on the downbeat.
 ///
 /// They are drawn from the grid rather than from the tempo, so a grid that
 /// drifts — which is the case this whole format handles well and most software
 /// handles badly — is visible as ticks that drift.
+///
+/// Through the zoom, like the waveform above them. They were not, so zooming in
+/// left the grid where it was while the music moved out from under it, which is
+/// the one thing a grid must never do.
 fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
     if wave.beat_ms.is_empty() || wave.duration_secs <= 0.0 {
         return;
     }
     let total_ms = wave.duration_secs * 1000.0;
-    let faint = theme::TEXT.gamma_multiply(0.28);
 
     // At a normal window width there are more beats than pixels, so draw every
-    // bar line and only as many beats as will read as separate marks.
-    let spacing = rect.width() / wave.beat_ms.len() as f32;
-    let every_beat = spacing >= 3.0;
+    // bar line and only as many beats as will read as separate marks. Counted
+    // against the beats that are *showing*: zoomed in, a handful of bars have
+    // the whole panel to themselves and every beat has room.
+    let showing = wave.beat_ms.len() as f32 * wave.zoom.span.max(f32::EPSILON);
+    let every_beat = rect.width() / showing.max(1.0) >= 3.0;
 
     for (index, time) in wave.beat_ms.iter().enumerate() {
-        let bar = index % 4 == 0;
-        if !bar && !every_beat {
+        let downbeat = index % BEATS_PER_BAR == 0;
+        if !downbeat && !every_beat {
             continue;
         }
-        let x = rect.left() + rect.width() * (*time as f64 / total_ms).clamp(0.0, 1.0) as f32;
-        let height = if bar { 9.0 } else { 4.0 };
+        let across = wave.zoom.across((*time as f64 / total_ms).clamp(0.0, 1.0));
+        if !(0.0..=1.0).contains(&across) {
+            continue;
+        }
+        let x = rect.left() + rect.width() * across;
+        let (height, color) = match downbeat {
+            true => (9.0, DOWNBEAT.gamma_multiply(0.9)),
+            false => (4.0, OFFBEAT.gamma_multiply(0.45)),
+        };
         painter.line_segment(
             [egui::pos2(x, rect.bottom() - height), egui::pos2(x, rect.bottom())],
-            Stroke::new(1.0_f32, faint),
+            Stroke::new(1.0_f32, color),
         );
     }
 }
@@ -662,7 +789,7 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
         let x = rect.left() + rect.width() * across;
         let mut color = Color32::from_rgb(cue.color[0], cue.color[1], cue.color[2]);
         if held == Some(cue.letter) {
-            color = theme::TEXT;
+            color = theme::text();
         }
 
         painter.line_segment(
@@ -693,7 +820,7 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
 /// What the phrase strip was used for this frame.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Strip {
-    /// A new view, when the map was used to move the window.
+    /// A new view, when the strip was dragged sideways.
     pub zoom: Option<Zoom>,
     /// A change to the sections, when one was dragged, split, merged or named.
     pub edit: Option<PhraseEdit>,
@@ -701,9 +828,15 @@ pub struct Strip {
 
 /// The phrase strip: one block per section, as wide as the section is long.
 ///
-/// The strip always shows the whole track, whatever the waveform above it is
-/// showing, which makes it the map: `zoom` is drawn over it as the window, and
-/// dragging inside a block moves that window.
+/// Shows what the waveform above it shows, through the same zoom, so a block
+/// sits under the music it names. It used to draw the whole track at every
+/// zoom and carry the window as a box over itself, which made it a map but put
+/// the drop's block nowhere near the drop as soon as you zoomed in. A strip
+/// that lines up with the picture is worth more than a map of a track you can
+/// already see the whole of at full width.
+///
+/// Grab it and drag to move the view, which is what a strip showing a window
+/// rather than a whole track can be grabbed for.
 ///
 /// It is also where the sections are corrected. A detector working from onset
 /// strength gets a good many boundaries right and some plainly wrong, and a
@@ -711,24 +844,69 @@ pub struct Strip {
 /// drop is, on the strip a player draws. So drag a boundary to move it,
 /// right-click a block to rename it, and split or merge to put a boundary
 /// where the detector did not find one or take away one it invented.
-pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64, zoom: Zoom) -> Strip {
+/// What the pointer resting on one section says.
+///
+/// The name, how long it runs, the rule that gave it that name, and how the
+/// number that rule is about is measured. The last two come from the engine that
+/// decides, not from here, so an explanation cannot outlive the rule.
+fn phrase_help(phrase: &Phrase, beat_ms: &[u32]) -> String {
+    use booth_cli::analysis::structure::Kind;
+
+    let length = match bars_of(phrase, beat_ms) {
+        Some(bars) => format!(" \u{2014} {}", crate::library::plural(bars, "bar")),
+        None => String::new(),
+    };
+    // Plain capitals, not the letter-spaced form the block is painted with:
+    // spacing is what makes a four-letter label read as a heading at nine
+    // points, and what makes a sentence of help unreadable.
+    let name = phrase.kind.to_uppercase();
+    match Kind::from_label(&phrase.kind) {
+        Some(kind) => format!("{name}{length}\n\n{}\n\n{}", kind.rules(), Kind::MEASURE),
+        // A section renamed by hand, or read off a drive under a name the
+        // format has no phrase for. There is no rule behind it, and inventing
+        // one would be worse than saying so.
+        None => format!("{name}{length}\n\nNamed by hand rather than measured."),
+    }
+}
+
+pub fn phrase_strip(
+    ui: &mut Ui,
+    phrases: &[Phrase],
+    duration_secs: f64,
+    beat_ms: &[u32],
+    zoom: Zoom,
+) -> Strip {
     let width = ui.available_width();
-    // Draggable whatever the zoom is: the map only means something zoomed in,
-    // but the sections are edited at any zoom and mostly at none.
+    // Draggable whatever the zoom is: there is nowhere to scroll to at full
+    // width, but the sections are edited at any zoom and mostly at none.
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(width, STRIP_HEIGHT), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let mut strip = Strip::default();
+    // The help for whichever block the pointer is over, filled in while they
+    // are drawn and shown once they all have been.
+    let mut about: Option<String> = None;
     if phrases.is_empty() || duration_secs <= 0.0 {
         return strip;
     }
     let total_ms = duration_secs * 1000.0;
-    let across = |ms: u32| rect.left() + rect.width() * (ms as f64 / total_ms) as f32;
-    let time_at =
-        |x: f32| (((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * total_ms) as u32;
+    // The same two mappings the waveform uses, so a boundary is drawn, grabbed
+    // and dropped at the moment it belongs to whatever the view is.
+    let across = |ms: u32| {
+        let fraction = (ms as f64 / total_ms).clamp(0.0, 1.0);
+        rect.left() + rect.width() * zoom.across(fraction)
+    };
+    let time_at = |x: f32| {
+        let across = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        (zoom.into_track(across) * total_ms) as u32
+    };
 
     for phrase in phrases {
         let (from, to) = (across(phrase.start_ms), across(phrase.end_ms));
+        // Outside the view: nothing to draw and no name to place.
+        if to < rect.left() || from > rect.right() {
+            continue;
+        }
         // A one-pixel gap between blocks, which is what makes them read as
         // separate phrases rather than as a colour bar.
         let block =
@@ -739,16 +917,45 @@ pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64, zoom: Z
         let color = theme::phrase_color(&phrase.kind);
         painter.rect_filled(block, 0.0, color);
 
-        // The name only goes in when it fits; a clipped label is worse than
-        // the colour on its own, which already says what the phrase is.
-        let label = theme::label_text(&phrase.kind);
-        let galley =
-            painter.layout_no_wrap(label, theme::sans(9.0), Color32::from_rgb(0x0F, 0x13, 0x16));
-        if galley.size().x + 8.0 < block.width() {
+        // What this section is and why it came out that way. Only the one the
+        // pointer is over: a strip that explained all five at once would be a
+        // paragraph nobody reads, and the question somebody actually has is
+        // "why is that bit a break".
+        //
+        // Hung off the strip's own response rather than a widget per block,
+        // because the blocks are painted — the strip is one control that can be
+        // dragged, and adding a widget per section would take the drag away.
+        if response.hover_pos().is_some_and(|at| block.contains(at)) {
+            about = Some(phrase_help(phrase, beat_ms));
+        }
+
+        // Zoomed far enough in, the section you are inside starts off the left
+        // of the panel. Its name goes against that edge rather than off it, so
+        // the strip still says where you are.
+        let seen = block.intersect(rect);
+
+        // The name and how long it runs for. A DJ builds in eights and
+        // sixteens, and "BREAK 16" is the difference between seeing that a
+        // breakdown is the usual length and counting the bars to find out.
+        //
+        // It is the bar marks under the block that are being counted, so the
+        // number can be checked against the picture and always comes out the
+        // same. A boundary dragged to the middle of a bar loses that bar rather
+        // than rounding up to it, which is what the marks show too.
+        let label = match bars_of(phrase, beat_ms) {
+            Some(bars) => format!("{} {bars}", theme::label_text(&phrase.kind)),
+            None => theme::label_text(&phrase.kind),
+        };
+        // Ink chosen against the block it sits on: an accent is near-white in
+        // some schemes and near-black in others, and a fixed dark would be a
+        // guess at what the block says in half of them.
+        let ink = theme::ink_on(color);
+        let galley = painter.layout_no_wrap(label, theme::sans(9.0), ink);
+        if galley.size().x + 8.0 < seen.width() {
             painter.galley(
-                egui::pos2(block.left() + 4.0, block.center().y - galley.size().y / 2.0),
+                egui::pos2(seen.left() + 4.0, seen.center().y - galley.size().y / 2.0),
                 galley,
-                Color32::BLACK,
+                ink,
             );
         }
     }
@@ -757,6 +964,17 @@ pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64, zoom: Z
     // says the strip is there and that it can be worked — and it is what lets a
     // test find it and drag one of its boundaries.
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "phrases"));
+    // Not while a boundary is being dragged: the help would sit over the very
+    // thing being lined up.
+    let response = match about.filter(|_| !response.dragged()) {
+        Some(about) => response.on_hover_text(about),
+        // Still says what the strip is for when the pointer is between blocks
+        // or past the end of the record.
+        None => response.on_hover_text(
+            "The arrangement, section by section. Drag a boundary to move it, or the strip \
+             itself to pan. Rest on a section to read why it is called what it is.",
+        ),
+    };
 
     // Which section the pointer is over, and which boundary — if any — it is
     // near enough to take hold of. The first section has no boundary before it:
@@ -788,7 +1006,7 @@ pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64, zoom: Z
         };
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            Stroke::new(1.0_f32, theme::TEXT),
+            Stroke::new(1.0_f32, theme::text()),
         );
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
@@ -807,7 +1025,7 @@ pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64, zoom: Z
         .unwrap_or((None, None));
     response.context_menu(|ui| {
         let (Some(at), Some(time_ms)) = (on, at_ms) else {
-            ui.label(egui::RichText::new("no section here").color(theme::DIM));
+            ui.label(egui::RichText::new("no section here").color(theme::dim()));
             return;
         };
         ui.set_min_width(160.0);
@@ -839,43 +1057,22 @@ pub fn phrase_strip(ui: &mut Ui, phrases: &[Phrase], duration_secs: f64, zoom: Z
         }
     });
 
+    // Nothing left to do at full width — there is nowhere to move to — and
+    // nothing while a boundary is being dragged, or the section would be moved
+    // and the view moved out from under it at once.
     if zoom.is_fit() || held.is_some() {
         return strip;
     }
 
-    // The window, drawn by dimming everything outside it rather than by
-    // outlining it: the phrase colours are the thing being pointed at, and a
-    // box around them competes with them for the same edge.
-    let shade = theme::BOOTH.gamma_multiply(0.72);
-    let left = rect.left() + rect.width() * zoom.start;
-    let right = rect.left() + rect.width() * (zoom.start + zoom.span).min(1.0);
-    painter.rect_filled(
-        Rect::from_min_max(rect.left_top(), egui::pos2(left, rect.bottom())),
-        0.0,
-        shade,
-    );
-    painter.rect_filled(
-        Rect::from_min_max(egui::pos2(right, rect.top()), rect.right_bottom()),
-        0.0,
-        shade,
-    );
-    painter.rect_stroke(
-        Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(right, rect.bottom())),
-        0.0,
-        Stroke::new(1.0_f32, theme::TEXT.gamma_multiply(0.75)),
-        egui::StrokeKind::Inside,
-    );
-
     if response.hovered() && lit.is_none() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    // Clicking the map puts the window where you clicked, which is the whole
-    // point of having one: getting from the intro to the last drop should not
-    // be a scroll.
-    let Some(at) = response.interact_pointer_pos() else { return strip };
-    if response.dragged() || response.clicked() {
-        let across = ((at.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-        strip.zoom = Some(zoom.centred(across));
+    // Away from a boundary, a drag moves the view with the pointer: what is
+    // under your finger stays under it, which is the only behaviour a strip
+    // that draws a window can have without arguing with the picture above it.
+    let moved = response.drag_delta().x;
+    if response.dragged() && moved != 0.0 {
+        strip.zoom = Some(zoom.panned(-moved / rect.width().max(1.0)));
     }
     strip
 }
@@ -945,8 +1142,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_help_on_a_section_says_what_it_is_and_why() {
+        let break_ = Phrase { start_ms: 0, end_ms: 8_000, kind: "break".into() };
+        let beats: Vec<u32> = (0..16).map(|i| i * 500).collect();
+        let said = phrase_help(&break_, &beats);
+
+        assert!(
+            said.starts_with("BREAK \u{2014} 4 bars"),
+            "the name and its length come first: {said}"
+        );
+        assert!(said.contains("quietest third"), "the rule is not in it: {said}");
+        assert!(said.contains("onset strength"), "how it is measured is not in it: {said}");
+
+        // Each kind gets its own rule and not a general description of the
+        // strip, which is the whole point of hanging it off the block.
+        let drop = Phrase { start_ms: 0, end_ms: 8_000, kind: "drop".into() };
+        assert!(phrase_help(&drop, &beats).contains("busiest third"), "{said}");
+        assert_ne!(phrase_help(&drop, &beats), said);
+    }
+
+    #[test]
+    fn a_section_named_by_hand_says_so_rather_than_inventing_a_rule() {
+        // A name the format has no phrase for — renamed in the window, or read
+        // off a drive somebody else wrote. Nothing measured it, so there is no
+        // rule to quote.
+        let mine = Phrase { start_ms: 0, end_ms: 4_000, kind: "the bit I like".into() };
+        let said = phrase_help(&mine, &[]);
+        assert!(said.contains("Named by hand"), "{said}");
+        assert!(!said.contains("onset strength"), "{said}");
+    }
+
     use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
+
+    /// An even grid, the way the window reconstructs one from a tempo.
+    fn grid(length_ms: u32, bpm: f64) -> Vec<u32> {
+        let period = 60_000.0 / bpm;
+        let count = (length_ms as f64 / period).floor().max(0.0) as usize;
+        (0..count).map(|i| (i as f64 * period).round() as u32).collect()
+    }
 
     fn sections(runs: &[(u32, u32, &str)]) -> Vec<Phrase> {
         runs.iter()
@@ -958,16 +1193,26 @@ mod tests {
             .collect()
     }
 
-    /// Drive the strip, and hand back what it asked for.
-    fn worked(
+    /// Drive the strip at a given view, and hand back what it asked for.
+    ///
+    /// The view is fed back in each frame, the way the window does it, so a
+    /// drag that moves the view a little at a time adds up over the frames the
+    /// gesture takes rather than being measured from a standing start.
+    fn worked_at(
+        zoom: Zoom,
         phrases: Vec<Phrase>,
         act: impl Fn(&mut egui_kittest::Harness<'_>, Rect),
-    ) -> Option<PhraseEdit> {
-        let asked = std::cell::RefCell::new(None);
+    ) -> Strip {
+        let asked = std::cell::RefCell::new(Strip::default());
+        let view = std::cell::Cell::new(zoom);
         let mut harness = Harness::new_ui(|ui| {
-            let strip = phrase_strip(ui, &phrases, 90.0, Zoom::default());
+            let strip = phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), view.get());
+            if let Some(moved) = strip.zoom {
+                view.set(moved);
+                asked.borrow_mut().zoom = Some(moved);
+            }
             if strip.edit.is_some() {
-                *asked.borrow_mut() = strip.edit.clone();
+                asked.borrow_mut().edit = strip.edit.clone();
             }
         });
         harness.run();
@@ -975,6 +1220,14 @@ mod tests {
         act(&mut harness, rect);
         let out = asked.borrow().clone();
         out
+    }
+
+    /// Drive the strip at full width, and hand back the edit it asked for.
+    fn worked(
+        phrases: Vec<Phrase>,
+        act: impl Fn(&mut egui_kittest::Harness<'_>, Rect),
+    ) -> Option<PhraseEdit> {
+        worked_at(Zoom::default(), phrases, act).edit
     }
 
     #[test]
@@ -995,15 +1248,111 @@ mod tests {
     }
 
     #[test]
+    fn the_number_on_a_section_is_the_number_of_bar_marks_under_it() {
+        // The two used to be worked out separately — the marks off the grid,
+        // the number off the tempo — and a DJ counting the red lines in a
+        // breakdown could get a different answer from the one on the block.
+        let beats = grid(180_000, 126.0);
+        let phrases = sections(&[
+            (0, beats[64], "intro"),
+            (beats[64], beats[128], "drop"),
+            // The case the two answers came apart on: a section that starts
+            // off the bar and runs fifty-nine beats. Fourteen marks fall
+            // inside it; the tempo divided by four and rounded to fifteen.
+            (beats[129], beats[188], "break"),
+        ]);
+        let lengths: Vec<Option<usize>> =
+            phrases.iter().map(|phrase| bars_of(phrase, &beats)).collect();
+        assert_eq!(lengths, vec![Some(16), Some(16), Some(14)]);
+
+        for phrase in &phrases {
+            let marks = beats
+                .iter()
+                .step_by(BEATS_PER_BAR)
+                .filter(|at| (phrase.start_ms..phrase.end_ms).contains(at))
+                .count();
+            assert_eq!(
+                bars_of(phrase, &beats),
+                Some(marks),
+                "{} says one length and the picture draws another",
+                phrase.kind
+            );
+        }
+    }
+
+    #[test]
+    fn a_section_with_no_grid_under_it_gives_no_length_rather_than_zero() {
+        // Nothing is drawn under it either, so a number would be a claim about
+        // a picture that is not there.
+        let phrases = sections(&[(0, 30_000, "intro")]);
+        assert_eq!(bars_of(&phrases[0], &[]), None);
+    }
+
+    #[test]
     fn dragging_the_middle_of_a_section_moves_the_view_and_not_the_boundary() {
-        // The strip is a map as well as an editor, and the two gestures share
-        // it. Away from a boundary the drag belongs to the map.
+        // The strip is scrolled as well as edited, and the two gestures share
+        // it. Away from a boundary the drag belongs to the view.
         let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
-        let edit = worked(phrases, |harness, rect| {
+        let half = Zoom { start: 0.25, span: 0.5 };
+        let travel = 40.0_f32;
+        let panel = std::cell::Cell::new(0.0_f32);
+        let worked = worked_at(half, phrases, |harness, rect| {
+            panel.set(rect.width());
             let middle = egui::pos2(rect.left() + rect.width() * 0.7, rect.center().y);
-            drag(harness, middle, middle + egui::vec2(20.0, 0.0));
+            // Leftwards, which pulls later music into the view.
+            drag(harness, middle, middle - egui::vec2(travel, 0.0));
         });
-        assert_eq!(edit, None, "a drag in open ground moved a boundary");
+        assert_eq!(worked.edit, None, "a drag in open ground moved a boundary");
+        let moved = worked.zoom.expect("a drag in open ground did not move the view");
+        assert_eq!(moved.span, half.span, "scrolling the strip changed how much it shows");
+
+        // The view moves by the drag as a fraction of its own width, so what
+        // was under the pointer is still under it. Jumping to put the pointer
+        // in the middle — which is what the strip did while it was a map —
+        // would have landed at 0.45 instead.
+        let want = half.start + travel / panel.get() * half.span;
+        assert!(
+            (moved.start - want).abs() < 0.002,
+            "the view moved to {} rather than {want}",
+            moved.start
+        );
+    }
+
+    #[test]
+    fn a_section_is_drawn_and_grabbed_where_the_waveform_puts_it() {
+        // The strip shows the window, not the whole track, so the boundary at
+        // a third of the way in is half way across a view that starts at a
+        // sixth and holds a third. Drawn anywhere else it would be pointing at
+        // music that is not under it.
+        let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
+        let zoom = Zoom { start: 1.0 / 6.0, span: 1.0 / 3.0 };
+        let worked = worked_at(zoom, phrases, |harness, rect| {
+            let on_the_boundary = egui::pos2(rect.center().x, rect.center().y);
+            drag(harness, on_the_boundary, on_the_boundary + egui::vec2(12.0, 0.0));
+        });
+        let Some(PhraseEdit::Move { at, time_ms }) = worked.edit else {
+            panic!("the boundary was not where the zoom draws it: {:?}", worked.edit)
+        };
+        assert_eq!(at, 1);
+        // Twelve points along a panel showing thirty seconds, so the boundary
+        // should have landed a little after where it was and nowhere near the
+        // place the unzoomed strip would have read.
+        assert!(
+            (30_000..34_000).contains(&time_ms),
+            "the drop landed at {time_ms} ms, which is not where it was dropped"
+        );
+    }
+
+    #[test]
+    fn the_whole_track_showing_leaves_the_view_alone() {
+        // There is nowhere to scroll to, and a strip that lurched on every
+        // stray drag would be worse than one that does nothing.
+        let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
+        let worked = worked_at(Zoom::default(), phrases, |harness, rect| {
+            let middle = egui::pos2(rect.left() + rect.width() * 0.7, rect.center().y);
+            drag(harness, middle, middle - egui::vec2(40.0, 0.0));
+        });
+        assert_eq!(worked.zoom, None);
     }
 
     #[test]
@@ -1011,7 +1360,7 @@ mod tests {
         let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
         let asked = std::cell::RefCell::new(None);
         let mut harness = Harness::new_ui(|ui| {
-            let strip = phrase_strip(ui, &phrases, 90.0, Zoom::default());
+            let strip = phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), Zoom::default());
             if strip.edit.is_some() {
                 *asked.borrow_mut() = strip.edit.clone();
             }
@@ -1088,6 +1437,38 @@ mod tests {
         // And again from somewhere that is not the start of the track.
         let deeper = closer.scaled(0.5, 0.8, 0.0);
         assert!((deeper.into_track(0.8) - closer.into_track(0.8)).abs() < 1e-4, "{deeper:?}");
+    }
+
+    #[test]
+    fn a_playhead_parked_outside_the_view_does_not_pull_it_back() {
+        // The reported bug, in one line: every scroll away from the playhead
+        // was undone on the next frame, so dragging the phrase strip stuttered
+        // and stayed by the top of the track.
+        let looking = Zoom { start: 0.5, span: 0.25 };
+        let parked = 0.0;
+        assert!(!follows(looking, parked, Some(parked), false));
+        // Whole track showing: there is nowhere to pull it back to.
+        assert!(!follows(Zoom::default(), parked, Some(0.5), false));
+    }
+
+    #[test]
+    fn a_playhead_running_out_of_the_view_pulls_it_back() {
+        // The behaviour worth keeping: what you zoomed in on to check should
+        // not silently be left behind while the record plays on.
+        let looking = Zoom { start: 0.5, span: 0.25 };
+        assert!(follows(looking, 0.80, Some(0.79), false));
+        // Still inside the view, so there is nothing to catch up with.
+        assert!(!follows(looking, 0.60, Some(0.59), false));
+        // Nothing to compare against on the first frame a track is shown.
+        assert!(!follows(looking, 0.80, None, false));
+    }
+
+    #[test]
+    fn dragging_the_view_stops_the_playhead_pulling_it_around() {
+        // Otherwise the same fight happens during playback, where the playhead
+        // is moving on its own and would win every frame.
+        let looking = Zoom { start: 0.5, span: 0.25 };
+        assert!(!follows(looking, 0.80, Some(0.79), true));
     }
 
     #[test]
@@ -1168,18 +1549,18 @@ mod tests {
         // drawn low, mid, high regardless of height, and the mid band — which
         // on most music is the tallest — painted over the low band every time.
         // The kick, which is the whole reason for this mode, was never visible.
-        let colors = [theme::BAND_LOW, theme::BAND_MID, theme::BAND_HIGH];
+        let colors = [theme::band_low(), theme::band_mid(), theme::band_high()];
 
         // A typical column of a modern master: mid loudest, the kick under it.
         let order = stacked([0.37, 1.0, 0.46], colors);
-        assert_eq!(order[0].1, theme::BAND_MID, "the tallest band must go down first");
-        assert_eq!(order[2].1, theme::BAND_LOW, "the kick is still buried");
+        assert_eq!(order[0].1, theme::band_mid(), "the tallest band must go down first");
+        assert_eq!(order[2].1, theme::band_low(), "the kick is still buried");
         assert!(order[0].0 >= order[1].0 && order[1].0 >= order[2].0);
 
         // And a bass-heavy one, where the old fixed order happened to be right.
         let order = stacked([1.0, 0.4, 0.2], colors);
-        assert_eq!(order[0].1, theme::BAND_LOW);
-        assert_eq!(order[2].1, theme::BAND_HIGH);
+        assert_eq!(order[0].1, theme::band_low());
+        assert_eq!(order[2].1, theme::band_high());
     }
 
     #[test]
@@ -1188,12 +1569,136 @@ mod tests {
         assert_eq!(frequency_color(1.0, 0.0, 0.0), FREQ_LOW);
         assert_eq!(frequency_color(0.0, 1.0, 0.0), FREQ_MID);
         assert_eq!(frequency_color(0.0, 0.0, 1.0), FREQ_HIGH);
+    }
 
-        // A mix lands between them rather than snapping to one.
-        let mixed = frequency_color(1.0, 1.0, 0.0);
-        assert!(mixed != FREQ_LOW && mixed != FREQ_MID);
-        let between = |a: u8, b: u8, c: u8| c >= a.min(b) && c <= a.max(b);
-        assert!(between(FREQ_LOW.b(), FREQ_MID.b(), mixed.b()));
+    #[test]
+    fn two_bands_together_land_on_the_colour_that_names_the_pair() {
+        // The whole reason the convention is three primaries on three
+        // channels, and what every EQ colour chart a DJ has read is drawn
+        // from: a column of two bands is the secondary between them, and
+        // there is no pair that cancels.
+        assert_eq!(frequency_color(1.0, 1.0, 0.0), Color32::from_rgb(255, 255, 0), "yellow");
+        assert_eq!(frequency_color(0.0, 1.0, 1.0), Color32::from_rgb(0, 255, 255), "cyan");
+        assert_eq!(frequency_color(1.0, 0.0, 1.0), Color32::from_rgb(255, 0, 255), "magenta");
+        assert_eq!(frequency_color(1.0, 1.0, 1.0), Color32::WHITE, "all three");
+    }
+
+    #[test]
+    fn a_quiet_column_is_still_the_colour_of_what_is_in_it() {
+        // The height already says how loud it is. A colour that said it again
+        // would leave a breakdown too dark to read for the sake of repeating
+        // something the shape has already shown.
+        let loud = frequency_color(0.8, 0.08, 0.02);
+        let quiet = frequency_color(0.2, 0.02, 0.005);
+        assert_eq!(loud, quiet, "the same balance at two volumes is the same colour");
+
+        // And silence is not black, which would be a column that looks like a
+        // hole in the picture.
+        assert_eq!(frequency_color(0.0, 0.0, 0.0), theme::rule());
+    }
+
+    /// Everything that crosses between a moment in the track and a place on
+    /// the panel has to go through the zoom, or the picture and the things
+    /// drawn over it stop agreeing.
+    mod zoomed_in {
+        use super::*;
+
+        const TOTAL: f64 = 240.0;
+
+        fn cue(letter: u8, time_ms: u32) -> CueMark {
+            CueMark { letter, time_ms, label: String::new(), color: [1, 2, 3] }
+        }
+
+        fn panel() -> Rect {
+            Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1_000.0, 100.0))
+        }
+
+        /// Showing the second quarter of the track: 60 s to 120 s.
+        fn wave<'a>(cues: &'a [CueMark], beats: &'a [u32]) -> Waveform<'a> {
+            Waveform {
+                bands: &[],
+                duration_secs: TOTAL,
+                beat_ms: beats,
+                cues,
+                position: None,
+                paint: Paint::Bands,
+                stems: None,
+                zoom: Zoom { start: 0.25, span: 0.25 },
+            }
+        }
+
+        #[test]
+        fn a_cue_is_grabbed_where_it_is_drawn() {
+            // They were two different mappings: one through the zoom and one
+            // not. A cue was drawn in the right place and grabbed in another,
+            // and zoomed in the gap between them was the whole panel.
+            let cues = [cue(1, 90_000)];
+            let wave = wave(&cues, &[]);
+            let rect = panel();
+
+            // 90 s is halfway through a window running 60 s to 120 s.
+            let x = cue_x(rect, &wave, 90_000);
+            assert!((x - rect.center().x).abs() < 0.5, "drawn at {x}");
+            assert_eq!(cue_under(egui::pos2(x, 50.0), rect, &wave), Some(1));
+        }
+
+        #[test]
+        fn a_cue_outside_the_window_cannot_be_grabbed_through_it() {
+            // It is not drawn, so grabbing it would be grabbing something
+            // invisible — and before this it was grabbable at whatever place
+            // the unzoomed mapping happened to put it.
+            let cues = [cue(1, 10_000)];
+            let wave = wave(&cues, &[]);
+            let rect = panel();
+            for x in [0.0, 250.0, 500.0, 750.0, 999.0] {
+                assert_eq!(cue_under(egui::pos2(x, 50.0), rect, &wave), None, "grabbed at {x}");
+            }
+        }
+
+        #[test]
+        fn a_click_lands_on_the_moment_under_the_pointer() {
+            let wave = wave(&[], &[]);
+            let rect = panel();
+            // The window runs 60 s to 120 s across a thousand points.
+            assert_eq!(time_at(rect, &wave, rect.left()), 60_000);
+            assert_eq!(time_at(rect, &wave, rect.center().x), 90_000);
+            assert_eq!(time_at(rect, &wave, rect.right()), 120_000);
+        }
+
+        #[test]
+        fn a_moment_survives_the_round_trip_through_the_panel() {
+            let wave = wave(&[], &[]);
+            let rect = panel();
+            for at in [60_000u32, 75_000, 90_000, 119_000] {
+                let back = time_at(rect, &wave, cue_x(rect, &wave, at));
+                assert!(back.abs_diff(at) <= 120, "{at} came back as {back}");
+            }
+        }
+
+        #[test]
+        fn the_whole_track_is_the_same_mapping_it_always_was() {
+            // Zoomed out, nothing should have changed.
+            let cues = [cue(1, 120_000)];
+            let mut wave = wave(&cues, &[]);
+            wave.zoom = Zoom::default();
+            let rect = panel();
+
+            assert!((cue_x(rect, &wave, 120_000) - rect.center().x).abs() < 0.5);
+            assert_eq!(time_at(rect, &wave, rect.center().x), 120_000);
+        }
+    }
+
+    #[test]
+    fn the_grid_marks_the_downbeat_in_the_colour_a_player_uses() {
+        // Red on the one and white on the other three is what a CDJ shows, so
+        // it is what a DJ reads without having to think about it.
+        assert_ne!(DOWNBEAT, OFFBEAT);
+        assert!(DOWNBEAT.r() > DOWNBEAT.g() && DOWNBEAT.r() > DOWNBEAT.b(), "{DOWNBEAT:?}");
+        let spread = |c: Color32| {
+            let v = [c.r(), c.g(), c.b()];
+            v.iter().max().unwrap() - v.iter().min().unwrap()
+        };
+        assert!(spread(OFFBEAT) < 20, "the off-beats should read as white: {OFFBEAT:?}");
     }
 
     /// Where a colour sits on the wheel, in degrees, and how far from grey.
@@ -1218,12 +1723,13 @@ mod tests {
 
     #[test]
     fn a_column_with_bass_under_it_is_a_different_colour_from_one_without() {
-        // The fault this is here for: it was not. Blue and amber sit opposite
-        // each other on the wheel, so a column holding both cancelled to grey,
-        // and a sharpening exponent of three then handed the mix to whichever
-        // band led — the mid, nearly always. A body with a strong bass and a
-        // breakdown with none came out at hue 36.0 and hue 35.8: the same
-        // colour, for the two passages a DJ most needs to tell apart.
+        // The fault this is here for: it was not. The palette was blue bass
+        // and amber mid, which sit opposite each other on the wheel, so a
+        // column holding both cancelled to grey — a body with a strong bass
+        // and a breakdown with none came out at hue 36.0 and hue 35.8, the
+        // same colour for the two passages a DJ most needs to tell apart.
+        // Red, green and blue have no opposite pair among them, which is why
+        // this is the convention rather than a matter of taste.
         //
         // The levels here are as they are stored, bent by the display curve.
         let body = frequency_color(0.59, 0.86, 0.49);
@@ -1239,8 +1745,10 @@ mod tests {
             "a body and a breakdown are {:.1} degrees apart",
             apart(body, breakdown)
         );
+        // A sixth of the wheel apart is the bar: red-orange against green is
+        // not a shade, it is a different colour. Measured at 83.
         assert!(
-            apart(bass, body) > 90.0,
+            apart(bass, body) > 60.0,
             "bass and a full-band body are {:.1} degrees apart",
             apart(bass, body)
         );
@@ -1270,17 +1778,21 @@ mod tests {
             "a bass-heavy column should read as bass: {kick:?} is {:.0} off grey",
             colourfulness(kick)
         );
-        assert!(kick.b() > kick.r(), "and it should read as the low band: {kick:?}");
+        let leads = |colour: Color32| {
+            [colour.r(), colour.g(), colour.b()].iter().copied().enumerate().max_by_key(|(_, v)| *v)
+        };
+        assert_eq!(leads(kick).map(|(i, _)| i), Some(0), "the low band is the red one: {kick:?}");
 
         // The same shape with the mid-range winning has to be visibly a
         // different colour, not a different shade of the same one. Measured
-        // round the wheel rather than down one channel: a red channel told
-        // blue from amber well enough, and says almost nothing about violet,
-        // which has plenty of red in it.
+        // round the wheel rather than down one channel, because "which channel
+        // is biggest" is a weaker claim than "these are different colours".
         let lead = frequency_color(0.32, 0.95, 0.63);
-        assert!(lead.r() > lead.b(), "a mid-heavy column should read amber: {lead:?}");
+        assert_eq!(leads(lead).map(|(i, _)| i), Some(1), "the mid band is the green one: {lead:?}");
         let gap = (hue(kick).0 - hue(lead).0).abs();
         let apart = gap.min(360.0 - gap);
+        // Two primaries apart, which is what the convention is for. Measured
+        // at exactly 120.
         assert!(apart > 90.0, "the two are {apart:.0} degrees apart: {kick:?} vs {lead:?}");
     }
 
@@ -1297,9 +1809,9 @@ mod tests {
             melody: vec![0, 255, 0],
             drums: vec![0, 0, 255],
         };
-        assert_eq!(envelopes.color_at(0), theme::STEM_VOCALS);
-        assert_eq!(envelopes.color_at(1), theme::STEM_MELODY);
-        assert_eq!(envelopes.color_at(2), theme::STEM_DRUMS);
+        assert_eq!(envelopes.color_at(0), theme::stem_vocals());
+        assert_eq!(envelopes.color_at(1), theme::stem_melody());
+        assert_eq!(envelopes.color_at(2), theme::stem_drums());
     }
 
     #[test]
@@ -1307,7 +1819,7 @@ mod tests {
         let envelopes = StemEnvelopes { vocals: vec![0], melody: vec![0], drums: vec![0] };
         // A blend of three colours at zero weight would be black, which reads
         // as "nothing here" only by accident; this says it deliberately.
-        assert_eq!(envelopes.color_at(0), theme::RULE);
+        assert_eq!(envelopes.color_at(0), theme::rule());
     }
 
     #[test]

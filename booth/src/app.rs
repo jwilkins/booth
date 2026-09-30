@@ -143,6 +143,23 @@ fn worth_keeping(seen: Option<&Seen>, state: &str) -> Worth {
     }
 }
 
+/// Whether a drive is there to be written to right now.
+///
+/// A drive in the collection is a place and a history of what went on it, not
+/// a stick in a socket, and the two read identically in a list until something
+/// asks. Saying which is which is the difference between a sync that does
+/// nothing and a sync that was the wrong button.
+///
+/// An image is a file and a stick is a mounted folder, so the question is not
+/// the same one twice. Neither asks whether the drive has been written yet: a
+/// blank stick about to have a library put on it is plugged in.
+fn plugged_in(drive: &crate::library::Drive) -> bool {
+    match drive.is_image {
+        true => drive.path.is_file(),
+        false => drive.path.is_dir(),
+    }
+}
+
 /// What to call a drive: the name it is mounted under, or the label it gave
 /// when there is no mount point to read.
 ///
@@ -235,6 +252,13 @@ pub struct App {
     plan: Plan,
     /// Set while the sync sheet is open.
     sheet: bool,
+    /// Set while the sync sheet's details window is open.
+    ///
+    /// A separate window rather than a taller sheet: the summary answers "is
+    /// this the write I meant", which is four lines, and the details answer
+    /// "which track is that", which is as many lines as the write has changes.
+    /// Putting the second inside the first made the sheet a scroll either way.
+    details: bool,
     /// Set while the settings sheet is open.
     settings: bool,
     /// Tracks found outside the library, waiting for an answer. Only ever set
@@ -302,6 +326,21 @@ pub struct App {
     /// the first: companion ids use the top bit too, so a bit that meant
     /// "stems" would sometimes also mean "acapella of track 3".
     re_enveloped: std::collections::HashSet<u32>,
+    /// Tracks that asked for cues from their words before they had a vocal
+    /// stem to read. They are waiting on a separation; when it lands, the
+    /// recogniser is what happens next.
+    want_cues: std::collections::HashSet<u32>,
+    /// Tracks changed here and on the drive since the two last agreed, worked
+    /// out when the sync sheet opens rather than every frame: it reads the
+    /// stick.
+    clashes: Vec<sync::Conflict>,
+    /// Which copy to keep for each of those, as the sheet has it. Seeded with
+    /// whichever is newer and then whatever the person says.
+    settled: std::collections::HashMap<u32, sync::Side>,
+    /// What the drive was holding when it was last examined, so that a track
+    /// left as the player left it can have that recorded as agreed rather than
+    /// being asked about again on every sync.
+    drive_now: std::collections::HashMap<u32, crate::library::Stamp>,
     /// Where the playhead sits in the selected track, in milliseconds. It is
     /// where a new cue goes, so it is a position rather than a playing thing —
     /// nothing here makes a sound.
@@ -340,6 +379,12 @@ enum Pending {
         name: String,
         on: bool,
     },
+    /// Work with this drive from now on, by its place in the list.
+    UseDrive(usize),
+    /// Take this drive off the list. Nothing on the drive itself is touched.
+    ForgetDrive(usize),
+    /// Put this drive's image into a running emulator's USB slot.
+    ToEmulator(usize),
     /// Put these tracks in the playlist of that name, making it if it is new.
     AddToPlaylist(Vec<u32>, String),
     /// Fold each of these copies into the track it is paired with, then send
@@ -377,6 +422,8 @@ enum Pending {
     TogglePlayback(u32),
     /// Change how the waveform is coloured.
     PaintAs(wave::Paint),
+    /// Turn the transport round: where you are, or what is left.
+    CountDifferently,
     /// Settle one question: the fingerprint's answer, the path's, or the one
     /// the track already had.
     AnswerMatch {
@@ -415,6 +462,9 @@ enum Pending {
     Identify(u32),
     /// Render one track's stem kit.
     Separate(u32),
+    /// Set one track's cues from its sections and its words, rendering the
+    /// vocal stem and reading it first if that has not been done.
+    AutoCue(u32),
     /// Put one track's path on the clipboard.
     CopyPath(u32),
     /// Show the whole track again.
@@ -502,10 +552,15 @@ enum Picking {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
-        theme::install(&cc.egui_ctx);
-
+        // The scheme is chosen before the style is built, because the style is
+        // built out of it — installing first would paint one frame in the
+        // wrong colours and then correct itself.
         let config_path = Config::path();
         let config = Config::load(&config_path);
+        if !theme::use_scheme(&config.theme) {
+            crate::warn!("no colour scheme called {}, so this is the usual one", config.theme);
+        }
+        theme::install(&cc.egui_ctx);
         let library_path = Library::default_path();
         let (library, status) = match Library::load(&library_path) {
             Ok(library) => {
@@ -593,6 +648,7 @@ impl App {
             drive: 0,
             plan: Plan::default(),
             sheet: false,
+            details: false,
             settings: false,
             asking: Vec::new(),
             questions: Vec::new(),
@@ -617,6 +673,10 @@ impl App {
             unlike: Vec::new(),
             remeasured: std::collections::HashSet::new(),
             re_enveloped: std::collections::HashSet::new(),
+            want_cues: std::collections::HashSet::new(),
+            clashes: Vec::new(),
+            settled: std::collections::HashMap::new(),
+            drive_now: std::collections::HashMap::new(),
             playhead_ms: None,
             cue_entry: (None, String::new()),
             pending: Vec::new(),
@@ -734,10 +794,14 @@ impl App {
     /// file recorded cannot disagree about a run.
     fn note(&mut self, text: impl Into<String>, color: Color32) {
         let text = text.into();
-        let level = match color {
-            theme::ALERT => crate::log::Level::Error,
-            theme::AMBER => crate::log::Level::Warn,
-            _ => crate::log::Level::Info,
+        // Compared rather than matched on, because the colours are a scheme's
+        // now and a scheme is chosen while the program runs.
+        let level = if color == theme::alert() {
+            crate::log::Level::Error
+        } else if color == theme::amber() {
+            crate::log::Level::Warn
+        } else {
+            crate::log::Level::Info
         };
         crate::log::record(level, text);
     }
@@ -855,7 +919,7 @@ impl App {
                             ui.label(
                                 RichText::new(theme::label_text(pane.title()))
                                     .size(theme::LABEL)
-                                    .color(theme::DIM)
+                                    .color(theme::dim())
                                     .strong(),
                             );
                             ui.with_layout(
@@ -916,10 +980,14 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.label(
                 RichText::new("The list and the prep editor are in windows of their own.")
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             );
             ui.add_space(8.0);
-            if ui.button("Put them back").clicked() {
+            if ui
+                .button("Put them back")
+                .on_hover_text("Bring the browser and the prep pane back into the main window.")
+                .clicked()
+            {
                 self.set_out(Pane::Browser, false);
                 self.set_out(Pane::Prep, false);
             }
@@ -932,9 +1000,9 @@ impl App {
     /// is the one strip that never goes anywhere: a control that popped out
     /// along with the thing it controls would be a door that shuts behind you.
     fn panes_menu(&mut self, ui: &mut Ui) {
-        ui.menu_button(RichText::new("⧉").font(theme::mono(11.0)).color(theme::DIM), |ui| {
+        ui.menu_button(RichText::new("⧉").font(theme::mono(11.0)).color(theme::dim()), |ui| {
             ui.set_min_width(230.0);
-            ui.label(RichText::new("In its own window").color(theme::DIM).size(theme::SMALL));
+            ui.label(RichText::new("In its own window").color(theme::dim()).size(theme::SMALL));
             ui.separator();
             for pane in Pane::ALL {
                 let mut out = self.is_out(pane);
@@ -1070,6 +1138,139 @@ impl App {
             Some(drive) => sync::plan(&self.library, drive),
             None => Plan::default(),
         };
+    }
+
+    /// Ask the drive what has happened to it since it was last written.
+    ///
+    /// A CDJ-3000X can move a cue or re-grid a track on the deck, and the next
+    /// sync would write over it without a word. So before the sheet offers to
+    /// write, the stick is read: which tracks it has changed, and which of
+    /// those have also been changed here. Only the ones changed in both places
+    /// are a question — a track changed only on the drive is not being
+    /// rewritten anyway, and one changed only here is what a sync is for.
+    ///
+    /// Reads the drive, so it is done when the sheet opens and when the button
+    /// on it is pressed, not on every frame. An image is skipped: there is no
+    /// player that could have edited one.
+    fn examine_drive(&mut self) {
+        self.clashes.clear();
+        self.settled.clear();
+        self.drive_now.clear();
+        let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
+        if drive.is_image || !drive.path.exists() {
+            return;
+        }
+
+        let found = sync::on_the_drive(&drive.path, &drive, self.config.onelibrary_key());
+        self.clashes = sync::conflicts(&self.library, &drive, &found);
+        self.drive_now = found;
+        for clash in &self.clashes {
+            self.settled.insert(clash.id, clash.default_side());
+        }
+        if !self.clashes.is_empty() {
+            crate::info!(
+                "{} on {} changed both here and on the drive",
+                plural(self.clashes.len(), "track"),
+                drive.label
+            );
+        }
+    }
+
+    /// Make what the player left the collection's copy, for every track whose
+    /// drive version is being kept.
+    ///
+    /// Read off the stick's own analysis files. This is what turns "leave it
+    /// alone" into "take it": without it, keeping the drive's copy protects an
+    /// edit nobody here can see, and the collection goes on showing something
+    /// the drive does not have.
+    ///
+    /// The track is still not written again afterwards. Only the tempo comes
+    /// back from the grid — a collection keeps a tempo and a downbeat, not
+    /// thousands of beat times — so writing it back would flatten a grid the
+    /// deck may have bent, which is the thing being protected.
+    fn take_what_the_player_left(&mut self) {
+        let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
+        if drive.is_image {
+            return;
+        }
+        let keeping: Vec<u32> = self
+            .settled
+            .iter()
+            .filter(|(_, side)| **side == sync::Side::Theirs)
+            .map(|(id, _)| *id)
+            .collect();
+
+        let (mut taken, mut unreadable) = (0usize, 0usize);
+        for id in keeping {
+            let Some(written) = drive.written.iter().find(|w| w.id == id) else { continue };
+            let Some(found) = sync::what_the_player_left(&drive.path, written) else {
+                unreadable += 1;
+                continue;
+            };
+            if let Some(track) = self.library.get_mut(id) {
+                if crate::library::take_prep(track, &found) {
+                    taken += 1;
+                }
+            }
+
+            // The reconciliation, recorded here rather than left to the write:
+            // taking the drive's copy *is* the two sides agreeing, and it has
+            // to hold even when there turns out to be nothing else to write.
+            // Without this the same question comes back on every sync.
+            let Some(track) = self.library.get(id) else { continue };
+            let settled = (sync::fingerprint(track), self.drive_now.get(&id).cloned());
+            if let Some(drive) = self.library.drives.get_mut(self.drive) {
+                if let Some(written) = drive.written.iter_mut().find(|w| w.id == id) {
+                    written.prep = settled.0;
+                    written.theirs = settled.1;
+                }
+            }
+        }
+
+        if taken > 0 {
+            crate::info!("took what the player left on {}", plural(taken, "track"));
+            self.note(
+                format!("{} now show what the player made of them", plural(taken, "track")),
+                theme::text(),
+            );
+        }
+        // Said rather than passed over. The drive's copy is still protected —
+        // the track is not written — but the collection cannot show it, and
+        // somebody who chose "the drive's" is entitled to know that is all
+        // that happened.
+        if unreadable > 0 {
+            self.note(
+                format!(
+                    "{} left alone, but {} analysis could not be read back",
+                    plural(unreadable, "track"),
+                    match unreadable {
+                        1 => "its",
+                        _ => "their",
+                    }
+                ),
+                theme::amber(),
+            );
+        }
+    }
+
+    /// The stamps to record for the tracks a write has just touched.
+    ///
+    /// Taken after the write rather than before it: writing a track rewrites
+    /// its analysis files, so a stamp taken beforehand describes a drive that
+    /// no longer exists and the next examination would read this program's own
+    /// write as a player's edit.
+    fn restamp_drive(&mut self) {
+        let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
+        if drive.is_image || !drive.path.exists() {
+            return;
+        }
+        let found = sync::on_the_drive(&drive.path, &drive, self.config.onelibrary_key());
+        let Some(drive) = self.library.drives.get_mut(self.drive) else { return };
+        for written in &mut drive.written {
+            if let Some(stamp) = found.get(&written.id) {
+                written.theirs = Some(stamp.clone());
+            }
+        }
     }
 
     fn selected_track(&self) -> Option<&Track> {
@@ -1358,10 +1559,28 @@ impl App {
     /// The same call behind the batch button and the one on a single row: a
     /// re-analysis is not a different operation from a first one, and having
     /// two of them is how they come to disagree.
+    /// Every stem row of these tracks that has files to be drawn from.
+    ///
+    /// Taken off the collection rather than off the browser: a crate being
+    /// prepared has its stems drawn whether or not the companion rows happen to
+    /// be showing, and whether or not anybody has clicked on one.
+    fn stem_pictures(&self, ids: &[u32]) -> Vec<job::Drawable> {
+        let mut drawing = Vec::new();
+        for id in ids {
+            let Some(track) = self.library.get(*id) else { continue };
+            for companion in self.library.companions(track) {
+                if let Some(sources) = picture_sources(&companion) {
+                    drawing.push(job::Drawable { id: companion.id, sources });
+                }
+            }
+        }
+        drawing
+    }
+
     fn analyze_tracks(&mut self, ids: &[u32]) {
         let waiting = self.files_for(ids);
         if waiting.is_empty() {
-            self.note("nothing to analyse", theme::DIM);
+            self.note("nothing to analyse", theme::dim());
             return;
         }
         crate::info!("analysing {}", plural(waiting.len(), "track"));
@@ -1384,6 +1603,22 @@ impl App {
         self.ensure_local(&ids);
         self.start(Job::Analyze(waiting.clone()));
 
+        // And the stems, where there are any. Listening to a record is the
+        // moment its pictures are made, and a stem row has a picture of its
+        // own — so leaving those to be drawn one at a time as somebody happens
+        // to click on them means a crate that has just been prepared is not
+        // prepared. The grid, the cues and the phrases are still the record's
+        // and are not measured again here; only the drawing is per file.
+        let drawing = self.stem_pictures(&ids);
+        if !drawing.is_empty() {
+            crate::info!("drawing {}", plural(drawing.len(), "stem"));
+            for row in &drawing {
+                self.remeasured.remove(&row.id);
+                crate::library::forget_waveform(row.id);
+            }
+            self.start(Job::Draw(drawing));
+        }
+
         // Listening to a track and asking what it is are the same errand, so
         // they are queued together — but the lookup is paced by two services'
         // rate limits, so it goes behind the analysis rather than in front.
@@ -1404,7 +1639,7 @@ impl App {
             Ok(key) => key,
             Err(e) => {
                 crate::warn!("{e:#}");
-                self.note(format!("{e:#}"), theme::AMBER);
+                self.note(format!("{e:#}"), theme::amber());
                 return;
             }
         };
@@ -1524,7 +1759,7 @@ impl App {
             .map(|(id, path)| job::Convertible { id, path })
             .collect();
         if waiting.is_empty() {
-            self.note("nothing to convert", theme::DIM);
+            self.note("nothing to convert", theme::dim());
             return;
         }
         crate::info!("converting {}", plural(waiting.len(), "file"));
@@ -1536,7 +1771,7 @@ impl App {
     fn analyze_unprepared(&mut self) {
         let waiting = self.acting_on(|track| !track.analyzed);
         if waiting.is_empty() {
-            self.note("nothing showing needs analysing", theme::DIM);
+            self.note("nothing showing needs analysing", theme::dim());
             return;
         }
         self.analyze_tracks(&waiting);
@@ -1556,7 +1791,7 @@ impl App {
     fn analyze_showing(&mut self) {
         let waiting = self.acting_on(|_| true);
         if waiting.is_empty() {
-            self.note("nothing showing to analyse", theme::DIM);
+            self.note("nothing showing to analyse", theme::dim());
             return;
         }
         self.analyze_tracks(&waiting);
@@ -1566,12 +1801,20 @@ impl App {
     fn separate_tracks(&mut self, ids: &[u32]) {
         let waiting = self.files_for(ids);
         if waiting.is_empty() {
-            self.note("nothing to separate", theme::DIM);
+            self.note("nothing to separate", theme::dim());
             return;
         }
         let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
         for id in &ids {
             self.re_enveloped.remove(id);
+            // The companions are about to be made of different audio, so the
+            // pictures measured from the old files are no longer of anything.
+            // The parent's is untouched: its own file has not changed.
+            for role in crate::library::Role::PARTS {
+                let companion = crate::library::companion_id(*id, role);
+                crate::library::forget_waveform(companion);
+                self.remeasured.remove(&companion);
+            }
         }
         self.ensure_local(&ids);
         self.start(Job::Separate {
@@ -1585,10 +1828,158 @@ impl App {
     fn render_stems(&mut self) {
         let waiting = self.acting_on(|track| track.stems.is_empty());
         if waiting.is_empty() {
-            self.note("everything showing already has a stem kit", theme::DIM);
+            self.note("everything showing already has a stem kit", theme::dim());
             return;
         }
         self.separate_tracks(&waiting);
+    }
+
+    // -- cues from the words -----------------------------------------------
+
+    /// Set cues from a track's sections and from what is sung over them.
+    ///
+    /// Three steps, each skipped when it has already been taken: render the
+    /// stems, read the vocal one, place the cues. Only the last is instant,
+    /// which is why the words are kept in the collection once they have been
+    /// heard — a track whose lyrics are known is re-cued with no job at all.
+    ///
+    /// Returns whether the collection changed here and now, as opposed to work
+    /// having been queued that will change it later.
+    fn auto_cue_tracks(&mut self, ids: &[u32]) -> bool {
+        // A companion row has no cues of its own; it shows its parent's. So
+        // asking for cues on an acapella is asking for them on the record.
+        let mut wanted: Vec<u32> = ids.iter().map(|id| crate::library::family(*id)).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        let mut known = Vec::new();
+        let mut reading = Vec::new();
+        let mut rendering = Vec::new();
+        for id in wanted {
+            let Some(track) = self.library.get(id) else { continue };
+            if !track.lyrics.is_empty() {
+                known.push(id);
+            } else if let Some(vocals) = track.stems.vocals.clone() {
+                reading.push(job::Transcribable { id, vocals });
+            } else {
+                rendering.push(id);
+            }
+        }
+
+        let mut placed = 0;
+        for id in &known {
+            placed += self.auto_cue(*id);
+        }
+        if !known.is_empty() {
+            self.note(
+                format!("{} from words already read", crate::library::plural(placed, "cue")),
+                theme::text(),
+            );
+        }
+
+        if reading.is_empty() && rendering.is_empty() {
+            return !known.is_empty();
+        }
+        // Asked once, before any of the minutes are spent. A separation that
+        // finishes and only then finds there is no recogniser to hand the stem
+        // to has wasted the expensive half of the work.
+        if let Err(why) = self.config.whisper.ready() {
+            self.note(why, theme::amber());
+            return !known.is_empty();
+        }
+        if !rendering.is_empty() {
+            self.want_cues.extend(rendering.iter().copied());
+            self.note(
+                format!(
+                    "rendering stems for {} first",
+                    crate::library::plural(rendering.len(), "track")
+                ),
+                theme::dim(),
+            );
+            self.separate_tracks(&rendering);
+        }
+        if !reading.is_empty() {
+            self.read_words(reading);
+        }
+        !known.is_empty()
+    }
+
+    /// Hand stems that are already on disk to the recogniser.
+    fn read_words(&mut self, tracks: Vec<job::Transcribable>) {
+        crate::info!("reading the words off {}", crate::library::plural(tracks.len(), "track"));
+        self.start(Job::Transcribe { tracks, whisper: self.config.whisper.clone() });
+    }
+
+    /// Set one track's cues from everything known about it, and say how many
+    /// hot cues that came to.
+    ///
+    /// Two sources: the sections the phrase analysis found, and the moments the
+    /// words did — where the singing starts, where the line the track repeats
+    /// most first lands, and every time it comes back. Which eight of those a
+    /// player ends up holding is the engine's decision rather than this one, so
+    /// that a cue set placed here and a cue set placed by the analyser mean the
+    /// same thing and are the same colours.
+    ///
+    /// The hot cues are replaced wholesale. The memory cue is not: it is what
+    /// the grid is anchored to, and moving it would move every bar line in the
+    /// track.
+    fn auto_cue(&mut self, id: u32) -> usize {
+        use booth_cli::analysis::cues::{self, Candidate, Reason};
+        use booth_cli::analysis::structure::Kind;
+
+        let Some(track) = self.library.get(id) else { return 0 };
+        let beats = beat_times(track);
+        let mut candidates: Vec<Candidate> = track
+            .phrases
+            .iter()
+            .filter_map(|phrase| {
+                let kind = Kind::from_label(&phrase.kind)?;
+                Some(Candidate::new(snap_to(&beats, phrase.start_ms, 4), Reason::Section(kind)))
+            })
+            .collect();
+
+        let words = crate::library::transcript(&track.lyrics);
+        for moment in words.moments() {
+            let mut candidate = cues::from_moment(&moment);
+            candidate.time_ms = snap_back(&beats, candidate.time_ms);
+            candidates.push(candidate);
+        }
+
+        let start = track
+            .cues
+            .iter()
+            .find(|cue| cue.letter == 0)
+            .map(|cue| cue.time_ms)
+            .or_else(|| beats.first().copied())
+            .unwrap_or(0);
+        let before = track.cues.clone();
+        let name = format!("{} \u{2014} {}", track.artist, track.display_title());
+        let lines = track.lyrics.len();
+
+        // The last bar the grid names, so "End" lands somewhere a player will
+        // park rather than wherever the file stops.
+        let end = beats.last().copied();
+        let placed = crate::job::cue_marks(&cues::assemble(start, end, candidates));
+        let hot = placed.iter().filter(|cue| cue.letter != 0).count();
+        crate::info!("cueing #{id} {name} from {}", plural(lines, "line"));
+        for line in what_the_words_decided(&words, &before, &placed) {
+            crate::info!("  {line}");
+        }
+
+        if let Some(track) = self.library.get_mut(id) {
+            track.cues = placed;
+        }
+        self.prep_changed(id);
+        hot
+    }
+
+    fn auto_cue_showing(&mut self) {
+        let waiting = self.acting_on(|track| track.lyrics.is_empty());
+        if waiting.is_empty() {
+            self.note("the words have been read for everything showing", theme::dim());
+            return;
+        }
+        self.auto_cue_tracks(&waiting);
     }
 
     fn collect(&mut self) {
@@ -1602,6 +1993,10 @@ impl App {
         // What this job brought in, so that the copy-in policy can be applied
         // to it once, when the import is done rather than per file.
         let mut imported: Vec<u32> = Vec::new();
+        // Stems that finished for a track which is waiting on its words. The
+        // reading is queued once, after the whole batch has been folded in,
+        // rather than a job per track as each kit lands.
+        let mut to_read: Vec<job::Transcribable> = Vec::new();
 
         for update in updates {
             match update {
@@ -1682,6 +2077,9 @@ impl App {
                     // if it happens to be mounted somewhere a sweep looks.
                     let (path, label, is_image) =
                         (drive.path.clone(), drive.label.clone(), drive.is_image);
+                    // What the drive holds for each track now, so the next
+                    // sheet can tell a player's edit from this program's own.
+                    self.restamp_drive();
                     if self.config.keep_drives && !is_image {
                         let listing = crate::backup::listing(&path);
                         let state = crate::backup::digest(&listing);
@@ -1700,7 +2098,7 @@ impl App {
                     }
                 }
                 Update::Kept(kept) => {
-                    self.note(format!("kept {}: {}", kept.drive, kept.summary()), theme::TEXT);
+                    self.note(format!("kept {}: {}", kept.drive, kept.summary()), theme::text());
                     // Music copied into the library is music the collection
                     // should know about, and importing is what reads a file and
                     // makes a row out of it.
@@ -1760,7 +2158,7 @@ impl App {
                 }
                 Update::Rekordbox(collection) => {
                     let brought = self.merge_rekordbox(&collection);
-                    self.note(brought, theme::GO);
+                    self.note(brought, theme::go());
                     changed = true;
                 }
                 Update::Converted { id, to } => {
@@ -1797,6 +2195,7 @@ impl App {
                         track.grid_confidence = analyzed.grid_confidence;
                         track.has_grid = analyzed.has_grid;
                         track.beats = analyzed.beats;
+                        track.beat_ms = analyzed.beat_ms.clone();
                         track.key = analyzed.key.clone();
                         track.key_confidence = analyzed.key_confidence;
                         track.energy = analyzed.energy;
@@ -1811,8 +2210,14 @@ impl App {
                         track.bitrate_kbps = bitrate(track.bytes, analyzed.duration_secs);
                         track.analyzed = true;
                     }
-                    if let Err(e) = crate::library::cache_waveform(analyzed.id, &analyzed.bands) {
-                        self.note(format!("could not cache the waveform: {e}"), theme::DIM);
+                    // An analysis replaces the grid, the cues and the phrases,
+                    // which is exactly what a player can also change.
+                    self.prep_changed(analyzed.id);
+                    let of = [analyzed.path.clone()];
+                    if let Err(e) =
+                        crate::library::cache_waveform(analyzed.id, &of, &analyzed.bands)
+                    {
+                        self.note(format!("could not cache the waveform: {e}"), theme::dim());
                     }
                     if Some(analyzed.id) == self.selected {
                         self.waveform = Some((analyzed.id, analyzed.bands.clone()));
@@ -1820,8 +2225,55 @@ impl App {
                     changed = true;
                 }
                 Update::Separated { id, kit } => {
+                    // Read before it is moved in, because what happens next
+                    // depends on whether the part the recogniser needs is
+                    // among what was rendered.
+                    let vocals = kit.vocals.clone();
                     if let Some(track) = self.library.get_mut(id) {
                         track.stems = kit;
+                    }
+                    if self.want_cues.remove(&id) {
+                        match vocals {
+                            Some(vocals) => to_read.push(job::Transcribable { id, vocals }),
+                            None => self.note(
+                                "the separation produced no vocal stem to read",
+                                theme::amber(),
+                            ),
+                        }
+                    }
+                    changed = true;
+                }
+                Update::Drawn { id, sources, bands } => {
+                    if let Err(e) = crate::library::cache_waveform(id, &sources, &bands) {
+                        self.note(format!("could not cache the waveform: {e}"), theme::dim());
+                    }
+                    if Some(id) == self.selected {
+                        self.waveform = Some((id, bands));
+                    }
+                    changed = true;
+                }
+                Update::Transcribed { id, lyrics } => {
+                    let heard = lyrics.len();
+                    if let Some(track) = self.library.get_mut(id) {
+                        track.lyrics = lyrics;
+                    }
+                    // Said plainly, because an empty transcript is a real
+                    // answer and looks exactly like a failure from outside: a
+                    // track that turns out to have no words should say so
+                    // rather than leave somebody waiting for cues.
+                    match heard {
+                        0 => self.note("nothing sung was made out", theme::dim()),
+                        _ => {
+                            let placed = self.auto_cue(id);
+                            self.note(
+                                format!(
+                                    "{} heard, {}",
+                                    crate::library::plural(heard, "line"),
+                                    crate::library::plural(placed, "cue")
+                                ),
+                                theme::text(),
+                            );
+                        }
                     }
                     changed = true;
                 }
@@ -1832,7 +2284,7 @@ impl App {
                     self.step = None;
                 }
                 Update::Step { percent } => self.step = Some(percent),
-                Update::Line(text) => self.note(text, theme::TEXT),
+                Update::Line(text) => self.note(text, theme::text()),
                 Update::Failed { path, message } => {
                     // Whatever failed, nothing is arriving for the deck now.
                     self.loading = None;
@@ -1843,7 +2295,7 @@ impl App {
                             "{}: {message}",
                             name.unwrap_or_else(|| path.display().to_string())
                         ),
-                        theme::ALERT,
+                        theme::alert(),
                     );
                 }
                 Update::Done(result) => {
@@ -1862,7 +2314,7 @@ impl App {
                         Err(message) => {
                             crate::error!("{name} failed{took}: {message}");
                             self.status = message.clone();
-                            self.note(message, theme::ALERT);
+                            self.note(message, theme::alert());
                         }
                     }
                 }
@@ -1891,6 +2343,10 @@ impl App {
         if !imported.is_empty() {
             self.ensure_local(&imported);
             self.check_compatibility(&imported);
+            self.check_storage(&imported);
+        }
+        if !to_read.is_empty() {
+            self.read_words(to_read);
         }
         if changed {
             self.rebuild();
@@ -1908,11 +2364,27 @@ impl App {
                 plural(self.library.tracks.len(), "track"),
                 plural(self.library.playlists.len(), "playlist")
             ),
-            Err(e) => self.note(format!("could not save the collection: {e:#}"), theme::ALERT),
+            Err(e) => self.note(format!("could not save the collection: {e:#}"), theme::alert()),
         }
     }
 
     // -- the sync ----------------------------------------------------------
+
+    /// How many of the drive's tracks have a kit rendered.
+    ///
+    /// Counted off the collection rather than off the plan, because the plan
+    /// counts files and the question being asked on the sheet is about records:
+    /// three files from one track and three from three read the same otherwise.
+    fn kits_going_on(&self) -> usize {
+        sync::wanted(
+            &self.library,
+            self.library.drives.get(self.drive).unwrap_or(&Drive::default()),
+        )
+        .iter()
+        .filter_map(|id| self.library.get(*id))
+        .filter(|track| track.stems.each().iter().any(|(_, part)| part.is_some()))
+        .count()
+    }
 
     /// The drive's playlists, as the exporter wants them: paths in play order.
     ///
@@ -1935,7 +2407,7 @@ impl App {
                     .filter_map(|id| self.library.get(*id))
                     .flat_map(|track| {
                         let mut paths = vec![track.path.clone()];
-                        if drive.with_stems {
+                        if !drive.skip_stems {
                             paths.extend(
                                 track.stems.each().into_iter().filter_map(|(_, s)| s.cloned()),
                             );
@@ -1947,16 +2419,93 @@ impl App {
             .collect()
     }
 
+    /// Notice kits that were rendered but never recorded, for these tracks.
+    ///
+    /// What goes on a drive is decided from the collection, so a kit the
+    /// collection does not know about is a kit that stays on the laptop — and
+    /// that is a silence rather than an error. The files are named after their
+    /// track, so asking the disk is cheap and the answer is not a guess.
+    ///
+    /// Returns how many tracks gained one, so the write can say so.
+    fn notice_rendered_kits(&mut self, ids: &[u32]) -> usize {
+        let stems_in = self.config.stems_location();
+        let mut found = 0;
+        for id in ids {
+            let Some(track) = self.library.get(*id) else { continue };
+            if track.stems.is_complete() {
+                continue;
+            }
+            let on_disk = crate::job::find_stems(&stems_in, &track.path);
+            if on_disk.is_empty() {
+                continue;
+            }
+            let Some(track) = self.library.get_mut(*id) else { continue };
+            if track.stems.fill_from(&on_disk) {
+                found += 1;
+            }
+        }
+        found
+    }
+
     fn write_drive(&mut self) {
         let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
         // What should be on the drive when this is done: the union of its
         // playlists, which is what the plan was worked out against.
         let wanted: Vec<u32> = sync::wanted(&self.library, &drive);
 
+        // Before anything is counted: a kit rendered in an earlier run, or by
+        // hand into the stems folder, is one the collection may never have been
+        // told about. Everything below decides from the collection, so this is
+        // the last moment the drive can gain it.
+        if !drive.skip_stems {
+            match self.notice_rendered_kits(&wanted) {
+                0 => {}
+                found => {
+                    crate::info!(
+                        "found a kit on disk for {} that the collection had not recorded",
+                        plural(found, "track")
+                    );
+                    self.save();
+                }
+            }
+        }
+
+        // Tracks the player has edited since this drive was written, and that
+        // the person has said to leave as they are. Taken out of the plan
+        // rather than written and then put back: preparing one is what would
+        // overwrite it.
+        //
+        // What the deck did is read back into the collection first, so that
+        // keeping the drive's copy means having it rather than only not losing
+        // it. See `take_what_the_player_left`.
+        //
+        // Their row is carried through untouched, so the track stays on the
+        // drive and in its playlists with whatever the deck made of it.
+        self.take_what_the_player_left();
+        self.replan();
+        let mut plan = self.plan.clone();
+        let kept_theirs: Vec<u32> = self
+            .settled
+            .iter()
+            .filter(|(_, side)| **side == sync::Side::Theirs)
+            .map(|(id, _)| *id)
+            .collect();
+        if !kept_theirs.is_empty() {
+            plan.update.retain(|(id, _)| !kept_theirs.contains(id));
+            crate::info!(
+                "leaving {} as the player left {}",
+                plural(kept_theirs.len(), "track"),
+                match kept_theirs.len() {
+                    1 => "it",
+                    _ => "them",
+                }
+            );
+        }
+
         // What is carried through from the last write and what has to be made
         // again — the rule for both, including how a stem follows its parent,
         // is in `sync::carry`.
-        let carry = sync::carry(&self.library, &drive, &self.plan);
+        let carry = sync::carry(&self.library, &drive, &plan);
 
         // Which stem came from which track, so each one takes its parent's
         // grid, cues, key and phrases rather than being listened to alone, and
@@ -1981,11 +2530,54 @@ impl App {
                     .collect::<Vec<_>>()
             })
             .collect();
+        // What is happening about stems, said out loud. A stem that does not go
+        // on is otherwise a silence — the drive simply ends up with fewer files
+        // than expected, and nothing distinguishes the three reasons: the drive
+        // not carrying them, nothing being rendered, or a kit naming files that
+        // have since moved. All three look identical on the stick afterwards.
+        let rendered = self.kits_going_on();
+        if !drive.skip_stems {
+            let missing = plan
+                .stems
+                .iter()
+                .filter(|(_, path)| !path.exists())
+                .map(|(_, path)| path.display().to_string())
+                .collect::<Vec<_>>();
+            match plan.stems.len() {
+                0 => crate::warn!(
+                    "this drive carries stems, but none of the {} has one rendered",
+                    plural(wanted.len(), "track")
+                ),
+                n => crate::info!("carrying {n} stem files from {rendered} tracks"),
+            }
+            if !missing.is_empty() {
+                crate::warn!(
+                    "{} named by a kit {} not there, so {} cannot go on: {}",
+                    plural(missing.len(), "stem"),
+                    match missing.len() {
+                        1 => "is",
+                        _ => "are",
+                    },
+                    match missing.len() {
+                        1 => "it",
+                        _ => "they",
+                    },
+                    missing.join(", ")
+                );
+            }
+        } else if rendered > 0 {
+            crate::info!(
+                "{} have stems rendered, and this drive is not carrying them — \
+                 Carry stems is on the sync sheet",
+                plural(rendered, "track")
+            );
+        }
+
         // Nothing to prepare is not nothing to do: a playlist that gained a
         // track already on the drive, or lost one, changes the database and
         // not a single audio file.
         if carry.files.is_empty() && carry.already.is_empty() {
-            self.note("nothing to write", theme::DIM);
+            self.note("nothing to write", theme::dim());
             return;
         }
 
@@ -2000,6 +2592,16 @@ impl App {
         args.companions = companions;
         args.already = carry.already;
         args.onelibrary_key = self.config.onelibrary_key().map(str::to_string);
+        // What the collection knows, so the exporter writes it rather than
+        // measuring its own and quietly writing that instead. Everything the
+        // drive should hold, not only what is being prepared now: a stem looks
+        // its prep up under its parent, and a parent being carried rather than
+        // rewritten is still the parent of a stem that is being written.
+        args.prepared = wanted
+            .iter()
+            .filter_map(|id| self.library.get(*id))
+            .map(|track| (track.path.clone(), sync::prep(track)))
+            .collect();
 
         // The drive's record is everything that should be on it once this is
         // done, not the part being written now. Recording only the part is how
@@ -2016,8 +2618,21 @@ impl App {
                 let before = drive.written.iter().find(|w| w.id == track.id);
                 Written {
                     id: track.id,
+                    // The collection's prep either way, including for a track
+                    // whose drive copy is being kept: the two have been
+                    // reconciled, by somebody saying which to keep, and asking
+                    // again on the next sync would be asking a settled
+                    // question for ever.
                     prep: sync::fingerprint(track),
                     row: before.and_then(|w| w.row.clone()),
+                    // Carried through for a track being left alone, whose files
+                    // are not about to change. For everything else it is filled
+                    // in after the write, because writing a track rewrites the
+                    // files this describes.
+                    theirs: match kept_theirs.contains(&track.id) {
+                        true => self.drive_now.get(&track.id).cloned(),
+                        false => None,
+                    },
                     // Kept only where the parent's row is: a stem being
                     // written again gets its row back from what the write
                     // reports, and one whose kit has been re-rendered names a
@@ -2065,7 +2680,7 @@ impl App {
         crate::info!("forgot what {label} was holding: {}", plural(held, "track"));
         self.note(
             format!("{label} will be written from scratch — {} to put on", plural(held, "track")),
-            theme::AMBER,
+            theme::amber(),
         );
         self.replan();
         self.save();
@@ -2088,7 +2703,7 @@ impl App {
             playlist: String::new(),
             playlists,
             written: Vec::new(),
-            with_stems: false,
+            skip_stems: false,
             bytes: 0,
             last_sync: None,
         });
@@ -2316,9 +2931,9 @@ fn pinned<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
 /// What colour a log line is drawn in, by how much it matters.
 fn log_color(level: crate::log::Level) -> egui::Color32 {
     match level {
-        crate::log::Level::Error => theme::ALERT,
-        crate::log::Level::Warn => theme::AMBER,
-        _ => theme::DIM,
+        crate::log::Level::Error => theme::alert(),
+        crate::log::Level::Warn => theme::amber(),
+        _ => theme::dim(),
     }
 }
 
@@ -2339,6 +2954,7 @@ fn bitrate(bytes: u64, duration_secs: f64) -> u32 {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.wake_from(ctx);
+        theme::help_delay(ctx, self.config.help_delay_ms);
         self.collect();
         self.collect_picked();
         if let Some(what) = self.want_pick.take() {
@@ -2420,6 +3036,10 @@ impl eframe::App for App {
         if self.sheet {
             self.sync_sheet(ctx);
         }
+        // After the sheet, so it sits over it rather than under it.
+        if self.details {
+            self.details_window(ctx);
+        }
         if self.settings {
             self.settings_sheet(ctx);
         }
@@ -2459,9 +3079,9 @@ impl eframe::App for App {
 
 fn bar_frame() -> egui::Frame {
     egui::Frame::NONE
-        .fill(theme::BOOTH_2)
+        .fill(theme::booth_2())
         .inner_margin(egui::Margin::symmetric(12, 8))
-        .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+        .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
 }
 
 /// The chrome every sheet shares.
@@ -2589,13 +3209,13 @@ fn sheet_height(ctx: &egui::Context) -> f32 {
 
 fn sheet_frame() -> egui::Frame {
     egui::Frame::NONE
-        .fill(theme::BOOTH)
-        .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+        .fill(theme::booth())
+        .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
         .inner_margin(egui::Margin::same(14))
 }
 
 fn pane_frame() -> egui::Frame {
-    egui::Frame::NONE.fill(theme::BOOTH).inner_margin(egui::Margin::same(12))
+    egui::Frame::NONE.fill(theme::booth()).inner_margin(egui::Margin::same(12))
 }
 
 impl App {
@@ -2649,6 +3269,11 @@ impl App {
         if std::mem::take(&mut self.settings) {
             return true;
         }
+        // Before the sheet it was opened from, or one press would shut both
+        // and the way back to the summary would be to open the sheet again.
+        if std::mem::take(&mut self.details) {
+            return true;
+        }
         std::mem::take(&mut self.sheet)
     }
 
@@ -2659,6 +3284,12 @@ impl App {
         ctx.input_mut(|i| {
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::K) {
                 self.focus_bar = true;
+            }
+            // Where every other program on the machine keeps its settings. On
+            // a Mac that is cmd-comma; COMMAND is control everywhere else,
+            // which is where the same habit lives there.
+            if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma) {
+                self.settings = true;
             }
             if typing {
                 return;
@@ -2794,19 +3425,9 @@ impl App {
         root: &std::path::Path,
         sessions: Vec<crate::history::Session>,
     ) {
-        let known: Vec<crate::backup::Known> = self
-            .library
-            .tracks
-            .iter()
-            .map(|track| crate::backup::Known {
-                path: track.path.clone(),
-                bytes: track.bytes,
-                audio_hash: track.audio_hash.clone(),
-            })
-            .collect();
+        let known = crate::backup::what_the_library_has(&self.library);
         let (by_name, by_sound) = crate::backup::index(&known);
-        let ids: std::collections::HashMap<&std::path::Path, u32> =
-            self.library.tracks.iter().map(|track| (track.path.as_path(), track.id)).collect();
+        let ids = crate::backup::whose(&self.library);
 
         let folder = crate::history::folder(drive);
         let (mut made, mut played, mut strangers) = (0usize, 0usize, 0usize);
@@ -2816,7 +3437,7 @@ impl App {
                 let file = track.file(root);
                 let owner =
                     crate::backup::owner(&by_name, &by_sound, &track.file_name, track.bytes, &file);
-                match owner.and_then(|known| ids.get(known.path.as_path())) {
+                match owner.and_then(|known| ids.get(&known.path)) {
                     Some(id) => tracks.push(*id),
                     None => strangers += 1,
                 }
@@ -2860,7 +3481,7 @@ impl App {
                     n
                 ),
             },
-            theme::TEXT,
+            theme::text(),
         );
         self.rebuild();
         self.save();
@@ -2874,16 +3495,7 @@ impl App {
         state: &str,
         listing: Vec<String>,
     ) {
-        let known: Vec<crate::backup::Known> = self
-            .library
-            .tracks
-            .iter()
-            .map(|track| crate::backup::Known {
-                path: track.path.clone(),
-                bytes: track.bytes,
-                audio_hash: track.audio_hash.clone(),
-            })
-            .collect();
+        let known = crate::backup::what_the_library_has(&self.library);
         crate::info!("keeping a copy of {name} from {}", root.display());
         crate::debug!(
             "in state {state}, {} files on it, into {}",
@@ -2901,7 +3513,7 @@ impl App {
             state: state.to_string(),
             into: self.config.backups_path.clone(),
             known,
-            foreign: self.config.on_foreign,
+            foreign: self.config.from_other_drives,
             library: self.config.library_path.clone(),
             key: booth_cli::rekordbox::onelibrary_key(self.config.onelibrary_key()),
         });
@@ -2931,9 +3543,13 @@ impl App {
                 .hint_text(
                     RichText::new("bpm:124-128 key:~8A -played:30d tag:peak")
                         .monospace()
-                        .color(theme::DIM),
+                        .color(theme::dim()),
                 );
-            let response = ui.add(field);
+            let response = ui.add(field).on_hover_text(
+                "Narrow the browser to what matches. Words match the artist, title and album; \
+                 bpm:, key:, tag:, played:, added: and missing: ask about one thing each. \
+                 \u{2318}K from anywhere puts the cursor here.",
+            );
             if self.focus_bar {
                 response.request_focus();
                 self.focus_bar = false;
@@ -2942,12 +3558,14 @@ impl App {
                 self.rebuild();
             }
 
-            ui.label(RichText::new("⌘K").font(theme::mono(10.5)).color(theme::DIM));
+            ui.label(RichText::new("⌘K").font(theme::mono(10.5)).color(theme::dim()));
             self.panes_menu(ui);
             if ui
                 .add(
-                    egui::Button::new(RichText::new("?").font(theme::mono(10.5)).color(theme::DIM))
-                        .fill(theme::BOOTH),
+                    egui::Button::new(
+                        RichText::new("?").font(theme::mono(10.5)).color(theme::dim()),
+                    )
+                    .fill(theme::booth()),
                 )
                 .on_hover_text("What can be typed here")
                 .clicked()
@@ -2974,16 +3592,17 @@ impl App {
                         }
                         if ui
                             .add(egui::Button::new(
-                                RichText::new("stop").font(theme::mono(10.5)).color(theme::DIM),
+                                RichText::new("stop").font(theme::mono(10.5)).color(theme::dim()),
                             ))
                             .clicked()
                         {
                             runner.cancel();
                         }
-                        ui.label(RichText::new(text).font(theme::mono(11.5)).color(theme::AMBER));
+                        ui.label(RichText::new(text).font(theme::mono(11.5)).color(theme::amber()));
                     }
                     None => {
-                        let color = if self.query.has_errors() { theme::ALERT } else { theme::DIM };
+                        let color =
+                            if self.query.has_errors() { theme::alert() } else { theme::dim() };
                         let shown = if self.query.has_errors() {
                             "unknown term".to_string()
                         } else {
@@ -3006,11 +3625,11 @@ impl App {
                 for token in &self.query.tokens {
                     let Some(text) = self.text.get(token.at.clone()) else { continue };
                     let color = match token.role {
-                        Paint::Field => theme::AMBER,
-                        Paint::Value => theme::TEXT,
-                        Paint::Negated => theme::ALERT,
-                        Paint::Text => theme::DIM,
-                        Paint::Bad => theme::ALERT,
+                        Paint::Field => theme::amber(),
+                        Paint::Value => theme::text(),
+                        Paint::Negated => theme::alert(),
+                        Paint::Text => theme::dim(),
+                        Paint::Bad => theme::alert(),
                     };
                     let mut label = RichText::new(text).font(theme::mono(10.0)).color(color);
                     if token.role == Paint::Bad {
@@ -3022,15 +3641,37 @@ impl App {
         }
     }
 
+    /// The collection panel, scrolled.
+    ///
+    /// A DJ with forty playlists has more of them than any panel is tall. They
+    /// used to run off the bottom of the screen; once [`pinned`] started
+    /// clipping a panel to its own rectangle — which is what stopped the panels
+    /// growing themselves back to their widest — they stopped being drawn at
+    /// all. Either way there was no way to reach them, which is what a scroll
+    /// area is for.
+    ///
+    /// `auto_shrink` is off in both directions so the panel is the size it was
+    /// dragged to and not the size of what happens to be in it. That is the
+    /// same argument `pinned` makes, and the two work together: `pinned` hands
+    /// this a box of exactly the panel's size, and this fills it and scrolls
+    /// what will not fit. Without a box around it — in a test harness, say —
+    /// it fills whatever it is given instead, which is worth knowing before
+    /// wondering where the rest of the window went.
     fn sidebar(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.collection(ui));
+    }
+
+    /// Everything in that panel: the views, the playlist tree, the saved
+    /// queries.
+    fn collection(&mut self, ui: &mut Ui) {
         pane_label(ui, "Collection");
         let all = self.library.tracks.len();
         let unprepared = self.library.unprepared_count();
         let attention = self.library.attention_count();
 
-        self.view_row(ui, View::All, "All tracks", all, theme::DIM);
-        self.view_row(ui, View::Unprepared, "Unprepared", unprepared, theme::DIM);
-        self.view_row(ui, View::Attention, "Needs attention", attention, theme::ALERT);
+        self.view_row(ui, View::All, "All tracks", all, theme::dim());
+        self.view_row(ui, View::Unprepared, "Unprepared", unprepared, theme::dim());
+        self.view_row(ui, View::Attention, "Needs attention", attention, theme::alert());
 
         // Offered when there is either something to show or something to look
         // through. A row reading zero when everything has been checked is a
@@ -3049,7 +3690,7 @@ impl App {
             ui.horizontal(|ui| {
                 if ui
                     .add(
-                        egui::Label::new(RichText::new("In here twice").color(theme::AMBER))
+                        egui::Label::new(RichText::new("In here twice").color(theme::amber()))
                             .sense(egui::Sense::click()),
                     )
                     .on_hover_text(match unchecked {
@@ -3070,9 +3711,9 @@ impl App {
                     // were the answer would be a lie in the direction that
                     // stops somebody looking.
                     let (text, colour) = match (copies, unchecked) {
-                        (n, 0) => (n.to_string(), theme::DIM),
-                        (0, _) => ("?".to_string(), theme::AMBER),
-                        (n, _) => (format!("{n}?"), theme::AMBER),
+                        (n, 0) => (n.to_string(), theme::dim()),
+                        (0, _) => ("?".to_string(), theme::amber()),
+                        (n, _) => (format!("{n}?"), theme::amber()),
                     };
                     ui.label(RichText::new(text).font(theme::mono(theme::SMALL)).color(colour));
                 });
@@ -3098,7 +3739,7 @@ impl App {
         let saved: Vec<SavedQuery> = self.library.saved.clone();
         for query in &saved {
             let on = self.text == query.text;
-            let color = if on { theme::AMBER } else { theme::TEXT };
+            let color = if on { theme::amber() } else { theme::text() };
             if ui
                 .add(
                     egui::Label::new(RichText::new(&query.name).color(color))
@@ -3114,7 +3755,10 @@ impl App {
         }
         if !self.text.trim().is_empty()
             && !saved.iter().any(|q| q.text == self.text)
-            && ui.button(RichText::new("save this one").size(theme::SMALL)).clicked()
+            && ui
+                .button(RichText::new("save this one").size(theme::SMALL))
+                .on_hover_text("Keep this query in the sidebar, so the same question is one click from now on.")
+                .clicked()
         {
             let name = self.text.clone();
             self.library.saved.push(SavedQuery { name, text: self.text.clone() });
@@ -3144,7 +3788,7 @@ impl App {
         }
 
         if tree.is_empty() && self.naming.is_none() {
-            ui.label(RichText::new("none yet").color(theme::DIM).size(theme::SMALL));
+            ui.label(RichText::new("none yet").color(theme::dim()).size(theme::SMALL));
         }
 
         let folders: Vec<String> =
@@ -3157,19 +3801,27 @@ impl App {
                 } else {
                     let response = ui.add(
                         egui::Label::new(
-                            RichText::new(format!("\u{25be} {folder}")).color(theme::TEXT),
+                            RichText::new(format!("\u{25be} {folder}")).color(theme::text()),
                         )
                         .sense(egui::Sense::click()),
                     );
                     response.context_menu(|ui| {
-                        if ui.button("Rename\u{2026}").clicked() {
+                        if ui
+                            .button("Rename\u{2026}")
+                            .on_hover_text("Give this folder another name. The playlists in it stay where they are.")
+                            .clicked()
+                        {
                             self.naming = Some(Naming::rename_folder(&folder));
                             ui.close();
                         }
                         // The playlists come back to the top level rather than
                         // going with it, so this loses the filing and not the
                         // work — which is why it needs no confirmation.
-                        if ui.button("Delete folder").clicked() {
+                        if ui
+                            .button("Delete folder")
+                            .on_hover_text("Lose the filing, not the work: the playlists inside come back to the top level.")
+                            .clicked()
+                        {
                             self.library.remove_folder(&folder);
                             self.pending_save = true;
                             ui.close();
@@ -3183,7 +3835,7 @@ impl App {
                     continue;
                 }
                 let on = self.view == View::Playlist && self.playlist == name;
-                let color = if on { theme::AMBER } else { theme::DIM };
+                let color = if on { theme::amber() } else { theme::dim() };
                 let indent = if folder.is_empty() { 0.0 } else { 12.0 };
                 ui.horizontal(|ui| {
                     ui.add_space(indent);
@@ -3199,37 +3851,57 @@ impl App {
                         ui.painter().rect_filled(
                             response.rect.expand2(egui::vec2(4.0, 2.0)),
                             2.0,
-                            theme::AMBER.gamma_multiply(0.22),
+                            theme::amber().gamma_multiply(0.22),
                         );
                     }
                     if let Some(dragged) = response.dnd_release_payload::<rows::Dragged>() {
                         self.pending.push(Pending::AddToPlaylist(dragged.0.clone(), name.clone()));
                     }
 
+                    let response = response.on_hover_text(format!(
+                        "Show {name} \u{2014} {}. Rows can be dragged onto it; right-click to \
+                         rename, move or delete it.",
+                        plural(count, "track")
+                    ));
                     if response.clicked() {
                         self.view = View::Playlist;
                         self.playlist = name.clone();
                         self.rebuild();
                     }
                     response.context_menu(|ui| {
-                        ui.label(RichText::new(&name).color(theme::DIM).size(theme::SMALL));
+                        ui.label(RichText::new(&name).color(theme::dim()).size(theme::SMALL));
                         ui.separator();
-                        if ui.button("Rename\u{2026}").clicked() {
+                        if ui
+                            .button("Rename\u{2026}")
+                            .on_hover_text("Give this playlist another name. A drive carrying it follows the new one.")
+                            .clicked()
+                        {
                             self.naming = Some(Naming::rename_playlist(&name));
                             ui.close();
                         }
                         ui.menu_button("Move to", |ui| {
-                            if !folder.is_empty() && ui.button("Top level").clicked() {
+                            if !folder.is_empty()
+                                && ui
+                                    .button("Top level")
+                                    .on_hover_text("Take it out of its folder.")
+                                    .clicked()
+                            {
                                 self.move_playlist(&name, "");
                                 ui.close();
                             }
                             for other in folders.iter().filter(|f| **f != folder) {
-                                if ui.button(other).clicked() {
+                                if ui
+                                    .button(other)
+                                    .on_hover_text(format!("File it under {other}."))
+                                    .clicked()
+                                {
                                     self.move_playlist(&name, other);
                                     ui.close();
                                 }
                             }
-                        });
+                        })
+.response
+.on_hover_text("Put this playlist in one of the sidebar's folders.");
                         if ui
                             .button("Delete playlist")
                             .on_hover_text("The tracks stay in the collection")
@@ -3249,7 +3921,7 @@ impl App {
                         ui.label(
                             RichText::new(count.to_string())
                                 .font(theme::mono(theme::SMALL))
-                                .color(theme::DIM),
+                                .color(theme::dim()),
                         );
                     });
                 });
@@ -3278,11 +3950,15 @@ impl App {
     /// half-typed name left behind by a click elsewhere is not an instruction.
     fn name_field(&mut self, ui: &mut Ui) {
         let Some(naming) = &mut self.naming else { return };
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut naming.text)
-                .desired_width(f32::INFINITY)
-                .hint_text(RichText::new(naming.what.hint()).color(theme::DIM)),
-        );
+        let response = ui
+            .add(
+                egui::TextEdit::singleline(&mut naming.text)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(RichText::new(naming.what.hint()).color(theme::dim())),
+            )
+            .on_hover_text(
+                "Enter keeps the name, Escape abandons it. Clicking away abandons it too.",
+            );
 
         // Asked for once, on the frame the field appears — never again.
         //
@@ -3321,7 +3997,7 @@ impl App {
                     self.pending_save = true;
                     self.pending_rebuild = true;
                 }
-                Err(message) => self.note(message, theme::ALERT),
+                Err(message) => self.note(message, theme::alert()),
             }
         } else if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.naming = None;
@@ -3338,7 +4014,7 @@ impl App {
     ) {
         let on = self.view == view;
         ui.horizontal(|ui| {
-            let color = if on { theme::AMBER } else { theme::TEXT };
+            let color = if on { theme::amber() } else { theme::text() };
             if ui
                 .add(egui::Label::new(RichText::new(name).color(color)).sense(egui::Sense::click()))
                 .clicked()
@@ -3347,7 +4023,7 @@ impl App {
                 self.rebuild();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let color = if count > 0 { count_color } else { theme::DIM };
+                let color = if count > 0 { count_color } else { theme::dim() };
                 ui.label(
                     RichText::new(count.to_string()).font(theme::mono(theme::SMALL)).color(color),
                 );
@@ -3472,6 +4148,18 @@ impl App {
             {
                 self.render_stems();
             }
+            let unread = self.acting_on(|track| track.lyrics.is_empty()).len();
+            if ui
+                .add_enabled(idle && unread > 0, egui::Button::new(format!("Words {unread}")))
+                .on_hover_text(
+                    "Read the vocal stem and cue the hook, the drops and the phrases \u{2014} \
+                     rendering the stems first where there are none",
+                )
+                .on_disabled_hover_text("The words have been read for everything showing")
+                .clicked()
+            {
+                self.auto_cue_showing();
+            }
             // Reads rather than changes anything, so it sits at the end of the
             // strip after the three that do. Shift for the thorough version:
             // one modifier beats a second button for the same verb.
@@ -3496,15 +4184,16 @@ impl App {
                     true => "selected to playlist",
                     false => "to playlist",
                 })
-                .color(if chosen { theme::AMBER } else { theme::DIM })
+                .color(if chosen { theme::amber() } else { theme::dim() })
                 .size(theme::SMALL),
             );
             let width = 110.0;
             ui.add(
                 egui::TextEdit::singleline(&mut self.playlist_entry)
                     .desired_width(width)
-                    .hint_text(RichText::new("name").color(theme::DIM)),
-            );
+                    .hint_text(RichText::new("name").color(theme::dim())),
+            )
+            .on_hover_text("What to call the playlist the tracks showing would go into.");
             let name = self.playlist_entry.trim().to_string();
             if ui
                 .add_enabled(
@@ -3564,7 +4253,7 @@ impl App {
                     crate::warn!("could not trash {}: {e}", path.display());
                     self.note(
                         format!("{} would not go to the trash", path.display()),
-                        theme::ALERT,
+                        theme::alert(),
                     );
                 }
             }
@@ -3584,7 +4273,7 @@ impl App {
         if gone > 0 {
             self.note(
                 format!("{} to the trash, {} freed", plural(gone, "file"), sync::bytes(freed)),
-                theme::TEXT,
+                theme::text(),
             );
         }
         // The copy kept is the one that knows the most about the record, which
@@ -3632,7 +4321,7 @@ impl App {
         let ids: Vec<u32> =
             ids.iter().copied().filter(|id| self.library.get(*id).is_some()).collect();
         if ids.is_empty() {
-            self.note("nothing to add", theme::DIM);
+            self.note("nothing to add", theme::dim());
             return;
         }
         let playlist = match self.library.playlists.iter_mut().find(|p| p.name == name) {
@@ -3652,7 +4341,7 @@ impl App {
                 playlist.tracks.push(id);
             }
         }
-        self.note(format!("{added} added to \u{201c}{name}\u{201d}"), theme::TEXT);
+        self.note(format!("{added} added to \u{201c}{name}\u{201d}"), theme::text());
         self.save();
         self.replan();
         // The list is a built thing and has to follow. Without this a drop
@@ -3787,6 +4476,7 @@ impl App {
                     rows::Action::Analyze => Pending::Analyze(id),
                     rows::Action::Identify => Pending::Identify(id),
                     rows::Action::Separate => Pending::Separate(id),
+                    rows::Action::AutoCue => Pending::AutoCue(id),
                     rows::Action::CopyIn => Pending::Adopt(id),
                     rows::Action::Reveal => Pending::CopyPath(id),
                     rows::Action::RemoveFromPlaylist => {
@@ -3814,7 +4504,7 @@ impl App {
                 } else {
                     "Nothing matches."
                 };
-                ui.label(RichText::new(message).color(theme::DIM));
+                ui.label(RichText::new(message).color(theme::dim()));
             });
         }
     }
@@ -3826,7 +4516,7 @@ impl App {
             // Nothing to draw. In the main window that is a strip of nothing
             // under the list, which reads fine; in a window of its own it is
             // an empty window, which reads as broken.
-            ui.label(RichText::new("nothing selected").color(theme::DIM));
+            ui.label(RichText::new("nothing selected").color(theme::dim()));
             return;
         };
 
@@ -3861,7 +4551,8 @@ impl App {
         // borrows the cached picture out of the window's own state, and that
         // borrow has to be finished with before the panel changes anything.
         let shown = wave::show(ui, &waveform);
-        let strip = wave::phrase_strip(ui, &track.phrases, track.duration_secs, shown.zoom);
+        let strip =
+            wave::phrase_strip(ui, &track.phrases, track.duration_secs, &beat_ms, shown.zoom);
         let zoom = strip.zoom.unwrap_or(shown.zoom);
         if let Some(edit) = strip.edit {
             self.pending.push(Pending::EditPhrase { id: track.id, edit });
@@ -3932,6 +4623,25 @@ impl App {
                 },
                 track.stems.is_complete(),
             );
+            // What the recogniser made of the vocal stem, and what it decided
+            // the hook was. Shown because a hook found in a badly heard
+            // transcript is a cue in the wrong place, and the only way to know
+            // that has happened is to be told what it thinks it heard.
+            let heard = crate::library::transcript(&track.lyrics);
+            measurement(
+                ui,
+                "words",
+                &match (track.lyrics.len(), heard.hook()) {
+                    (0, _) => "not read".to_string(),
+                    (lines, Some(hook)) => format!(
+                        "{lines} lines \u{b7} {}\u{d7} \u{201c}{}\u{201d}",
+                        hook.times(),
+                        hook.text
+                    ),
+                    (lines, None) => format!("{lines} lines \u{b7} nothing repeats"),
+                },
+                !track.lyrics.is_empty(),
+            );
         });
 
         // The same three jobs the toolbar runs over everything showing, aimed
@@ -3981,6 +4691,18 @@ impl App {
             ) {
                 self.pending.push(Pending::Separate(track.id));
             }
+            if offer(
+                ui,
+                if track.lyrics.is_empty() {
+                    "Cue from the words"
+                } else {
+                    "Cue from the words again"
+                },
+                "Read the vocal stem, find the line it keeps coming back to, and cue that, \
+                 the drops and the phrases. Replaces the hot cues it has.",
+            ) {
+                self.pending.push(Pending::AutoCue(track.id));
+            }
         });
 
         // The waveform is only read when it is looked at: a collection of
@@ -4004,23 +4726,35 @@ impl App {
             }
         }
 
-        if !has_bands && track.analyzed {
-            match crate::library::cached_waveform(track.id) {
+        if !has_bands && worth_drawing(&track) {
+            // Worked out before the cache is consulted, because the cache can
+            // only say whether its picture is still of these files if it knows
+            // which files they are.
+            let sources = picture_sources(&track);
+            let cached =
+                sources.as_deref().and_then(|of| crate::library::cached_waveform(track.id, of));
+            match cached {
                 Some(cached) => self.waveform = Some((track.id, cached)),
-                // Nothing cached — analysed by an older version, or the cache
-                // was cleared. Measure it again, once, in the background.
+                // Nothing cached — analysed by an older version, the cache was
+                // cleared, or this is a stem companion, which has never had a
+                // picture of its own. Measure one, once, in the background.
                 //
-                // Once, and remembered: this runs every frame the track is
-                // selected, so a track that cannot be measured — its file has
+                // The picture only. This used to run a whole analysis, which
+                // re-derived the grid, the key, the cues and the phrases and
+                // wrote them over whatever the collection had — so selecting a
+                // track whose cache had been cleared quietly discarded every
+                // cue somebody had moved by hand. Re-analysing is a thing to
+                // ask for, not a thing that happens because a row was clicked.
+                //
+                // Once, and remembered: this runs every frame the row is
+                // selected, so one that cannot be measured — its file has
                 // moved, it will not decode — would otherwise start a job,
-                // fail, and start another one for as long as it stayed
-                // selected.
-                None if !self.running()
-                    && !self.remeasured.contains(&track.id)
-                    && track.path.exists() =>
-                {
-                    self.remeasured.insert(track.id);
-                    self.start(Job::Analyze(vec![(track.id, track.path.clone())]));
+                // fail, and start another for as long as it stayed selected.
+                None if !self.running() && !self.remeasured.contains(&track.id) => {
+                    if let Some(sources) = sources {
+                        self.remeasured.insert(track.id);
+                        self.start(Job::Draw(vec![job::Drawable { id: track.id, sources }]));
+                    }
                 }
                 None => {}
             }
@@ -4038,12 +4772,12 @@ impl App {
         let Some(track) = self.library.row(id) else { return };
         let sources = track.sources();
         if sources.is_empty() {
-            self.note(format!("no {} rendered for that track", track.role.label()), theme::ALERT);
+            self.note(format!("no {} rendered for that track", track.role.label()), theme::alert());
             return;
         }
         if let Some(missing) = sources.iter().find(|path| !path.exists()) {
             crate::warn!("cannot play #{id}: {} is gone", missing.display());
-            self.note("that file is not where it was", theme::ALERT);
+            self.note("that file is not where it was", theme::alert());
             return;
         }
 
@@ -4090,7 +4824,7 @@ impl App {
             // Short, because this row is mostly cue buttons and the reason is
             // rarely actionable; the whole of it is one hover away.
             if let Some(problem) = &self.player_problem {
-                ui.label(RichText::new("no audio out").color(theme::DIM).size(theme::SMALL))
+                ui.label(RichText::new("no audio out").color(theme::dim()).size(theme::SMALL))
                     .on_hover_text(problem);
             }
             return;
@@ -4107,9 +4841,11 @@ impl App {
         };
         if ui
             .add(
-                egui::Button::new(RichText::new(label).font(theme::mono(12.0)).color(theme::BOOTH))
-                    .fill(if playing { theme::GO } else { theme::AMBER })
-                    .min_size(egui::vec2(30.0, 18.0)),
+                egui::Button::new(
+                    RichText::new(label).font(theme::mono(12.0)).color(theme::booth()),
+                )
+                .fill(if playing { theme::go() } else { theme::amber() })
+                .min_size(egui::vec2(30.0, 18.0)),
             )
             .on_hover_text("Space")
             .clicked()
@@ -4127,26 +4863,46 @@ impl App {
             false => self.playhead_ms.unwrap_or(0),
         };
         let length = self.config.length;
-        ui.label(
-            RichText::new(match beat_at(track, at_ms) {
-                Some(beat) => length.elapsed_and_left(beat, track.beats),
-                // No grid, so no bars to count in — the clock is all there is.
-                None => format!(
-                    "{} / {}",
-                    time_text(at_ms),
-                    time_text((track.duration_secs * 1000.0) as u32)
-                ),
-            })
-            .font(theme::mono(10.5))
-            .color(if loaded { theme::TEXT } else { theme::DIM }),
-        )
-        .on_hover_text(format!(
-            "{} of {} — {} / {}",
-            length.position(beat_at(track, at_ms).unwrap_or(0)),
-            length.describe(track.beats),
-            time_text(at_ms),
-            time_text((track.duration_secs * 1000.0) as u32)
-        ));
+        let counting = self.config.counting;
+        let total_ms = (track.duration_secs * 1000.0) as u32;
+        let reading = match beat_at(track, at_ms) {
+            Some(beat) => counting.reading(length, beat, track.beats, at_ms, total_ms),
+            // No grid, so no bars to count in — the clock is all there is, and
+            // it still answers whichever question is being asked.
+            None => match counting {
+                crate::config::Counting::Elapsed => crate::config::clock(at_ms),
+                crate::config::Counting::Remaining => {
+                    format!("-{}", crate::config::clock(total_ms.saturating_sub(at_ms)))
+                }
+            },
+        };
+        // Clickable, the way a player's time display is: the two questions a
+        // DJ asks of a running track are where am I and how long have I got,
+        // and they are never both wanted at once.
+        let clicked = ui
+            .add(
+                egui::Label::new(RichText::new(reading).font(theme::mono(10.5)).color(if loaded {
+                    theme::text()
+                } else {
+                    theme::dim()
+                }))
+                .sense(egui::Sense::click()),
+            )
+            .on_hover_text(format!(
+                "{} of {} — {} of {}\nclick for {}",
+                length.position(beat_at(track, at_ms).unwrap_or(0)),
+                length.describe(track.beats),
+                time_text(at_ms),
+                time_text(total_ms),
+                match counting {
+                    crate::config::Counting::Elapsed => "what is left",
+                    crate::config::Counting::Remaining => "where you are",
+                }
+            ))
+            .clicked();
+        if clicked {
+            self.pending.push(Pending::CountDifferently);
+        }
 
         let mut gain = player.gain();
         if ui
@@ -4192,7 +4948,7 @@ impl App {
             ui.label(
                 RichText::new(theme::label_text("Cues"))
                     .size(theme::LABEL)
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .strong(),
             );
 
@@ -4205,19 +4961,19 @@ impl App {
                 };
                 let color = match cue {
                     Some(cue) => Color32::from_rgb(cue.color[0], cue.color[1], cue.color[2]),
-                    None => theme::RULE,
+                    None => theme::rule(),
                 };
                 let response = ui
                     .add(
                         egui::Button::new(RichText::new(&name).font(theme::mono(10.5)).color(
                             match cue {
-                                Some(_) => theme::BOOTH,
-                                None => theme::DIM,
+                                Some(_) => theme::booth(),
+                                None => theme::dim(),
                             },
                         ))
                         .fill(match cue {
                             Some(_) => color,
-                            None => theme::BOOTH,
+                            None => theme::booth(),
                         })
                         .min_size(egui::vec2(30.0, 18.0)),
                     )
@@ -4261,14 +5017,14 @@ impl App {
             match self.playhead_ms {
                 Some(ms) => {
                     ui.label(
-                        RichText::new(time_text(ms)).font(theme::mono(10.5)).color(theme::TEXT),
+                        RichText::new(time_text(ms)).font(theme::mono(10.5)).color(theme::text()),
                     );
                 }
                 None => {
                     ui.label(
                         RichText::new("click the waveform to place the playhead")
                             .size(theme::SMALL)
-                            .color(theme::DIM),
+                            .color(theme::dim()),
                     );
                 }
             }
@@ -4283,9 +5039,9 @@ impl App {
                     // would hide that the choice is remembered for next time.
                     let ready = mode != wave::Paint::Stems || track.stems.is_complete();
                     let color = match (on, ready) {
-                        (true, _) => theme::BOOTH,
-                        (false, true) => theme::DIM,
-                        (false, false) => theme::RULE,
+                        (true, _) => theme::booth(),
+                        (false, true) => theme::dim(),
+                        (false, false) => theme::rule(),
                     };
                     if ui
                         .add(
@@ -4293,9 +5049,9 @@ impl App {
                                 RichText::new(mode.label()).font(theme::mono(10.0)).color(color),
                             )
                             .fill(if on {
-                                theme::AMBER
+                                theme::amber()
                             } else {
-                                theme::BOOTH
+                                theme::booth()
                             }),
                         )
                         .on_hover_text(match ready {
@@ -4314,7 +5070,7 @@ impl App {
                     ui.add_space(8.0);
                     if ui
                         .add(egui::Button::new(
-                            RichText::new("fit").font(theme::mono(10.0)).color(theme::DIM),
+                            RichText::new("fit").font(theme::mono(10.0)).color(theme::dim()),
                         ))
                         .on_hover_text("Show the whole track again (esc)")
                         .clicked()
@@ -4331,12 +5087,18 @@ impl App {
                 if self.cue_entry.0 != Some((track.id, letter)) {
                     self.cue_entry = (Some((track.id, letter)), cue.label.clone());
                 }
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.cue_entry.1)
-                        .desired_width(140.0)
-                        .font(theme::mono(10.5))
-                        .hint_text(RichText::new("name this cue").monospace().color(theme::DIM)),
-                );
+                let response = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.cue_entry.1)
+                            .desired_width(140.0)
+                            .font(theme::mono(10.5))
+                            .hint_text(
+                                RichText::new("name this cue").monospace().color(theme::dim()),
+                            ),
+                    )
+                    .on_hover_text(
+                        "What a player shows under this cue. It goes on the drive with it.",
+                    );
                 if response.changed() || response.lost_focus() {
                     self.pending.push(Pending::RenameCue {
                         id: track.id,
@@ -4361,7 +5123,7 @@ impl App {
     fn inspector(&mut self, ui: &mut Ui) {
         pane_label(ui, "Now inspecting");
         let Some(track) = self.selected_track().cloned() else {
-            ui.label(RichText::new("nothing selected").color(theme::DIM));
+            ui.label(RichText::new("nothing selected").color(theme::dim()));
             self.editing = None;
             return;
         };
@@ -4388,12 +5150,14 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let width = ui.available_width();
             fn field(ui: &mut Ui, width: f32, label: &str, value: &mut String) {
-                let caption = ui.label(RichText::new(label).color(theme::DIM).size(theme::SMALL));
-                let field = ui.add(
-                    egui::TextEdit::singleline(value)
-                        .desired_width(width)
-                        .font(theme::sans(theme::BODY)),
-                );
+                let caption = ui.label(RichText::new(label).color(theme::dim()).size(theme::SMALL));
+                let field = ui
+                    .add(
+                        egui::TextEdit::singleline(value)
+                            .desired_width(width)
+                            .font(theme::sans(theme::BODY)),
+                    )
+                    .on_hover_text(format!("The track's {}. Save writes it into the file's tags.", label.to_lowercase()));
                 // The caption sits above the box rather than beside it, so
                 // nothing but this says which is which: without it a screen
                 // reader announces four unnamed text boxes, and so does
@@ -4408,14 +5172,24 @@ impl App {
             let changed = editing.differs_from(&track);
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.add_enabled(changed, egui::Button::new("Save")).clicked() {
+                if ui
+                    .add_enabled(changed, egui::Button::new("Save"))
+                    .on_hover_text("Write these fields into the collection, and into the file's tags.")
+                    .on_disabled_hover_text("Nothing has been changed yet.")
+                    .clicked()
+                {
                     self.pending.push(Pending::CommitEdit);
                 }
-                if ui.add_enabled(changed, egui::Button::new("Revert")).clicked() {
+                if ui
+                    .add_enabled(changed, egui::Button::new("Revert"))
+                    .on_hover_text("Put every field back to what the collection says.")
+                    .on_disabled_hover_text("Nothing has been changed yet.")
+                    .clicked()
+                {
                     self.pending.push(Pending::CancelEdit);
                 }
                 if changed {
-                    ui.label(RichText::new("unsaved").color(theme::AMBER).size(theme::SMALL));
+                    ui.label(RichText::new("unsaved").color(theme::amber()).size(theme::SMALL));
                 }
             });
             // Writing to the file is a separate act from editing the record,
@@ -4433,7 +5207,7 @@ impl App {
                     } else {
                         "The file's own format carries no tags; only the collection changes."
                     })
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
             } else if taggable
@@ -4455,12 +5229,12 @@ impl App {
                     sync::bytes(track.bytes)
                 ))
                 .font(theme::mono(10.0))
-                .color(theme::DIM),
+                .color(theme::dim()),
             );
             ui.label(
                 RichText::new(track.path.display().to_string())
                     .font(theme::mono(9.5))
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             )
             .on_hover_text(track.path.display().to_string());
 
@@ -4468,7 +5242,7 @@ impl App {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!("{} {problem}", theme::WARN))
-                        .color(theme::ALERT)
+                        .color(theme::alert())
                         .size(theme::SMALL),
                 );
             }
@@ -4480,10 +5254,14 @@ impl App {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!("{} the file is not where it was", theme::WARN))
-                        .color(theme::ALERT)
+                        .color(theme::alert())
                         .size(theme::SMALL),
                 );
-                if ui.button("Forget this track").clicked() {
+                if ui
+                    .button("Forget this track")
+                    .on_hover_text("Take it out of the collection and out of every playlist. The file is not touched.")
+                    .clicked()
+                {
                     self.pending.push(Pending::Forget(track.id));
                 }
             } else if !self.config.holds(&track.path) {
@@ -4494,7 +5272,7 @@ impl App {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!("{} no local copy", theme::WARN))
-                        .color(theme::AMBER)
+                        .color(theme::amber())
                         .size(theme::SMALL),
                 );
                 if ui
@@ -4511,14 +5289,14 @@ impl App {
             for (name, path) in track.stems.each() {
                 ui.horizontal(|ui| {
                     let (mark, color) = match path {
-                        Some(_) => (theme::TICK, theme::GO),
-                        None => ("·", theme::DIM),
+                        Some(_) => (theme::TICK, theme::go()),
+                        None => ("·", theme::dim()),
                     };
                     ui.label(RichText::new(mark).color(color));
                     ui.label(RichText::new(name).color(if path.is_some() {
-                        theme::TEXT
+                        theme::text()
                     } else {
-                        theme::DIM
+                        theme::dim()
                     }));
                 });
             }
@@ -4534,9 +5312,9 @@ impl App {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new(tag).font(theme::mono(10.0)).color(theme::TEXT),
+                                RichText::new(tag).font(theme::mono(10.0)).color(theme::text()),
                             )
-                            .fill(theme::BOOTH_2),
+                            .fill(theme::booth_2()),
                         )
                         .on_hover_text("Remove")
                         .clicked()
@@ -4550,10 +5328,14 @@ impl App {
                     egui::TextEdit::singleline(&mut self.tag_entry)
                         .desired_width(ui.available_width() - 46.0)
                         .font(theme::mono(10.5))
-                        .hint_text(RichText::new("add a tag").monospace().color(theme::DIM)),
+                        .hint_text(RichText::new("add a tag").monospace().color(theme::dim())),
                 );
                 let entered = entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (entered || ui.button("Add").clicked()) && !self.tag_entry.trim().is_empty() {
+                let added = ui
+                    .button("Add")
+                    .on_hover_text("Put this tag on the track. Enter does the same.")
+                    .clicked();
+                if (entered || added) && !self.tag_entry.trim().is_empty() {
                     self.pending.push(Pending::AddTag(track.id, self.tag_entry.trim().to_string()));
                 }
             });
@@ -4570,9 +5352,9 @@ impl App {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new(tag).font(theme::mono(10.0)).color(theme::DIM),
+                                    RichText::new(tag).font(theme::mono(10.0)).color(theme::dim()),
                                 )
-                                .fill(theme::BOOTH),
+                                .fill(theme::booth()),
                             )
                             .clicked()
                         {
@@ -4599,14 +5381,18 @@ impl App {
                 .collect();
             if neighbours.is_empty() {
                 ui.label(
-                    RichText::new("none in key and in range").color(theme::DIM).size(theme::SMALL),
+                    RichText::new("none in key and in range")
+                        .color(theme::dim())
+                        .size(theme::SMALL),
                 );
             }
             for (id, name) in neighbours {
                 if ui
                     .add(
-                        egui::Label::new(RichText::new(name).color(theme::TEXT).size(theme::SMALL))
-                            .sense(egui::Sense::click()),
+                        egui::Label::new(
+                            RichText::new(name).color(theme::text()).size(theme::SMALL),
+                        )
+                        .sense(egui::Sense::click()),
                     )
                     .clicked()
                 {
@@ -4667,9 +5453,64 @@ impl App {
                         let before = playlist.tracks.len();
                         playlist.tracks.retain(|t| *t != id);
                         if playlist.tracks.len() != before {
-                            self.note(format!("removed from \u{201c}{name}\u{201d}"), theme::TEXT);
+                            self.note(
+                                format!("removed from \u{201c}{name}\u{201d}"),
+                                theme::text(),
+                            );
                             touched = true;
                         }
+                    }
+                }
+                Pending::UseDrive(at) => {
+                    if at < self.library.drives.len() && at != self.drive {
+                        self.drive = at;
+                        self.replan();
+                    }
+                }
+                Pending::ForgetDrive(at) => {
+                    if at >= self.library.drives.len() {
+                        continue;
+                    }
+                    let gone = self.library.drives.remove(at);
+                    crate::info!("forgot {} \u{2014} nothing on it was touched", gone.label);
+                    // Whatever is left, and the end of the list rather than a
+                    // hole in it: an index kept past a removal points at the
+                    // wrong drive, which is the worst kind of right-looking.
+                    self.drive = self.drive.min(self.library.drives.len().saturating_sub(1));
+                    self.replan();
+                    touched = true;
+                }
+                Pending::ToEmulator(at) => {
+                    let Some(drive) = self.library.drives.get(at).cloned() else { continue };
+                    if !drive.is_image {
+                        crate::warn!(
+                            "{} is a stick, not an image, and the emulator takes an image",
+                            drive.label
+                        );
+                        continue;
+                    }
+                    if !drive.path.is_file() {
+                        crate::warn!("{} is not there to send", drive.path.display());
+                        continue;
+                    }
+                    // Done here rather than on a worker because it is a
+                    // loopback socket: the emulator not running is a refused
+                    // connection, which comes back at once, and the wait only
+                    // bites on a host that swallows packets.
+                    let port = self.config.emulator_port;
+                    match booth_cli::emulator::send(("127.0.0.1", port), &drive.path) {
+                        booth_cli::emulator::Sent::Attached => {
+                            crate::info!("{} is in the emulator's USB slot", drive.path.display())
+                        }
+                        booth_cli::emulator::Sent::Revealed => crate::info!(
+                            "nothing is listening on port {port}, so {} is showing in a file \
+                             manager \u{2014} attach it with USB \u{2192} Attach virtual image",
+                            drive.path.display()
+                        ),
+                        booth_cli::emulator::Sent::Written(why) => crate::warn!(
+                            "{} did not reach the emulator: {why}",
+                            drive.path.display()
+                        ),
                     }
                 }
                 Pending::DrivePlaylist { name, on } => {
@@ -4704,6 +5545,7 @@ impl App {
                 Pending::Analyze(id) => self.analyze_tracks(&[id]),
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
+                Pending::AutoCue(id) => touched |= self.auto_cue_tracks(&[id]),
                 Pending::CopyPath(id) => {
                     // A companion's path is its stems, not its parent's file:
                     // copying the mix's path off an acapella row would be a
@@ -4716,7 +5558,7 @@ impl App {
                             .collect::<Vec<_>>()
                             .join("\n");
                         ctx.copy_text(path.clone());
-                        self.note(format!("copied {path}"), theme::TEXT);
+                        self.note(format!("copied {path}"), theme::text());
                     }
                 }
                 Pending::AddTag(id, tag) => {
@@ -4756,6 +5598,12 @@ impl App {
                 Pending::PlaceCue { id, letter, time_ms } => {
                     self.place_cue(id, letter, time_ms);
                     touched = true;
+                }
+                Pending::CountDifferently => {
+                    self.config.counting = self.config.counting.flipped();
+                    if let Err(e) = self.config.save(&self.config_path) {
+                        crate::warn!("could not save the settings: {e:#}");
+                    }
                 }
                 Pending::PaintAs(mode) => {
                     self.config.paint = mode;
@@ -4844,6 +5692,7 @@ impl App {
                     if let Some(track) = self.library.get_mut(id) {
                         track.cues.retain(|cue| cue.letter != letter);
                     }
+                    self.prep_changed(id);
                     touched = true;
                 }
                 Pending::RenameCue { id, letter, label } => {
@@ -4852,6 +5701,7 @@ impl App {
                             cue.label = label;
                         }
                     }
+                    self.prep_changed(id);
                     touched = true;
                 }
             }
@@ -4899,7 +5749,7 @@ impl App {
     fn identify_tracks(&mut self, ids: &[u32], announce: bool) {
         if ids.is_empty() {
             if announce {
-                self.note("nothing to identify", theme::DIM);
+                self.note("nothing to identify", theme::dim());
             }
             return;
         }
@@ -4908,7 +5758,7 @@ impl App {
             if announce {
                 self.note(
                     "no AcoustID key — put one in Settings, or set ACOUSTID_API_KEY",
-                    theme::AMBER,
+                    theme::amber(),
                 );
             }
             return;
@@ -4916,7 +5766,7 @@ impl App {
         let waiting = self.files_for(ids);
         if waiting.is_empty() {
             if announce {
-                self.note("nothing to identify", theme::DIM);
+                self.note("nothing to identify", theme::dim());
             }
             return;
         }
@@ -4930,7 +5780,7 @@ impl App {
     fn identify_showing(&mut self) {
         let waiting = self.acting_on(|track| !track.identified);
         if waiting.is_empty() {
-            self.note("nothing showing needs identifying", theme::DIM);
+            self.note("nothing showing needs identifying", theme::dim());
             return;
         }
         self.identify_tracks(&waiting, true);
@@ -5116,8 +5966,42 @@ impl App {
             other => other,
         };
 
+        // Where the boundary is now, so the cues that mark it can be taken
+        // with it. Read before the edit, because afterwards it is gone.
+        let was = match &snapped {
+            PhraseEdit::Move { at, .. } => track.phrases.get(*at).map(|p| p.start_ms),
+            _ => None,
+        };
+        // A beat, or a quarter second on a track with no tempo to ask.
+        let beat_ms = if track.bpm > 0.0 { 60_000.0 / track.bpm } else { 250.0 } as u32;
+
         let Some(track) = self.library.get_mut(id) else { return false };
-        crate::library::edit_phrases(&mut track.phrases, &snapped)
+        let changed = crate::library::edit_phrases(&mut track.phrases, &snapped);
+        if changed {
+            if let (Some(from), PhraseEdit::Move { at, .. }) = (was, &snapped) {
+                if let Some(to) = track.phrases.get(*at).map(|p| p.start_ms) {
+                    let moved = drag_cues(&mut track.cues, from, to, beat_ms);
+                    if moved > 0 {
+                        crate::debug!("took {} with the boundary", plural(moved, "cue"));
+                    }
+                }
+            }
+            self.prep_changed(id);
+        }
+        changed
+    }
+
+    /// Note that a track's prep changed here, and when.
+    ///
+    /// Called from every place that moves a cue, a boundary or a grid, because
+    /// a CDJ-3000X can move the same things on the drive and the two have to be
+    /// comparable. Deliberately not called for a tag, a rating or a play count:
+    /// a player has no opinion about those, so there is nothing to disagree
+    /// about and nothing to ask.
+    fn prep_changed(&mut self, id: u32) {
+        if let Some(track) = self.library.get_mut(id) {
+            track.edited = Some(crate::library::now());
+        }
     }
 
     fn place_cue(&mut self, id: u32, letter: u8, time_ms: u32) {
@@ -5138,6 +6022,7 @@ impl App {
             }),
         }
         track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
+        self.prep_changed(id);
     }
 
     /// Write one track's names into the file's own tags.
@@ -5157,13 +6042,13 @@ impl App {
         // code underneath would have written.
         match booth_cli::tag::tag_kind(&track.path) {
             Some(booth_cli::tag::TagKind::None) => {
-                self.note(format!("a .{} has nowhere to keep tags", track.format), theme::AMBER);
+                self.note(format!("a .{} has nowhere to keep tags", track.format), theme::amber());
                 return;
             }
             None => {
                 self.note(
                     format!("a .{} is not a file whose tags can be written", track.format),
-                    theme::AMBER,
+                    theme::amber(),
                 );
                 return;
             }
@@ -5223,10 +6108,10 @@ impl App {
                     egui::Button::new(
                         RichText::new(theme::label_text("Settings"))
                             .size(theme::LABEL)
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .strong(),
                     )
-                    .fill(theme::BOOTH),
+                    .fill(theme::booth()),
                 )
                 .on_hover_text("Where music is kept, and what to do about music from elsewhere")
                 .clicked()
@@ -5238,21 +6123,35 @@ impl App {
             ui.label(
                 RichText::new(theme::label_text("Drives"))
                     .size(theme::LABEL)
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .strong(),
             );
 
             match self.library.drives.get(self.drive).cloned() {
                 None => {
-                    ui.label(RichText::new("none set up").color(theme::DIM));
-                    if ui.button("Add a drive…").clicked() {
+                    ui.label(RichText::new("none set up").color(theme::dim()));
+                    if ui
+                        .button("Add a drive\u{2026}")
+                        .on_hover_text("Point at a mounted USB stick. It is written the way a player expects to find it.")
+                        .clicked()
+                    {
                         self.want_pick = Some(Picking::Drive);
                     }
-                    if ui.button("Or an image…").clicked() {
+                    if ui
+                        .button("Or an image\u{2026}")
+                        .on_hover_text("Write to a FAT32 disk image file instead, which can be handed to the emulator.")
+                        .clicked()
+                    {
                         self.want_pick = Some(Picking::Image);
                     }
                 }
                 Some(drive) => {
+                    // Whether this one is actually in a socket. A remembered
+                    // drive is a place and a history, not a stick, and the two
+                    // read identically until something asks — which is how a
+                    // drive that went home in a bag stays on screen as the
+                    // thing sync is about to write to.
+                    let here = plugged_in(&drive);
                     let mark = if drive.is_image { "▢" } else { "▣" };
                     let carries = drive.playlist_names();
                     let what = match carries.len() {
@@ -5260,44 +6159,141 @@ impl App {
                         1 => carries[0].clone(),
                         n => format!("{n} playlists"),
                     };
-                    ui.label(format!(
-                        "{mark} {} — {what} · {}",
-                        drive.label,
-                        plural(drive.written.len(), "track")
-                    ));
+                    ui.label(
+                        RichText::new(format!(
+                            "{mark} {} — {what} · {}",
+                            drive.label,
+                            plural(drive.written.len(), "track")
+                        ))
+                        .color(match here {
+                            true => theme::text(),
+                            false => theme::dim(),
+                        }),
+                    )
+                    .on_hover_text(match here {
+                        true => drive.path.display().to_string(),
+                        false => format!("{} is not there", drive.path.display()),
+                    });
+                    if !here {
+                        ui.label(RichText::new("not plugged in").color(theme::amber()));
+                    }
                     // Which playlists go on the stick is the decision the dock
                     // exists for, so it is a menu here rather than a setting
                     // somewhere else.
                     ui.menu_button("playlists\u{2026}", |ui| {
                         ui.set_min_width(190.0);
                         if self.library.playlists.is_empty() {
-                            ui.label(RichText::new("no playlists yet").color(theme::DIM));
+                            ui.label(RichText::new("no playlists yet").color(theme::dim()));
                         }
                         for (folder, lists) in self.library.playlist_tree() {
                             if !folder.is_empty() {
                                 ui.label(
-                                    RichText::new(&folder).color(theme::DIM).size(theme::SMALL),
+                                    RichText::new(&folder).color(theme::dim()).size(theme::SMALL),
                                 );
                             }
                             for playlist in lists {
                                 let name = playlist.name.clone();
                                 let mut on = carries.contains(&name);
+                                let about = format!(
+                                    "Carry {name} on this drive \u{2014} {}.",
+                                    plural(playlist.tracks.len(), "track")
+                                );
                                 if ui
                                     .checkbox(
                                         &mut on,
                                         format!("{name}  ({})", playlist.tracks.len()),
                                     )
+                                    .on_hover_text(about)
                                     .changed()
                                 {
                                     self.pending.push(Pending::DrivePlaylist { name, on });
                                 }
                             }
                         }
-                    });
-                    if self.library.drives.len() > 1 && ui.button("next").clicked() {
-                        self.drive = (self.drive + 1) % self.library.drives.len();
-                        self.replan();
-                    }
+                    })
+.response
+.on_hover_text("Choose which playlists this drive carries. A track in two of them is one track on the stick.");
+                    // Every drive the collection knows, named, with the ones
+                    // actually here marked as such — and a way to add another
+                    // from the same place. Adding used to be offered only
+                    // while the list was empty and switching only while it
+                    // held more than one, so the first drive set up was the
+                    // last: no way to add a second, no way to reach it, and
+                    // nothing saying the one on screen was in a drawer.
+                    ui.menu_button("drives\u{2026}", |ui| {
+                        ui.set_min_width(240.0);
+                        for (at, other) in self.library.drives.iter().enumerate() {
+                            let there = plugged_in(other);
+                            let mark = if other.is_image { "\u{25a2}" } else { "\u{25a3}" };
+                            let state = match there {
+                                true => String::new(),
+                                false => " · not plugged in".to_string(),
+                            };
+                            let label = RichText::new(format!("{mark} {}{state}", other.label))
+                                .color(match there {
+                                    true => theme::text(),
+                                    false => theme::dim(),
+                                });
+                            if ui
+                                .radio(at == self.drive, label)
+                                .on_hover_text(match there {
+                                    true => format!("Work with {}.", other.label),
+                                    false => format!(
+                                        "Work with {}. It is not plugged in, so the plan is \
+                                         worked out and nothing is written until it is.",
+                                        other.label
+                                    ),
+                                })
+                                .clicked()
+                            {
+                                self.pending.push(Pending::UseDrive(at));
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui
+                            .button("Add a drive\u{2026}")
+                            .on_hover_text("Point at another mounted USB stick.")
+                            .clicked()
+                        {
+                            self.want_pick = Some(Picking::Drive);
+                            ui.close();
+                        }
+                        if ui
+                            .button("Add an image\u{2026}")
+                            .on_hover_text("Write to a FAT32 disk image file, which the emulator can be handed.")
+                            .clicked()
+                        {
+                            self.want_pick = Some(Picking::Image);
+                            ui.close();
+                        }
+                        // Only for an image: the emulator's slot takes a file,
+                        // and a mounted stick is not one.
+                        if drive.is_image
+                            && ui
+                                .button("Send to the emulator")
+                                .on_hover_text(
+                                    "Puts this image in a running CDJ-3000 emulator's USB slot",
+                                )
+                                .clicked()
+                        {
+                            self.pending.push(Pending::ToEmulator(self.drive));
+                            ui.close();
+                        }
+                        // Forgetting is not unplugging: what goes is this
+                        // program's record of what it wrote, and the stick
+                        // keeps everything on it.
+                        if ui
+                            .button("Forget this one")
+                            .on_hover_text("Takes it off this list. Nothing on the drive changes.")
+                            .clicked()
+                        {
+                            self.pending.push(Pending::ForgetDrive(self.drive));
+                            ui.close();
+                        }
+                    })
+.response
+.on_hover_text("Switch between the drives set up here, add another, or hand an image to the emulator.");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Open whenever there is a drive and nothing running,
@@ -5315,16 +6311,16 @@ impl App {
                                     RichText::new(theme::label_text("Sync"))
                                         .size(11.0)
                                         .color(match empty {
-                                            true => theme::TEXT,
-                                            false => theme::BOOTH,
+                                            true => theme::text(),
+                                            false => theme::booth(),
                                         })
                                         .strong(),
                                 )
                                 // Quiet when there is nothing to write, so the
                                 // button being there is not itself a summons.
                                 .fill(match empty {
-                                    true => theme::BOOTH_2,
-                                    false => theme::AMBER,
+                                    true => theme::booth_2(),
+                                    false => theme::amber(),
                                 }),
                             )
                             .on_hover_text(match empty {
@@ -5333,12 +6329,13 @@ impl App {
                             })
                             .clicked()
                         {
+                            self.examine_drive();
                             self.sheet = true;
                         }
                         ui.label(
                             RichText::new(self.plan.delta())
                                 .font(theme::mono(11.5))
-                                .color(theme::AMBER),
+                                .color(theme::amber()),
                         );
                     });
                 }
@@ -5355,10 +6352,10 @@ impl App {
                 egui::Button::new(
                     RichText::new(theme::label_text("Log"))
                         .size(theme::LABEL)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .strong(),
                 )
-                .fill(theme::BOOTH),
+                .fill(theme::booth()),
             )
             .on_hover_text("Open the log in its own window")
             .clicked()
@@ -5381,7 +6378,7 @@ impl App {
         ui.add_space(4.0);
 
         if entries.is_empty() {
-            ui.label(RichText::new("nothing yet").font(theme::mono(10.5)).color(theme::DIM));
+            ui.label(RichText::new("nothing yet").font(theme::mono(10.5)).color(theme::dim()));
             return;
         }
 
@@ -5432,7 +6429,7 @@ impl App {
                     RichText::new(
                         "These files are named nothing like the tags about to go into them.                          That is usually a fingerprint that found the wrong record — and                          tagging is the one thing here that writes to your files.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -5443,7 +6440,7 @@ impl App {
                             ui.vertical(|ui| {
                                 ui.label(
                                     RichText::new(format!("{} — {}", write.artist, write.title))
-                                        .color(theme::TEXT),
+                                        .color(theme::text()),
                                 );
                                 ui.label(
                                     RichText::new(format!(
@@ -5455,13 +6452,17 @@ impl App {
                                             .to_string_lossy()
                                     ))
                                     .font(theme::mono(10.0))
-                                    .color(theme::AMBER),
+                                    .color(theme::amber()),
                                 );
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button("Leave it").clicked() {
+                                    if ui
+                                        .button("Leave it")
+                                        .on_hover_text("Keep the name the collection has. Nothing is written to the file.")
+                                        .clicked()
+                                    {
                                         self.pending.push(Pending::AnswerNaming {
                                             id: write.id,
                                             write: false,
@@ -5471,10 +6472,10 @@ impl App {
                                         .add(
                                             egui::Button::new(
                                                 RichText::new("Tag it anyway")
-                                                    .color(theme::BOOTH)
+                                                    .color(theme::booth())
                                                     .strong(),
                                             )
-                                            .fill(theme::AMBER),
+                                            .fill(theme::amber()),
                                         )
                                         .clicked()
                                     {
@@ -5492,13 +6493,21 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Tag them all").clicked() {
+                    if ui
+                        .button("Tag them all")
+                        .on_hover_text("Write the collection's names into every one of these files' tags.")
+                        .clicked()
+                    {
                         for write in &held {
                             self.pending
                                 .push(Pending::AnswerNaming { id: write.id, write: true });
                         }
                     }
-                    if ui.button("Leave them all").clicked() {
+                    if ui
+                        .button("Leave them all")
+                        .on_hover_text("Answer no to every one. Nothing changes, here or on disk.")
+                        .clicked()
+                    {
                         for write in &held {
                             self.pending
                                 .push(Pending::AnswerNaming { id: write.id, write: false });
@@ -5506,7 +6515,7 @@ impl App {
                     }
                     ui.label(
                         RichText::new("Leaving one alone changes nothing, here or on disk.")
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                     );
                 });
@@ -5544,7 +6553,7 @@ impl App {
                          are somebody's answer already.",
                         threshold * 100.0
                     ))
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -5556,11 +6565,12 @@ impl App {
                             ui.label(
                                 RichText::new(format!("{:.0}%", question.candidate.score * 100.0))
                                     .font(theme::mono(11.0))
-                                    .color(if confident { theme::GO } else { theme::AMBER }),
+                                    .color(if confident { theme::go() } else { theme::amber() }),
                             );
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new(question.candidate.describe()).color(theme::TEXT),
+                                    RichText::new(question.candidate.describe())
+                                        .color(theme::text()),
                                 );
                                 ui.label(
                                     RichText::new(format!(
@@ -5568,7 +6578,7 @@ impl App {
                                         question.current, question.source
                                     ))
                                     .font(theme::mono(10.0))
-                                    .color(theme::DIM),
+                                    .color(theme::dim()),
                                 );
                                 // Only when the path says something else. Two
                                 // answers that both look right is the case a
@@ -5577,21 +6587,28 @@ impl App {
                                     ui.label(
                                         RichText::new(format!("path: {}", from_path.describe()))
                                             .font(theme::mono(10.0))
-                                            .color(theme::AMBER),
+                                            .color(theme::amber()),
                                     );
                                 }
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button("Keep mine").clicked() {
+                                    if ui
+                                        .button("Keep mine")
+                                        .on_hover_text("Keep the names the collection already has for this track.")
+                                        .clicked()
+                                    {
                                         self.pending.push(Pending::AnswerMatch {
                                             id: question.id,
                                             answer: crate::identify::Answer::Mine,
                                         });
                                     }
                                     if question.from_path.is_some()
-                                        && ui.button("Use the path").clicked()
+                                        && ui
+                                            .button("Use the path")
+                                            .on_hover_text("Take the artist and title read out of the file's own name.")
+                                            .clicked()
                                     {
                                         self.pending.push(Pending::AnswerMatch {
                                             id: question.id,
@@ -5602,10 +6619,10 @@ impl App {
                                         .add(
                                             egui::Button::new(
                                                 RichText::new("Use this")
-                                                    .color(theme::BOOTH)
+                                                    .color(theme::booth())
                                                     .strong(),
                                             )
-                                            .fill(theme::AMBER),
+                                            .fill(theme::amber()),
                                         )
                                         .clicked()
                                     {
@@ -5623,7 +6640,11 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Use all").clicked() {
+                    if ui
+                        .button("Use all")
+                        .on_hover_text("Take the fingerprint's answer for every question here.")
+                        .clicked()
+                    {
                         for question in &questions {
                             self.pending.push(Pending::AnswerMatch {
                                 id: question.id,
@@ -5631,7 +6652,11 @@ impl App {
                             });
                         }
                     }
-                    if ui.button("Keep all of mine").clicked() {
+                    if ui
+                        .button("Keep all of mine")
+                        .on_hover_text("Leave every one of these tracks named as the collection has it.")
+                        .clicked()
+                    {
                         for question in &questions {
                             self.pending.push(Pending::AnswerMatch {
                                 id: question.id,
@@ -5641,7 +6666,7 @@ impl App {
                     }
                     ui.label(
                         RichText::new("Nothing is written to any file by answering these.")
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                     );
                 });
@@ -5759,8 +6784,8 @@ impl App {
             .max_height(sheet_height(ctx))
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -5775,7 +6800,7 @@ impl App {
                             plural(unchecked, "track"),
                             if unchecked == 1 { "has" } else { "have" },
                         ))
-                        .color(theme::AMBER)
+                        .color(theme::amber())
                         .size(theme::SMALL),
                     );
                     ui.add_space(4.0);
@@ -5800,7 +6825,7 @@ impl App {
                             0 => "Nothing is in here twice.",
                             _ => "Nothing among the tracks looked at so far is in here twice.",
                         })
-                        .color(theme::DIM),
+                        .color(theme::dim()),
                     );
                     return;
                 }
@@ -5811,7 +6836,7 @@ impl App {
                          same rip tagged twice is one record here. Ticked is kept; what the \
                          rest know is folded into it before they go.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -5838,7 +6863,7 @@ impl App {
                             if let Some(track) = self.library.get(group.into) {
                                 ui.label(
                                     RichText::new(track.display_title())
-                                        .color(theme::TEXT)
+                                        .color(theme::text())
                                         .size(theme::BODY),
                                 );
                             }
@@ -5889,14 +6914,14 @@ impl App {
                                                 ui,
                                                 &path,
                                                 match kept {
-                                                    true => theme::GO,
-                                                    false => theme::DIM,
+                                                    true => theme::go(),
+                                                    false => theme::dim(),
                                                 },
                                             );
                                             let (note, color) = match (kept, same, answered) {
-                                                (true, _, _) => ("keep".to_string(), theme::GO),
+                                                (true, _, _) => ("keep".to_string(), theme::go()),
                                                 (false, true, _) => {
-                                                    ("identical".to_string(), theme::DIM)
+                                                    ("identical".to_string(), theme::dim())
                                                 }
                                                 (false, false, false) => (
                                                     format!(
@@ -5907,10 +6932,10 @@ impl App {
                                                             .collect::<Vec<_>>()
                                                             .join(", ")
                                                     ),
-                                                    theme::ALERT,
+                                                    theme::alert(),
                                                 ),
                                                 (false, false, true) => {
-                                                    (plan.summary(), theme::AMBER)
+                                                    (plan.summary(), theme::amber())
                                                 }
                                             };
                                             ui.label(
@@ -5931,7 +6956,7 @@ impl App {
                                                         track.tags.join("  ")
                                                     ))
                                                     .font(theme::mono(10.0))
-                                                    .color(theme::DIM),
+                                                    .color(theme::dim()),
                                                 );
                                             });
                                         }
@@ -5955,7 +6980,7 @@ impl App {
                                                 ui.label(
                                                     RichText::new("keep tags")
                                                         .size(theme::SMALL)
-                                                        .color(theme::DIM),
+                                                        .color(theme::dim()),
                                                 );
                                                 // A file kept alongside the
                                                 // first starts as itself rather
@@ -5976,9 +7001,9 @@ impl App {
                                                             RichText::new(tag)
                                                                 .size(theme::SMALL)
                                                                 .color(match (on, mine) {
-                                                                    (false, _) => theme::DIM,
-                                                                    (true, true) => theme::TEXT,
-                                                                    (true, false) => theme::AMBER,
+                                                                    (false, _) => theme::dim(),
+                                                                    (true, true) => theme::text(),
+                                                                    (true, false) => theme::amber(),
                                                                 }),
                                                         )
                                                         .on_hover_text(match mine {
@@ -6008,7 +7033,7 @@ impl App {
                                                         conflict.field.name()
                                                     ))
                                                     .size(theme::SMALL)
-                                                    .color(theme::DIM),
+                                                    .color(theme::dim()),
                                                 );
                                                 for (side, value) in [
                                                     (Side::Kept, &conflict.kept),
@@ -6080,10 +7105,10 @@ impl App {
                                     plural(going.len(), "file"),
                                     crate::sync::bytes(bytes)
                                 ))
-                                .color(theme::BOOTH)
+                                .color(theme::booth())
                                 .strong(),
                             )
-                            .fill(theme::ALERT),
+                            .fill(theme::alert()),
                         )
                         .on_hover_text(
                             "To the trash, not gone: this is the one thing here that touches \
@@ -6109,7 +7134,7 @@ impl App {
                                 if waiting == 1 { "its" } else { "each" },
                             ))
                             .size(theme::SMALL)
-                            .color(theme::ALERT),
+                            .color(theme::alert()),
                         );
                     }
                 });
@@ -6191,7 +7216,7 @@ impl App {
                         "These were kept, and the files they were copied from have gone — so \
                          the plain name is free again.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -6206,16 +7231,16 @@ impl App {
                                 ui.add_space(6.0);
                                 ui.vertical(|ui| {
                                     ui.horizontal_wrapped(|ui| {
-                                        path_label(ui, &from, theme::DIM);
+                                        path_label(ui, &from, theme::dim());
                                     });
                                     ui.horizontal_wrapped(|ui| {
                                         ui.add_space(10.0);
                                         ui.label(
                                             RichText::new("\u{2192}")
                                                 .font(theme::mono(10.0))
-                                                .color(theme::GO),
+                                                .color(theme::go()),
                                         );
-                                        path_label(ui, plain, theme::GO);
+                                        path_label(ui, plain, theme::go());
                                     });
                                 });
                             });
@@ -6230,7 +7255,7 @@ impl App {
                                 RichText::new(format!("Rename {}", plural(offers.len(), "file")))
                                     .strong(),
                             )
-                            .fill(theme::BOOTH_2),
+                            .fill(theme::booth_2()),
                         )
                         .on_hover_text("Renames the files on disk, and follows them here")
                         .clicked()
@@ -6276,12 +7301,12 @@ impl App {
                 }
                 Err(e) => {
                     crate::warn!("could not rename {}: {e}", from.display());
-                    self.note(format!("{} would not rename", from.display()), theme::ALERT);
+                    self.note(format!("{} would not rename", from.display()), theme::alert());
                 }
             }
         }
         if done > 0 {
-            self.note(format!("{} renamed", plural(done, "file")), theme::TEXT);
+            self.note(format!("{} renamed", plural(done, "file")), theme::text());
             self.save();
         }
     }
@@ -6356,8 +7381,8 @@ impl App {
             .max_height(sheet_height(ctx))
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -6373,7 +7398,7 @@ impl App {
                             }
                         ),
                     })
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
@@ -6387,7 +7412,7 @@ impl App {
                                       the collection says."
                             }
                         })
-                        .color(theme::GO),
+                        .color(theme::go()),
                     );
                     if !deep {
                         ui.add_space(4.0);
@@ -6396,7 +7421,7 @@ impl App {
                                 "A file edited in place without changing length would not \
                                  show up here. Checking that means reading every byte.",
                             )
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                         );
                     }
@@ -6416,7 +7441,7 @@ impl App {
                             if let Some(track) = self.library.get(report.id) {
                                 ui.label(
                                     RichText::new(track.display_title())
-                                        .color(theme::TEXT)
+                                        .color(theme::text())
                                         .size(theme::BODY),
                                 );
                             }
@@ -6424,7 +7449,7 @@ impl App {
                                 ui.add_space(14.0);
                                 ui.vertical(|ui| {
                                     ui.horizontal_wrapped(|ui| {
-                                        path_label(ui, &report.path, theme::DIM);
+                                        path_label(ui, &report.path, theme::dim());
                                     });
                                     for trouble in &report.troubles {
                                         ui.horizontal_wrapped(|ui| {
@@ -6440,9 +7465,9 @@ impl App {
                                                             trouble.is_a_choice(),
                                                             trouble.is_fixable(),
                                                         ) {
-                                                            (true, _) => theme::TEXT,
-                                                            (_, true) => theme::AMBER,
-                                                            _ => theme::ALERT,
+                                                            (true, _) => theme::text(),
+                                                            (_, true) => theme::amber(),
+                                                            _ => theme::alert(),
                                                         },
                                                     ),
                                             );
@@ -6460,7 +7485,7 @@ impl App {
                                                         "{stored}  \u{2192}  {file}"
                                                     ))
                                                     .font(theme::mono(10.0))
-                                                    .color(theme::TEXT),
+                                                    .color(theme::text()),
                                                 );
                                             }
                                         });
@@ -6489,12 +7514,12 @@ impl App {
                                                 ui.label(
                                                     RichText::new(stored)
                                                         .font(theme::mono(10.0))
-                                                        .color(theme::TEXT),
+                                                        .color(theme::text()),
                                                 );
                                                 ui.label(
                                                     RichText::new("the tags")
                                                         .size(theme::SMALL)
-                                                        .color(theme::DIM),
+                                                        .color(theme::dim()),
                                                 );
                                             });
                                             ui.horizontal_wrapped(|ui| {
@@ -6514,12 +7539,12 @@ impl App {
                                                 ui.label(
                                                     RichText::new(from_path.describe())
                                                         .font(theme::mono(10.0))
-                                                        .color(theme::TEXT),
+                                                        .color(theme::text()),
                                                 );
                                                 ui.label(
                                                     RichText::new("the file name")
                                                         .size(theme::SMALL)
-                                                        .color(theme::DIM),
+                                                        .color(theme::dim()),
                                                 );
                                             });
                                         }
@@ -6539,7 +7564,7 @@ impl App {
                                     "{} in the library folder that no track points at",
                                     plural(orphans.len(), "file")
                                 ))
-                                .color(theme::TEXT)
+                                .color(theme::text())
                                 .size(theme::BODY),
                             );
                             for path in orphans.iter().take(ORPHANS_SHOWN) {
@@ -6547,7 +7572,7 @@ impl App {
                                     ui.add_space(14.0);
                                     ui.vertical(|ui| {
                                         ui.horizontal_wrapped(|ui| {
-                                            path_label(ui, path, theme::DIM);
+                                            path_label(ui, path, theme::dim());
                                         });
                                     });
                                 });
@@ -6561,7 +7586,7 @@ impl App {
                                             orphans.len() - ORPHANS_SHOWN
                                         ))
                                         .size(theme::SMALL)
-                                        .color(theme::DIM),
+                                        .color(theme::dim()),
                                     );
                                 });
                             }
@@ -6580,7 +7605,7 @@ impl App {
                                     ))
                                     .strong(),
                                 )
-                                .fill(theme::BOOTH_2),
+                                .fill(theme::booth_2()),
                             )
                             .on_hover_text(
                                 "A file's size and its tags are facts about the file, so where \
@@ -6598,10 +7623,10 @@ impl App {
                                         "Forget {}",
                                         plural(missing.len(), "missing track")
                                     ))
-                                    .color(theme::BOOTH)
+                                    .color(theme::booth())
                                     .strong(),
                                 )
-                                .fill(theme::ALERT),
+                                .fill(theme::alert()),
                             )
                             .on_hover_text(
                                 "Only the records go. There is no file to delete — though an \
@@ -6621,7 +7646,7 @@ impl App {
                                     ))
                                     .strong(),
                                 )
-                                .fill(theme::BOOTH_2),
+                                .fill(theme::booth_2()),
                             )
                             .on_hover_text("Read them in, as an import would")
                             .clicked()
@@ -6641,7 +7666,7 @@ impl App {
                                     ))
                                     .strong(),
                                 )
-                                .fill(theme::BOOTH_2),
+                                .fill(theme::booth_2()),
                             )
                             .on_hover_text(
                                 "Only the ones set to the file name. Nothing is written to \
@@ -6661,7 +7686,7 @@ impl App {
             for id in &forget {
                 self.library.remove(*id);
             }
-            self.note(format!("{} forgotten", plural(forget.len(), "track")), theme::TEXT);
+            self.note(format!("{} forgotten", plural(forget.len(), "track")), theme::text());
             self.checked = None;
             self.rebuild();
             self.save();
@@ -6726,7 +7751,7 @@ impl App {
         if renamed > 0 {
             self.note(
                 format!("{} renamed from their files", plural(renamed, "track")),
-                theme::TEXT,
+                theme::text(),
             );
             self.checked = None;
             self.rebuild();
@@ -6748,6 +7773,22 @@ impl App {
         let Some(checked) = &self.checked else { return };
         let reports: Vec<crate::verify::Report> =
             checked.troubles.iter().filter(|report| ids.contains(&report.id)).cloned().collect();
+
+        // The one trouble in the sheet put right by changing the file rather
+        // than the record. Done before the rest, because a file that cannot be
+        // read is a file whose flag is why.
+        let flagged: Vec<PathBuf> = reports
+            .iter()
+            .filter(|report| {
+                report
+                    .troubles
+                    .contains(&crate::verify::Trouble::Slow(crate::storage::Slow::Quarantined))
+            })
+            .map(|report| report.path.clone())
+            .collect();
+        if !flagged.is_empty() {
+            self.clear_quarantine(&flagged);
+        }
 
         let mut put_right = 0usize;
         let mut restale = 0usize;
@@ -6803,12 +7844,56 @@ impl App {
                         n
                     ),
                 },
-                theme::TEXT,
+                theme::text(),
             );
             self.checked = None;
             self.rebuild();
             self.save();
         }
+    }
+
+    /// Take the macOS quarantine flag off these files.
+    ///
+    /// A folder holding more than one of them is swept whole, which is what
+    /// `xattr -r -d` does and what a person would run: clearing the files alone
+    /// leaves the folder to hand the flag straight back to the next thing
+    /// copied into it. The rest are cleared one by one, and a file somebody
+    /// else owns is reported rather than allowed to stop the others.
+    fn clear_quarantine(&mut self, paths: &[PathBuf]) {
+        let roots = crate::storage::roots(paths);
+        let mut cleared = 0usize;
+        let mut refused = Vec::new();
+        for root in &roots {
+            let (count, no) = crate::storage::clear_tree(root);
+            crate::info!("{}: cleared {count} entries", crate::storage::command_for(root, true));
+            cleared += count;
+            refused.extend(no);
+        }
+        for path in paths.iter().filter(|path| !roots.iter().any(|root| path.starts_with(root))) {
+            match crate::storage::clear(path) {
+                Ok(()) => cleared += 1,
+                Err(e) => refused.push((path.clone(), e)),
+            }
+        }
+
+        for (path, why) in &refused {
+            crate::warn!("could not unquarantine {}: {why}", path.display());
+        }
+        crate::info!("took the quarantine flag off {}", plural(cleared, "file"));
+        self.note(
+            match refused.is_empty() {
+                true => format!("unquarantined {}", plural(cleared, "file")),
+                false => format!(
+                    "unquarantined {}, {} refused — see the log",
+                    plural(cleared, "file"),
+                    refused.len()
+                ),
+            },
+            match refused.is_empty() {
+                true => theme::text(),
+                false => theme::amber(),
+            },
+        );
     }
 
     /// Read the tracks that have never been hashed, so they can be compared.
@@ -6838,8 +7923,8 @@ impl App {
             .anchor(egui::Align2::LEFT_TOP, [24.0, 56.0])
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -6848,7 +7933,7 @@ impl App {
                         "Terms narrow the list together. Put a - or ! in front of one to \
                          exclude it, and quotes around anything with a space in it.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(10.0);
@@ -6865,10 +7950,12 @@ impl App {
                                         egui::Label::new(
                                             RichText::new(help.example)
                                                 .font(theme::mono(11.0))
-                                                .color(theme::AMBER),
+                                                .color(theme::amber()),
                                         )
                                         .sense(egui::Sense::click()),
                                     );
+                                    let example = example
+                                        .on_hover_text("Click to put this in the search bar.");
                                     if example.clicked() {
                                         chosen = Some(help.example.to_string());
                                     }
@@ -6877,7 +7964,7 @@ impl App {
                                     }
                                     ui.label(
                                         RichText::new(help.means)
-                                            .color(theme::DIM)
+                                            .color(theme::dim())
                                             .size(theme::SMALL),
                                     );
                                 });
@@ -6915,7 +8002,7 @@ impl App {
                 egui::TopBottomPanel::top("log-bar")
                     .frame(
                         egui::Frame::NONE
-                            .fill(theme::BOOTH_2)
+                            .fill(theme::booth_2())
                             .inner_margin(egui::Margin::symmetric(10, 7)),
                     )
                     .show(ctx, |ui| {
@@ -6927,12 +8014,16 @@ impl App {
                                         egui::Button::new(
                                             RichText::new(shown.label())
                                                 .font(theme::mono(10.5))
-                                                .color(if on { theme::BOOTH } else { theme::DIM }),
+                                                .color(if on {
+                                                    theme::booth()
+                                                } else {
+                                                    theme::dim()
+                                                }),
                                         )
                                         .fill(if on {
-                                            theme::AMBER
+                                            theme::amber()
                                         } else {
-                                            theme::BOOTH
+                                            theme::booth()
                                         }),
                                     )
                                     .on_hover_text(format!("show {shown} and above"))
@@ -6976,7 +8067,7 @@ impl App {
                                             "line",
                                         ))
                                         .font(theme::mono(10.0))
-                                        .color(theme::DIM),
+                                        .color(theme::dim()),
                                     )
                                     .on_hover_text(
                                         crate::log::default_path().display().to_string(),
@@ -6987,7 +8078,9 @@ impl App {
                     });
 
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE.fill(theme::BOOTH).inner_margin(egui::Margin::same(8)))
+                    .frame(
+                        egui::Frame::NONE.fill(theme::booth()).inner_margin(egui::Margin::same(8)),
+                    )
                     .show(ctx, |ui| {
                         egui::ScrollArea::both()
                             .auto_shrink([false, false])
@@ -6995,17 +8088,17 @@ impl App {
                             .show_rows(ui, 14.0, entries.len(), |ui, range| {
                                 for entry in &entries[range] {
                                     let color = match entry.level {
-                                        crate::log::Level::Error => theme::ALERT,
-                                        crate::log::Level::Warn => theme::AMBER,
-                                        crate::log::Level::Info => theme::TEXT,
-                                        _ => theme::DIM,
+                                        crate::log::Level::Error => theme::alert(),
+                                        crate::log::Level::Warn => theme::amber(),
+                                        crate::log::Level::Info => theme::text(),
+                                        _ => theme::dim(),
                                     };
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 8.0;
                                         ui.label(
                                             RichText::new(entry.stamp())
                                                 .font(theme::mono(10.5))
-                                                .color(theme::DIM),
+                                                .color(theme::dim()),
                                         );
                                         ui.label(
                                             RichText::new(entry.level.tag())
@@ -7058,7 +8151,7 @@ impl App {
                             "Where music copied into the collection is kept, one folder per \
                          artist — the same shape a drive gets.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     ui.horizontal(|ui| {
@@ -7074,7 +8167,11 @@ impl App {
                             self.config.library_path = PathBuf::from(shown.trim());
                             changed = true;
                         }
-                        if ui.button("Choose…").clicked() {
+                        if ui
+                            .button("Choose\u{2026}")
+                            .on_hover_text("Pick the folder the collection's own copies of tracks are kept in.")
+                            .clicked()
+                        {
                             pick_library = true;
                         }
                     });
@@ -7089,7 +8186,7 @@ impl App {
                             changed = true;
                         }
                         ui.label(
-                            RichText::new(policy.blurb()).color(theme::DIM).size(theme::SMALL),
+                            RichText::new(policy.blurb()).color(theme::dim()).size(theme::SMALL),
                         );
                         ui.add_space(4.0);
                     }
@@ -7104,7 +8201,7 @@ impl App {
                             changed = true;
                         }
                         ui.label(
-                            RichText::new(quality.blurb()).color(theme::DIM).size(theme::SMALL),
+                            RichText::new(quality.blurb()).color(theme::dim()).size(theme::SMALL),
                         );
                     }
                     ui.label(
@@ -7112,7 +8209,71 @@ impl App {
                             "A kit is rendered once and then played for years, so the slow one is \
                          the default. The fast one is for a first pass over a whole library.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Hover help");
+                    ui.horizontal(|ui| {
+                        let mut delay = self.config.help_delay_ms;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut delay, 0..=2000)
+                                    .suffix(" ms")
+                                    .step_by(50.0),
+                            )
+                            .on_hover_text(
+                                "How long the pointer has to rest on a control before its help \
+                                 appears. Zero shows it at once; drag it right once you know \
+                                 the window.",
+                            )
+                            .changed()
+                        {
+                            self.config.help_delay_ms = delay;
+                            changed = true;
+                        }
+                    });
+                    ui.label(
+                        RichText::new(
+                            "Every button, box and switch in the window says what it does when \
+                             the pointer rests on it. This is the resting. Settings opens on \
+                             \u{2318}, \u{2014} or ctrl-, where that is the key.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Colours");
+                    ui.horizontal_wrapped(|ui| {
+                        for scheme in theme::SCHEMES {
+                            // Each name written in its own scheme's accent, so
+                            // the list is a sample of what it is offering
+                            // rather than eleven words.
+                            let label = RichText::new(scheme.name).color(scheme.amber);
+                            let picked = self.config.theme == scheme.name;
+                            if ui
+                                .radio(picked, label)
+                                .on_hover_text(format!("Draw the window in {}.", scheme.name))
+                                .clicked()
+                                && !picked
+                            {
+                                self.config.theme = scheme.name.to_string();
+                                theme::use_scheme(scheme.name);
+                                theme::install(ui.ctx());
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.label(
+                        RichText::new(
+                            "Ten colour schemes out of editors and one of this program's own. \
+                             The eight hot cue colours are not among them: those are written \
+                             into the cues and go on the drive, so a player lights its buttons \
+                             with them.",
+                        )
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
 
@@ -7120,7 +8281,10 @@ impl App {
                     pane_label(ui, "Track length");
                     ui.horizontal(|ui| {
                         for unit in crate::config::Length::ALL {
-                            if ui.radio_value(&mut self.config.length, unit, unit.label()).changed()
+                            if ui
+                                .radio_value(&mut self.config.length, unit, unit.label())
+                                .on_hover_text(format!("Show a track's length in {}.", unit.label()))
+                                .changed()
                             {
                                 changed = true;
                             }
@@ -7129,7 +8293,7 @@ impl App {
                             RichText::new(
                                 "Four beats to the bar, as the drive's own format counts.",
                             )
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                         );
                     });
@@ -7147,7 +8311,7 @@ impl App {
                     }
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("AcoustID key").color(theme::DIM).size(theme::SMALL),
+                            RichText::new("AcoustID key").color(theme::dim()).size(theme::SMALL),
                         );
                         if ui
                             .add(
@@ -7160,8 +8324,13 @@ impl App {
                                             Err(_) => "free from acoustid.org/new-application",
                                         })
                                         .monospace()
-                                        .color(theme::DIM),
+                                        .color(theme::dim()),
                                     ),
+                            )
+                            .on_hover_text(
+                                "Your own AcoustID key, used when looking up what a track is. \
+                                 Free from acoustid.org; the environment variable is used when \
+                                 this is empty.",
                             )
                             .changed()
                         {
@@ -7175,6 +8344,10 @@ impl App {
                                 .suffix("%")
                                 .text("apply without asking at"),
                         )
+                        .on_hover_text(
+                            "How sure a lookup has to be before its answer is written in \
+                             without asking. Below this, the match is put to you.",
+                        )
                         .changed()
                     {
                         self.config.autotag_score = percent / 100.0;
@@ -7186,7 +8359,7 @@ impl App {
                          the file's tags, the match is put to you instead. Nothing under 50% \
                          is offered at all.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
 
@@ -7199,7 +8372,9 @@ impl App {
                         {
                             changed = true;
                         }
-                        ui.label(RichText::new(level.blurb()).color(theme::DIM).size(theme::SMALL));
+                        ui.label(
+                            RichText::new(level.blurb()).color(theme::dim()).size(theme::SMALL),
+                        );
                         ui.add_space(4.0);
                     }
                     ui.label(
@@ -7210,9 +8385,77 @@ impl App {
                          FLAC and MP3 only — a WAV has nowhere to put them. The inspector's \
                          own button always overwrites, whatever this says.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Words");
+                    ui.label(
+                        RichText::new(
+                            "Cueing a track by what is sung on it needs a speech recogniser, \
+                         and Booth does not ship one or download one. Install whisper.cpp \
+                         and point at a ggml model file, or install OpenAI's `whisper` and \
+                         name the program `whisper` here. Everything else in the program \
+                         works without this; only the words need it.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+                    let mut program = self.config.whisper.program.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut program)
+                                .desired_width(ui.available_width())
+                                .hint_text("whisper-cli, or a path to it")
+                                .font(theme::mono(11.0)),
+                        )
+                        .on_hover_text(
+                            "Which of the two it is comes from this name: `whisper` is \
+                             OpenAI's, anything else is whisper.cpp. BOOTH_WHISPER_BIN when \
+                             this is empty.",
+                        )
+                        .changed()
+                    {
+                        self.config.whisper.program = program.trim().to_string();
+                        changed = true;
+                    }
+                    let mut model = self.config.whisper.model.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut model)
+                                .desired_width(ui.available_width())
+                                .hint_text("path to ggml-base.en.bin, or a model name")
+                                .font(theme::mono(11.0)),
+                        )
+                        .on_hover_text(
+                            "whisper.cpp cannot run without a model file. OpenAI's picks its \
+                             own from a name like `small` or `turbo`. BOOTH_WHISPER_MODEL \
+                             when this is empty.",
+                        )
+                        .changed()
+                    {
+                        self.config.whisper.model = model.trim().to_string();
+                        changed = true;
+                    }
+                    let mut language = self.config.whisper.language.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut language)
+                                .desired_width(ui.available_width())
+                                .hint_text("en")
+                                .font(theme::mono(11.0)),
+                        )
+                        .on_hover_text(
+                            "Worth setting. Left to itself the recogniser guesses the language \
+                             off the first few seconds, and the first few seconds of an \
+                             isolated vocal are usually a breath.",
+                        )
+                        .changed()
+                    {
+                        self.config.whisper.language = language.trim().to_string();
+                        changed = true;
+                    }
 
                     ui.add_space(14.0);
                     pane_label(ui, "rekordbox");
@@ -7223,7 +8466,7 @@ impl App {
                          nothing to fill in here. It is only worth using if AlphaTheta ever \
                          changes the key: put the new one here, or in REKORDBOX_KEY.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     let mut key = self.config.rekordbox_key.clone();
@@ -7234,6 +8477,10 @@ impl App {
                                 .hint_text("SQLCipher key")
                                 .password(true)
                                 .font(theme::mono(11.0)),
+                        )
+                        .on_hover_text(
+                            "The key rekordbox's own master.db is encrypted with. This build \
+                             carries it; this is here for the day it changes.",
                         )
                         .changed()
                     {
@@ -7249,7 +8496,7 @@ impl App {
                          This is here for the same reason as the one above: the day the key \
                          changes, it is what keeps the program working.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     let mut onelibrary = self.config.onelibrary_key.clone();
@@ -7288,7 +8535,7 @@ impl App {
                          audio is linked to the library's own copy rather than copied, so a \
                          drive costs megabytes.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     if ui
@@ -7298,24 +8545,33 @@ impl App {
                         changed = true;
                     }
                     ui.horizontal_wrapped(|ui| {
-                        path_label(ui, &self.config.backups_path.clone(), theme::DIM);
+                        path_label(ui, &self.config.backups_path.clone(), theme::dim());
                     });
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
-                            "Music on somebody else's drive that the library has no copy of. \
-                         Yours is always linked, whatever this says — a track is recognised by \
-                         its sound, so a rename or a retag does not make a second copy of it.",
+                            "Music on another laptop's stick, or somebody else's, that the \
+                             library has no copy of. Yours is always linked, whatever this says \
+                             \u{2014} a track is recognised by its sound, so a rename or a \
+                             retag does not make a second copy of it. And a track the \
+                             collection names but the disk has lost is put back off the drive \
+                             whichever of these is set: that row is broken rather than absent, \
+                             and the stick that can fix it will not be here for ever.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
                     for what in crate::config::OnForeign::ALL {
-                        if ui.radio_value(&mut self.config.on_foreign, what, what.label()).changed()
+                        if ui
+                            .radio_value(&mut self.config.from_other_drives, what, what.label())
+                            .on_hover_text(what.blurb())
+                            .changed()
                         {
                             changed = true;
                         }
-                        ui.label(RichText::new(what.blurb()).color(theme::DIM).size(theme::SMALL));
+                        ui.label(
+                            RichText::new(what.blurb()).color(theme::dim()).size(theme::SMALL),
+                        );
                         ui.add_space(4.0);
                     }
 
@@ -7329,7 +8585,7 @@ impl App {
                             changed = true;
                         }
                         ui.label(
-                            RichText::new(where_.blurb()).color(theme::DIM).size(theme::SMALL),
+                            RichText::new(where_.blurb()).color(theme::dim()).size(theme::SMALL),
                         );
                         ui.add_space(4.0);
                     }
@@ -7340,6 +8596,10 @@ impl App {
                                 egui::TextEdit::singleline(&mut shown)
                                     .desired_width(ui.available_width())
                                     .font(theme::mono(11.0)),
+                            )
+                            .on_hover_text(
+                                "The one folder rendered kits go into. Both places are searched \
+                                 whichever is set, so changing it never loses a kit.",
                             )
                             .changed()
                         {
@@ -7352,7 +8612,7 @@ impl App {
                             "Both places are searched whichever is set, so changing this never \
                          loses a kit that is already rendered.",
                         )
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .size(theme::SMALL),
                     );
 
@@ -7366,10 +8626,14 @@ impl App {
                                 outside.len(),
                                 if outside.len() == 1 { "track is" } else { "tracks are" }
                             ))
-                            .color(theme::AMBER)
+                            .color(theme::amber())
                             .size(theme::SMALL),
                         );
-                        if ui.button("Copy them all in").clicked() {
+                        if ui
+                            .button("Copy them all in")
+                            .on_hover_text("Copy every track that lives outside the library folder into it.")
+                            .clicked()
+                        {
                             self.pending.extend(outside.into_iter().map(Pending::Adopt));
                         }
                     }
@@ -7378,7 +8642,7 @@ impl App {
 
         if changed {
             if let Err(e) = self.config.save(&self.config_path) {
-                self.note(format!("could not save the settings: {e:#}"), theme::ALERT);
+                self.note(format!("could not save the settings: {e:#}"), theme::alert());
             }
         }
         if pick_library {
@@ -7413,6 +8677,62 @@ impl App {
             if !self.incompatible.contains(id) {
                 self.incompatible.push(*id);
             }
+        }
+    }
+
+    /// What was just imported that will be slow to reach, and why.
+    ///
+    /// Said at import rather than at play, because at play it is too late and
+    /// nothing about the file looks wrong in between. The quarantine flag is
+    /// the half of this Booth can take off — "Check" and then "take the files'
+    /// word" does it — and where somebody keeps their music is theirs to
+    /// decide, so that half is said once and not again.
+    fn check_storage(&mut self, ids: &[u32]) {
+        use crate::storage::Slow;
+
+        let mut flagged = 0usize;
+        let mut downloads = 0usize;
+        let mut synced: Vec<(&'static str, usize)> = Vec::new();
+        for id in ids {
+            let Some(track) = self.library.get(*id) else { continue };
+            for slow in crate::storage::slow(&track.path) {
+                match slow {
+                    Slow::Quarantined => flagged += 1,
+                    Slow::Downloads => downloads += 1,
+                    Slow::Synced(service) => match synced.iter_mut().find(|(s, _)| *s == service) {
+                        Some((_, count)) => *count += 1,
+                        None => synced.push((service, 1)),
+                    },
+                }
+            }
+        }
+
+        let mut lines = Vec::new();
+        if flagged > 0 {
+            crate::warn!(
+                "{} carry the macOS quarantine flag, so every play is a Gatekeeper check —                  Check, then take the files' word, takes it off ({})",
+                plural(flagged, "track"),
+                crate::storage::command_for(std::path::Path::new("FOLDER"), true)
+            );
+            lines.push(format!("{} quarantined", plural(flagged, "track")));
+        }
+        if downloads > 0 {
+            crate::warn!(
+                "{} sit in the Downloads folder, where macOS re-flags what lands in it —                  move them into the library folder to be done with it",
+                plural(downloads, "track")
+            );
+            lines.push(format!("{downloads} in Downloads"));
+        }
+        for (service, count) in &synced {
+            crate::warn!(
+                "{} are inside {service}, so playing one may mean fetching it first —                  copy them onto this machine before the night rather than during it",
+                plural(*count, "track")
+            );
+            lines.push(format!("{count} in {service}"));
+        }
+
+        if !lines.is_empty() {
+            self.note(format!("slow to reach: {}", lines.join(", ")), theme::amber());
         }
     }
 
@@ -7451,27 +8771,27 @@ impl App {
                          written. A CDJ-3000 takes MP3 and AAC at 44.1–48 kHz, and WAV, \
                          AIFF, FLAC and ALAC up to 96 kHz.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
 
                 egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
                     for (_, name, path, problem) in &waiting {
-                        ui.label(RichText::new(name).color(theme::TEXT).size(theme::SMALL));
+                        ui.label(RichText::new(name).color(theme::text()).size(theme::SMALL));
                         ui.label(
                             RichText::new(format!("{} — {}", problem.what(), problem.fix()))
                                 .color(if problem.convertible() {
-                                    theme::AMBER
+                                    theme::amber()
                                 } else {
-                                    theme::ALERT
+                                    theme::alert()
                                 })
                                 .size(theme::SMALL),
                         );
                         ui.label(
                             RichText::new(path.display().to_string())
                                 .font(theme::mono(9.5))
-                                .color(theme::DIM),
+                                .color(theme::dim()),
                         );
                         ui.add_space(4.0);
                     }
@@ -7488,10 +8808,10 @@ impl App {
                                         plural(convertible.len(), "file")
                                     )))
                                     .size(11.0)
-                                    .color(theme::BOOTH)
+                                    .color(theme::booth())
                                     .strong(),
                                 )
-                                .fill(theme::AMBER),
+                                .fill(theme::amber()),
                             )
                             .on_hover_text(
                                 "Writes a FLAC beside each original and points the \
@@ -7517,7 +8837,7 @@ impl App {
                                     waiting.len() - convertible.len()
                                 ),
                             })
-                            .color(theme::DIM)
+                            .color(theme::dim())
                             .size(theme::SMALL),
                         );
                     }
@@ -7557,18 +8877,18 @@ impl App {
                         "These play from where they are now. A file on a stick, a share or \
                          a download folder is a file that can be gone on the night.",
                     )
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .size(theme::SMALL),
                 );
                 ui.add_space(8.0);
 
                 egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                     for (_, name, path) in &waiting {
-                        ui.label(RichText::new(name).color(theme::TEXT).size(theme::SMALL));
+                        ui.label(RichText::new(name).color(theme::text()).size(theme::SMALL));
                         ui.label(
                             RichText::new(path.display().to_string())
                                 .font(theme::mono(9.5))
-                                .color(theme::DIM),
+                                .color(theme::dim()),
                         );
                         ui.add_space(3.0);
                     }
@@ -7581,10 +8901,10 @@ impl App {
                             egui::Button::new(
                                 RichText::new(theme::label_text("Copy in"))
                                     .size(11.0)
-                                    .color(theme::BOOTH)
+                                    .color(theme::booth())
                                     .strong(),
                             )
-                            .fill(theme::AMBER),
+                            .fill(theme::amber()),
                         )
                         .clicked()
                     {
@@ -7620,6 +8940,109 @@ impl App {
         }
     }
 
+    /// The tracks changed here and on the player, and which copy to keep.
+    ///
+    /// Always asked rather than decided, even where the clocks are clear about
+    /// which came later. A time is not a reason, and the one thing worse than
+    /// losing an edit is losing it without being told — so the newer one is
+    /// what each row starts on, and the person still has to look.
+    fn clashes_section(&mut self, ui: &mut Ui) {
+        let mut all: Option<sync::Side> = None;
+        ui.label(
+            RichText::new(format!(
+                "{} {} changed here and on the player since this drive was written",
+                theme::WARN,
+                plural(self.clashes.len(), "track")
+            ))
+            .font(theme::mono(11.5))
+            .color(theme::amber()),
+        );
+        ui.label(
+            RichText::new(
+                "Keeping the drive's leaves the track exactly as the deck left it: it is not \
+                 prepared again, and its row and playlists carry through. Nothing here can read \
+                 a player's edits back, so what it changed will not appear in the collection — \
+                 which is why this asks rather than picking for you.",
+            )
+            .font(theme::mono(10.0))
+            .color(theme::dim()),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            if ui
+                .button("Keep all mine")
+                .on_hover_text("Write the collection's version of every one of these, over what the player left.")
+                .clicked()
+            {
+                all = Some(sync::Side::Mine);
+            }
+            if ui
+                .button("Keep all the drive's")
+                .on_hover_text("Leave every one of these as the player left it, and read it back into the collection.")
+                .clicked()
+            {
+                all = Some(sync::Side::Theirs);
+            }
+        });
+        ui.add_space(4.0);
+
+        for clash in &self.clashes {
+            let name = self
+                .library
+                .get(clash.id)
+                .map(|track| format!("{} — {}", track.artist, track.display_title()))
+                .unwrap_or_else(|| format!("#{}", clash.id));
+            let side = self.settled.entry(clash.id).or_insert(sync::Side::Mine);
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.label(RichText::new(name).font(theme::mono(11.0)).color(theme::text()));
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                ui.radio_value(
+                    side,
+                    sync::Side::Mine,
+                    format!("mine, {}", how_long_ago(clash.mine)),
+                )
+                .on_hover_text("Write the collection's cues and grid over what the player left.");
+                ui.radio_value(
+                    side,
+                    sync::Side::Theirs,
+                    format!("the drive's, {}", how_long_ago(clash.theirs)),
+                )
+                .on_hover_text("Keep what the player did, and read it back into the collection.");
+            });
+        }
+
+        if let Some(side) = all {
+            for clash in &self.clashes {
+                self.settled.insert(clash.id, side);
+            }
+        }
+
+        let leaving = self.settled.values().filter(|side| **side == sync::Side::Theirs).count();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            ui.label(
+                RichText::new(match leaving {
+                    0 => "All of them will be written from the collection.".to_string(),
+                    n => format!(
+                        "{} will be left as the player left {} and not written.",
+                        plural(n, "track"),
+                        match n {
+                            1 => "it",
+                            _ => "them",
+                        }
+                    ),
+                })
+                .font(theme::mono(10.5))
+                .color(theme::dim()),
+            );
+        });
+    }
+
     fn sync_sheet(&mut self, ctx: &egui::Context) {
         let Some(drive) = self.library.drives.get(self.drive).cloned() else {
             self.sheet = false;
@@ -7630,10 +9053,11 @@ impl App {
 
         let mut open = true;
         let mut forget = false;
+        let mut details = false;
         // Toggled here rather than applied in place: the sheet is drawing a
         // clone of the drive, and the plan under it was worked out before this
         // frame. Read back after the window closes, so one change redraws once.
-        let mut with_stems = drive.with_stems;
+        let mut with_stems = !drive.skip_stems;
         egui::Window::new(format!("SYNC → {}", drive.label))
             .open(&mut open)
             .collapsible(false)
@@ -7643,8 +9067,8 @@ impl App {
             .max_height(sheet_height(ctx))
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::BOOTH)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::RULE))
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
@@ -7658,7 +9082,7 @@ impl App {
                             if drive.is_image { " · into a FAT32 image" } else { "" }
                         ))
                         .font(theme::mono(10.5))
-                        .color(theme::DIM),
+                        .color(theme::dim()),
                     );
                     ui.label(
                         RichText::new(match both {
@@ -7680,8 +9104,8 @@ impl App {
                         })
                         .font(theme::mono(10.5))
                         .color(match both {
-                            true => theme::AMBER,
-                            false => theme::ALERT,
+                            true => theme::amber(),
+                            false => theme::alert(),
                         }),
                     );
 
@@ -7702,7 +9126,7 @@ impl App {
                     ui.label(
                         RichText::new(format!("Playlists: {line}"))
                             .font(theme::mono(10.5))
-                            .color(if specs.is_empty() { theme::ALERT } else { theme::DIM }),
+                            .color(if specs.is_empty() { theme::alert() } else { theme::dim() }),
                     );
                     ui.add_space(10.0);
 
@@ -7723,21 +9147,43 @@ impl App {
                         ui,
                         "Stems",
                         &match with_stems {
-                            false => "not carried".to_string(),
-                            true => match self.plan.stems.len() {
-                                0 => "none rendered".to_string(),
-                                n => format!("{n} files"),
+                            false => "held back".to_string(),
+                            true => match (self.plan.new_stems.len(), self.plan.stems.len()) {
+                                (0, 0) => "none rendered".to_string(),
+                                (0, on) => format!("{on} already on"),
+                                (n, _) => format!(
+                                    "{n} files from {}",
+                                    plural(self.kits_going_on(), "track")
+                                ),
                             },
                         },
                         &sync::bytes(self.plan.stem_bytes),
                     );
                     ui.horizontal(|ui| {
                         ui.add_space(74.0);
+                        let changes = self.plan.add.len()
+                            + self.plan.update.len()
+                            + self.plan.remove.len()
+                            + self.plan.new_stems.len();
+                        if ui
+                            .add_enabled(changes > 0, egui::Button::new("Details"))
+                            .on_hover_text(
+                                "Every change this write would make, one to a line. The                                  summary above names three of each; this names all of them,                                  which is what tells you whether the four it is about to                                  remove are the four you meant.",
+                            )
+                            .on_disabled_hover_text("Nothing to write, so there is nothing to list.")
+                            .clicked()
+                        {
+                            details = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(74.0);
                         ui.checkbox(&mut with_stems, "Carry stems").on_hover_text(
-                            "Put each track's vocals, drums and melody on the drive beside it, \
-                             in the same folder and next to it in the playlist. Only tracks \
-                             with a kit rendered are affected; it is roughly three times the \
-                             space, and the same again in analysis.",
+                            "On by default: a kit that has been rendered goes on the drive \
+                             beside its track, in the same folder and next to it in the \
+                             playlist. Only tracks with a kit are affected. Turn it off for a \
+                             smaller stick — three files a track, and the same again in \
+                             analysis.",
                         );
                     });
 
@@ -7745,17 +9191,22 @@ impl App {
                     for check in &checks {
                         ui.horizontal(|ui| {
                             let (mark, color) = match check.level {
-                                Level::Ok => (theme::TICK, theme::GO),
-                                Level::Warn => (theme::WARN, theme::AMBER),
-                                Level::Bad => (theme::CROSS, theme::ALERT),
+                                Level::Ok => (theme::TICK, theme::go()),
+                                Level::Warn => (theme::WARN, theme::amber()),
+                                Level::Bad => (theme::CROSS, theme::alert()),
                             };
                             ui.label(RichText::new(mark).color(color).font(theme::mono(11.5)));
                             ui.label(
                                 RichText::new(&check.text)
                                     .font(theme::mono(11.5))
-                                    .color(theme::TEXT),
+                                    .color(theme::text()),
                             );
                         });
+                    }
+
+                    if !self.clashes.is_empty() {
+                        ui.add_space(12.0);
+                        self.clashes_section(ui);
                     }
 
                     ui.add_space(6.0);
@@ -7766,7 +9217,7 @@ impl App {
                          passes, this is not a finished drive.",
                     )
                     .font(theme::mono(10.0))
-                    .color(theme::DIM),
+                    .color(theme::dim()),
                 );
 
                     ui.add_space(12.0);
@@ -7779,13 +9230,13 @@ impl App {
                                 egui::Button::new(
                                     RichText::new(theme::label_text(verb))
                                         .size(11.0)
-                                        .color(theme::BOOTH)
+                                        .color(theme::booth())
                                         .strong(),
                                 )
                                 .fill(if worst == Level::Bad {
-                                    theme::ALERT
+                                    theme::alert()
                                 } else {
-                                    theme::AMBER
+                                    theme::amber()
                                 }),
                             )
                             .on_disabled_hover_text(
@@ -7818,22 +9269,25 @@ impl App {
                         if worst == Level::Bad {
                             ui.label(
                                 RichText::new("the files above will be skipped; the rest still go")
-                                    .color(theme::DIM)
+                                    .color(theme::dim())
                                     .size(theme::SMALL),
                             );
                         }
                     });
                 });
             });
-        if with_stems != drive.with_stems {
+        if with_stems == drive.skip_stems {
             if let Some(drive) = self.library.drives.get_mut(self.drive) {
-                drive.with_stems = with_stems;
+                drive.skip_stems = !with_stems;
             }
             // The plan changes by three files a track, and so does the space
             // check under it. Both are on screen, so both are redone now rather
             // than on whatever happens next.
             self.replan();
             self.save();
+        }
+        if details {
+            self.details = true;
         }
         if forget {
             self.forget_drive_contents();
@@ -7856,6 +9310,87 @@ impl App {
         match ids.len() {
             n if n <= 3 => format!("{} — {}", plural(n, "track"), names.join(", ")),
             n => format!("{} — {} +{}", plural(n, "track"), names.join(", "), n - 3),
+        }
+    }
+
+    /// Every change the next write would make, one to a line.
+    ///
+    /// The summary above it says how many and names three; this says which,
+    /// which is the question somebody opens it with — a drive about to remove
+    /// four tracks is fine or a disaster depending entirely on which four.
+    ///
+    /// A track that has since left the collection still gets a line: it is
+    /// exactly the case worth seeing, and a row that quietly vanished from the
+    /// list would be the write doing something the list did not mention.
+    fn change_lines(&self) -> Vec<(String, egui::Color32)> {
+        let named = |id: u32| match self.library.get(id) {
+            Some(track) => format!("{} \u{2014} {}", track.artist, track.display_title()),
+            None => format!("#{id}, no longer in the collection"),
+        };
+        let mut lines = Vec::new();
+        for id in &self.plan.add {
+            let size = self.library.get(*id).map(|track| track.bytes).unwrap_or(0);
+            lines.push((format!("+  {}  ({})", named(*id), sync::bytes(size)), theme::go()));
+        }
+        for (id, what) in &self.plan.update {
+            lines.push((format!("~  {}  \u{2014} {what}", named(*id)), theme::amber()));
+        }
+        for id in &self.plan.remove {
+            lines.push((format!("\u{2212}  {}", named(*id)), theme::alert()));
+        }
+        for (id, path) in &self.plan.new_stems {
+            let file = path.file_name().unwrap_or_default().to_string_lossy();
+            lines.push((format!("\u{266a}  {file}  \u{2014} with {}", named(*id)), theme::blue()));
+        }
+        lines
+    }
+
+    /// The whole list of changes, scrolled and wrapped, one to a line.
+    fn details_window(&mut self, ctx: &egui::Context) {
+        let lines = self.change_lines();
+        let mut open = true;
+        egui::Window::new("CHANGES")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(620.0)
+            .default_height(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{} the next write would make, in the order it makes them.",
+                        plural(lines.len(), "change")
+                    ))
+                    .color(theme::dim())
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    // Wrapped rather than cut off: a long title with a long
+                    // reason after it is exactly the line worth reading, and
+                    // it is the one that would run off the edge.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    for (line, color) in &lines {
+                        ui.label(RichText::new(line).font(theme::mono(11.0)).color(*color));
+                    }
+                    if lines.is_empty() {
+                        ui.label(
+                            RichText::new("Nothing to write.")
+                                .font(theme::mono(11.0))
+                                .color(theme::dim()),
+                        );
+                    }
+                });
+            });
+        if !open {
+            self.details = false;
         }
     }
 
@@ -7954,7 +9489,7 @@ impl App {
                 if let Some(path) = paths.into_iter().next() {
                     self.config.library_path = path;
                     if let Err(e) = self.config.save(&self.config_path) {
-                        self.note(format!("could not save the settings: {e:#}"), theme::ALERT);
+                        self.note(format!("could not save the settings: {e:#}"), theme::alert());
                     }
                 }
             }
@@ -7968,23 +9503,25 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 fn pane_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(theme::label_text(text)).size(theme::LABEL).color(theme::DIM).strong());
+    ui.label(
+        RichText::new(theme::label_text(text)).size(theme::LABEL).color(theme::dim()).strong(),
+    );
     ui.add_space(4.0);
 }
 
 fn measurement(ui: &mut Ui, name: &str, value: &str, good: bool) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        ui.label(RichText::new(name).font(theme::mono(11.0)).color(theme::DIM));
+        ui.label(RichText::new(name).font(theme::mono(11.0)).color(theme::dim()));
         ui.label(
             RichText::new(if good { theme::TICK } else { "·" })
                 .font(theme::mono(11.0))
-                .color(if good { theme::GO } else { theme::AMBER }),
+                .color(if good { theme::go() } else { theme::amber() }),
         );
         ui.label(RichText::new(value).font(theme::mono(11.0)).color(if good {
-            theme::GO
+            theme::go()
         } else {
-            theme::AMBER
+            theme::amber()
         }));
     });
 }
@@ -7999,19 +9536,39 @@ fn grid_text(track: &Track, length: crate::config::Length) -> String {
     format!("{:.2} · {}", track.bpm, length.describe(track.beats))
 }
 
-/// A track's beat times, reconstructed from its tempo and its first cue.
+/// A track's beat times: the ones it kept, or rebuilt from its tempo and its
+/// first cue.
 ///
-/// The full grid is not kept in the collection — it is thousands of numbers per
+/// An even grid is not kept in the collection — it is thousands of numbers per
 /// track, and the analysis file on the drive is where it belongs. What the
 /// picture needs is where the bars fall, and a constant tempo from the first
 /// downbeat gives that.
+///
+/// Wound back in whole bars rather than whole beats, so that beat zero is a
+/// downbeat on the same bar as the anchor. Winding back a beat at a time
+/// put beat zero on whichever beat happened to fall nearest the top of the
+/// track, and everything that counts in fours — the red bar marks, the bar
+/// number in the transport, the length on the phrase strip — then counted from
+/// a beat that was not a downbeat at all. It only looked right on a track that
+/// happens to start on one.
+///
+/// The cost is that a track starting part way through a bar has that part bar
+/// unmarked, which is the right way round: a player numbers from the first
+/// whole bar too, and three marks in the wrong colour is the worse trade.
 fn beat_times(track: &Track) -> Vec<u32> {
     if !track.has_grid || track.bpm <= 0.0 || track.duration_secs <= 0.0 {
         return Vec::new();
     }
+    // A grid that bends is kept beat for beat, because no tempo puts those
+    // beats back. It already starts on a downbeat, which is the one thing
+    // everything below counts on.
+    if !track.beat_ms.is_empty() {
+        return track.beat_ms.clone();
+    }
     let period_ms = 60_000.0 / track.bpm;
-    let first = track.cues.first().map(|cue| cue.time_ms).unwrap_or(0) as f64;
-    let start = first % period_ms;
+    let first =
+        track.downbeat_ms.or_else(|| track.cues.first().map(|cue| cue.time_ms)).unwrap_or(0) as f64;
+    let start = first % (period_ms * crate::library::BEATS_PER_BAR as f64);
     let count = ((track.duration_secs * 1000.0 - start) / period_ms).floor().max(0.0) as usize;
     (0..count).map(|i| (start + i as f64 * period_ms).round() as u32).collect()
 }
@@ -8026,13 +9583,181 @@ fn beat_at(track: &Track, at_ms: u32) -> Option<usize> {
         return None;
     }
     let beats = beat_times(track);
-    let first = beats.first().copied().unwrap_or(0);
-    if at_ms < first {
-        return Some(0);
+    if beats.is_empty() {
+        return None;
     }
-    let period_ms = 60_000.0 / track.bpm;
-    let index = ((at_ms - first) as f64 / period_ms).floor() as usize;
-    Some(index.min(track.beats.saturating_sub(1)))
+    // Found in the grid rather than divided out of the tempo. They are the
+    // same answer on an even grid and different ones on a grid that bends,
+    // and the grid is the thing the marks are drawn from.
+    let after = beats.partition_point(|beat| *beat <= at_ms);
+    Some(after.saturating_sub(1))
+}
+
+/// Write down what the words decided, and why.
+///
+/// A cue placed off a transcript is a cue with a reason, and the reason is the
+/// only thing that makes it arguable. The recogniser mishears, the same sung
+/// line comes back written four ways, and the hook is picked off the top of a
+/// ranking — so a DJ who finds cue B in the wrong place needs to be able to see
+/// that it was put there because a line it heard as something else came round
+/// three times. Without that, a wrong cue is indistinguishable from a bug.
+///
+/// Three things, in the order they were decided: every line the track comes
+/// back to and how often, which of them the hook is, and what that moved.
+///
+/// Returned rather than logged from inside, so that what it says can be read
+/// back by a test instead of being asserted against a global log buffer that
+/// every other test is writing to at the same time.
+fn what_the_words_decided(
+    words: &booth_cli::transcribe::Transcript,
+    before: &[crate::library::CueMark],
+    after: &[crate::library::CueMark],
+) -> Vec<String> {
+    /// Enough of the ranking to see where it falls off, without a log that is
+    /// one track long. A hook is never far from the top of it.
+    const LISTED: usize = 8;
+
+    let mut said = Vec::new();
+    let refrains = words.refrains();
+    if refrains.is_empty() {
+        said.push("nothing was made out that is long enough to be a line".to_string());
+    } else {
+        said.push("lines by how often they come round:".to_string());
+        for refrain in refrains.iter().take(LISTED) {
+            let at: Vec<String> = refrain.at.iter().map(|at| time_text(*at)).collect();
+            said.push(format!(
+                "  {}\u{d7} \u{201c}{}\u{201d} \u{2014} {}",
+                refrain.times(),
+                refrain.text,
+                at.join(", ")
+            ));
+        }
+        if refrains.len() > LISTED {
+            said.push(format!("  \u{2026}and {} more", refrains.len() - LISTED));
+        }
+    }
+
+    said.push(match words.hook() {
+        Some(hook) => format!(
+            "hook: \u{201c}{}\u{201d}, sung {} times, first at {}",
+            hook.text,
+            hook.times(),
+            time_text(hook.at.first().copied().unwrap_or(0))
+        ),
+        // Not a failure. A track can have words and no chorus, and saying so
+        // is what stops somebody looking for a hook cue that was never going
+        // to be there.
+        None => "no line comes round twice, so the cues are the arrangement's alone".to_string(),
+    });
+
+    let reading = |cue: &crate::library::CueMark| match cue.label.is_empty() {
+        true => time_text(cue.time_ms),
+        false => format!("{} {}", time_text(cue.time_ms), cue.label),
+    };
+    let was = said.len();
+    for cue in after {
+        match before.iter().find(|old| old.letter == cue.letter) {
+            Some(old) if old.time_ms == cue.time_ms && old.label == cue.label => {}
+            Some(old) => {
+                said.push(format!("{} {} \u{2192} {}", cue.name(), reading(old), reading(cue)))
+            }
+            None => said.push(format!("{} set to {}", cue.name(), reading(cue))),
+        }
+    }
+    for old in before {
+        if !after.iter().any(|cue| cue.letter == old.letter) {
+            said.push(format!("{} cleared, was {}", old.name(), reading(old)));
+        }
+    }
+    if said.len() == was {
+        said.push("every cue is already where the words put it".to_string());
+    }
+    said
+}
+
+/// Take the cues that mark a boundary with it when it moves.
+///
+/// A cue that marks the drop is a cue for wherever the drop is. Dragging the
+/// line and leaving the cue behind makes the two disagree about the same
+/// moment, and the cue is the one somebody presses in a booth.
+///
+/// Only the cues that mark the section, which is what the name says: a cue
+/// called "drop" or "break" is about the arrangement. One named for what is
+/// sung there — a hook, a vocal entry — is about a moment in the music that has
+/// not moved, and dragging it along would put it somewhere nothing happens.
+///
+/// `within` is how close a cue has to be to count as marking the boundary. A
+/// beat: a section cue is snapped to the bar and so is the line, so they should
+/// be on the same moment, and anything a whole beat away is marking something
+/// else.
+///
+/// Returns how many moved.
+fn drag_cues(cues: &mut [crate::library::CueMark], from: u32, to: u32, within: u32) -> usize {
+    if from == to {
+        return 0;
+    }
+    let mut moved = 0;
+    for cue in cues.iter_mut() {
+        let marks_a_section = crate::library::Phrase::KINDS.contains(&cue.label.as_str());
+        if marks_a_section && cue.time_ms.abs_diff(from) <= within {
+            cue.time_ms = to;
+            moved += 1;
+        }
+    }
+    moved
+}
+
+/// Whether this is a row this program draws a picture for at all.
+///
+/// A record has to have been analysed first. Arrowing down a library of
+/// thousands of unprepared tracks should not start a decode per row, and a
+/// track nobody has listened to is one nobody has asked anything of.
+///
+/// A stem row is exempt, and the exemption is the point rather than a special
+/// case: a companion exists only because somebody rendered it, which is a more
+/// deliberate act than analysing, not a less deliberate one. Waiting for the
+/// record to be analysed before drawing the stems that were explicitly asked
+/// for is asking twice for one thing.
+fn worth_drawing(track: &Track) -> bool {
+    track.analyzed || track.role != crate::library::Role::Track
+}
+
+/// The audio a row's picture is measured from, if it is all there.
+///
+/// A row's own files, which for a stem companion are its stems and not the mix
+/// its parent points at: a companion is a clone of its parent with a different
+/// role, so `path` is the record's file and drawing from it put the whole mix
+/// under the acapella's name.
+///
+/// Only the picture works this way. Everything else a companion shows — the
+/// grid, the cues, the phrases, the key — stays the parent's, and should: those
+/// are properties of the record, and a cue that did not line up with the one on
+/// the track would be worse than no cue at all. The waveform is the one thing
+/// that is a property of the file, because it is a drawing of what will come
+/// out of the speaker.
+///
+/// `None` when there is nothing to draw from or a file is missing — a blank
+/// picture looks exactly like a quiet one, so it is better not to cache it.
+fn picture_sources(track: &Track) -> Option<Vec<PathBuf>> {
+    let sources = track.sources();
+    let all_there = !sources.is_empty() && sources.iter().all(|path| path.exists());
+    all_there.then_some(sources)
+}
+
+/// How long ago a moment was, in the roughest terms that are still useful.
+///
+/// For putting two edits beside each other and saying which came later, which
+/// is a comparison nobody makes in seconds. An unknown time says so rather than
+/// pretending to be the epoch.
+fn how_long_ago(at: Option<u64>) -> String {
+    let Some(at) = at else { return "at some point".to_string() };
+    let seconds = crate::library::now().saturating_sub(at);
+    match seconds {
+        0..=90 => "just now".to_string(),
+        91..=5_400 => format!("{} minutes ago", seconds / 60),
+        5_401..=172_800 => format!("{} hours ago", seconds / 3_600),
+        _ => format!("{} days ago", seconds / 86_400),
+    }
 }
 
 /// A position in a track, as minutes, seconds and hundredths.
@@ -8051,6 +9776,18 @@ fn snap_to(beats: &[u32], time_ms: u32, every: usize) -> u32 {
     candidates.iter().min_by_key(|beat| beat.abs_diff(time_ms)).copied().unwrap_or(time_ms)
 }
 
+/// The last beat at or before a moment, rather than the nearest one.
+///
+/// For a cue placed off the words. A sung line rarely starts on the beat — a
+/// pickup is the whole point of a pickup — and a recogniser's idea of where a
+/// line starts is already a little late, because it trims the breath before it.
+/// Rounding to the nearest beat can therefore land after the first word, and a
+/// hook cue that clips its own first word is one nobody presses twice. So this
+/// rounds down. Falls back to the moment itself where there is no grid.
+fn snap_back(beats: &[u32], time_ms: u32) -> u32 {
+    beats.iter().rev().find(|beat| **beat <= time_ms).copied().unwrap_or(time_ms)
+}
+
 fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
@@ -8060,7 +9797,7 @@ fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
                 ui.label(
                     RichText::new(theme::label_text(operation))
                         .size(theme::LABEL)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .strong(),
                 );
             },
@@ -8069,11 +9806,11 @@ fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
             egui::vec2(ui.available_width() - 100.0, 18.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.label(RichText::new(what).color(theme::TEXT));
+                ui.label(RichText::new(what).color(theme::text()));
             },
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(size).font(theme::mono(11.5)).color(theme::DIM));
+            ui.label(RichText::new(size).font(theme::mono(11.5)).color(theme::dim()));
         });
     });
 }
@@ -8163,6 +9900,565 @@ mod tests {
                 dir.join("config.json"),
                 String::new(),
             )
+        }
+
+        /// Dragging a phrase boundary takes the cues that mark it along.
+        mod moving_a_boundary {
+            use super::*;
+            use crate::library::{CueMark, Phrase, PhraseEdit};
+
+            fn cue(letter: u8, time_ms: u32, label: &str) -> CueMark {
+                CueMark { letter, time_ms, label: label.to_string(), color: [0; 3] }
+            }
+
+            /// 120 BPM, so a beat is 500 ms and a bar is two seconds.
+            fn with_a_drop(name: &str) -> (App, u32) {
+                let mut app = app(name);
+                let id = app.library.add(std::path::Path::new("/music/track.flac"));
+                let track = app.library.get_mut(id).unwrap();
+                track.bpm = 120.0;
+                track.has_grid = true;
+                track.analyzed = true;
+                track.duration_secs = 300.0;
+                track.beats = 600;
+                track.phrases = vec![
+                    Phrase { start_ms: 0, end_ms: 32_000, kind: "intro".into() },
+                    Phrase { start_ms: 32_000, end_ms: 96_000, kind: "drop".into() },
+                    Phrase { start_ms: 96_000, end_ms: 160_000, kind: "break".into() },
+                ];
+                track.cues = vec![
+                    cue(0, 0, ""),
+                    cue(1, 32_000, "drop"),
+                    cue(2, 40_000, "hold me closer now"),
+                    cue(3, 96_000, "break"),
+                ];
+                app.rebuild();
+                (app, id)
+            }
+
+            #[test]
+            fn a_cue_that_marks_the_drop_goes_where_the_drop_goes() {
+                // Otherwise the line and the cue disagree about the same
+                // moment, and the cue is the one somebody presses in a booth.
+                let (mut app, id) = with_a_drop("dragged");
+                assert!(app.edit_phrase(id, PhraseEdit::Move { at: 1, time_ms: 40_000 }));
+
+                let cues = &app.library.get(id).unwrap().cues;
+                let drop = cues.iter().find(|c| c.label == "drop").unwrap();
+                let boundary = app.library.get(id).unwrap().phrases[1].start_ms;
+                assert_eq!(drop.time_ms, boundary, "the cue was left behind");
+            }
+
+            #[test]
+            fn a_cue_named_for_what_is_sung_there_stays_where_it_is() {
+                // It is about a moment in the music, not about the line above
+                // it, and the music has not moved.
+                let (mut app, id) = with_a_drop("sung");
+                app.edit_phrase(id, PhraseEdit::Move { at: 1, time_ms: 40_000 });
+
+                let cues = &app.library.get(id).unwrap().cues;
+                let hook = cues.iter().find(|c| c.label == "hold me closer now").unwrap();
+                assert_eq!(hook.time_ms, 40_000);
+            }
+
+            #[test]
+            fn a_cue_marking_a_different_boundary_is_not_dragged_along() {
+                let (mut app, id) = with_a_drop("elsewhere");
+                app.edit_phrase(id, PhraseEdit::Move { at: 1, time_ms: 40_000 });
+
+                let cues = &app.library.get(id).unwrap().cues;
+                let other = cues.iter().find(|c| c.label == "break").unwrap();
+                assert_eq!(other.time_ms, 96_000, "the far boundary's cue moved too");
+                // And the memory cue, which anchors the grid, is untouched.
+                assert_eq!(cues.iter().find(|c| c.letter == 0).unwrap().time_ms, 0);
+            }
+
+            #[test]
+            fn a_cue_a_beat_away_from_the_line_is_marking_something_else() {
+                // A section cue and its boundary are both snapped, so they sit
+                // on the same moment. A whole beat of daylight between them
+                // means the cue is for something the line is not.
+                let mut cues = vec![cue(1, 32_000, "drop"), cue(2, 33_000, "drop")];
+                let moved = drag_cues(&mut cues, 32_000, 48_000, 500);
+                assert_eq!(moved, 1);
+                assert_eq!(cues[0].time_ms, 48_000);
+                assert_eq!(cues[1].time_ms, 33_000, "two beats away and dragged anyway");
+            }
+
+            #[test]
+            fn a_boundary_that_did_not_move_moves_nothing() {
+                let mut cues = vec![cue(1, 32_000, "drop")];
+                assert_eq!(drag_cues(&mut cues, 32_000, 32_000, 500), 0);
+                assert_eq!(cues[0].time_ms, 32_000);
+            }
+        }
+
+        /// A stem's picture is of the stem; everything else it shows is the
+        /// record's.
+        mod what_a_companion_draws {
+            use super::*;
+            use crate::library::{CueMark, Role};
+
+            /// A track with a kit whose files are really on disk, since a row
+            /// with a missing file is deliberately not drawn.
+            fn with_a_kit(name: &str) -> (App, u32) {
+                let mut app = app(name);
+                let dir = app.library_path.parent().unwrap().to_path_buf();
+                let mix = dir.join("Sirens.flac");
+                std::fs::write(&mix, b"a mix").unwrap();
+
+                let id = app.library.add(&mix);
+                let track = app.library.get_mut(id).unwrap();
+                track.artist = "Peverelist".into();
+                track.title = "Sirens".into();
+                track.analyzed = true;
+                track.has_grid = true;
+                track.bpm = 130.0;
+                track.cues = vec![CueMark {
+                    letter: 1,
+                    time_ms: 4_000,
+                    label: "drop".into(),
+                    color: [1, 2, 3],
+                }];
+                for (part, slot) in [("vocals", 0), ("drums", 1), ("melody", 2)] {
+                    let path = dir.join(format!("Sirens-{part}.mp3"));
+                    std::fs::write(&path, b"a stem").unwrap();
+                    let kit = &mut app.library.get_mut(id).unwrap().stems;
+                    match slot {
+                        0 => kit.vocals = Some(path),
+                        1 => kit.drums = Some(path),
+                        _ => kit.melody = Some(path),
+                    }
+                }
+                app.rebuild();
+                (app, id)
+            }
+
+            fn companion(app: &App, id: u32, role: Role) -> Track {
+                app.library
+                    .row(crate::library::companion_id(id, role))
+                    .expect("the companion row was not built")
+            }
+
+            #[test]
+            fn an_acapella_is_drawn_from_the_vocal_stem_and_not_the_mix() {
+                // The fault: a companion is a clone of its parent with a
+                // different role, so its `path` is the record's file. Anything
+                // drawing from that put the whole mix under the acapella's
+                // name — and cached it there, so it stayed wrong.
+                let (app, id) = with_a_kit("acapella");
+                let acapella = companion(&app, id, Role::Vocals);
+
+                let drawn = picture_sources(&acapella).expect("nothing to draw the acapella from");
+                assert_eq!(drawn.len(), 1);
+                assert!(
+                    drawn[0].to_string_lossy().contains("vocals"),
+                    "the acapella would have been drawn from {:?}",
+                    drawn[0]
+                );
+                assert_ne!(drawn[0], acapella.path, "that is the mix, not the stem");
+            }
+
+            #[test]
+            fn the_record_itself_is_still_drawn_from_its_own_file() {
+                let (app, id) = with_a_kit("record");
+                let track = app.library.get(id).unwrap().clone();
+                assert_eq!(picture_sources(&track), Some(vec![track.path.clone()]));
+            }
+
+            #[test]
+            fn everything_but_the_picture_is_still_the_records() {
+                // The other half of the rule, and the half it would be easy to
+                // break while fixing the first: a cue that did not line up
+                // with the one on the track would be worse than no cue at all.
+                let (app, id) = with_a_kit("inherited");
+                let parent = app.library.get(id).unwrap().clone();
+                let acapella = companion(&app, id, Role::Vocals);
+
+                assert_eq!(acapella.cues, parent.cues);
+                assert_eq!(acapella.bpm, parent.bpm);
+                assert!(acapella.has_grid);
+                assert_eq!(acapella.parent, Some(id));
+            }
+
+            #[test]
+            fn analysing_a_record_draws_its_stems_too() {
+                // What "re-analyse" has to mean for a track with a kit. Left
+                // to be drawn one at a time as somebody clicks on them, a
+                // crate that has just been prepared is not prepared.
+                let (app, id) = with_a_kit("batch");
+                let drawing = app.stem_pictures(&[id]);
+
+                assert_eq!(drawing.len(), 3, "one per part of the kit");
+                let mut named: Vec<String> = drawing
+                    .iter()
+                    .flat_map(|row| &row.sources)
+                    .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect();
+                named.sort();
+                assert_eq!(
+                    named,
+                    vec![
+                        "Sirens-drums.mp3".to_string(),
+                        "Sirens-melody.mp3".to_string(),
+                        "Sirens-vocals.mp3".to_string()
+                    ],
+                    "the stems should be drawn from the stems"
+                );
+                // And never from the record, which has its own picture.
+                assert!(drawing.iter().all(|row| row.id != id));
+            }
+
+            #[test]
+            fn a_record_with_no_kit_has_no_stems_to_draw() {
+                let (mut app, id) = with_a_kit("kitless");
+                app.library.get_mut(id).unwrap().stems = Default::default();
+                app.rebuild();
+                assert!(app.stem_pictures(&[id]).is_empty());
+            }
+
+            #[test]
+            fn a_stem_is_drawn_whether_or_not_the_record_was_ever_analysed() {
+                // Rendering a kit is a more deliberate act than analysing, not
+                // a less deliberate one. Making somebody analyse the record
+                // before the stems they explicitly asked for will draw is
+                // asking twice for one thing.
+                let (mut app, id) = with_a_kit("unanalysed");
+                app.library.get_mut(id).unwrap().analyzed = false;
+                app.rebuild();
+
+                assert!(worth_drawing(&companion(&app, id, Role::Vocals)));
+                // The record itself still waits to be asked: arrowing down a
+                // library of thousands of unprepared tracks should not start a
+                // decode per row.
+                assert!(!worth_drawing(app.library.get(id).unwrap()));
+            }
+
+            #[test]
+            fn a_row_whose_audio_is_missing_is_not_drawn_at_all() {
+                // A blank picture looks exactly like a quiet one, so it is
+                // better not to draw and cache one.
+                let (mut app, id) = with_a_kit("missing");
+                let gone = app.library.get(id).unwrap().stems.vocals.clone().unwrap();
+                std::fs::remove_file(&gone).unwrap();
+                app.rebuild();
+
+                assert_eq!(picture_sources(&companion(&app, id, Role::Vocals)), None);
+                // And its neighbours are unaffected.
+                assert!(picture_sources(&companion(&app, id, Role::Drums)).is_some());
+            }
+        }
+
+        /// Noting when the prep changed, which is half of telling a player's
+        /// edit from one made here.
+        mod when_it_changed {
+            use super::*;
+
+            fn one_track(name: &str) -> (App, u32) {
+                let mut app = app(name);
+                let id = app.library.add(std::path::Path::new("/music/track.flac"));
+                let track = app.library.get_mut(id).unwrap();
+                track.bpm = 120.0;
+                track.has_grid = true;
+                track.analyzed = true;
+                track.duration_secs = 300.0;
+                app.rebuild();
+                (app, id)
+            }
+
+            #[test]
+            fn placing_a_cue_says_when() {
+                let (mut app, id) = one_track("stamped");
+                assert_eq!(app.library.get(id).unwrap().edited, None, "nothing has happened yet");
+
+                app.place_cue(id, 1, 4_000);
+                assert!(
+                    app.library.get(id).unwrap().edited.is_some(),
+                    "a moved cue with no time on it cannot be compared with the drive's"
+                );
+            }
+
+            #[test]
+            fn a_tag_is_not_a_change_a_player_could_disagree_about() {
+                // Only the things a drive carries and a deck can edit count.
+                // Stamping a rating would turn every one into a question about
+                // a drive nobody has touched.
+                let (mut app, id) = one_track("untouched");
+                let track = app.library.get_mut(id).unwrap();
+                track.tags.push("peak".into());
+                track.play_count += 1;
+                assert_eq!(app.library.get(id).unwrap().edited, None);
+            }
+        }
+
+        /// What the log says a cue was placed for.
+        ///
+        /// The recogniser is wrong often enough that arguing with it is the
+        /// point, and a cue whose reason cannot be read is a cue nobody can
+        /// argue with.
+        mod explaining_itself {
+            use super::*;
+            use crate::library::{CueMark, Lyric};
+
+            fn heard(lines: &[(u32, &str)]) -> booth_cli::transcribe::Transcript {
+                crate::library::transcript(
+                    &lines
+                        .iter()
+                        .map(|&(start_ms, text)| Lyric {
+                            start_ms,
+                            end_ms: start_ms + 2_000,
+                            text: text.to_string(),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+
+            fn cue(letter: u8, time_ms: u32, label: &str) -> CueMark {
+                CueMark { letter, time_ms, label: label.to_string(), color: [0; 3] }
+            }
+
+            #[test]
+            fn the_lines_are_listed_most_repeated_first() {
+                let words = heard(&[
+                    (20_000, "walking through the city at night"),
+                    (40_000, "hold me closer now"),
+                    (100_000, "hold me closer now"),
+                    (160_000, "hold me closer now"),
+                    (200_000, "and I don't want to go home"),
+                    (260_000, "and I don't want to go home"),
+                ]);
+                let said = what_the_words_decided(&words, &[], &[]);
+
+                let ranking: Vec<&String> =
+                    said.iter().filter(|line| line.contains('\u{d7}')).collect();
+                assert_eq!(ranking.len(), 3, "{said:#?}");
+                assert!(ranking[0].contains("3\u{d7}"), "{}", ranking[0]);
+                assert!(ranking[0].contains("hold me closer now"), "{}", ranking[0]);
+                assert!(ranking[1].contains("2\u{d7}"), "{}", ranking[1]);
+                assert!(ranking[2].contains("1\u{d7}"), "{}", ranking[2]);
+                // And each says where it lands, so a cue can be checked
+                // against the list that put it there.
+                assert!(ranking[0].contains("0:40.00"), "{}", ranking[0]);
+                assert!(ranking[0].contains("2:40.00"), "{}", ranking[0]);
+            }
+
+            #[test]
+            fn the_lyric_the_hook_cue_is_for_is_named() {
+                let words =
+                    heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
+                let said = what_the_words_decided(&words, &[], &[]);
+                let hook = said.iter().find(|line| line.starts_with("hook:")).expect("{said:#?}");
+                assert!(hook.contains("hold me closer now"), "{hook}");
+                assert!(hook.contains("sung 2 times"), "{hook}");
+                assert!(hook.contains("0:40.00"), "{hook}");
+            }
+
+            #[test]
+            fn a_track_with_no_chorus_says_so_rather_than_staying_quiet() {
+                // Otherwise somebody goes looking for a hook cue that was
+                // never going to be there.
+                let words = heard(&[(40_000, "one line, said once, and then nothing")]);
+                let said = what_the_words_decided(&words, &[], &[]);
+                assert!(
+                    said.iter().any(|line| line.contains("no line comes round twice")),
+                    "{said:#?}"
+                );
+            }
+
+            #[test]
+            fn every_cue_that_moved_says_what_it_was_and_what_it_became() {
+                let words =
+                    heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
+                let before = [cue(1, 32_000, "drop"), cue(2, 96_000, "break")];
+                let after = [cue(1, 40_000, "hold me closer now"), cue(3, 150_000, "outro")];
+
+                let said = what_the_words_decided(&words, &before, &after);
+                let moved = said.iter().find(|line| line.starts_with('A')).expect("{said:#?}");
+                assert_eq!(moved, "A 0:32.00 drop \u{2192} 0:40.00 hold me closer now");
+                // A slot that gained a cue, and one that lost one, both said.
+                assert!(said.iter().any(|line| line == "C set to 2:30.00 outro"), "{said:#?}");
+                assert!(
+                    said.iter().any(|line| line == "B cleared, was 1:36.00 break"),
+                    "{said:#?}"
+                );
+            }
+
+            #[test]
+            fn a_cue_that_did_not_move_is_not_reported_as_having_moved() {
+                let words =
+                    heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
+                let same = [cue(1, 40_000, "hold me closer now")];
+                let said = what_the_words_decided(&words, &same, &same);
+                assert!(
+                    said.iter().any(|line| line == "every cue is already where the words put it"),
+                    "{said:#?}"
+                );
+                assert!(!said.iter().any(|line| line.contains('\u{2192}')), "{said:#?}");
+            }
+        }
+
+        /// Cues placed off what is sung, rather than off what is played.
+        mod from_the_words {
+            use super::*;
+            use crate::library::{Lyric, Phrase, Role};
+
+            /// A window holding one analysed track: a grid, two phrases, and
+            /// whatever has already been heard on its vocal stem.
+            ///
+            /// 120 BPM, so a beat is 500 ms and a bar is two seconds, and the
+            /// arithmetic in these tests can be done in the head.
+            fn sung(name: &str, lyrics: &[(u32, &str)]) -> (App, u32) {
+                let mut app = app(name);
+                // A real file: everything that spends minutes on a track
+                // checks first that it is still where the collection says.
+                let path = app.library_path.with_file_name("track.flac");
+                std::fs::write(&path, b"not really a flac").unwrap();
+
+                let id = app.library.add(&path);
+                let track = app.library.get_mut(id).unwrap();
+                track.bpm = 120.0;
+                track.has_grid = true;
+                track.analyzed = true;
+                track.beats = 600;
+                track.duration_secs = 300.0;
+                track.cues =
+                    vec![CueMark { letter: 0, time_ms: 0, label: String::new(), color: [0; 3] }];
+                track.phrases = vec![
+                    Phrase { start_ms: 0, end_ms: 32_000, kind: "intro".into() },
+                    Phrase { start_ms: 32_000, end_ms: 64_000, kind: "drop".into() },
+                ];
+                track.lyrics = lyrics
+                    .iter()
+                    .map(|&(start_ms, text)| Lyric {
+                        start_ms,
+                        end_ms: start_ms + 2_000,
+                        text: text.to_string(),
+                    })
+                    .collect();
+                app.rebuild();
+                (app, id)
+            }
+
+            fn labels(app: &App, id: u32) -> Vec<String> {
+                app.library
+                    .get(id)
+                    .unwrap()
+                    .cues
+                    .iter()
+                    .filter(|cue| cue.letter != 0)
+                    .map(|cue| cue.label.clone())
+                    .collect()
+            }
+
+            #[test]
+            fn the_line_the_track_keeps_coming_back_to_becomes_a_cue() {
+                let (mut app, id) = sung(
+                    "hook",
+                    &[
+                        (20_000, "walking through the city at night"),
+                        (40_100, "hold me closer now"),
+                        (100_100, "hold me closer now"),
+                        (160_100, "hold me closer now"),
+                    ],
+                );
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let hook = cues
+                    .iter()
+                    .find(|cue| cue.label == "hold me closer now")
+                    .unwrap_or_else(|| panic!("the hook was not cued: {cues:?}"));
+                // On the beat before the first word rather than the nearest
+                // one, so the cue cannot land after the word it is for.
+                assert_eq!(hook.time_ms, 40_000);
+                // Once, wherever it first lands. A line sung three times used
+                // to be three cues saying the same thing, which left the drops
+                // and the breakdowns nowhere to go.
+                assert_eq!(
+                    cues.iter().filter(|cue| cue.label == "hold me closer now").count(),
+                    1,
+                    "{cues:?}"
+                );
+            }
+
+            #[test]
+            fn a_line_said_once_is_not_cued_as_a_hook() {
+                let (mut app, id) = sung(
+                    "once",
+                    &[(20_000, "walking through the city at night"), (60_000, "and then home")],
+                );
+                app.auto_cue(id);
+                let placed = labels(&app, id);
+                assert!(
+                    placed.iter().all(|label| !label.contains("city")),
+                    "a line nobody repeats is not a hook: {placed:?}"
+                );
+                // The voice arriving is still worth a cue.
+                assert!(placed.iter().any(|label| label == "vocal"), "{placed:?}");
+            }
+
+            #[test]
+            fn a_track_with_no_words_still_gets_its_phrases_cued() {
+                let (mut app, id) = sung("phrases", &[]);
+                app.auto_cue(id);
+                // The first section is on the memory cue, which is where the
+                // player parks when the track loads, so it costs no hot cue.
+                let cues = &app.library.get(id).unwrap().cues;
+                assert_eq!(cues[0].letter, 0);
+                assert_eq!(cues[0].label, "Start");
+                assert_eq!(labels(&app, id), vec!["drop".to_string()]);
+
+                // And every section it did not take is a named memory cue, so
+                // the list reads as an arrangement rather than as a row of
+                // identical markers.
+                let marks: Vec<&str> = cues
+                    .iter()
+                    .filter(|cue| cue.letter == 0)
+                    .map(|cue| cue.label.as_str())
+                    .collect();
+                assert_eq!(marks.first(), Some(&"Start"));
+                assert!(marks.contains(&"Drop 1"), "{marks:?}");
+                assert_eq!(marks.last(), Some(&"End"), "{marks:?}");
+            }
+
+            #[test]
+            fn the_memory_cue_is_left_where_the_grid_is_anchored() {
+                // Every bar line in the track is measured from it, so an
+                // auto-cue pass that moved it would silently re-grid the
+                // record.
+                let (mut app, id) = sung("anchor", &[]);
+                app.library.get_mut(id).unwrap().cues[0].time_ms = 317;
+                app.auto_cue(id);
+
+                let cues = &app.library.get(id).unwrap().cues;
+                assert_eq!(cues[0].letter, 0);
+                assert_eq!(cues[0].time_ms, 317);
+            }
+
+            #[test]
+            fn asking_an_acapella_for_cues_asks_the_record_it_came_from() {
+                let (mut app, id) = sung(
+                    "acapella",
+                    &[(40_100, "hold me closer now"), (100_100, "hold me closer now")],
+                );
+                let acapella = crate::library::companion_id(id, Role::Vocals);
+                assert!(app.auto_cue_tracks(&[acapella]), "the row did nothing");
+
+                let placed = labels(&app, id);
+                assert!(placed.iter().any(|label| label == "hold me closer now"), "{placed:?}");
+            }
+
+            #[test]
+            fn a_track_with_no_vocal_stem_is_remembered_until_it_has_one() {
+                let (mut app, id) = sung("render", &[]);
+                app.config.whisper.model = "/models/ggml-base.en.bin".into();
+
+                assert!(!app.auto_cue_tracks(&[id]), "nothing can be cued yet");
+                assert!(
+                    app.want_cues.contains(&id),
+                    "the track was not remembered, so its words will never be read"
+                );
+            }
         }
 
         /// Click the named button, type into the field it opens, press a key,
@@ -8294,50 +10590,77 @@ mod tests {
 
         /// A window with one track and one playlist, showing browser and
         /// sidebar side by side — which is what a drag crosses.
-        fn with_a_track_and_a_playlist(name: &str) -> App {
+        /// Draw a pane in a box of exactly this size, the way a side panel
+        /// does in the window. Returns the box.
+        ///
+        /// Not decoration, and not a size plucked out of the air. The sidebar
+        /// fills whatever it is handed — since it gained a `ScrollArea` it
+        /// fills it in both directions — and a `Ui` that merely *allocates* a
+        /// box does not stop it: `max_rect` is where egui lays out to, not a
+        /// wall. Handed the harness with nothing holding it, the sidebar took
+        /// all 784 points of it and left the browser a list zero pixels wide,
+        /// which is not a list a row can be dragged out of.
+        ///
+        /// So this is [`pinned`] with the box stated outright, and every part
+        /// of it has to be. Inside a `horizontal`, `available_rect_before_wrap`
+        /// reports the height of the row *so far* — eighteen points on the
+        /// first frame — and a clip rect eighteen points tall is a playlist
+        /// that `contains_pointer` says the pointer is not over, on the one
+        /// frame where that decides whether a drop lands. The layout is stated
+        /// for the same kind of reason: inherited from the enclosing
+        /// `horizontal`, the sidebar lays itself out sideways.
+        fn in_a_panel(ui: &mut Ui, size: egui::Vec2, contents: impl FnOnce(&mut Ui)) -> egui::Rect {
+            let rect = egui::Rect::from_min_size(ui.available_rect_before_wrap().min, size);
+            let mut inner = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            inner.shrink_clip_rect(rect);
+            contents(&mut inner);
+            ui.advance_cursor_after_rect(rect);
+            rect
+        }
+
+        /// Wide enough for the browser to have room beside it, and tall enough
+        /// that a short collection does not scroll.
+        const PANEL: egui::Vec2 = egui::vec2(200.0, 560.0);
+        /// Short enough that any collection overruns it.
+        const SHORT_PANEL: egui::Vec2 = egui::vec2(200.0, 200.0);
+
+        /// Where the panel's bottom edge ended up, noted as it was drawn.
+        ///
+        /// "Below the fold" is a claim about the edge the harness actually put
+        /// there. A number typed in beside the test would go on passing after
+        /// it moved.
+        #[derive(Clone, Default)]
+        struct Fold(std::sync::Arc<std::sync::atomic::AtomicU32>);
+
+        impl Fold {
+            fn note(&self, at: f32) {
+                self.0.store(at.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
+
+            fn at(&self) -> f32 {
+                f32::from_bits(self.0.load(std::sync::atomic::Ordering::Relaxed))
+            }
+        }
+
+        /// A collection with more playlists than any panel could show at once.
+        fn with_many_playlists(name: &str, count: usize) -> App {
             let mut app = app(name);
-            let id = app.library.add(std::path::Path::new("/music/Sirens.flac"));
-            let track = app.library.get_mut(id).unwrap();
-            track.artist = "Peverelist".into();
-            track.title = "Sirens".into();
-            app.library.add_playlist("Saturday peak", "").unwrap();
+            for i in 0..count {
+                app.library.add_playlist(&format!("list {i:02}"), "").unwrap();
+            }
             app.rebuild();
             app
         }
 
-        #[test]
-        fn a_row_can_be_dragged_onto_a_playlist() {
-            // The thing this was all for. Drag-and-drop is a chain — the row
-            // has to be draggable, the payload has to be set, the sidebar has
-            // to accept it — and any link being missing looks identical from
-            // the outside: nothing happens.
-            let mut harness = Harness::new_ui_state(
-                |ui, app: &mut App| {
-                    ui.horizontal(|ui| {
-                        // A width, as the panel gives it one: the sidebar
-                        // fills what it is handed, and handing it the whole
-                        // harness would leave the list nothing to be dragged
-                        // from.
-                        ui.vertical(|ui| app.sidebar(ui));
-                        ui.vertical(|ui| {
-                            let widths = rows::Layout::default().widths(ui.available_width());
-                            app.rows_table(ui, &widths)
-                        });
-                    });
-                    // As the window does: the panels ask, and what they asked
-                    // for happens once they have all drawn.
-                    let ctx = ui.ctx().clone();
-                    app.apply_pending(&ctx);
-                },
-                with_a_track_and_a_playlist("dragging"),
-            );
-            harness.run();
-
-            let from = harness.get_by_label_contains("Sirens").rect().center();
-            let onto = harness.get_by_label("Saturday peak").rect().center();
-
-            // Pressed, moved, released — a drag is not one event, and egui only
-            // starts one once the pointer has actually travelled.
+        /// Carry something from one place to another with the pointer.
+        ///
+        /// Pressed, moved, released — a drag is not one event, and egui only
+        /// starts one once the pointer has actually travelled.
+        fn drag(harness: &mut Harness<'_, App>, from: egui::Pos2, onto: egui::Pos2) {
             harness.event(egui::Event::PointerMoved(from));
             harness.run();
             harness.event(egui::Event::PointerButton {
@@ -8360,6 +10683,154 @@ mod tests {
             });
             harness.run();
             harness.run();
+        }
+
+        /// Spin the wheel over the panel, which is how a person reaches the
+        /// bottom of it.
+        ///
+        /// `run_ok` rather than `run`: a scroll bar fades out over a second or
+        /// so, which is a repaint per frame for as long as it takes, and the
+        /// harness treats a ui that keeps asking to be redrawn as a runaway.
+        fn scroll(harness: &mut Harness<'_, App>, over: egui::Pos2, by: f32) {
+            harness.event(egui::Event::PointerMoved(over));
+            harness.run_ok();
+            harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, by),
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run_ok();
+        }
+
+        #[test]
+        fn a_playlist_below_the_fold_can_be_reached() {
+            // What the panel had no answer for. A collection with more
+            // playlists than there is room for used to run them off the bottom
+            // of the screen; once the panel began clipping to its own
+            // rectangle they stopped being drawn at all, and either way there
+            // was no way to get at them.
+            let fold = Fold::default();
+            let edge = fold.clone();
+            let mut harness = Harness::new_ui_state(
+                move |ui, app: &mut App| {
+                    edge.note(in_a_panel(ui, SHORT_PANEL, |ui| app.sidebar(ui)).bottom());
+                },
+                with_many_playlists("scrolling", 40),
+            );
+            harness.run();
+            let fold = fold.at();
+
+            let last = harness.query_by_label("list 39").map(|node| node.rect());
+            assert!(
+                last.is_none_or(|rect| rect.top() >= fold),
+                "the last playlist is already in view, so this proves nothing: {last:?}"
+            );
+
+            scroll(&mut harness, egui::pos2(100.0, 100.0), -4_000.0);
+
+            let last = harness
+                .query_by_label("list 39")
+                .unwrap_or_else(|| panic!("the last playlist is still not drawn"))
+                .rect();
+            assert!(last.top() < fold, "scrolling did not bring it into the panel: {last:?}");
+        }
+
+        #[test]
+        fn a_row_can_be_dropped_on_a_playlist_that_had_to_be_scrolled_to() {
+            // The two halves of this panel meeting: a playlist reachable only
+            // by scrolling still has to be a thing a track can be dropped on.
+            // A scroll area moves its contents without moving the rectangles
+            // egui interacts against unless everything agrees, and a drop that
+            // lands on where a playlist *was* is the kind of fault that looks
+            // from the outside exactly like nothing happening.
+            let mut app = with_many_playlists("dropping-after-scrolling", 40);
+            let id = app.library.add(std::path::Path::new("/music/Sirens.flac"));
+            let track = app.library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+            app.rebuild();
+
+            let fold = Fold::default();
+            let edge = fold.clone();
+            let mut harness = Harness::new_ui_state(
+                move |ui, app: &mut App| {
+                    ui.horizontal(|ui| {
+                        edge.note(in_a_panel(ui, SHORT_PANEL, |ui| app.sidebar(ui)).bottom());
+                        ui.vertical(|ui| {
+                            let widths = rows::Layout::default().widths(ui.available_width());
+                            app.rows_table(ui, &widths)
+                        });
+                    });
+                    let ctx = ui.ctx().clone();
+                    app.apply_pending(&ctx);
+                },
+                app,
+            );
+            harness.run();
+
+            let before = harness.get_by_label("list 39").rect();
+            assert!(
+                before.top() >= fold.at(),
+                "the target is on screen already, so this proves nothing: {before:?}"
+            );
+
+            // To the bottom of the list, so the target is one that was not on
+            // screen a moment ago.
+            scroll(&mut harness, egui::pos2(100.0, 100.0), -4_000.0);
+
+            let from = harness.get_by_label_contains("Sirens").rect().center();
+            let onto = harness.get_by_label("list 39").rect().center();
+            assert!(onto.y < fold.at(), "the target is still below the panel: {onto:?}");
+            drag(&mut harness, from, onto);
+
+            let reached = harness
+                .state()
+                .library
+                .playlists
+                .iter()
+                .find(|playlist| playlist.name == "list 39")
+                .expect("the playlist went missing");
+            assert_eq!(reached.tracks, vec![id], "the drop did not reach the scrolled playlist");
+        }
+
+        fn with_a_track_and_a_playlist(name: &str) -> App {
+            let mut app = app(name);
+            let id = app.library.add(std::path::Path::new("/music/Sirens.flac"));
+            let track = app.library.get_mut(id).unwrap();
+            track.artist = "Peverelist".into();
+            track.title = "Sirens".into();
+            app.library.add_playlist("Saturday peak", "").unwrap();
+            app.rebuild();
+            app
+        }
+
+        #[test]
+        fn a_row_can_be_dragged_onto_a_playlist() {
+            // The thing this was all for. Drag-and-drop is a chain — the row
+            // has to be draggable, the payload has to be set, the sidebar has
+            // to accept it — and any link being missing looks identical from
+            // the outside: nothing happens.
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    ui.horizontal(|ui| {
+                        in_a_panel(ui, PANEL, |ui| app.sidebar(ui));
+                        ui.vertical(|ui| {
+                            let widths = rows::Layout::default().widths(ui.available_width());
+                            app.rows_table(ui, &widths)
+                        });
+                    });
+                    // As the window does: the panels ask, and what they asked
+                    // for happens once they have all drawn.
+                    let ctx = ui.ctx().clone();
+                    app.apply_pending(&ctx);
+                },
+                with_a_track_and_a_playlist("dragging"),
+            );
+            harness.run();
+
+            let from = harness.get_by_label_contains("Sirens").rect().center();
+            let onto = harness.get_by_label("Saturday peak").rect().center();
+            drag(&mut harness, from, onto);
 
             let playlist = &harness.state().library.playlists[0];
             assert_eq!(playlist.tracks.len(), 1, "the drop did not add the track");
@@ -9488,6 +11959,284 @@ mod tests {
         }
 
         #[test]
+        fn a_carried_stem_goes_into_the_playlist_beside_its_track() {
+            let mut app = a_drive_up_to_date("stems in lists");
+            let id = app.library.playlists[0].tracks[0];
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.stems.vocals = Some("/stems/Sirens-vocals.wav".into());
+                track.stems.drums = Some("/stems/Sirens-drums.wav".into());
+                track.stems.melody = Some("/stems/Sirens-melody.wav".into());
+            }
+
+            let drive = app.library.drives[0].clone();
+            let specs = app.drive_playlists(&drive);
+            assert_eq!(specs.len(), 1, "{specs:?}");
+            let paths = &specs[0].tracks;
+            assert_eq!(paths.len(), 4, "the track and its three stems: {paths:?}");
+            assert_eq!(paths[0], app.library.get(id).unwrap().path, "the track comes first");
+            for part in ["vocals", "drums", "melody"] {
+                assert!(
+                    paths.iter().any(|p| p.to_string_lossy().contains(part)),
+                    "no {part} in the list: {paths:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_stem_is_in_the_files_the_write_prepares() {
+            // The other half of the same question: a stem named in a playlist
+            // but never written is an entry the database drops on the floor.
+            let mut app = a_drive_up_to_date("stems on disk");
+            let id = app.library.playlists[0].tracks[0];
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.stems.vocals = Some("/stems/Sirens-vocals.wav".into());
+                track.stems.drums = Some("/stems/Sirens-drums.wav".into());
+                track.stems.melody = Some("/stems/Sirens-melody.wav".into());
+            }
+            app.replan();
+
+            let drive = app.library.drives[0].clone();
+            let carry = sync::carry(&app.library, &drive, &app.plan);
+            for part in ["vocals", "drums", "melody"] {
+                assert!(
+                    carry.files.iter().any(|p| p.to_string_lossy().contains(part)),
+                    "the {part} stem is not among the files to write: {:?}",
+                    carry.files
+                );
+            }
+        }
+
+        #[test]
+        fn settings_opens_on_the_key_every_other_program_uses() {
+            let mut harness = browsing("comma", 2);
+            assert!(!harness.state().settings);
+            press(&mut harness, egui::Key::Comma, egui::Modifiers::COMMAND);
+            assert!(
+                harness.state().settings,
+                "\u{2318}, did not open Settings, which is where every other program keeps it"
+            );
+        }
+
+        #[test]
+        fn the_hover_delay_setting_reaches_the_window_it_describes() {
+            // A delay that only took effect after a restart would be one
+            // nobody could tune: the whole point is to drag it while looking
+            // at the window.
+            let mut app = app("hover");
+            app.config.help_delay_ms = 1500;
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    theme::help_delay(ui.ctx(), app.config.help_delay_ms);
+                },
+                app,
+            );
+            harness.run();
+            assert_eq!(harness.ctx.style().interaction.tooltip_delay, 1.5);
+
+            harness.state_mut().config.help_delay_ms = 0;
+            harness.run();
+            assert_eq!(harness.ctx.style().interaction.tooltip_delay, 0.0);
+        }
+
+        #[test]
+        fn the_details_button_lists_every_change_one_to_a_line() {
+            // The summary names three of each and says "+7". Which seven is
+            // the question somebody opens the sheet with: a drive about to
+            // remove four tracks is fine or a disaster depending on which four.
+            let mut app = a_drive_up_to_date("details");
+            let added = app.library.add(std::path::Path::new("/music/Second.flac"));
+            app.library.get_mut(added).unwrap().artist = "Peverelist".into();
+            app.library.get_mut(added).unwrap().title = "Roll With The Punches".into();
+            app.library.playlists[0].tracks.push(added);
+            app.replan();
+
+            let lines = app.change_lines();
+            assert_eq!(lines.len(), 1, "one line for the one track being added: {lines:?}");
+            assert!(lines[0].0.starts_with('+'), "{lines:?}");
+            assert!(lines[0].0.contains("Roll With The Punches"), "{lines:?}");
+
+            // And the button on the sheet opens the window that shows them.
+            app.sheet = true;
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.sync_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+            harness.get_by_label("Details").click();
+            harness.run();
+            assert!(harness.state().details, "the Details button did not open the window");
+        }
+
+        #[test]
+        fn a_track_the_collection_has_lost_still_gets_a_line() {
+            // The case worth seeing above all: the drive holds a track that is
+            // no longer in the collection, so the write takes it off. A row
+            // that quietly vanished from the list would be the write doing
+            // something the list did not mention.
+            let mut app = a_drive_up_to_date("gone");
+            let id = app.library.playlists[0].tracks[0];
+            app.library.remove(id);
+            // `remove` clears the drive's record too, so put back the one row
+            // that makes this a removal rather than nothing at all.
+            app.library.drives[0].written =
+                vec![crate::library::Written { id, ..Default::default() }];
+            app.replan();
+
+            let lines = app.change_lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].0.contains("no longer in the collection"), "{lines:?}");
+        }
+
+        #[test]
+        fn a_rendered_kit_goes_on_without_anyone_ticking_a_box() {
+            // Why nobody's stems reached a stick: carrying them was a choice
+            // that defaulted to no, made on a sheet most people never opened.
+            // A kit exists because somebody asked for one, so the drive it goes
+            // with is the answer unless they say otherwise.
+            let mut app = a_drive_up_to_date("kits by default");
+            let id = app.library.playlists[0].tracks[0];
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.stems.vocals = Some("/stems/Sirens-vocals.wav".into());
+                track.stems.drums = Some("/stems/Sirens-drums.wav".into());
+                track.stems.melody = Some("/stems/Sirens-melody.wav".into());
+            }
+            app.replan();
+
+            assert_eq!(app.plan.stems.len(), 3, "a rendered kit was left off a fresh drive");
+            assert!(app.plan.delta().contains("3 stems"), "{}", app.plan.delta());
+        }
+
+        #[test]
+        fn a_kit_on_disk_the_collection_never_heard_about_is_noticed() {
+            // A kit rendered in a run that ended before the collection was
+            // saved, or dropped into the folder by hand, is three files the
+            // drive would otherwise never be told about. The write is the last
+            // chance to look, and the files are named after their track, so
+            // looking is cheap and the answer is not a guess.
+            let dir = std::env::temp_dir().join(format!("booth-found-kit-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let track = dir.join("Sirens.flac");
+            std::fs::write(&track, b"").unwrap();
+            for part in ["vocals", "drums", "melody"] {
+                std::fs::write(dir.join(format!("Sirens-{part}.wav")), b"").unwrap();
+            }
+
+            let mut app = app("found kit");
+            let id = app.library.add(&track);
+            assert!(app.library.get(id).unwrap().stems.is_empty(), "the fixture starts with none");
+
+            assert_eq!(app.notice_rendered_kits(&[id]), 1);
+            let kit = &app.library.get(id).unwrap().stems;
+            assert!(kit.is_complete(), "the kit beside the track was not picked up: {kit:?}");
+            // Asking twice must not report a second find, or every write would
+            // save the collection for nothing.
+            assert_eq!(app.notice_rendered_kits(&[id]), 0);
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn another_drive_can_be_reached_when_one_is_already_set_up() {
+            // The hole this closes: adding was offered only while the list was
+            // empty and switching only while it held more than one, so setting
+            // up a first drive took away every way to add or reach a second.
+            let mut app = a_drive_up_to_date("pick");
+            // A second drive the dock is not currently on, so finding it can
+            // only mean the menu listed it rather than the dock naming the one
+            // already in use.
+            app.library.drives.push(crate::library::Drive {
+                label: "SPARE".into(),
+                path: std::path::PathBuf::from("/media/spare"),
+                ..Default::default()
+            });
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.dock(ui), app);
+            harness.run();
+
+            harness.get_by_label_contains("drives").click();
+            harness.run();
+            harness.get_by_label_contains("Add a drive");
+            harness.get_by_label_contains("Add an image");
+            harness.get_by_label_contains("SPARE").click();
+            harness.run();
+
+            // The dock only asks; the window is what acts, so the ask has to
+            // be carried out here the way a frame would carry it out.
+            let ctx = egui::Context::default();
+            harness.state_mut().apply_pending(&ctx);
+            assert_eq!(harness.state().drive, 1, "picking a drive did not switch to it");
+        }
+
+        #[test]
+        fn a_drive_that_is_not_there_says_so_rather_than_looking_ready() {
+            // `/media/usb` is not mounted while a test runs, which is the whole
+            // point: the collection remembers a place and a history, and a
+            // place is not a stick. Told nothing, you line up a sync against a
+            // drive that went home in somebody's bag.
+            let mut harness =
+                Harness::new_ui_state(|ui, app: &mut App| app.dock(ui), a_drive_up_to_date("gone"));
+            harness.run();
+            harness.get_by_label_contains("not plugged in");
+        }
+
+        #[test]
+        fn what_counts_as_plugged_in_is_different_for_an_image() {
+            // One is a mounted folder and the other is a file, so asking the
+            // same question of both would call every image missing.
+            let dir = std::env::temp_dir().join(format!("booth-plugged-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let image = dir.join("drive.img");
+            std::fs::write(&image, b"not really an image").unwrap();
+
+            let stick = crate::library::Drive { path: dir.clone(), ..Default::default() };
+            let missing = crate::library::Drive { path: dir.join("nowhere"), ..Default::default() };
+            let made =
+                crate::library::Drive { path: image.clone(), is_image: true, ..Default::default() };
+            // A folder is not an image, and an image is not a folder.
+            let unmade =
+                crate::library::Drive { path: dir.clone(), is_image: true, ..Default::default() };
+
+            assert!(plugged_in(&stick));
+            assert!(!plugged_in(&missing));
+            assert!(plugged_in(&made));
+            assert!(!plugged_in(&unmade));
+
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn forgetting_a_drive_leaves_the_rest_reachable() {
+            // An index kept across a removal points at a different drive, which
+            // is the worst kind of wrong: everything still works and it is the
+            // wrong stick.
+            let mut app = a_drive_up_to_date("forget");
+            app.library.drives.push(crate::library::Drive {
+                label: "SPARE".into(),
+                path: std::path::PathBuf::from("/media/spare"),
+                ..Default::default()
+            });
+            app.drive = 1;
+
+            let ctx = egui::Context::default();
+            app.pending.push(Pending::ForgetDrive(1));
+            app.apply_pending(&ctx);
+
+            assert_eq!(app.library.drives.len(), 1);
+            assert_eq!(app.library.drives[0].label, "USB");
+            assert!(
+                app.library.drives.get(app.drive).is_some(),
+                "the index was left past the end of the list"
+            );
+        }
+
+        #[test]
         fn forgetting_what_a_drive_holds_makes_the_next_write_a_first_write() {
             // The way back from a drive something else has been at. The record
             // is what makes a write a small one; without it every track is
@@ -10080,6 +12829,82 @@ mod tests {
         assert_eq!(beats[1], 500);
         assert!(beats.contains(&2_000), "the cue should fall on a beat");
         assert!(*beats.last().unwrap() < 10_000);
+    }
+
+    #[test]
+    fn the_first_beat_of_the_grid_is_a_downbeat_on_the_memory_cues_bar() {
+        // Everything that counts in fours counts from beat zero — the red bar
+        // marks, the bar number in the transport, the length on a phrase. Wind
+        // the grid back a beat at a time and beat zero is whichever beat lands
+        // nearest the top of the track, so all three count from an offbeat on
+        // any track that does not happen to start on the one.
+        let mut track = Track::placeholder(1);
+        track.has_grid = true;
+        track.bpm = 126.0;
+        track.duration_secs = 180.0;
+        track.cues.push(CueMark {
+            letter: 0,
+            time_ms: 30_969,
+            label: String::new(),
+            color: [0, 0, 0],
+        });
+
+        let beats = beat_times(&track);
+        let at = beats
+            .iter()
+            .position(|beat| beat.abs_diff(30_969) < 2)
+            .expect("the memory cue should fall on a beat");
+        assert_eq!(at % crate::library::BEATS_PER_BAR, 0, "the memory cue landed on beat {at}");
+        // And it is wound back as far as a downbeat goes, so at most the part
+        // bar at the head of the track is left unmarked.
+        let bar_ms = (crate::library::BEATS_PER_BAR as f64 * 60_000.0 / 126.0) as u32;
+        assert!(beats[0] < bar_ms, "the grid started {} ms in, past the first bar", beats[0]);
+    }
+
+    #[test]
+    fn a_grid_that_bends_is_drawn_as_it_was_kept() {
+        // No tempo puts these beats back, which is the whole reason they are
+        // kept. Rebuilding one from the tempo would straighten a grid somebody
+        // bent on a player, and the straightened version is what would then go
+        // back on the drive.
+        let mut track = Track::placeholder(1);
+        track.has_grid = true;
+        track.bpm = 120.0;
+        track.duration_secs = 10.0;
+        track.beat_ms = vec![0, 500, 1_010, 1_480, 2_030, 2_500];
+
+        assert_eq!(beat_times(&track), track.beat_ms);
+        // And the transport counts against those beats, not against the tempo:
+        // 1_600 ms is past the fourth beat although a steady 120 would have
+        // called it the third.
+        assert_eq!(beat_at(&track, 1_600), Some(3));
+        assert_eq!(beat_at(&track, 0), Some(0));
+    }
+
+    #[test]
+    fn the_anchor_says_where_the_one_is_rather_than_the_memory_cue() {
+        // They were the same thing, so setting the grid moved a cue and moving
+        // a cue moved the grid. A DJ does both, and rarely means the other.
+        let mut track = Track::placeholder(1);
+        track.has_grid = true;
+        track.bpm = 120.0;
+        track.duration_secs = 20.0;
+        track.cues.push(CueMark {
+            letter: 0,
+            time_ms: 3_000,
+            label: String::new(),
+            color: [0, 0, 0],
+        });
+
+        let off_the_cue = beat_times(&track);
+        track.downbeat_ms = Some(3_250);
+        let off_the_anchor = beat_times(&track);
+        assert_ne!(off_the_cue[0], off_the_anchor[0], "the anchor was ignored");
+        assert!(
+            off_the_anchor.contains(&3_250),
+            "the anchor should fall on a beat: {:?}",
+            &off_the_anchor[..4]
+        );
     }
 
     #[test]

@@ -115,16 +115,22 @@ impl StemKit {
     }
 
     /// Take the parts this kit lacks from `other`, leaving the rest alone.
-    pub fn fill_from(&mut self, other: &StemKit) {
+    ///
+    /// Says whether it took any, so a caller that is about to save the
+    /// collection can tell a kit that arrived from one that was already there.
+    pub fn fill_from(&mut self, other: &StemKit) -> bool {
+        let mut took = false;
         for (mine, theirs) in [
             (&mut self.vocals, &other.vocals),
             (&mut self.drums, &other.drums),
             (&mut self.melody, &other.melody),
         ] {
-            if mine.is_none() {
+            if mine.is_none() && theirs.is_some() {
                 mine.clone_from(theirs);
+                took = true;
             }
         }
+        took
     }
 
     /// Whether `path` is one of the parts this kit names.
@@ -167,6 +173,14 @@ impl Phrase {
         self.end_ms.saturating_sub(self.start_ms)
     }
 }
+
+/// Four, and the picture, the transport and the phrase strip all count in it.
+///
+/// Named rather than written out at each of the three, because the bar is the
+/// one number they have to agree on: a red mark every four beats, a bar number
+/// that advances every four, and a section length in fours are the same claim
+/// made three times, and they disagreed once already.
+pub const BEATS_PER_BAR: usize = 4;
 
 /// The shortest a section may be left.
 ///
@@ -263,6 +277,142 @@ fn room(from: u32, to: u32, wanted: u32) -> Option<u32> {
     (floor <= ceiling).then(|| wanted.clamp(floor, ceiling))
 }
 
+/// One line of a track's words, with when it was sung.
+///
+/// Kept in the collection rather than re-read, because getting it costs a stem
+/// render and a pass through a speech recogniser — minutes a track — and
+/// because a DJ who has seen what a cue says should be able to see it again
+/// without paying for it twice.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lyric {
+    pub start_ms: u32,
+    pub end_ms: u32,
+    pub text: String,
+}
+
+/// The words as the engine wants them, for finding what repeats in them.
+pub fn transcript(lyrics: &[Lyric]) -> booth_cli::transcribe::Transcript {
+    booth_cli::transcribe::Transcript {
+        lines: lyrics
+            .iter()
+            .map(|line| booth_cli::transcribe::Line {
+                start_ms: line.start_ms,
+                end_ms: line.end_ms,
+                text: line.text.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// And back, for storing what one came home with.
+pub fn lyrics_from(transcript: &booth_cli::transcribe::Transcript) -> Vec<Lyric> {
+    transcript
+        .lines
+        .iter()
+        .map(|line| Lyric { start_ms: line.start_ms, end_ms: line.end_ms, text: line.text.clone() })
+        .collect()
+}
+
+/// Make what a player left on a drive the collection's copy.
+///
+/// The other direction from the one everything else here goes in: a CDJ-3000X
+/// moved a cue or re-gridded a track on the deck, somebody has said that is the
+/// copy to keep, and the collection has to be able to show it or the decision
+/// means nothing.
+///
+/// The grid itself is not taken, only the tempo it was written at. A collection
+/// keeps a tempo and a downbeat rather than thousands of beat times — see
+/// [`crate::app`]'s `beat_times` — so a variable grid cannot be held here
+/// without being flattened, and flattening it and writing it back would lose
+/// exactly what was being protected. This is why a track whose drive copy is
+/// kept is not written again: the files on the stick stay as the player left
+/// them, and what comes back here is what can be shown beside them.
+///
+/// Returns whether anything changed.
+pub fn take_prep(track: &mut Track, found: &booth_cli::rekordbox::anlz::Analysis) -> bool {
+    let before = (
+        track.bpm,
+        track.cues.clone(),
+        track.phrases.clone(),
+        track.beats,
+        track.beat_ms.clone(),
+        track.downbeat_ms,
+    );
+
+    if let Some(bpm) = found.bpm() {
+        track.bpm = bpm;
+    }
+    if !found.grid.beats.is_empty() {
+        track.beats = found.grid.beats.len();
+        track.has_grid = true;
+        // A grid a tempo cannot describe is kept beat for beat. A player bends
+        // grids by hand and this is the only copy of that work: rebuilding it
+        // from the tempo on the way back out would hand the drive a flattened
+        // version of what it just gave us.
+        track.beat_ms = match found.grid.bends() {
+            true => found.grid.times_from_downbeat(),
+            false => Vec::new(),
+        };
+        // Where the drive says the one is. Phasing an even grid off the memory
+        // cue instead is a guess that happens to be right when the cue is on a
+        // downbeat, and silently wrong when it is not.
+        track.downbeat_ms = found.grid.times_from_downbeat().first().copied();
+    }
+
+    track.cues = found
+        .cues
+        .iter()
+        .map(|cue| CueMark {
+            letter: cue.hot_cue,
+            time_ms: cue.time_ms,
+            label: cue.comment.clone().unwrap_or_default(),
+            color: cue
+                .color
+                .map(|rgb| [rgb.r, rgb.g, rgb.b])
+                .unwrap_or_else(|| crate::job::cue_color(cue.hot_cue)),
+        })
+        .collect();
+    track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
+
+    if let Some(structure) = &found.structure {
+        let ends = track.duration_secs.max(0.0) * 1000.0;
+        let mut phrases = Vec::with_capacity(structure.phrases.len());
+        for (index, phrase) in structure.phrases.iter().enumerate() {
+            let Some(kind) = booth_cli::analysis::structure::Kind::from_id(phrase.kind) else {
+                continue;
+            };
+            let Some(start_ms) = found.time_of(phrase.beat) else { continue };
+            // A section runs to the next one, and the last runs to wherever
+            // the phrases say the track ends — or to the end of the audio when
+            // the grid is shorter than the record, which it is for a track
+            // that fades out past its last beat.
+            let end_ms = structure
+                .phrases
+                .get(index + 1)
+                .and_then(|next| found.time_of(next.beat))
+                .or_else(|| found.time_of(structure.end_beat))
+                .unwrap_or(ends as u32)
+                .max(start_ms);
+            phrases.push(Phrase { start_ms, end_ms, kind: kind.label().to_string() });
+        }
+        track.phrases = phrases;
+    }
+
+    let changed = before
+        != (
+            track.bpm,
+            track.cues.clone(),
+            track.phrases.clone(),
+            track.beats,
+            track.beat_ms.clone(),
+            track.downbeat_ms,
+        );
+    if changed {
+        track.edited = Some(now());
+    }
+    changed
+}
+
 /// A cue point, as the waveform draws it and the export writes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CueMark {
@@ -327,8 +477,42 @@ pub struct Track {
     #[serde(default)]
     pub intensity: f32,
     pub beats: usize,
+    /// Every beat, for a track whose grid bends.
+    ///
+    /// Empty for almost every record, and that is not a track without a grid:
+    /// a grid at one steady tempo is a tempo and a downbeat, and the picture
+    /// rebuilds it from those two. It fills in only where those two cannot say
+    /// it — a live take, a disco record, one somebody bent by hand on a player
+    /// — because that grid cannot be rebuilt, and dropping it would flatten
+    /// their work the next time a drive is written.
+    ///
+    /// From the first downbeat on, like the grid the picture rebuilds, so that
+    /// everything counting in fours counts from the same beat either way.
+    ///
+    /// What goes on the drive is every beat regardless: a player reads the
+    /// beats, not the tempo.
+    #[serde(default)]
+    pub beat_ms: Vec<u32>,
+    /// Where the first downbeat of an even grid falls.
+    ///
+    /// `None` falls back to the memory cue, which is where the phase came from
+    /// before there was a field for it — so a collection written by an older
+    /// build keeps the grid it had.
+    ///
+    /// It has a field of its own because saying "the one is here" and saying
+    /// "start the track here" are two different things a DJ does, and folding
+    /// them together means setting the grid quietly moves a cue. Ignored where
+    /// [`Track::beat_ms`] has the beats, since then there is nothing to phase.
+    #[serde(default)]
+    pub downbeat_ms: Option<u32>,
     pub phrases: Vec<Phrase>,
     pub cues: Vec<CueMark>,
+    /// What is sung, and when, once the vocal stem has been through a speech
+    /// recogniser. Empty on a track nobody has asked about, on an instrumental,
+    /// and on a track whose words nothing could make out — which are three
+    /// different things the inspector is careful to tell apart.
+    #[serde(default)]
+    pub lyrics: Vec<Lyric>,
     pub loudness_lufs: Option<f64>,
     pub peak_dbtp: Option<f64>,
 
@@ -342,6 +526,18 @@ pub struct Track {
     pub role: Role,
     /// For a stem companion, the track it belongs to.
     pub parent: Option<u32>,
+    /// When the prep last changed here, in seconds since the epoch.
+    ///
+    /// Not when the record changed — a tag, a rating or a play count is not
+    /// something a player holds an opinion about. This is the grid, the cues,
+    /// the phrases and the key: the things a drive carries and a CDJ-3000X can
+    /// also edit. When both have moved since the last sync, this is one half of
+    /// saying which is the newer, and the other half is on the drive.
+    ///
+    /// `None` on a track nothing has edited, which is not the same as one
+    /// edited long ago.
+    #[serde(default)]
+    pub edited: Option<u64>,
     /// Whether the analysers have run. An unanalysed track has no grid, no key
     /// and no cues, which is different from having been analysed and found to
     /// have none.
@@ -419,8 +615,12 @@ impl Track {
             energy: 0,
             intensity: 0.0,
             beats: 0,
+            beat_ms: Vec::new(),
+            downbeat_ms: None,
             phrases: Vec::new(),
             cues: Vec::new(),
+            lyrics: Vec::new(),
+            edited: None,
             loudness_lufs: None,
             peak_dbtp: None,
             tags: Vec::new(),
@@ -798,15 +998,61 @@ pub struct SavedQuery {
     pub text: String,
 }
 
+/// What the drive was holding for one track, the last time anything looked.
+///
+/// A CDJ-3000X can move a cue, re-grid a track or rename a phrase on the deck,
+/// and it writes the result back to the stick. Nothing here can tell what it
+/// changed — reading a player's edits back is not something this build does —
+/// but it can tell *that* something did, which is the difference between
+/// overwriting somebody's work in silence and asking first.
+///
+/// Two independent pieces of evidence, because neither is enough alone. The
+/// counters are the field the format keeps for exactly this question and are
+/// the right thing to read; what a player actually writes into them is not
+/// documented and nobody has published a reading of one, so a drive that shows
+/// no change there has not said it was not edited. The analysis files cannot
+/// argue: a player that rewrote a track's cues rewrote the file that holds
+/// them, whatever the database says about it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamp {
+    /// The track's analysis files, as `name:size:modified`, in the order
+    /// [`crate::sync::analysis_files`] looks for them.
+    pub files: Vec<String>,
+    /// `hasModified`, `cueUpdateCount`, `analysisDataUpdateCount` and
+    /// `informationUpdateCount` from the OneLibrary row, when the drive has one
+    /// and it could be opened. Empty when it could not, which is not the same
+    /// as four zeroes.
+    #[serde(default)]
+    pub counts: Vec<i64>,
+    /// The newest modification time among those files, in seconds since the
+    /// epoch. What the drive's side of "which was edited more recently" is.
+    #[serde(default)]
+    pub at: Option<u64>,
+}
+
+impl Stamp {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.counts.is_empty()
+    }
+}
+
 /// One track as it was written to a drive.
 ///
 /// The fingerprint is what makes an update distinguishable from an addition
 /// without re-reading the drive: it summarises the prep the player will see, so
 /// a moved cue marks the track for rewriting and a play count does not.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Written {
     pub id: u32,
     pub prep: u64,
+    /// What the drive was holding for this track when the two last agreed.
+    ///
+    /// Absent for a drive written before this was recorded, and for a track
+    /// whose files could not be found. Absent means no evidence rather than no
+    /// change: a drive that cannot be asked is never treated as having
+    /// answered, so nothing is refused on the strength of it.
+    #[serde(default)]
+    pub theirs: Option<Stamp>,
     /// The row this track has in the drive's own database.
     ///
     /// Kept because a second write is only given what changed — preparing a
@@ -856,8 +1102,16 @@ pub struct Drive {
     pub playlists: Vec<String>,
     /// What was on it after the last sync.
     pub written: Vec<Written>,
-    /// Whether the stem companions went on too.
-    pub with_stems: bool,
+    /// Whether the stem companions are held back.
+    ///
+    /// A rendered kit goes on the drive with its track unless this says not to,
+    /// because a kit exists only because somebody asked for one and a stick
+    /// that quietly leaves it behind is a stick with no acapella in the booth.
+    /// The name is the negative one so that a collection written before this —
+    /// which stored the question the other way round, and stored it as "no" for
+    /// every drive that was never told otherwise — starts carrying them.
+    #[serde(default)]
+    pub skip_stems: bool,
     pub bytes: u64,
     pub last_sync: Option<u64>,
 }
@@ -1316,8 +1570,9 @@ impl Library {
         // copy it came from, and it is not something to be asked about.
         kept.last_played = kept.last_played.max(copy.last_played);
         if take(Field::Stems) {
-            kept.stems.fill_from(&copy.stems);
+            let _ = kept.stems.fill_from(&copy.stems);
         }
+        let kept_path = kept.path.clone();
         if analysis {
             kept.bpm = copy.bpm;
             kept.grid_confidence = copy.grid_confidence;
@@ -1339,8 +1594,14 @@ impl Library {
         // so taking the listening without them would leave a track that says
         // it is analysed and draws nothing until it is analysed again.
         if analysis {
-            if let Some(bands) = cached_waveform(other) {
-                let _ = cache_waveform(keep, &bands);
+            // Copied across, and noted as being of the file that is staying.
+            // These two are the same recording by hash, so the picture is of
+            // the right audio; it is not of the right *file*, and a note
+            // carried over unchanged would name one that is about to be
+            // thrown away.
+            let of = [kept_path.clone()];
+            if let Some(bands) = cached_waveform(other, &of) {
+                let _ = cache_waveform(keep, &of, &bands);
             }
             if let Some(envelopes) = cached_envelopes(other) {
                 let _ = cache_envelopes(keep, &envelopes);
@@ -1532,18 +1793,89 @@ pub fn waveform_path(id: u32) -> PathBuf {
     data_dir().join("waveforms").join(format!("{id:08}.bands"))
 }
 
-/// Keep a track's picture for next time.
-pub fn cache_waveform(id: u32, bands: &[u8]) -> std::io::Result<()> {
+/// Where the note of what a picture was drawn from sits, beside the picture.
+fn drawn_from_path(id: u32) -> PathBuf {
+    data_dir().join("waveforms").join(format!("{id:08}.from"))
+}
+
+/// What a picture was drawn from: the files, and what they looked like.
+///
+/// `None` when a file cannot be reached, which is not the same as a file that
+/// has changed — see [`cached_waveform`].
+fn drawn_from(sources: &[PathBuf]) -> Option<String> {
+    if sources.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(sources.len());
+    for path in sources {
+        let meta = std::fs::metadata(path).ok()?;
+        let at = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs())
+            .unwrap_or(0);
+        lines.push(format!("{}:{}:{at}", path.display(), meta.len()));
+    }
+    Some(lines.join("\n"))
+}
+
+/// Keep a row's picture for next time, with a note of what it is a picture of.
+///
+/// The note is the whole point. A picture is of a file, but the cache is keyed
+/// by row id — so without it a row whose audio changed underneath it goes on
+/// showing the old picture for ever, and nothing about the row says so. Two
+/// ways that happens: a stem kit rendered again, and a bug that is the reason
+/// this exists, where a stem companion was drawn from its parent's mix and the
+/// mix's picture was cached under the stem's name.
+pub fn cache_waveform(id: u32, sources: &[PathBuf], bands: &[u8]) -> std::io::Result<()> {
     let path = waveform_path(id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, bands)
+    std::fs::write(path, bands)?;
+    match drawn_from(sources) {
+        Some(note) => std::fs::write(drawn_from_path(id), note),
+        // Nothing to say what it is of, so nothing is claimed: the next read
+        // will find no note and draw it again.
+        None => {
+            let _ = std::fs::remove_file(drawn_from_path(id));
+            Ok(())
+        }
+    }
 }
 
-/// Read a cached picture, if there is one.
-pub fn cached_waveform(id: u32) -> Option<Vec<u8>> {
-    std::fs::read(waveform_path(id)).ok().filter(|bands| !bands.is_empty())
+/// Read a cached picture, if there is one and it is still of these files.
+///
+/// A cache with no note beside it is one written before there were notes, or
+/// one whose note was lost. Either way it cannot be vouched for, so it is
+/// redrawn — which is what heals a library full of acapellas showing the mix.
+///
+/// A file that cannot be reached is a different matter. Nothing can be said
+/// about whether the picture is still right, and a row whose audio has been
+/// unplugged is better showing the last picture of it than a blank strip.
+pub fn cached_waveform(id: u32, sources: &[PathBuf]) -> Option<Vec<u8>> {
+    let bands = std::fs::read(waveform_path(id)).ok().filter(|bands| !bands.is_empty())?;
+    match drawn_from(sources) {
+        Some(now) => {
+            let noted = std::fs::read_to_string(drawn_from_path(id)).ok()?;
+            (noted == now).then_some(bands)
+        }
+        None => Some(bands),
+    }
+}
+
+/// Throw away a row's cached picture.
+///
+/// For when the audio it was measured from has changed under it — a stem kit
+/// rendered again, at a different quality or by a different separator. The
+/// picture is of a file, so a new file means a new picture; without this the
+/// acapella goes on showing the one it had before, and nothing about the row
+/// says it is stale.
+pub fn forget_waveform(id: u32) {
+    let _ = std::fs::remove_file(waveform_path(id));
+    let _ = std::fs::remove_file(drawn_from_path(id));
 }
 
 /// Where a track's per-stem loudness is cached.
@@ -1735,6 +2067,59 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn a_drive_written_before_the_kits_were_default_starts_carrying_them() {
+        // The reason nobody's stems reached a stick. The old field said whether
+        // to carry them and every drive was made with it off, so a kit that had
+        // been rendered stayed on the laptop unless somebody found the tick box.
+        // Reading a collection from that build has to come back carrying them,
+        // or the fix only helps drives added from now on.
+        let older = r#"{
+            "tracks": [],
+            "playlists": [],
+            "saved": [],
+            "next_id": 1,
+            "drives": [{
+                "label": "TRANSCEND",
+                "path": "/Volumes/TRANSCEND",
+                "is_image": false,
+                "playlists": ["Saturday"],
+                "written": [],
+                "with_stems": false,
+                "bytes": 0,
+                "last_sync": null
+            }]
+        }"#;
+        let read: Library = serde_json::from_str(older).expect("an older collection should open");
+        assert!(!read.drives[0].skip_stems, "the drive still will not carry its kits");
+    }
+
+    #[test]
+    fn a_drive_remembers_that_its_kits_are_held_back() {
+        // The other half: somebody who wants a small stick unticks the box, and
+        // that has to survive a restart too, or the drive quietly triples.
+        let mut library = Library::default();
+        library.drives.push(Drive {
+            label: "USB".into(),
+            path: PathBuf::from("/Volumes/USB"),
+            skip_stems: true,
+            playlists: vec!["Saturday".into()],
+            ..Drive::default()
+        });
+        let mut track = Track::placeholder(1);
+        track.stems.vocals = Some("/stems/a-vocals.wav".into());
+        track.stems.drums = Some("/stems/a-drums.wav".into());
+        track.stems.melody = Some("/stems/a-melody.wav".into());
+        library.tracks.push(track);
+
+        let written = serde_json::to_string(&library).expect("a collection should serialise");
+        let read: Library = serde_json::from_str(&written).expect("and read back");
+
+        assert!(read.drives[0].skip_stems, "the drive forgot that its kits are held back");
+        let kit = &read.tracks[0].stems;
+        assert!(kit.vocals.is_some() && kit.drums.is_some() && kit.melody.is_some(), "{kit:?}");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("booth-{name}-{}", std::process::id()));
@@ -2568,5 +2953,267 @@ mod tests {
         assert_eq!(leftovers, vec!["library.json".to_string()], "{leftovers:?}");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// A cached picture has to say what it is a picture of.
+#[cfg(test)]
+mod a_picture_of_what {
+    use super::*;
+
+    /// Ids well clear of anything another test might use, since the cache is
+    /// one directory shared by the whole suite.
+    fn scratch(name: &str) -> (u32, PathBuf) {
+        let id = 0xA000_0000 + name.bytes().map(u32::from).sum::<u32>();
+        forget_waveform(id);
+        let dir = std::env::temp_dir().join(format!("booth-picture-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (id, dir)
+    }
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_picture_of_these_files_is_the_one_that_comes_back() {
+        let (id, dir) = scratch("kept");
+        let audio = dir.join("stem.wav");
+        write(&audio, b"some audio");
+        let of = [audio.clone()];
+
+        cache_waveform(id, &of, &[1, 2, 3]).unwrap();
+        assert_eq!(cached_waveform(id, &of), Some(vec![1, 2, 3]));
+
+        forget_waveform(id);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_with_no_note_beside_it_is_not_trusted() {
+        // The bug this is here for. A stem companion carries its parent's
+        // path, and an older build drew from it and cached the *mix* under the
+        // stem's name — so every acapella in the library had a picture of the
+        // record, and re-analysing never touched it because the cache was
+        // keyed by id alone and looked perfectly present.
+        let (id, dir) = scratch("unnoted");
+        let audio = dir.join("stem.wav");
+        write(&audio, b"some audio");
+
+        // Written the way the old code wrote it: bands, and nothing saying
+        // what they are of.
+        std::fs::create_dir_all(waveform_path(id).parent().unwrap()).unwrap();
+        write(&waveform_path(id), &[9, 9, 9]);
+        assert_eq!(
+            cached_waveform(id, std::slice::from_ref(&audio)),
+            None,
+            "a picture that cannot vouch for itself was used anyway"
+        );
+
+        forget_waveform(id);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_of_a_file_that_has_changed_since_is_not_trusted() {
+        // A kit rendered again, at another quality or by another separator.
+        let (id, dir) = scratch("changed");
+        let audio = dir.join("stem.wav");
+        write(&audio, b"the first render");
+        let of = [audio.clone()];
+        cache_waveform(id, &of, &[1, 2, 3]).unwrap();
+
+        // Long enough after that the modification time really moves.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        write(&audio, b"a second render, of a different length");
+        assert_eq!(cached_waveform(id, &of), None);
+
+        forget_waveform(id);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_of_a_file_that_is_not_there_is_better_than_no_picture() {
+        // Nothing can be said about whether it is still right, and a row whose
+        // drive has been unplugged is better showing the last picture of it
+        // than an empty strip that reads as a track with no sound in it.
+        let (id, dir) = scratch("unplugged");
+        let audio = dir.join("stem.wav");
+        write(&audio, b"some audio");
+        cache_waveform(id, std::slice::from_ref(&audio), &[4, 5, 6]).unwrap();
+
+        std::fs::remove_file(&audio).unwrap();
+        assert_eq!(cached_waveform(id, &[audio]), Some(vec![4, 5, 6]));
+
+        forget_waveform(id);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_instrumental_is_a_picture_of_both_its_files() {
+        // Two stems summed. Either one changing makes the picture wrong.
+        let (id, dir) = scratch("instrumental");
+        let (melody, drums) = (dir.join("melody.mp3"), dir.join("drums.mp3"));
+        write(&melody, b"melody");
+        write(&drums, b"drums");
+        let of = [melody.clone(), drums.clone()];
+        cache_waveform(id, &of, &[7]).unwrap();
+        assert_eq!(cached_waveform(id, &of), Some(vec![7]));
+
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        write(&drums, b"different drums");
+        assert_eq!(cached_waveform(id, &of), None, "one of the two changed");
+
+        forget_waveform(id);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Taking what a player left, through the files it would actually have left.
+///
+/// Written with the exporter and read with the reader, so the test exercises
+/// the whole path rather than a hand-built struct: a change to either end that
+/// stopped them meeting would show up here.
+#[cfg(test)]
+mod what_the_deck_did {
+    use super::*;
+    use booth_cli::export::{
+        anlz, waveform::WaveformData, Beat, BeatGrid, Cue, Mood, SongStructure,
+    };
+
+    /// 128 BPM, half a bar a second, sixteen beats.
+    fn grid() -> BeatGrid {
+        BeatGrid {
+            beats: (0..16)
+                .map(|i| Beat {
+                    number: (i % 4) as u16 + 1,
+                    tempo_x100: 12_800,
+                    time_ms: i as u32 * 469,
+                })
+                .collect(),
+        }
+    }
+
+    /// What the stick holds after somebody has been at it on a deck.
+    fn off_the_drive(
+        cues: &[Cue],
+        structure: Option<&SongStructure>,
+    ) -> booth_cli::rekordbox::anlz::Analysis {
+        let grid = grid();
+        let waveforms = WaveformData::silent(8.0);
+        let files = anlz::Analysis {
+            on_drive_path: "/Contents/Artist/Track.flac",
+            grid: &grid,
+            cues,
+            waveforms: &waveforms,
+            structure,
+            vbr: None,
+        };
+        booth_cli::rekordbox::anlz::read_files(&files.dat(), Some(&files.ext())).unwrap()
+    }
+
+    fn a_track() -> Track {
+        let mut track = Track::placeholder(1);
+        track.duration_secs = 8.0;
+        track.bpm = 174.0;
+        track.analyzed = true;
+        track.cues =
+            vec![CueMark { letter: 1, time_ms: 1_000, label: "drop".into(), color: [1, 2, 3] }];
+        track
+    }
+
+    #[test]
+    fn the_cues_the_deck_has_replace_the_ones_we_had() {
+        let cues = vec![
+            Cue::memory(0),
+            Cue::hot(1, 4_000).with_comment("hold me closer now").with_color(0xe8, 0x3c, 0x9e),
+        ];
+        let mut track = a_track();
+        assert!(take_prep(&mut track, &off_the_drive(&cues, None)));
+
+        assert_eq!(track.cues.len(), 2);
+        assert_eq!(track.cues[0].letter, 0, "the memory cue sorts first");
+        let hot = &track.cues[1];
+        assert_eq!(hot.time_ms, 4_000);
+        assert_eq!(hot.label, "hold me closer now");
+        assert_eq!(hot.color, [0xe8, 0x3c, 0x9e]);
+    }
+
+    #[test]
+    fn the_tempo_comes_back_off_the_grid() {
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&[Cue::memory(0)], None));
+        assert_eq!(track.bpm, 128.0, "the deck's grid says 128, not the 174 we had");
+        assert_eq!(track.beats, 16);
+        assert!(track.has_grid);
+    }
+
+    #[test]
+    fn phrases_come_back_as_the_positions_the_strip_draws() {
+        // The format keeps phrases as beat numbers; the strip wants
+        // milliseconds, and the grid on the drive is what turns one into the
+        // other.
+        let structure = SongStructure {
+            mood: Mood::High,
+            end_beat: 16,
+            bank: 0,
+            phrases: vec![
+                booth_cli::export::Phrase { beat: 1, kind: 1 },
+                booth_cli::export::Phrase { beat: 9, kind: 5 },
+            ],
+        };
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&[Cue::memory(0)], Some(&structure)));
+
+        let strip: Vec<(u32, u32, &str)> = track
+            .phrases
+            .iter()
+            .map(|phrase| (phrase.start_ms, phrase.end_ms, phrase.kind.as_str()))
+            .collect();
+        assert_eq!(strip, vec![(0, 8 * 469, "intro"), (8 * 469, 15 * 469, "drop")]);
+    }
+
+    #[test]
+    fn taking_it_says_when_it_was_taken() {
+        // Otherwise the next sync has no time for this side and cannot say
+        // which of the two is the later.
+        let mut track = a_track();
+        assert_eq!(track.edited, None);
+        take_prep(&mut track, &off_the_drive(&[Cue::memory(0)], None));
+        assert!(track.edited.is_some());
+    }
+
+    #[test]
+    fn taking_what_we_already_have_changes_nothing_and_says_so() {
+        let cues = vec![Cue::memory(0), Cue::hot(1, 4_000).with_color(1, 2, 3)];
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&cues, None));
+        let settled = track.clone();
+
+        assert!(!take_prep(&mut track, &off_the_drive(&cues, None)), "nothing moved");
+        assert_eq!(track.cues, settled.cues);
+        assert_eq!(track.edited, settled.edited, "an unchanged track is not re-stamped");
+    }
+
+    #[test]
+    fn a_phrase_name_the_format_has_no_word_for_is_left_out() {
+        // Low- and mid-mood tracks number their phrases differently. Guessing
+        // at one would put the wrong word on the strip.
+        let structure = SongStructure {
+            mood: Mood::High,
+            end_beat: 16,
+            bank: 0,
+            phrases: vec![
+                booth_cli::export::Phrase { beat: 1, kind: 1 },
+                booth_cli::export::Phrase { beat: 5, kind: 9 },
+                booth_cli::export::Phrase { beat: 9, kind: 6 },
+            ],
+        };
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&[Cue::memory(0)], Some(&structure)));
+
+        let kinds: Vec<&str> = track.phrases.iter().map(|p| p.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["intro", "outro"]);
     }
 }
