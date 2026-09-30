@@ -753,8 +753,8 @@ impl Track {
     ///
     /// These are the states that look fine in a file browser and fail in a
     /// booth, which is why they get their own count in the sidebar.
-    pub fn needs_attention(&self) -> Option<String> {
-        if let Some(problem) = self.incompatibility() {
+    pub fn needs_attention(&self, player: booth_cli::compat::Player) -> Option<String> {
+        if let Some(problem) = self.incompatibility(player) {
             return Some(format!("{} — {}", problem.what(), problem.fix()));
         }
         if self.analyzed && !self.has_grid {
@@ -772,21 +772,25 @@ impl Track {
     /// again, except for the one small header read that says whether an MP4 is
     /// a protected purchase — and that answer is kept on the record from the
     /// import, so this stays cheap enough to ask about every row.
-    pub fn incompatibility(&self) -> Option<booth_cli::compat::Problem> {
+    pub fn incompatibility(
+        &self,
+        player: booth_cli::compat::Player,
+    ) -> Option<booth_cli::compat::Problem> {
+        use booth_cli::compat::Problem;
         if self.protected {
-            return Some(booth_cli::compat::Problem::Protected);
+            return Some(Problem::Protected);
         }
         // An empty format is a record nothing has looked at yet, not a file in
         // a format nothing opens. Reporting the first as the second would put
         // every freshly added track in the attention list.
-        if !self.format.is_empty() && !booth_cli::commands::is_playable(&self.format) {
-            return Some(booth_cli::compat::Problem::Format(self.format.clone()));
+        if !self.format.is_empty() && !player.opens(&self.format) {
+            return Some(Problem::Format { extension: self.format.clone(), player });
         }
         if self.float_samples {
-            return Some(booth_cli::compat::Problem::FloatSamples);
+            return Some(Problem::FloatSamples);
         }
-        if self.sample_rate > 96_000 {
-            return Some(booth_cli::compat::Problem::TooFast(self.sample_rate));
+        if self.sample_rate > player.max_sample_rate() {
+            return Some(Problem::TooFast { rate: self.sample_rate, player });
         }
         None
     }
@@ -1699,8 +1703,11 @@ impl Library {
         self.tracks.iter().filter(|t| t.unprepared()).count()
     }
 
-    pub fn attention_count(&self) -> usize {
-        self.tracks.iter().filter(|t| t.needs_attention().is_some()).count()
+    /// How many tracks something is wrong with, given the oldest player the
+    /// drives have to work on — which is what decides whether a 96 kHz FLAC is
+    /// a fine track or one that will not load.
+    pub fn attention_count(&self, player: booth_cli::compat::Player) -> usize {
+        self.tracks.iter().filter(|t| t.needs_attention(player).is_some()).count()
     }
 
     // -- persistence -------------------------------------------------------
@@ -2786,34 +2793,61 @@ mod tests {
 
     #[test]
     fn the_things_that_fail_in_a_booth_are_the_things_that_need_attention() {
+        use booth_cli::compat::Player;
+        let now = Player::Cdj3000;
         let mut track = Track::placeholder(1);
         track.analyzed = true;
         track.has_grid = true;
         track.grid_confidence = 4.0;
-        assert_eq!(track.needs_attention(), None);
+        assert_eq!(track.needs_attention(now), None);
 
         track.float_samples = true;
-        assert!(track.needs_attention().unwrap().contains("float"));
+        assert!(track.needs_attention(now).unwrap().contains("float"));
         track.float_samples = false;
 
         track.sample_rate = 192_000;
-        assert!(track.needs_attention().unwrap().contains("96 kHz"));
+        assert!(track.needs_attention(now).unwrap().contains("96 kHz"));
         track.sample_rate = 44_100;
 
         track.has_grid = false;
-        assert!(track.needs_attention().unwrap().contains("beat grid"));
+        assert!(track.needs_attention(now).unwrap().contains("beat grid"));
         track.has_grid = true;
 
         // A format nothing opens, and a purchase nothing here can convert.
         track.format = "ogg".into();
-        assert!(track.needs_attention().unwrap().contains("not a format a player opens"));
+        assert!(track.needs_attention(now).unwrap().contains("does not open a .ogg"));
         track.format = "m4a".into();
-        assert_eq!(track.needs_attention(), None, "a CDJ-3000 plays AAC and ALAC");
+        assert_eq!(track.needs_attention(now), None, "a CDJ-3000 plays AAC and ALAC");
 
         track.protected = true;
-        let said = track.needs_attention().unwrap();
+        let said = track.needs_attention(now).unwrap();
         assert!(said.contains("protected"), "{said}");
         assert!(said.contains("cannot convert it"), "and it should not offer to: {said}");
+    }
+
+    #[test]
+    fn what_needs_attention_depends_on_the_oldest_player_it_has_to_work_on() {
+        // The whole point of the setting. Nothing about the file changes; what
+        // changes is the booth it is going to, and a 96 kHz FLAC is a fine
+        // track for a CDJ-3000 and one that will not load on an NXS2.
+        use booth_cli::compat::Player;
+        let mut track = Track::placeholder(1);
+        track.analyzed = true;
+        track.has_grid = true;
+        track.grid_confidence = 4.0;
+        track.format = "flac".into();
+        track.sample_rate = 96_000;
+
+        assert_eq!(track.needs_attention(Player::Cdj3000), None);
+        let older = track.needs_attention(Player::Cdj2000Nxs2).expect("this will not load");
+        assert!(older.contains("48 kHz a CDJ-2000NXS2"), "{older}");
+
+        // And a generation back, the format itself is the problem.
+        track.sample_rate = 44_100;
+        assert_eq!(track.needs_attention(Player::Cdj2000Nxs2), None);
+        let oldest = track.needs_attention(Player::Cdj2000Nexus).expect("no FLAC on a nexus");
+        assert!(oldest.contains("does not open a .flac"), "{oldest}");
+        assert!(oldest.contains("AIFF"), "and FLAC is not the way out of it: {oldest}");
     }
 
     #[test]
@@ -2822,7 +2856,7 @@ mod tests {
         // same as having been looked at and found to have none.
         let track = Track::placeholder(1);
         assert!(track.unprepared());
-        assert_eq!(track.needs_attention(), None);
+        assert_eq!(track.needs_attention(booth_cli::compat::Player::default()), None);
     }
 
     #[test]

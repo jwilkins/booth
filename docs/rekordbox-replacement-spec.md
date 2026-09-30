@@ -331,12 +331,32 @@ against *that player's* rules, not against ours.
 
 ### 4.2 Player facts the exporter must respect
 
-From AlphaTheta's own documentation and the CDJ-3000 specifications:
+From AlphaTheta's own documentation and the published player specifications. "A player"
+is not one thing, so these are per generation, and the one a drive is checked against is
+**the oldest player it has to work on** (`compat::Player`, settable in Settings):
 
-- Audio: MP3 and AAC at 16-bit / 44.1–48 kHz; WAV, AIFF, FLAC and ALAC at 16 or 24-bit up
-  to 96 kHz. No 32-bit float, no AIFF-C, no DRM'd AAC, nothing above 96 kHz.
-- Filesystem: FAT16, FAT32, HFS+ (exFAT support varies by model and firmware — the
-  compatibility target decides). **Never NTFS.**
+| | CDJ-3000X | CDJ-3000 | CDJ-2000NXS2 | CDJ-2000NXS |
+| --- | --- | --- | --- | --- |
+| Lossless | WAV, AIFF, FLAC, ALAC | WAV, AIFF, FLAC, ALAC | WAV, AIFF, FLAC, ALAC | WAV, AIFF |
+| Ceiling | 96 kHz | 96 kHz | 48 kHz | 48 kHz |
+| exFAT | yes | yes | no | no |
+| `exportLibrary.db` | read | — | — | — |
+| `PSSI` phrases | drawn | drawn | — | — |
+| `.2EX` three-band | drawn | drawn | — | — |
+
+Every generation's files are written whatever the target is — `.DAT` for a 2009 player,
+`.EXT` for the nexus 2 line, `.2EX` for the CDJ-3000's three-band waveforms, and
+`exportLibrary.db` when its key is known — because a player reads the richest file it
+knows about and ignores the rest. What the target changes is what is *checked*, at import
+and again in the preflight: a 96 kHz FLAC is a fine track for a CDJ-3000 and one that
+copies, browses and will not load on an NXS2.
+
+- Audio: MP3 and AAC at 16-bit / 44.1–48 kHz; the lossless formats and ceiling above at
+  16 or 24-bit. No 32-bit float, no AIFF-C, no DRM'd AAC, nothing above 96 kHz anywhere.
+- Filesystem: FAT16, FAT32, HFS+ everywhere; exFAT on the CDJ-3000 line only. **Never
+  NTFS.** A drive a player will not mount is the one failure it cannot shrug off by
+  ignoring a file it does not understand, so the preflight reads the drive's actual
+  format and says so.
 - Structure: 8 folder levels deep, 10,000 folders, 10,000 files per folder.
 - Full path under 256 characters.
 - Playlists: rekordbox's own Intelligent Playlists cap at 1,000 tracks; exported ordinary

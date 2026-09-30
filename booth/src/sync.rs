@@ -533,14 +533,36 @@ pub struct Check {
 ///
 /// Each of these is a state that looks fine in a file browser and fails in a
 /// booth — which is the only reason any of them is worth a line on the screen.
-pub fn preflight(library: &Library, plan: &Plan, destination: &Path, is_image: bool) -> Vec<Check> {
+pub fn preflight(
+    library: &Library,
+    plan: &Plan,
+    destination: &Path,
+    is_image: bool,
+    player: booth_cli::compat::Player,
+    // What the drive is formatted as, from `filesystem`. Passed in rather than
+    // asked for here so that the check is a function of its arguments: one
+    // that read whatever the developer's scratch directory happens to be
+    // turned a test of the collection into a test of the machine.
+    formatted: Option<&str>,
+) -> Vec<Check> {
     let tracks: Vec<&Track> = plan.writes().iter().filter_map(|id| library.get(*id)).collect();
     let mut checks = Vec::new();
 
     // -- formats a player cannot open
-    let unplayable: Vec<&&Track> =
+    //
+    // Two different failures, kept apart because what happens to the file is
+    // different. A format the writer itself refuses never reaches the drive.
+    // A format this generation does not take but a newer one does — a FLAC
+    // bound for a nexus deck — is written, copies, browses, and will not load,
+    // which is a warning about the booth rather than about the write.
+    let refused: Vec<&&Track> =
         tracks.iter().filter(|t| !booth_cli::commands::is_playable(&t.format)).collect();
-    checks.push(match unplayable.len() {
+    let too_new: Vec<&&Track> = tracks
+        .iter()
+        .filter(|t| !t.format.is_empty())
+        .filter(|t| booth_cli::commands::is_playable(&t.format) && !player.opens(&t.format))
+        .collect();
+    checks.push(match refused.len() {
         0 => Check {
             level: Level::Ok,
             text: format!("{} files are formats a player opens", tracks.len()),
@@ -548,11 +570,23 @@ pub fn preflight(library: &Library, plan: &Plan, destination: &Path, is_image: b
         n => Check {
             level: Level::Bad,
             text: format!(
-                "{n} files a player cannot open ({}) — they will be skipped",
-                list(unplayable.iter().map(|t| t.format.as_str())),
+                "{n} files a player cannot open ({}) \u{2014} they will be skipped",
+                list(refused.iter().map(|t| t.format.as_str())),
             ),
         },
     });
+    if !too_new.is_empty() {
+        checks.push(Check {
+            level: Level::Warn,
+            text: format!(
+                "{} files are formats a {} does not open ({}) \u{2014} they go on, and it will \
+                 not load them",
+                too_new.len(),
+                player.name(),
+                list(too_new.iter().map(|t| t.format.as_str())),
+            ),
+        });
+    }
 
     // -- 32-bit float WAVs
     let floats = tracks.iter().filter(|t| t.float_samples).count();
@@ -567,14 +601,41 @@ pub fn preflight(library: &Library, plan: &Plan, destination: &Path, is_image: b
     }
 
     // -- sample rates
-    let fast = tracks.iter().filter(|t| t.sample_rate > 96_000).count();
-    checks.push(match fast {
-        0 => Check { level: Level::Ok, text: "all sample rates are 96 kHz or below".into() },
+    //
+    // Split for the same reason as the formats above: past 96 kHz the writer
+    // refuses the file, and between this generation's ceiling and that one it
+    // writes a file this player will not load.
+    // The writer's own ceiling, which is the newest player's: past it the
+    // export bails on the file rather than putting something unplayable on.
+    let refused_above = booth_cli::compat::Player::ALL[0].max_sample_rate();
+    let ceiling = player.max_sample_rate();
+    let khz = ceiling as f64 / 1000.0;
+    let refused = tracks.iter().filter(|t| t.sample_rate > refused_above).count();
+    let over =
+        tracks.iter().filter(|t| t.sample_rate > ceiling && t.sample_rate <= refused_above).count();
+    checks.push(match refused {
+        0 => Check {
+            level: Level::Ok,
+            text: format!("all sample rates are {:.0} kHz or below", refused_above as f64 / 1000.0),
+        },
         n => Check {
             level: Level::Bad,
-            text: format!("{n} files are above the 96 kHz a player will accept"),
+            text: format!(
+                "{n} files are above the {:.0} kHz a player will accept",
+                refused_above as f64 / 1000.0
+            ),
         },
     });
+    if over > 0 {
+        checks.push(Check {
+            level: Level::Warn,
+            text: format!(
+                "{over} files are above the {khz:.0} kHz a {} will take \u{2014} they go on, \
+                 and it will not load them",
+                player.name()
+            ),
+        });
+    }
 
     // -- path lengths, worked out with the writer's own rule
     //
@@ -613,6 +674,14 @@ pub fn preflight(library: &Library, plan: &Plan, destination: &Path, is_image: b
                 "{ungridded} files have no beat grid — they will load, without sync or quantize"
             ),
         });
+    }
+
+    // -- the filesystem, for a drive that is really a drive
+    //
+    // An image is written as FAT32 by this program, so there is nothing to
+    // ask; a mounted volume was formatted by somebody else.
+    if let Some(kind) = formatted.filter(|_| !is_image) {
+        checks.push(mountable(kind, player));
     }
 
     checks.push(space(plan, destination, is_image));
@@ -699,6 +768,110 @@ fn free_space(_path: &Path) -> Option<u64> {
 
 /// The path itself if it exists, else the nearest parent that does — a drive
 /// folder that has not been created yet still sits on a filesystem with a size.
+/// What the drive is formatted as, in the name its own operating system uses.
+///
+/// `None` when it cannot be found out, which is treated as not knowing rather
+/// than as a pass — a check that invents an answer here is worse than one that
+/// admits it has none.
+#[cfg(target_os = "linux")]
+pub fn filesystem(path: &Path) -> Option<String> {
+    // The mount table, longest matching mount point first: a stick under
+    // /media/dj/STICK is matched by that line and not by the "/" above it.
+    let at = nearest_existing(path)?;
+    let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
+    let mut best: Option<(usize, String)> = None;
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace().skip(1);
+        let point = fields.next()?;
+        let kind = fields.next()?;
+        if !at.starts_with(point) {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(len, _)| point.len() > *len) {
+            best = Some((point.len(), kind.to_string()));
+        }
+    }
+    best.map(|(_, kind)| kind)
+}
+
+#[cfg(target_os = "macos")]
+pub fn filesystem(path: &Path) -> Option<String> {
+    use std::ffi::{CStr, CString};
+    use std::os::unix::ffi::OsStrExt;
+
+    let at = nearest_existing(path)?;
+    let c_path = CString::new(at.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let stat = unsafe { stat.assume_init() };
+    let name = unsafe { CStr::from_ptr(stat.f_fstypename.as_ptr()) };
+    Some(name.to_string_lossy().into_owned())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn filesystem(_path: &Path) -> Option<String> {
+    None
+}
+
+/// Whether a player will mount a drive formatted this way.
+///
+/// The one failure here that is not a player ignoring a file it does not know
+/// about: a drive it will not mount is a drive with nothing on it, however
+/// perfectly everything was written. exFAT arrived with the CDJ-3000 line, so
+/// a stick somebody formatted on a modern Mac is a stick a nexus deck shows as
+/// empty. NTFS no player has ever read.
+///
+/// Named rather than matched exactly, because each platform spells these
+/// differently — "msdos" and "vfat" are both FAT32, "exfat" and "exFAT" are
+/// both exFAT — and an unfamiliar name is reported as unknown rather than
+/// guessed at.
+fn mountable(kind: &str, player: booth_cli::compat::Player) -> Check {
+    let name = kind.to_ascii_lowercase();
+    let fat = ["msdos", "vfat", "fat", "fat32", "fat16"].contains(&name.as_str());
+    let hfs = name.starts_with("hfs") || name == "apfs";
+    let exfat = name.contains("exfat");
+    let ntfs = name.contains("ntfs");
+
+    if ntfs {
+        return Check {
+            level: Level::Bad,
+            text: "the drive is NTFS, which no player mounts \u{2014} reformat it as FAT32, \
+                   or nothing written to it will be seen"
+                .to_string(),
+        };
+    }
+    if exfat && !player.reads_exfat() {
+        return Check {
+            level: Level::Bad,
+            text: format!(
+                "the drive is exFAT, which a {} will not mount \u{2014} reformat it as FAT32, \
+                 or the drive will read as empty",
+                player.name()
+            ),
+        };
+    }
+    if exfat {
+        return Check {
+            level: Level::Ok,
+            text: format!("the drive is exFAT, which a {} mounts", player.name()),
+        };
+    }
+    // APFS is here with HFS+ because a player that reads one reads the other,
+    // and because a Mac-formatted stick is the common case for both.
+    if fat || hfs {
+        return Check {
+            level: Level::Ok,
+            text: format!("the drive is {kind}, which players mount"),
+        };
+    }
+    Check {
+        level: Level::Warn,
+        text: format!("the drive is {kind}; whether a player mounts one is not known here"),
+    }
+}
+
 fn nearest_existing(path: &Path) -> Option<PathBuf> {
     let mut at = path;
     loop {
@@ -1158,6 +1331,103 @@ mod tests {
     }
 
     #[test]
+    fn the_preflight_asks_the_booth_the_drive_is_going_to() {
+        use booth_cli::compat::Player;
+        let (mut library, ids) = library_with(1);
+        {
+            let track = library.get_mut(ids[0]).unwrap();
+            track.format = "flac".into();
+            track.sample_rate = 96_000;
+        }
+        let drive = drive_for(&library, &[]);
+        let plan = plan(&library, &drive);
+        let said = |player| {
+            preflight(&library, &plan, Path::new("/tmp"), false, player, None)
+                .iter()
+                .map(|check| format!("{:?} {}", check.level, check.text))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let now = said(Player::Cdj3000);
+        assert!(now.contains("all sample rates are 96 kHz or below"), "{now}");
+        assert!(!now.contains("will not load"), "nothing is wrong with this track: {now}");
+
+        // Same file, older booth. The write still happens — 96 kHz is inside
+        // what the writer accepts — so this is a warning about the hardware
+        // rather than a refusal, and it says which hardware.
+        let older = said(Player::Cdj2000Nxs2);
+        assert!(
+            older.contains("Warn") && older.contains("48 kHz a CDJ-2000NXS2 will take"),
+            "{older}"
+        );
+        assert!(older.contains("will not load them"), "{older}");
+
+        // A generation back it is the format, and the same distinction holds:
+        // a FLAC is written, because the writer opens one and a newer deck
+        // plays it, and this deck will not.
+        let oldest = said(Player::Cdj2000Nexus);
+        assert!(oldest.contains("a CDJ-2000NXS does not open"), "{oldest}");
+        assert!(
+            !oldest.contains("they will be skipped"),
+            "a FLAC is not skipped by the writer, and saying so would be a lie: {oldest}"
+        );
+    }
+
+    #[test]
+    fn a_drive_an_older_deck_will_not_mount_is_the_one_thing_that_cannot_be_ignored() {
+        use booth_cli::compat::Player;
+        // Everything else a generation does not understand, it skips. A drive
+        // it will not mount is a drive with nothing on it, however perfectly
+        // everything was written — so this is the check that has to know which
+        // booth the stick is going to.
+        assert_eq!(mountable("exfat", Player::Cdj3000).level, Level::Ok);
+        let older = mountable("exfat", Player::Cdj2000Nxs2);
+        assert_eq!(older.level, Level::Bad);
+        assert!(older.text.contains("CDJ-2000NXS2 will not mount"), "{}", older.text);
+        assert!(older.text.contains("FAT32"), "and say what to do about it: {}", older.text);
+
+        // NTFS is nobody's, whichever generation is asked.
+        for player in Player::ALL {
+            let ntfs = mountable("ntfs3", player);
+            assert_eq!(ntfs.level, Level::Bad, "{}", player.name());
+            assert!(ntfs.text.contains("no player mounts"), "{}", ntfs.text);
+        }
+
+        // Spelled however the platform spells it.
+        for name in ["msdos", "vfat", "FAT32", "hfs", "apfs"] {
+            assert_eq!(mountable(name, Player::Cdj2000Nexus).level, Level::Ok, "{name}");
+        }
+
+        // And something nobody here has heard of is admitted to rather than
+        // guessed at in either direction.
+        let unknown = mountable("btrfs", Player::Cdj3000);
+        assert_eq!(unknown.level, Level::Warn);
+        assert!(unknown.text.contains("not known here"), "{}", unknown.text);
+    }
+
+    #[test]
+    fn a_format_no_player_opens_is_still_reported_as_skipped() {
+        // The other half: what the writer itself refuses never reaches the
+        // drive, whichever booth is being targeted, and "they will be skipped"
+        // is the true thing to say about those.
+        let (mut library, ids) = library_with(1);
+        library.get_mut(ids[0]).unwrap().format = "ogg".into();
+        let drive = drive_for(&library, &[]);
+        let plan = plan(&library, &drive);
+        for player in booth_cli::compat::Player::ALL {
+            let checks = preflight(&library, &plan, Path::new("/tmp"), false, player, None);
+            assert!(
+                checks
+                    .iter()
+                    .any(|c| c.level == Level::Bad && c.text.contains("they will be skipped")),
+                "{}: {checks:#?}",
+                player.name()
+            );
+        }
+    }
+
+    #[test]
     fn a_stem_whose_path_is_too_long_is_caught_before_the_write() {
         let (mut library, ids) = library_with(1);
         // The track's own path is short. Its stem's is not: a stem is named
@@ -1169,7 +1439,14 @@ mod tests {
 
         let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
-        let checks = preflight(&library, &plan, Path::new("/tmp"), false);
+        let checks = preflight(
+            &library,
+            &plan,
+            Path::new("/tmp"),
+            false,
+            booth_cli::compat::Player::default(),
+            None,
+        );
         assert!(
             checks.iter().any(|c| c.level == Level::Bad && c.text.contains("longer")),
             "a stem the writer will refuse passed the preflight: {checks:#?}"
@@ -1362,7 +1639,14 @@ mod tests {
         let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
 
-        let checks = preflight(&library, &plan, Path::new("/tmp"), false);
+        let checks = preflight(
+            &library,
+            &plan,
+            Path::new("/tmp"),
+            false,
+            booth_cli::compat::Player::default(),
+            None,
+        );
         let worst = checks.iter().map(|c| c.level).max().unwrap();
         assert_eq!(worst, Level::Ok, "{checks:#?}");
     }
@@ -1378,7 +1662,14 @@ mod tests {
 
         let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
-        let checks = preflight(&library, &plan, Path::new("/tmp"), false);
+        let checks = preflight(
+            &library,
+            &plan,
+            Path::new("/tmp"),
+            false,
+            booth_cli::compat::Player::default(),
+            None,
+        );
         let text = checks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
 
         assert!(text.contains("float"), "{text}");
@@ -1399,7 +1690,14 @@ mod tests {
 
         let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
-        let checks = preflight(&library, &plan, Path::new("/tmp"), false);
+        let checks = preflight(
+            &library,
+            &plan,
+            Path::new("/tmp"),
+            false,
+            booth_cli::compat::Player::default(),
+            None,
+        );
         assert!(
             checks.iter().any(|c| c.level == Level::Bad && c.text.contains("longer")),
             "{checks:#?}"
@@ -1412,7 +1710,14 @@ mod tests {
         let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
 
-        let checks = preflight(&library, &plan, Path::new("/tmp/drive.img"), true);
+        let checks = preflight(
+            &library,
+            &plan,
+            Path::new("/tmp/drive.img"),
+            true,
+            booth_cli::compat::Player::default(),
+            None,
+        );
         let space = checks.last().unwrap();
         assert_eq!(space.level, Level::Ok);
         assert!(space.text.contains("image will be created"), "{}", space.text);
@@ -1438,7 +1743,14 @@ mod tests {
         let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
 
-        let checks = preflight(&library, &plan, Path::new("."), false);
+        let checks = preflight(
+            &library,
+            &plan,
+            Path::new("."),
+            false,
+            booth_cli::compat::Player::default(),
+            None,
+        );
         let space = checks.last().unwrap();
         if free_space(Path::new(".")).is_some() {
             assert_eq!(space.level, Level::Bad, "{}", space.text);

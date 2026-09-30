@@ -1715,7 +1715,9 @@ mod tests {
         assert!(is_float_wav(&float));
         assert!(read_record(1, &float, false).float_samples);
         // And it is exactly the kind of thing the sidebar counts.
-        assert!(read_record(1, &float, false).needs_attention().is_some());
+        assert!(read_record(1, &float, false)
+            .needs_attention(booth_cli::compat::Player::default())
+            .is_some());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

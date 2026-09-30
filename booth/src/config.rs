@@ -443,6 +443,17 @@ pub struct Config {
     /// a half is what somebody who knows it wants.
     #[serde(default = "default_help_delay_ms")]
     pub help_delay_ms: u32,
+    /// The oldest player a drive written here has to work on.
+    ///
+    /// Everything a newer player wants is written whatever this says — the
+    /// phrase section, the three-band waveforms, the second database — because
+    /// an older player does not look for those files and writing them costs a
+    /// few kilobytes a track. What this decides is what gets *checked*: the
+    /// sample-rate ceiling and the format list are a generation's, and a
+    /// library checked against a CDJ-3000 and carried to a booth full of NXS2s
+    /// is a library that passed every check and will not load.
+    #[serde(default)]
+    pub oldest_player: booth_cli::compat::Player,
     #[serde(default = "default_emulator_port")]
     pub emulator_port: u16,
     /// Whether a drive is copied when it is written or plugged in.
@@ -677,6 +688,7 @@ impl Default for Config {
             theme: default_theme(),
             emulator_port: booth_cli::emulator::DEFAULT_PORT,
             help_delay_ms: default_help_delay_ms(),
+            oldest_player: booth_cli::compat::Player::default(),
             keep_drives: true,
             from_other_drives: OnForeign::default(),
             whisper: Whisper::default(),
