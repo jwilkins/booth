@@ -773,20 +773,31 @@ impl Track {
     /// a protected purchase — and that answer is kept on the record from the
     /// import, so this stays cheap enough to ask about every row.
     pub fn incompatibility(&self) -> Option<booth_cli::compat::Problem> {
+        use booth_cli::compat::{Player, Problem};
+        // The writer's limits, not the drive's target. A format an older deck
+        // will not open is re-encoded on the way onto the stick, so it is
+        // something the sync sheet mentions and not something wrong with the
+        // track — and a sidebar that counted it would be telling somebody to
+        // go and fix a library that is already fine.
+        //
+        // What is left is what no amount of re-encoding reaches: a container
+        // nothing decodes, a purchase nothing can lawfully open, float samples,
+        // and a rate past what the writer itself accepts.
+        let player = Player::ALL[0];
         if self.protected {
-            return Some(booth_cli::compat::Problem::Protected);
+            return Some(Problem::Protected);
         }
         // An empty format is a record nothing has looked at yet, not a file in
         // a format nothing opens. Reporting the first as the second would put
         // every freshly added track in the attention list.
-        if !self.format.is_empty() && !booth_cli::commands::is_playable(&self.format) {
-            return Some(booth_cli::compat::Problem::Format(self.format.clone()));
+        if !self.format.is_empty() && !player.opens(&self.format) {
+            return Some(Problem::Format { extension: self.format.clone(), player });
         }
         if self.float_samples {
-            return Some(booth_cli::compat::Problem::FloatSamples);
+            return Some(Problem::FloatSamples);
         }
-        if self.sample_rate > 96_000 {
-            return Some(booth_cli::compat::Problem::TooFast(self.sample_rate));
+        if self.sample_rate > player.max_sample_rate() {
+            return Some(Problem::TooFast { rate: self.sample_rate, player });
         }
         None
     }
@@ -2806,7 +2817,7 @@ mod tests {
 
         // A format nothing opens, and a purchase nothing here can convert.
         track.format = "ogg".into();
-        assert!(track.needs_attention().unwrap().contains("not a format a player opens"));
+        assert!(track.needs_attention().unwrap().contains("does not open a .ogg"));
         track.format = "m4a".into();
         assert_eq!(track.needs_attention(), None, "a CDJ-3000 plays AAC and ALAC");
 
@@ -2814,6 +2825,26 @@ mod tests {
         let said = track.needs_attention().unwrap();
         assert!(said.contains("protected"), "{said}");
         assert!(said.contains("cannot convert it"), "and it should not offer to: {said}");
+    }
+
+    #[test]
+    fn a_track_an_older_deck_cannot_open_is_not_a_track_that_needs_attention() {
+        // What the sidebar counts is what nobody can fix by writing a drive.
+        // A 96 kHz FLAC bound for a nexus 2 booth goes on as an mp3, so the
+        // library is already fine and a count that flagged it would be sending
+        // somebody to repair something that is not broken. The sync sheet is
+        // where the re-encode is mentioned, because that is where it happens.
+        let mut track = Track::placeholder(1);
+        track.analyzed = true;
+        track.has_grid = true;
+        track.grid_confidence = 4.0;
+        track.format = "flac".into();
+        track.sample_rate = 96_000;
+        assert_eq!(track.needs_attention(), None);
+
+        // Past what the writer itself takes, there is nothing to be done.
+        track.sample_rate = 192_000;
+        assert!(track.needs_attention().unwrap().contains("96 kHz"));
     }
 
     #[test]

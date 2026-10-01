@@ -12,6 +12,8 @@ since 2023 needs and which no other free tool had been seen to write.
 cargo run --release          # the library window
 ```
 
+![Booth: the browser, the waveform and the drive dock](docs/booth.png)
+
 Everything runs on your machine. Nothing is uploaded, there is no account, and the one thing that
 needs the network — asking AcoustID and MusicBrainz what a recording is — is a feature you turn on
 with a free key.
@@ -30,10 +32,33 @@ with a free key.
 - **Splits them.** Vocals, melody and drums as separate stems, rendered ahead of time.
 - **Writes drives a player will open.** Both on-drive databases from one collection, so they
   cannot disagree about what is on the stick, with everything read back and checked afterwards.
+  Every generation's analysis files go on — `.DAT`, `.EXT` and `.2EX` — so one stick works from
+  a 2009 deck to a CDJ-3000X.
+- **Checks the drive against the booth it is going to.** You say the oldest player it has to
+  work on; the checks use that generation's rules, and anything it cannot open — a FLAC on a
+  nexus deck, a 96 kHz file on an NXS2 — is re-encoded to a 320 kbps MP3 on the way onto the
+  stick. Your library keeps its lossless copy. (The files for older players are all written;
+  only the CDJ-3000X has been seen to browse a drive from here — see
+  [what it does not do yet](booth/README.md#what-it-does-not-do-yet).)
 - **Keeps a copy of every drive.** Databases and analysis copied, audio hard-linked, so a backup
   of a 64 GB stick costs megabytes. What a player recorded having played comes back as playlists.
+  Music on the stick the collection does not have is copied in, and a track the collection
+  names but the disk has lost is put back — because the stick that could fix it will not be
+  there for ever.
+- **Says what will be slow before the night does.** A quarantined file, one still sitting in
+  Downloads, or one inside Dropbox or iCloud is seconds to open rather than milliseconds. Booth
+  says so at import and takes the quarantine flag off when you ask.
+
+Every button, box and switch says what it does when the pointer rests on it, and how long it
+waits is a setting. `⌘,` opens Settings, which is also where the colour scheme lives — eleven of
+them, out of editors and one of this program's own.
 
 [`booth/README.md`](booth/README.md) is the whole of it, screen by screen.
+
+| | |
+|---|---|
+| ![The sync sheet](docs/booth-sync.png) | ![Settings](docs/booth-settings.png) |
+| Writing a drive: what goes on, what the target player will take, and what the drive is formatted as. | Settings, including which generation of player the drives have to work on. |
 
 ## The parts
 
@@ -71,7 +96,7 @@ an app launched from the Finder has no useful working directory.
 
 It is not in the bundle: run it with `cargo run -p booth-gui`.
 
-![The batch window, on the Batch tab](docs/screenshot.png)
+![The batch window, on the Batch tab](docs/batch-window.png)
 
 ### Building it
 
@@ -135,6 +160,17 @@ same function the CLI calls. A default cannot drift between the two, and an opti
 CLI without a control in the window is a compile error rather than a silent difference. The
 command line that matches what you have set up is printed in the log when a job starts, so you can
 run it once in the window and then copy the line into a script.
+
+## The pictures
+
+`scripts/screenshots.sh` re-takes every screenshot in these READMEs: it builds the window with
+its layout-check hooks in, fills a scratch collection from
+[`booth/examples/demo_library.rs`](booth/examples/demo_library.rs), and photographs the same
+three screens. The collection is fixed, so two runs give two comparable pictures, and none of
+it is anybody's music.
+
+Worth doing whenever the window has moved — more than about 5% of the code changed since the
+last time is a good sign it has.
 
 ## Tests
 

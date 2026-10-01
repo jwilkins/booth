@@ -511,6 +511,11 @@ struct Prepared {
     track: Option<pdb::Track>,
     /// Where the audio goes, as the player will see it.
     on_drive: String,
+    /// The bytes to write there, when they are not the source file's.
+    ///
+    /// Set only for a file re-encoded to reach an older player. `None` means
+    /// copy the original, which is what everything else does.
+    carried: Option<Vec<u8>>,
     /// The analysis files, by their paths on the drive.
     analysis: Vec<(String, Vec<u8>)>,
     beats: usize,
@@ -526,6 +531,7 @@ impl Prepared {
         Self {
             track: None,
             on_drive: String::new(),
+            carried: None,
             analysis: Vec::new(),
             beats: 0,
             bpm: 0.0,
@@ -571,8 +577,16 @@ impl Prepared {
     ) -> Result<()> {
         let name = short(source);
         let copying = std::time::Instant::now();
-        destination.copy_in(&self.on_drive, source)?;
-        let size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
+        let size = match &self.carried {
+            Some(bytes) => {
+                destination.write(&self.on_drive, bytes)?;
+                bytes.len() as u64
+            }
+            None => {
+                destination.copy_in(&self.on_drive, source)?;
+                std::fs::metadata(source).map(|m| m.len()).unwrap_or(0)
+            }
+        };
         report::detail(
             reporter,
             format!("{name}: copied {size} bytes to {} in {}", self.on_drive, took(copying)),
@@ -800,6 +814,24 @@ fn prepare(
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow::anyhow!("{} has no usable file name", path.display()))?;
+    // Whether this file can reach the player this drive is for as it is. A
+    // format it does not open, or a rate above its ceiling, is re-encoded on
+    // the way on — an MP3 at the best rate and bitrate the hardware takes.
+    //
+    // Decided here, before the name is worked out, because the name is what
+    // everything else hangs off: the analysis directory is a hash of the path
+    // on the drive, so a file that goes on as an MP3 has to be called one from
+    // this line onwards or the player looks for its grid in the wrong place.
+    //
+    // The library's own file is untouched. This is a copy bound for a stick,
+    // and the grid, key, cues and phrases below are all measured from the
+    // original rather than from what is written.
+    let recode = args.player.must_recode(&extension, audio.sample_rate);
+    let renamed = format!("{}.mp3", stem_of(filename));
+    let filename = match recode {
+        false => filename,
+        true => renamed.as_str(),
+    };
     // A stem with no name of its own takes its parent's, which is not a
     // nicety: a wav has nowhere to keep tags and `--no-tags` asks for none, and
     // either way the alternative is a row reading "Unknown Artist" next to the
@@ -944,7 +976,42 @@ fn prepare(
         vbr: seek.as_ref(),
     };
 
-    let file_size = std::fs::metadata(path).map(|m| m.len() as u32).unwrap_or(0);
+    // The audio that actually goes on the drive, and what the row has to say
+    // about it. A re-encode is the only case where either differs from the
+    // source file; everything else is copied byte for byte.
+    let carried = match recode {
+        false => None,
+        true => {
+            let rate = args.player.mp3_rate_from(audio.sample_rate);
+            let encoding = std::time::Instant::now();
+            let bytes: Vec<u8> = crate::audio::encode::to_mp3(
+                &audio,
+                &crate::audio::encode::EncodeOptions {
+                    mp3_bitrate: crate::compat::Player::MP3_KBPS,
+                    mp3_vbr: None,
+                    mp3_out_rate: Some(rate),
+                    ..Default::default()
+                },
+            )?;
+            report::detail(
+                reporter,
+                format!(
+                    "{name}: a {} does not take this as it is, so it goes on as a {} kbps mp3 \
+                     at {rate} Hz \u{2014} {} bytes in {}",
+                    args.player.name(),
+                    crate::compat::Player::MP3_KBPS,
+                    bytes.len(),
+                    took(encoding)
+                ),
+            );
+            Some((bytes, rate))
+        }
+    };
+
+    let file_size = match &carried {
+        Some((bytes, _)) => bytes.len() as u32,
+        None => std::fs::metadata(path).map(|m| m.len() as u32).unwrap_or(0),
+    };
     let track = pdb::Track {
         id,
         title: metadata.title.clone().unwrap_or_else(|| stem_of(filename)),
@@ -959,7 +1026,12 @@ fn prepare(
         analyze_path,
         tempo_x100: (listened.bpm * 100.0).round() as u32,
         duration_secs: audio.duration_secs().round() as u16,
-        sample_rate: audio.sample_rate,
+        // What the file on the drive is, not what the library's copy is: the
+        // player reads this row about the file sitting beside it.
+        sample_rate: match &carried {
+            Some((_, rate)) => *rate,
+            None => audio.sample_rate,
+        },
         sample_depth: 16,
         file_size,
         track_number: metadata.track_number.unwrap_or(0),
@@ -984,6 +1056,7 @@ fn prepare(
         track: Some(track),
         on_drive,
         analysis,
+        carried: carried.map(|(bytes, _)| bytes),
         beats: listened.grid.beats.len(),
         bpm: listened.bpm,
         key,
@@ -1152,6 +1225,8 @@ fn normalize_reencode(
         mp3_bitrate: args.bitrate,
         mp3_vbr: None,
         dither: !args.no_dither,
+        // Never here: the library's own files keep the rate they came with.
+        mp3_out_rate: None,
     };
 
     let progress = Progress::new(reporter, plans.len());
@@ -1426,6 +1501,9 @@ pub fn stems_files(args: &StemsArgs, files: &[PathBuf], reporter: &dyn Reporter)
         // spends the most on for the least.
         mp3_vbr: args.vbr(),
         dither: true,
+        // A stem keeps its parent's rate: the two are compared on a deck, and
+        // one resampled and one not is a comparison of two different files.
+        mp3_out_rate: None,
     };
 
     let mut failures = Vec::new();

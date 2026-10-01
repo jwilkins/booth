@@ -2588,6 +2588,7 @@ impl App {
         } else {
             args.drive = Some(drive.path.clone());
         }
+        args.player = self.config.oldest_player;
         args.playlists = self.drive_playlists(&drive);
         args.companions = companions;
         args.already = carry.already;
@@ -8214,6 +8215,41 @@ impl App {
                     );
 
                     ui.add_space(14.0);
+                    pane_label(ui, "Oldest player a drive must work on");
+                    ui.label(
+                        RichText::new(
+                            "Every generation's files go on whatever this says \u{2014} .DAT for \
+                             a 2009 player, .EXT for the nexus 2 line, .2EX for the CDJ-3000's \
+                             three-band waveforms \u{2014} because a player reads the richest \
+                             one it knows and ignores the rest. What this changes is what the \
+                             drive carries. A track this player cannot open, or one above its \
+                             sample-rate ceiling, goes on as a 320 kbps mp3 at the best rate \
+                             the hardware takes; the library's own file is not touched, so the \
+                             same collection still writes a lossless stick for a CDJ-3000.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+                    for player in booth_cli::compat::Player::ALL {
+                        if ui
+                            .radio_value(
+                                &mut self.config.oldest_player,
+                                player,
+                                format!("{} and newer", player.name()),
+                            )
+                            .on_hover_text(format!(
+                                "{} \u{2014} up to {:.0} kHz, opens {}.",
+                                player.also(),
+                                player.max_sample_rate() as f64 / 1000.0,
+                                player.plays().join(", ")
+                            ))
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+
+                    ui.add_space(14.0);
                     pane_label(ui, "Hover help");
                     ui.horizontal(|ui| {
                         let mut delay = self.config.help_delay_ms;
@@ -8765,12 +8801,16 @@ impl App {
             .max_height(sheet_height(ctx))
             .frame(sheet_frame())
             .show(ctx, |ui| {
+                let target = self.config.oldest_player;
                 ui.label(
-                    RichText::new(
-                        "These import, play here, and will be skipped when a drive is \
-                         written. A CDJ-3000 takes MP3 and AAC at 44.1–48 kHz, and WAV, \
-                         AIFF, FLAC and ALAC up to 96 kHz.",
-                    )
+                    RichText::new(format!(
+                        "These import and play here. A {} takes MP3 and AAC at 44.1\u{2013}48 \
+                         kHz, and opens {} at up to {:.0} kHz \u{2014} which is the booth this \
+                         collection is being checked against, in Settings.",
+                        target.name(),
+                        target.plays().join(", "),
+                        target.max_sample_rate() as f64 / 1000.0
+                    ))
                     .color(theme::dim())
                     .size(theme::SMALL),
                 );
@@ -9048,7 +9088,15 @@ impl App {
             self.sheet = false;
             return;
         };
-        let checks = sync::preflight(&self.library, &self.plan, &drive.path, drive.is_image);
+        let formatted = sync::filesystem(&drive.path);
+        let checks = sync::preflight(
+            &self.library,
+            &self.plan,
+            &drive.path,
+            drive.is_image,
+            self.config.oldest_player,
+            formatted.as_deref(),
+        );
         let worst = checks.iter().map(|c| c.level).max().unwrap_or(Level::Ok);
 
         let mut open = true;
@@ -9075,39 +9123,83 @@ impl App {
                 // Scrolled, because the sheet is no taller than the screen now.
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let both = self.config.writes_onelibrary();
+                    let target = self.config.oldest_player;
                     ui.label(
                         RichText::new(format!(
-                            "Target: CDJ-3000 · writes: Device Library (export.pdb){} + ANLZ{}",
+                            "Target: {} and newer · writes: Device Library (export.pdb){} \
+                             + ANLZ .DAT/.EXT/.2EX{}",
+                            target.name(),
                             if both { " + OneLibrary (exportLibrary.db)" } else { "" },
                             if drive.is_image { " · into a FAT32 image" } else { "" }
                         ))
                         .font(theme::mono(10.5))
                         .color(theme::dim()),
-                    );
-                    ui.label(
-                        RichText::new(match both {
-                            // A CDJ-3000X has browsed one of these. What it did
-                            // with the analysis files is not known, and the
-                            // sheet should not let the first half stand in for
-                            // the second.
-                            true => format!(
-                                "{} A CDJ-3000X browses a drive written this way. Its \
-                                 waveforms and grids have not been seen on a player since \
-                                 the naming they are found by was corrected.",
-                                theme::WARN
-                            ),
-                            false => format!(
-                                "{} A CDJ-3000X will not read this drive: it needs OneLibrary, \
-                                 which needs its key in Settings.",
-                                theme::WARN
-                            ),
-                        })
-                        .font(theme::mono(10.5))
-                        .color(match both {
-                            true => theme::amber(),
-                            false => theme::alert(),
-                        }),
-                    );
+                    )
+                    .on_hover_text(format!(
+                        "Every generation's files go on whatever the target is: .DAT is what a \
+                         2009 player reads, .EXT adds the nexus 2 line's colour waveforms and \
+                         named cues, .2EX carries the CDJ-3000's three-band waveforms, and a \
+                         player reads the richest one it knows and ignores the rest. What the \
+                         target changes is what gets checked \u{2014} a {} takes {:.0} kHz and \
+                         opens {}. It is in Settings.",
+                        target.name(),
+                        target.max_sample_rate() as f64 / 1000.0,
+                        target.plays().join(", ")
+                    ));
+                    // The OneLibrary half only matters to the players that
+                    // read it. Warning a DJ whose booth is full of NXS2s that a
+                    // CDJ-3000X would not browse their drive is a warning about
+                    // hardware they have said they do not have.
+                    let needs_onelibrary = booth_cli::compat::Player::Cdj3000X;
+                    if target.reads_onelibrary() || both {
+                        ui.label(
+                            RichText::new(match both {
+                                // A CDJ-3000X has browsed one of these. What it
+                                // did with the analysis files is not known, and
+                                // the sheet should not let the first half stand
+                                // in for the second.
+                                true => format!(
+                                    "{} A {} browses a drive written this way. Its waveforms \
+                                     and grids have not been seen on a player since the \
+                                     naming they are found by was corrected.",
+                                    theme::WARN,
+                                    needs_onelibrary.name()
+                                ),
+                                false => format!(
+                                    "{} A {} will not read this drive: it needs OneLibrary, \
+                                     which needs its key in Settings.",
+                                    theme::WARN,
+                                    needs_onelibrary.name()
+                                ),
+                            })
+                            .font(theme::mono(10.5))
+                            .color(match both {
+                                true => theme::amber(),
+                                false => theme::alert(),
+                            }),
+                        );
+                    } else {
+                        // Not a tick. Everything a player of this generation
+                        // reads is written — export.pdb and all three analysis
+                        // files — and no player older than a CDJ-3000X has been
+                        // seen to browse a drive from here. One on firmware
+                        // 2.05 refused the database outright, and that is not
+                        // known to have been fixed, so the sheet says so rather
+                        // than letting "the files are there" stand in for "it
+                        // works". See booth/README.md.
+                        ui.label(
+                            RichText::new(format!(
+                                "{} A {} reads export.pdb and the analysis files, which all go \
+                                 on \u{2014} but no player older than a {} has yet been seen to \
+                                 browse a drive written here. Try it before the night.",
+                                theme::WARN,
+                                target.name(),
+                                needs_onelibrary.name()
+                            ))
+                            .font(theme::mono(10.5))
+                            .color(theme::amber()),
+                        );
+                    }
 
                     // What the browse tree on the player will look like, because
                     // that is the thing being written and the easiest to get wrong.

@@ -440,6 +440,16 @@ pub struct ExportArgs {
     #[arg(long, value_name = "NAME", default_value = "REKORDBOX")]
     pub label: String,
 
+    /// The oldest player this drive has to work on.
+    ///
+    /// Decides two things. What is checked — the formats and the sample-rate
+    /// ceiling are a generation's, not "a player's". And what is re-encoded: a
+    /// file this player cannot open, or one above its ceiling, goes on as an
+    /// MP3 at the best rate and bitrate the hardware takes, because the
+    /// alternative is a track that copies, browses and will not load.
+    #[arg(long, value_name = "MODEL", value_enum, default_value_t = crate::compat::Player::default())]
+    pub player: crate::compat::Player,
+
     /// Override the detected tempo, in BPM, for every file named.
     ///
     /// The beats are still tracked against the audio; this only says how far

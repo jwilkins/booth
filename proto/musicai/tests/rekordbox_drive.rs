@@ -91,6 +91,9 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         drive: None,
         image: None,
         label: "REKORDBOX".to_string(),
+        // The literal is deliberately exhaustive, so a new field is a
+        // compile error and somebody has to decide what the tests want.
+        player: booth_cli::compat::Player::default(),
         bpm: None,
         playlist: "Sat 14/9".to_string(),
         playlists: Vec::new(),
@@ -441,6 +444,62 @@ fn the_cues_on_the_drive_are_named_and_coloured() {
         .expect("no memory cue list");
     let marks: usize = memory.trim_end_matches(" memory cues").parse().unwrap();
     assert!(marks > 1, "the drive got {marks} memory cues, so the arrangement is not on it");
+}
+
+#[test]
+fn a_flac_bound_for_a_deck_that_cannot_play_one_goes_on_as_an_mp3() {
+    // A nexus deck has no FLAC. Writing the FLAC anyway puts a track on the
+    // stick that copies, browses and will not load, and telling the DJ to go
+    // and re-encode their library is telling them to ruin it for the CDJ-3000
+    // in the other booth. So the drive gets an mp3 at the most the hardware
+    // takes and the library keeps its FLAC.
+    let scratch = Scratch::new("recode-flac");
+    let drive = scratch.path("USB");
+    let source = write_song_of(&scratch, "lossless.flac", 8.0);
+
+    let args = ExportArgs {
+        drive: Some(drive.clone()),
+        player: booth_cli::compat::Player::Cdj2000Nexus,
+        ..args_for(vec![source.clone()])
+    };
+    let reporter = Collected::new();
+    commands::export(&args, &reporter).expect("export failed");
+
+    let rows = tracks_on(&drive);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (_, on_drive, analyze) = &rows[0];
+    assert!(on_drive.ends_with("lossless.mp3"), "the row still names a FLAC: {on_drive}");
+    assert!(
+        drive.join(on_drive.trim_start_matches('/')).exists(),
+        "nothing was written at {on_drive}"
+    );
+    assert!(
+        !drive.join("Contents/Unknown Artist/lossless.flac").exists(),
+        "the FLAC went on as well"
+    );
+
+    // The library's own copy is untouched, which is the whole point of doing
+    // this at the write rather than to the collection.
+    assert_eq!(source.extension().unwrap(), "flac");
+    assert!(source.exists());
+
+    // And the analysis is found where the player looks for it, which is a hash
+    // of the path on the drive — so renaming the file to .mp3 had to happen
+    // before that hash was taken.
+    assert_eq!(
+        analyze.trim_end_matches(".DAT"),
+        booth_cli::export::anlz::analysis_dir(on_drive) + "/ANLZ0000",
+        "the grid is filed under the name the FLAC would have had"
+    );
+    assert!(drive.join(analyze.trim_start_matches('/')).exists());
+
+    // And it said so, because a track that goes on as something other than
+    // what it is in the library is exactly the thing to be able to check.
+    assert!(
+        reporter.details().iter().any(|line| line.contains("goes on as a 320 kbps mp3")),
+        "the write did not say it had re-encoded anything: {:#?}",
+        reporter.details()
+    );
 }
 
 #[test]

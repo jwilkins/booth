@@ -125,7 +125,14 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
     assert_eq!(plan.delta(), "2 to add");
 
     // -- and the preflight says whether it can
-    let checks = sync::preflight(&collection, &plan, &drive_path, false);
+    let checks = sync::preflight(
+        &collection,
+        &plan,
+        &drive_path,
+        false,
+        booth_cli::compat::Player::default(),
+        None,
+    );
     let worst = checks.iter().map(|c| c.level).max().unwrap();
     assert_eq!(worst, sync::Level::Ok, "a clean collection should pass: {checks:#?}");
 

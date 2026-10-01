@@ -331,12 +331,47 @@ against *that player's* rules, not against ours.
 
 ### 4.2 Player facts the exporter must respect
 
-From AlphaTheta's own documentation and the CDJ-3000 specifications:
+From AlphaTheta's own documentation and the published player specifications. "A player"
+is not one thing, so these are per generation, and the one a drive is checked against is
+**the oldest player it has to work on** (`compat::Player`, settable in Settings):
 
-- Audio: MP3 and AAC at 16-bit / 44.1–48 kHz; WAV, AIFF, FLAC and ALAC at 16 or 24-bit up
-  to 96 kHz. No 32-bit float, no AIFF-C, no DRM'd AAC, nothing above 96 kHz.
-- Filesystem: FAT16, FAT32, HFS+ (exFAT support varies by model and firmware — the
-  compatibility target decides). **Never NTFS.**
+| | CDJ-3000X | CDJ-3000 | CDJ-2000NXS2 | CDJ-2000NXS |
+| --- | --- | --- | --- | --- |
+| Lossless | WAV, AIFF, FLAC, ALAC | WAV, AIFF, FLAC, ALAC | WAV, AIFF, FLAC, ALAC | WAV, AIFF |
+| Ceiling | 96 kHz | 96 kHz | 48 kHz | 48 kHz |
+| exFAT | yes | yes | no | no |
+| `exportLibrary.db` | read | — | — | — |
+| `PSSI` phrases | drawn | drawn | — | — |
+| `.2EX` three-band | drawn | drawn | — | — |
+
+Every generation's files are written whatever the target is — `.DAT` for a 2009 player,
+`.EXT` for the nexus 2 line, `.2EX` for the CDJ-3000's three-band waveforms, and
+`exportLibrary.db` when its key is known — because a player reads the richest file it
+knows about and ignores the rest.
+
+What the target changes is **what the drive carries**. A track the target cannot open, or
+one above its sample-rate ceiling, is re-encoded on the way onto the stick: a 320 kbps MP3
+at the highest of MPEG-1's three rates the hardware and the source share, preferring a
+whole-number ratio (88.2 → 44.1, 96 → 48). LAME resamples, which is the one resampler in
+the program trusted with audio, and only ever for a copy bound for a drive. The library's
+own file is untouched, so the same collection writes a lossless stick for a CDJ-3000 and
+an MP3 one for a nexus deck.
+
+The grid, key, cues and phrases are measured from the original, not from what is written,
+and the analysis directory is hashed from the on-drive name — so the rename to `.mp3`
+happens before that hash is taken or the player looks for the grid in the wrong place.
+
+Because the write fixes it, this is **not** something the collection needs attention for:
+the sidebar's attention count asks the writer's own limits (a container nothing decodes,
+a protected purchase, 32-bit float, past 96 kHz), and the re-encode is reported on the
+sync sheet, which is where it happens.
+
+- Audio: MP3 and AAC at 16-bit / 44.1–48 kHz; the lossless formats and ceiling above at
+  16 or 24-bit. No 32-bit float, no AIFF-C, no DRM'd AAC, nothing above 96 kHz anywhere.
+- Filesystem: FAT16, FAT32, HFS+ everywhere; exFAT on the CDJ-3000 line only. **Never
+  NTFS.** A drive a player will not mount is the one failure it cannot shrug off by
+  ignoring a file it does not understand, so the preflight reads the drive's actual
+  format and says so.
 - Structure: 8 folder levels deep, 10,000 folders, 10,000 files per folder.
 - Full path under 256 characters.
 - Playlists: rekordbox's own Intelligent Playlists cap at 1,000 tracks; exported ordinary
