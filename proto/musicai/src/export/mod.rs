@@ -34,6 +34,29 @@ pub struct Beat {
     pub time_ms: u32,
 }
 
+/// The period a straight line through these beat times implies, by least
+/// squares. `None` when there are too few to fit one or they do not advance.
+fn fitted_period(times: &[u32]) -> Option<f64> {
+    if times.len() < 2 {
+        return None;
+    }
+    let n = times.len() as f64;
+    let mean_index = (n - 1.0) / 2.0;
+    let mean_time = times.iter().map(|&t| t as f64).sum::<f64>() / n;
+    let mut covariance = 0.0;
+    let mut variance = 0.0;
+    for (i, &time) in times.iter().enumerate() {
+        let di = i as f64 - mean_index;
+        covariance += di * (time as f64 - mean_time);
+        variance += di * di;
+    }
+    if variance <= 0.0 {
+        return None;
+    }
+    let period = covariance / variance;
+    (period > 0.0).then_some(period)
+}
+
 /// Whether beat times bend, meaning no single tempo places them all.
 ///
 /// Measured against the even grid through the two ends, so a grid that speeds
@@ -120,27 +143,34 @@ impl BeatGrid {
     /// A grid from measured beat times, in milliseconds, assuming the first is
     /// a downbeat.
     ///
-    /// The tempo written against each beat is the one implied by the gap to the
-    /// next beat, so a track that drifts is described as drifting rather than
-    /// averaged into a lie. The last beat inherits the tempo of the one before
-    /// it, there being no following gap to measure.
+    /// The tempo written against each beat comes from a line fitted through the
+    /// beats around it, so a track that drifts is described as drifting rather
+    /// than averaged into a lie — and a track that does not is described at one
+    /// tempo rather than at whatever the rounding of two beat times implies.
+    ///
+    /// Taking it from the single gap to the next beat, which is what this did,
+    /// reads the tempo off numbers stored to the millisecond: at 128 BPM the
+    /// beats fall 468.75 ms apart, the stored gaps alternate 468 and 469, and
+    /// the tempo written alternates 128.21 and 127.93. A quarter of a BPM of
+    /// jitter, beat by beat, on a track that never changed tempo.
     pub fn from_beat_times(times: &[u32]) -> Self {
-        let mut beats = Vec::with_capacity(times.len());
-        for (i, &t) in times.iter().enumerate() {
-            let gap = if i + 1 < times.len() {
-                times[i + 1].saturating_sub(t)
-            } else if i > 0 {
-                t.saturating_sub(times[i - 1])
-            } else {
-                0
-            };
-            let bpm = if gap > 0 { 60_000.0 / gap as f64 } else { 0.0 };
-            beats.push(Beat {
-                number: (i % 4) as u16 + 1,
-                tempo_x100: (bpm * 100.0).round().clamp(0.0, u16::MAX as f64) as u16,
-                time_ms: t,
-            });
-        }
+        /// Beats either side of one that are used to read the tempo at it.
+        const AROUND: usize = 6;
+
+        let beats = times
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| {
+                let from = i.saturating_sub(AROUND);
+                let to = (i + AROUND + 1).min(times.len());
+                let bpm = fitted_period(&times[from..to]).map(|p| 60_000.0 / p).unwrap_or(0.0);
+                Beat {
+                    number: (i % 4) as u16 + 1,
+                    tempo_x100: (bpm * 100.0).round().clamp(0.0, u16::MAX as f64) as u16,
+                    time_ms: t,
+                }
+            })
+            .collect();
         Self { beats }
     }
 
@@ -408,13 +438,53 @@ mod tests {
     }
 
     #[test]
-    fn measured_grid_records_the_tempo_of_each_gap() {
-        // A track that slows down: 500 ms, then 500, then 600.
-        let grid = BeatGrid::from_beat_times(&[0, 500, 1000, 1600]);
-        assert_eq!(grid.beats[0].tempo_x100, 12_000);
-        assert_eq!(grid.beats[2].tempo_x100, 10_000);
-        // The last beat has no following gap, so it keeps the previous tempo.
-        assert_eq!(grid.beats[3].tempo_x100, 10_000);
+    fn a_steady_run_of_beats_is_written_at_one_tempo() {
+        // Taking the tempo from the single gap that follows each beat read it
+        // off numbers stored to the millisecond: 128 BPM is 468.75 ms, the
+        // stored gaps alternate 468 and 469, and the tempo came out
+        // alternating 128.21 and 127.93. A quarter of a BPM of jitter on a
+        // track that never changed tempo, and a player's readout that will not
+        // hold still.
+        let period = 60_000.0 / 128.0;
+        let times: Vec<u32> = (0..64).map(|i| (period * i as f64).round() as u32).collect();
+        let grid = BeatGrid::from_beat_times(&times);
+
+        let tempos: std::collections::BTreeSet<u16> =
+            grid.beats.iter().map(|beat| beat.tempo_x100).collect();
+        // Every beat within a hundredth of a BPM of 128, which is the unit the
+        // format stores: there is nowhere further to go. Read off the single
+        // following gap, these spanned 12_793 to 12_821.
+        for tempo in &tempos {
+            assert!(tempo.abs_diff(12_800) <= 1, "{tempos:?} is not 128 BPM");
+        }
+    }
+
+    #[test]
+    fn a_track_that_slows_down_is_written_slowing_down() {
+        // The other half: smoothing must not flatten a record that really does
+        // change. A ramp from 128 to 120 over a couple of minutes should come
+        // out as a tempo that falls across the track.
+        let mut times = vec![0u32];
+        let mut at = 0.0f64;
+        for i in 0..256 {
+            let bpm = 128.0 - 8.0 * (i as f64 / 256.0);
+            at += 60_000.0 / bpm;
+            times.push(at.round() as u32);
+        }
+        let grid = BeatGrid::from_beat_times(&times);
+
+        let first = grid.beats[8].tempo_x100;
+        let last = grid.beats[grid.beats.len() - 9].tempo_x100;
+        assert!(first > 12_700, "it should start near 128: {first}");
+        assert!(last < 12_100, "and end near 120: {last}");
+        // And fall the whole way rather than in two or three steps, which is
+        // what reading the median of a handful of quantised gaps gave.
+        let steps = grid
+            .beats
+            .iter()
+            .map(|beat| beat.tempo_x100)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(steps.len() > 20, "only {} distinct tempos across the ramp", steps.len());
     }
 
     #[test]

@@ -29,7 +29,13 @@ const PRIOR_WIDTH_OCTAVES: f64 = 1.4;
 const TIGHTNESS: f32 = 100.0;
 /// Beats either side of each one, over which its tempo is measured. A single
 /// gap is too noisy to quote as a BPM.
-const TEMPO_WINDOW: usize = 4;
+/// How many beats either side of one are used to read the tempo at it.
+///
+/// Six either side is thirteen beats, about five seconds of music. Long enough
+/// that fitting a line through them averages out the frame the tracker reports
+/// in — a dozen points cut the quantisation noise by more than three — and
+/// short enough to follow a record that is really speeding up.
+const TEMPO_WINDOW: usize = 6;
 /// How periodic the onsets have to be before a tempo is believed: the winning
 /// autocorrelation peak against the average across all candidate tempos.
 const MIN_CONFIDENCE: f32 = 1.5;
@@ -88,10 +94,14 @@ pub fn detect_at(features: &Features, bpm: Option<f64>) -> Beats {
     // this frame rate is a step of more than a beat per minute — too coarse to
     // hold a mix together. The tracked beat times are far more precise than the
     // lag that produced them, so the tempo is read back off them.
-    let steady = straighten(&mut times);
+    let straightened = straighten(&mut times, 1000.0 / features.frame_rate);
+    let steady = straightened.as_ref().map(|s| s.bpm);
     let bpm = steady.unwrap_or_else(|| measured_bpm(&times));
     let mut grid = grid_from(&times, steady);
-    let phase = downbeat_phase(features, &frames);
+    // The phase is an index into the beats that were tracked, so it moves with
+    // them when straightening takes some off the front.
+    let dropped = straightened.as_ref().map(|s| s.dropped).unwrap_or(0);
+    let phase = downbeat_phase(features, &frames) + 4 - dropped % 4;
     renumber(&mut grid, phase);
 
     Beats { grid, bpm, confidence }
@@ -261,51 +271,110 @@ fn downbeat_phase(features: &Features, beats: &[usize]) -> usize {
     best.0
 }
 
-/// Fit a constant tempo to the tracked beats, and if it fits, use it.
+/// A straight line through beat times: the period between them, and where the
+/// first one falls.
 ///
-/// A production that was made to a click really is at one tempo, and a grid
-/// that wobbles by ten milliseconds a beat is worse than one that does not —
-/// it makes the player's tempo readout flicker and it puts every cue slightly
-/// off. So: fit a line through the beat times, and if no beat is far from it,
-/// replace the tracked times with the line. Returns the tempo when it did.
-fn straighten(times: &mut [u32]) -> Option<f64> {
-    if times.len() < 8 {
+/// Least squares over whichever beats are named, so a caller can fit through
+/// the ones that agree and leave the ones that do not out of it.
+fn line_through(times: &[u32], using: impl Iterator<Item = usize> + Clone) -> Option<(f64, f64)> {
+    let count = using.clone().count();
+    if count < 4 {
         return None;
     }
-    let n = times.len() as f64;
-    let mean_index = (n - 1.0) / 2.0;
-    let mean_time = times.iter().map(|&t| t as f64).sum::<f64>() / n;
+    let n = count as f64;
+    let mean_index = using.clone().map(|i| i as f64).sum::<f64>() / n;
+    let mean_time = using.clone().map(|i| times[i] as f64).sum::<f64>() / n;
     let mut covariance = 0.0;
     let mut variance = 0.0;
-    for (i, &time) in times.iter().enumerate() {
+    for i in using {
         let di = i as f64 - mean_index;
-        covariance += di * (time as f64 - mean_time);
+        covariance += di * (times[i] as f64 - mean_time);
         variance += di * di;
     }
     if variance <= 0.0 {
         return None;
     }
     let period = covariance / variance;
-    if period <= 0.0 {
+    (period > 0.0).then_some((period, mean_time - period * mean_index))
+}
+
+/// Fit a constant tempo to the tracked beats, and if it fits, use it.
+///
+/// A production made to a click really is at one tempo, and a grid that wobbles
+/// is worse than one that does not: the player's tempo readout flickers, every
+/// cue sits slightly off, and two decks told to sync are each chasing a number
+/// that will not hold still. So: fit a line through the beat times, and where
+/// the track is plainly at one tempo, replace the tracked times with the line.
+///
+/// # Why the test is not "no beat is far from the line"
+///
+/// It used to be, and it almost never fired. Measured on a metronomic 128 BPM
+/// click track: the fit came out at 128.000 BPM with a median deviation of
+/// 2.6 ms and a 90th percentile of 5.0 ms — and **one** beat out of 640 sat
+/// 30.3 ms off, which is past a twentieth of a beat, so the whole track kept
+/// its tracked times. A single bad beat threw away a perfect answer for the
+/// other 639, and what went on the drive was a grid whose gaps ran from 441 to
+/// 477 ms with a tempo that alternated between 126.05 and 129.03 BPM.
+///
+/// So the question asked is whether *most* beats are on the line, not whether
+/// all of them are. The ones that are not are then left out and the line is
+/// fitted again, so an outlier cannot drag the tempo either.
+///
+/// The tolerance is a frame, because that is the resolution the beats arrive
+/// at: the tracker reports whole analysis frames, so even a perfect track
+/// comes back quantised to about 11.6 ms and its deviations are half of that.
+/// Anything that genuinely bends — a disco record speeding up over five
+/// minutes — leaves the line by hundreds of milliseconds and fails this easily.
+fn straighten(times: &mut Vec<u32>, frame_ms: f64) -> Option<Straightened> {
+    if times.len() < 8 {
         return None;
     }
-    let first = mean_time - period * mean_index;
+    let (period, first) = line_through(times, 0..times.len())?;
+    let off =
+        |period: f64, first: f64, i: usize| (times[i] as f64 - (first + period * i as f64)).abs();
 
-    let worst = times
-        .iter()
-        .enumerate()
-        .map(|(i, &time)| (time as f64 - (first + period * i as f64)).abs())
-        .fold(0.0f64, f64::max);
-    // A twentieth of a beat. Past that the track is not at one tempo and the
-    // tracked times, wobble and all, are the truthful answer.
-    if worst > period / 20.0 {
+    // How far the beats sit from the line, at the point where nine in ten are
+    // closer. A handful further out than that is a tracker that missed a beat,
+    // not a track that changed tempo.
+    let mut spread: Vec<f64> = (0..times.len()).map(|i| off(period, first, i)).collect();
+    spread.sort_by(f64::total_cmp);
+    let typical = spread[spread.len() * 9 / 10];
+    let tolerance = frame_ms.max(1.0);
+    if typical > tolerance {
         return None;
     }
 
+    // Fitted again without the beats that disagree, so one mistracked beat
+    // moves nothing. Falls back to the first fit if too few are left to fit at
+    // all, which cannot happen while nine in ten are inliers but is not worth
+    // being wrong about.
+    let keep = || (0..times.len()).filter(|i| off(period, first, *i) <= tolerance * 2.0);
+    let (period, first) = line_through(times, keep()).unwrap_or((period, first));
+
+    // A line fitted through the whole track can start a little before the
+    // track does, and a beat clamped to zero is a beat off the grid at the one
+    // place every player parks. So the beats before the start are dropped
+    // rather than squashed onto it, and the caller is told how many so the
+    // downbeat keeps its phase.
+    let dropped = match first < 0.0 {
+        true => (-first / period).ceil() as usize,
+        false => 0,
+    };
+    if dropped >= times.len() {
+        return None;
+    }
+    times.drain(..dropped);
     for (i, time) in times.iter_mut().enumerate() {
-        *time = (first + period * i as f64).round().max(0.0) as u32;
+        *time = (first + period * (i + dropped) as f64).round().max(0.0) as u32;
     }
-    Some(60_000.0 / period)
+    Some(Straightened { bpm: 60_000.0 / period, dropped })
+}
+
+/// What straightening a grid came to: the one tempo it is at, and how many
+/// beats came off the front because the line began before the track did.
+struct Straightened {
+    bpm: f64,
+    dropped: usize,
 }
 
 /// The tempo implied by the middle of the distribution of gaps, for a track
@@ -324,26 +393,30 @@ fn measured_bpm(times: &[u32]) -> f64 {
     }
 }
 
-/// Build a grid from beat times, quoting each beat's tempo from the gaps around
-/// it rather than from the one gap that follows it, which is too noisy to read.
+/// Build a grid from beat times, quoting each beat's tempo from a line fitted
+/// through the beats around it.
+///
+/// Not from the gap that follows it, and not from the median of the gaps
+/// nearby: both read the tempo off numbers that arrive quantised to an analysis
+/// frame, so on a 128 BPM track the only answers available were 126.05 and
+/// 129.03 — the two tempos a 41-frame and a 40-frame gap imply. A player shown
+/// that has a tempo readout that flickers between two wrong numbers, and two
+/// players told to sync are each chasing it.
+///
+/// A line through a dozen beats averages the quantisation away and lands within
+/// a hundredth of a BPM, which is the resolution the format stores anyway.
 fn grid_from(times: &[u32], steady: Option<f64>) -> BeatGrid {
-    let gaps: Vec<f64> = times.windows(2).map(|w| (w[1] - w[0]) as f64).collect();
     let beats = times
         .iter()
         .enumerate()
         .map(|(i, &time)| {
-            let bpm = steady.unwrap_or_else(|| {
-                let from = i.saturating_sub(TEMPO_WINDOW);
-                let to = (i + TEMPO_WINDOW).min(gaps.len());
-                let mut local: Vec<f64> = gaps.get(from..to).unwrap_or(&[]).to_vec();
-                local.sort_by(f64::total_cmp);
-                let gap = local.get(local.len() / 2).copied().unwrap_or(0.0);
-                if gap > 0.0 {
-                    60_000.0 / gap
-                } else {
-                    0.0
-                }
-            });
+            let bpm = steady
+                .or_else(|| {
+                    let from = i.saturating_sub(TEMPO_WINDOW);
+                    let to = (i + TEMPO_WINDOW + 1).min(times.len());
+                    line_through(times, from..to).map(|(period, _)| 60_000.0 / period)
+                })
+                .unwrap_or(0.0);
             Beat {
                 number: (i % 4) as u16 + 1,
                 tempo_x100: (bpm * 100.0).round().clamp(0.0, u16::MAX as f64) as u16,
@@ -466,6 +539,50 @@ mod tests {
             let off = (position / 4.0 - (position / 4.0).round()).abs() * 4.0;
             assert!(off < 0.2, "a downbeat landed {off:.2} beats from the accent");
         }
+    }
+
+    #[test]
+    fn a_metronomic_track_comes_out_at_one_exact_tempo() {
+        // The bug this exists for. A grid is accepted as steady on how most of
+        // its beats sit against the fitted line, not on whether every single
+        // one does — and before that, one mistracked beat in six hundred threw
+        // the fit away for the whole track.
+        //
+        // What went on the drive instead was the tracked times, quantised to
+        // an analysis frame: on a metronomic 128 BPM click track the gaps ran
+        // from 441 to 477 ms and the tempo alternated between 126.05 and
+        // 129.03 BPM — neither of them the tempo, and a number that will not
+        // hold still is a number two players cannot sync to.
+        for wanted in [128.0, 174.0] {
+            let found = detect(&features::extract(&clicks(wanted, 16, true)));
+            assert!((found.bpm - wanted).abs() < 0.05, "{wanted} BPM came out as {:.3}", found.bpm);
+
+            let tempos: std::collections::BTreeSet<u16> =
+                found.grid.beats.iter().map(|beat| beat.tempo_x100).collect();
+            assert_eq!(tempos.len(), 1, "{wanted} BPM was written as {tempos:?}");
+
+            // And the beats are evenly spaced, to the millisecond they are
+            // stored in: two gap lengths at most, one apart.
+            let times: Vec<u32> = found.grid.beats.iter().map(|beat| beat.time_ms).collect();
+            let gaps: std::collections::BTreeSet<u32> =
+                times.windows(2).map(|pair| pair[1] - pair[0]).collect();
+            let (tight, loose) = (*gaps.iter().next().unwrap(), *gaps.iter().next_back().unwrap());
+            assert!(loose - tight <= 1, "{wanted} BPM gave gaps {gaps:?}");
+        }
+    }
+
+    #[test]
+    fn a_grid_fitted_from_before_the_track_does_not_squash_a_beat_onto_zero() {
+        // The line through a whole track can start a little before the track
+        // does. Clamping that beat to zero put one beat off the grid at the
+        // one place every player parks — the first gap came out 461 ms where
+        // every other was 468.
+        let found = detect(&features::extract(&clicks(128.0, 16, true)));
+        let times: Vec<u32> = found.grid.beats.iter().map(|beat| beat.time_ms).collect();
+        assert!(times[0] > 0, "the grid still begins on a clamped beat");
+        let first = times[1] - times[0];
+        let second = times[2] - times[1];
+        assert!(first.abs_diff(second) <= 1, "the first gap is {first} and the next {second}");
     }
 
     #[test]
