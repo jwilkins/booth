@@ -258,6 +258,20 @@ fn section_word(kind: Kind) -> &'static str {
     }
 }
 
+/// How much of a sung line goes on the marker itself.
+///
+/// Two words. What shows it is one line of a player's screen beside the
+/// number, the artist and the title, and a whole sung phrase there is a phrase
+/// with its end cut off — which reads as a mistake rather than as a label. Two
+/// words is enough to tell one line of a record from another, which is all the
+/// marker has to do.
+const VERSE_WORDS: usize = 2;
+
+/// The start of a sung line, for a marker with no room for the rest of it.
+fn opening(text: &str) -> String {
+    text.split_whitespace().take(VERSE_WORDS).collect::<Vec<_>>().join(" ")
+}
+
 /// A named memory cue for every moment, in time order.
 ///
 /// The names are what a DJ would write on the markers themselves: Start, then
@@ -266,11 +280,11 @@ fn section_word(kind: Kind) -> &'static str {
 /// of them is the whole point: six markers all called "drop" say nothing that
 /// looking at the waveform does not.
 ///
-/// A sung line gets a verse number and its words the first time it lands, and
-/// the number alone every time it comes back: "V1 Get Down", then "V1", "V1".
-/// A player shows a memory cue's comment while the track is loaded, so the
-/// second time round the line is already known and the number is what says
-/// where in the record you are.
+/// A sung line gets a verse number and the start of its words the first time
+/// it lands, and the number alone every time it comes back: "V1 Get Down",
+/// then "V1", "V1". A player shows a memory cue's comment while the track is
+/// loaded, so the second time round the line is already known and the number
+/// is what says where in the record you are.
 ///
 /// `kept` is the folded, time-ordered list [`assemble`] works from.
 fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) -> Vec<Cue> {
@@ -306,7 +320,7 @@ fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) ->
                         Some(at) => format!("V{}", at + 1),
                         None => {
                             lines.push(text.to_string());
-                            format!("V{} {text}", lines.len())
+                            format!("V{} {}", lines.len(), opening(text))
                         }
                     }
                 }
@@ -749,6 +763,28 @@ mod tests {
         assert!(
             marks.iter().any(|mark| mark.starts_with("V2 ")),
             "the other line is another verse: {marks:?}"
+        );
+    }
+
+    #[test]
+    fn a_verse_marker_carries_the_start_of_the_line_and_not_the_whole_of_it() {
+        // What the player shows is one line of a small screen beside the
+        // number, the artist and the title. A whole sung phrase there arrives
+        // with its end cut off, which reads as a fault rather than a label.
+        let words = crate::transcribe::Transcript {
+            lines: vec![
+                line(30_000, "everybody in the room put your hands up"),
+                line(90_000, "everybody in the room put your hands up"),
+            ],
+        };
+        let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let marks = marks(&assemble(0, None, candidates));
+        assert!(marks.contains(&"V1 everybody in".to_string()), "{marks:?}");
+        assert!(
+            !marks.iter().any(|mark| mark.contains("hands up")),
+            "the whole line should not be on the marker: {marks:?}"
         );
     }
 

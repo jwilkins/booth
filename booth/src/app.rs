@@ -10864,6 +10864,37 @@ mod tests {
             }
 
             #[test]
+            fn a_line_is_marked_with_its_words_once_and_its_number_ever_after() {
+                let (mut app, id) = sung(
+                    "verses",
+                    &[
+                        (40_100, "everybody in the room"),
+                        (100_100, "everybody in the room"),
+                        (160_100, "everybody in the room"),
+                    ],
+                );
+                app.auto_cue(id);
+                let marks: Vec<String> = app
+                    .library
+                    .get(id)
+                    .unwrap()
+                    .cues
+                    .iter()
+                    .filter(|cue| cue.letter == 0)
+                    .map(|cue| cue.label.clone())
+                    .collect();
+
+                // Two words on the marker, because what shows it is one line
+                // of a player's screen.
+                assert!(marks.contains(&"V1 everybody in".to_string()), "{marks:?}");
+                assert_eq!(
+                    marks.iter().filter(|mark| *mark == "V1").count(),
+                    2,
+                    "the repeats carry the number alone: {marks:?}"
+                );
+            }
+
+            #[test]
             fn a_line_said_once_is_not_cued_as_a_hook() {
                 let (mut app, id) = sung(
                     "once",
