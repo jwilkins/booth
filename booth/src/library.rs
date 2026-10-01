@@ -513,6 +513,16 @@ pub struct Track {
     /// different things the inspector is careful to tell apart.
     #[serde(default)]
     pub lyrics: Vec<Lyric>,
+    /// Whether those words have been put where the singing actually is.
+    ///
+    /// Whisper's timing on a stem is wrong in a measurable way — see
+    /// `booth_cli::transcribe::align` — so the lines are moved to the onsets
+    /// measured off the stem itself. `false` on a collection transcribed before
+    /// that existed, which is the whole point of the field: the words are fine
+    /// and only the times are wrong, so those tracks want a second of decoding
+    /// rather than minutes of listening all over again.
+    #[serde(default)]
+    pub lyrics_aligned: bool,
     pub loudness_lufs: Option<f64>,
     pub peak_dbtp: Option<f64>,
 
@@ -620,6 +630,7 @@ impl Track {
             phrases: Vec::new(),
             cues: Vec::new(),
             lyrics: Vec::new(),
+            lyrics_aligned: true,
             edited: None,
             loudness_lufs: None,
             peak_dbtp: None,
@@ -2793,6 +2804,33 @@ mod tests {
         assert_eq!(tree[0].0, "Sat 14/9");
         assert_eq!(tree[0].1.len(), 2, "both of the night's playlists, together");
         assert_eq!(tree[1].0, "Digging");
+    }
+
+    #[test]
+    fn words_read_before_they_were_placed_say_so_when_the_collection_is_read_back() {
+        // The field exists for collections that already have words in them,
+        // so the one case that matters is the one serde fills in: an older
+        // collection has no such key and must come back as not placed, or the
+        // tracks that need the fix are exactly the ones that never get it.
+        let older = r#"{
+            "tracks": [],
+            "playlists": [],
+            "saved": [],
+            "next_id": 1,
+            "drives": []
+        }"#;
+        let read: Library = serde_json::from_str(older).expect("an older collection should open");
+        assert!(read.tracks.is_empty());
+
+        let mut track = Track::placeholder(1);
+        track.lyrics = vec![Lyric { start_ms: 0, end_ms: 900, text: "get down".into() }];
+        track.lyrics_aligned = false;
+        let written = serde_json::to_string(&track).expect("a track should serialise");
+        let back: Track = serde_json::from_str(&written).expect("and read back");
+        assert!(!back.lyrics_aligned, "a track that needs placing forgot that it does");
+
+        // And one with no words at all is not waiting on anything.
+        assert!(Track::placeholder(2).lyrics_aligned);
     }
 
     #[test]

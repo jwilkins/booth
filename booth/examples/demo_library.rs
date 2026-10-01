@@ -148,24 +148,59 @@ fn fill_in(
         })
         .collect();
 
-    // A memory cue on the first downbeat and a hot cue on each drop, which is
-    // the shape a prepared record actually has.
-    track.cues = vec![CueMark { letter: 0, time_ms: 0, label: "Start".into(), color: [0, 0, 0] }];
-    for (letter, (from, _, kind)) in ARRANGEMENT.iter().enumerate() {
-        if *kind != "drop" {
-            continue;
-        }
-        let at = track.cues.len() as u8;
+    // The shape a prepared record actually has: a named memory cue on every
+    // section, and a hot cue on each drop. The names are the ones the analyser
+    // writes — numbered within their own kind — so the picture shows what a
+    // track off this program looks like rather than something arranged for it.
+    track.cues.clear();
+    let mut seen: Vec<(&str, usize)> = Vec::new();
+    for (from, _, kind) in ARRANGEMENT {
+        let word = match kind {
+            "intro" => "Intro",
+            "build" => "Build",
+            "break" => "Break",
+            "drop" => "Drop",
+            _ => "Outro",
+        };
+        let count = match seen.iter_mut().find(|(name, _)| *name == word) {
+            Some((_, count)) => {
+                *count += 1;
+                *count
+            }
+            None => {
+                seen.push((word, 1));
+                1
+            }
+        };
         track.cues.push(CueMark {
-            letter: at,
+            letter: 0,
             time_ms: (total * from) as u32,
-            label: format!("Drop {}", letter / 3 + 1),
-            color: {
-                let c = booth::theme::CUE_COLORS[at as usize % booth::theme::CUE_COLORS.len()];
-                [c.r(), c.g(), c.b()]
+            label: match from {
+                0.0 => "Start".to_string(),
+                _ => format!("{word} {count}"),
             },
+            color: booth::job::cue_color(0),
         });
     }
+    track.cues.push(CueMark {
+        letter: 0,
+        time_ms: total as u32,
+        label: "End".into(),
+        color: booth::job::cue_color(0),
+    });
+
+    for (from, _, _) in ARRANGEMENT.iter().filter(|(_, _, kind)| *kind == "drop") {
+        let letter = track.cues.iter().filter(|cue| cue.letter != 0).count() as u8 + 1;
+        let shade =
+            booth::theme::CUE_COLORS[(letter - 1) as usize % booth::theme::CUE_COLORS.len()];
+        track.cues.push(CueMark {
+            letter,
+            time_ms: (total * from) as u32,
+            label: format!("Drop {letter}"),
+            color: [shade.r(), shade.g(), shade.b()],
+        });
+    }
+    track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
 }
 
 /// A three-band picture with the shape of the arrangement above.

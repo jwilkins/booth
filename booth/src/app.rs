@@ -409,6 +409,13 @@ enum Pending {
     Resort,
     WriteTags(u32),
     /// Move a cue to a new time, or add one if it is not there yet.
+    /// Move the cue at this place in a track's list, which is how a drag on
+    /// the waveform names one. See [`App::move_cue`].
+    MoveCue {
+        id: u32,
+        at: usize,
+        time_ms: u32,
+    },
     PlaceCue {
         id: u32,
         letter: u8,
@@ -1853,16 +1860,25 @@ impl App {
         wanted.dedup();
 
         let mut known = Vec::new();
+        let mut placing = Vec::new();
         let mut reading = Vec::new();
         let mut rendering = Vec::new();
         for id in wanted {
             let Some(track) = self.library.get(id) else { continue };
-            if !track.lyrics.is_empty() {
-                known.push(id);
-            } else if let Some(vocals) = track.stems.vocals.clone() {
-                reading.push(job::Transcribable { id, vocals });
-            } else {
-                rendering.push(id);
+            match (track.lyrics.is_empty(), track.lyrics_aligned, track.stems.vocals.clone()) {
+                // Words already read and already placed: nothing to wait for.
+                (false, true, _) => known.push(id),
+                // Words read before they were placed against the stem. The
+                // words are right and the times are not, so this is a decode
+                // rather than another pass through the recogniser.
+                (false, false, Some(vocals)) => {
+                    placing.push(job::Realigning { id, vocals, lyrics: track.lyrics.clone() })
+                }
+                // Same, but the stem has gone. Nothing can be measured, so cue
+                // from what is there rather than refusing to cue at all.
+                (false, false, None) => known.push(id),
+                (true, _, Some(vocals)) => reading.push(job::Transcribable { id, vocals }),
+                (true, _, None) => rendering.push(id),
             }
         }
 
@@ -1875,6 +1891,14 @@ impl App {
                 format!("{} from words already read", crate::library::plural(placed, "cue")),
                 theme::text(),
             );
+        }
+
+        if !placing.is_empty() {
+            crate::info!(
+                "placing the words on {} against the stem they were read from",
+                plural(placing.len(), "track")
+            );
+            self.start(Job::Realign { tracks: placing });
         }
 
         if reading.is_empty() && rendering.is_empty() {
@@ -2256,6 +2280,10 @@ impl App {
                     let heard = lyrics.len();
                     if let Some(track) = self.library.get_mut(id) {
                         track.lyrics = lyrics;
+                        // Both paths that produce this update place the words
+                        // against the stem first, so arriving here is what
+                        // being placed means.
+                        track.lyrics_aligned = true;
                     }
                     // Said plainly, because an empty transcript is a real
                     // answer and looks exactly like a failure from outside: a
@@ -4564,8 +4592,8 @@ impl App {
                 self.playhead_ms = Some(ms);
                 self.pending.push(Pending::SeekDeck { id: track.id, time_ms: ms });
             }
-            Some(wave::Touched::Moved { letter, time_ms }) => {
-                self.pending.push(Pending::PlaceCue { id: track.id, letter, time_ms })
+            Some(wave::Touched::Moved { at, time_ms }) => {
+                self.pending.push(Pending::MoveCue { id: track.id, at, time_ms })
             }
             None => {}
         }
@@ -5600,6 +5628,10 @@ impl App {
                     self.place_cue(id, letter, time_ms);
                     touched = true;
                 }
+                Pending::MoveCue { id, at, time_ms } => {
+                    self.move_cue(id, at, time_ms);
+                    touched = true;
+                }
                 Pending::CountDifferently => {
                     self.config.counting = self.config.counting.flipped();
                     if let Err(e) = self.config.save(&self.config_path) {
@@ -6003,6 +6035,30 @@ impl App {
         if let Some(track) = self.library.get_mut(id) {
             track.edited = Some(crate::library::now());
         }
+    }
+
+    /// Move the cue at this place in the track's list to a new moment.
+    ///
+    /// By place rather than by letter, because a letter stopped naming one cue
+    /// when a track could have more than one memory cue: they all carry zero,
+    /// so finding "the cue with letter 0" found whichever came first — the one
+    /// the grid is anchored to — however far down the panel the one being
+    /// dragged was. The index is the one the waveform drew from, and the list
+    /// is not touched between the frame and this.
+    fn move_cue(&mut self, id: u32, at: usize, time_ms: u32) {
+        let Some(track) = self.library.get(id) else { return };
+        let Some(letter) = track.cues.get(at).map(|cue| cue.letter) else { return };
+        let beats = beat_times(track);
+        // A memory cue takes the coarser grid: it is what the bars are counted
+        // from, so one placed off the bar line re-phrases the whole track.
+        let snapped =
+            snap_to(&beats, time_ms, if letter == 0 { crate::library::BEATS_PER_BAR } else { 1 });
+
+        let Some(track) = self.library.get_mut(id) else { return };
+        let Some(cue) = track.cues.get_mut(at) else { return };
+        cue.time_ms = snapped;
+        track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
+        self.prep_changed(id);
     }
 
     fn place_cue(&mut self, id: u32, letter: u8, time_ms: u32) {
@@ -9853,7 +9909,7 @@ fn how_long_ago(at: Option<u64>) -> String {
 }
 
 /// A position in a track, as minutes, seconds and hundredths.
-fn time_text(ms: u32) -> String {
+pub(crate) fn time_text(ms: u32) -> String {
     let total = ms / 1000;
     format!("{}:{:02}.{:02}", total / 60, total % 60, (ms % 1000) / 10)
 }
@@ -10511,6 +10567,40 @@ mod tests {
                 assert_eq!(marks.first(), Some(&"Start"));
                 assert!(marks.contains(&"Drop 1"), "{marks:?}");
                 assert_eq!(marks.last(), Some(&"End"), "{marks:?}");
+            }
+
+            #[test]
+            fn dragging_one_memory_cue_does_not_move_another() {
+                // Every memory cue carries letter zero, so looking one up by
+                // letter found whichever came first — the one the grid is
+                // anchored to. Dragging "Drop 1" re-gridded the record and
+                // nothing said so.
+                let (mut app, id) = sung("two memory cues", &[]);
+                {
+                    let track = app.library.get_mut(id).unwrap();
+                    track.cues = vec![
+                        crate::library::CueMark {
+                            letter: 0,
+                            time_ms: 0,
+                            label: "Start".into(),
+                            color: [0, 0, 0],
+                        },
+                        crate::library::CueMark {
+                            letter: 0,
+                            time_ms: 60_000,
+                            label: "Drop 1".into(),
+                            color: [0, 0, 0],
+                        },
+                    ];
+                }
+
+                app.move_cue(id, 1, 90_000);
+
+                let cues = &app.library.get(id).unwrap().cues;
+                let anchor = cues.iter().find(|cue| cue.label == "Start").unwrap();
+                let moved = cues.iter().find(|cue| cue.label == "Drop 1").unwrap();
+                assert_eq!(anchor.time_ms, 0, "the anchor moved instead of the one dragged");
+                assert!(moved.time_ms > 60_000, "the one dragged did not move: {moved:?}");
             }
 
             #[test]

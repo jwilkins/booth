@@ -181,7 +181,11 @@ pub fn transcribe_audio(
     let json = std::fs::read_to_string(&written).with_context(|| {
         format!("whisper finished but wrote no transcript at {}", written.display())
     })?;
-    read(&json, flavour)
+    // Put the lines where the singing is before anybody sees them. Whisper's
+    // own timing is wrong on a stem in a way that is measurable and fixable,
+    // and the fixing needs the audio — which nothing downstream has, because
+    // what is kept in a collection is the words. See [`super::align`].
+    Ok(super::align::aligned(read(&json, flavour)?, audio))
 }
 
 /// Turn whichever program's JSON into timed lines.
