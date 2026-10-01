@@ -275,6 +275,9 @@ pub enum Update {
     Separated {
         id: u32,
         kit: StemKit,
+        /// How long the separation itself took, drawing aside. What the
+        /// warning before the next batch of them estimates from.
+        took_secs: f32,
     },
     /// A vocal stem has been through the recogniser. Empty lines are a real
     /// answer: it means nothing was sung, or nothing could be made out.
@@ -1462,8 +1465,12 @@ fn separate(
             });
             continue;
         }
+        let began = std::time::Instant::now();
         match booth_cli::commands::stems_files(&args, std::slice::from_ref(path), &batch) {
             Ok(()) => {
+                // Read before the drawing below, so what is reported is the
+                // separation and not the separation plus three decodes.
+                let took_secs = began.elapsed().as_secs_f32();
                 let kit = find_stems(stems_in, path);
                 crate::debug!(
                     "stems for #{id}: vocals {}, melody {}, drums {}",
@@ -1487,7 +1494,7 @@ fn separate(
                         reporter,
                     );
                 }
-                let _ = reporter.tx.send(Update::Separated { id: *id, kit });
+                let _ = reporter.tx.send(Update::Separated { id: *id, kit, took_secs });
             }
             Err(e) => {
                 let _ = reporter

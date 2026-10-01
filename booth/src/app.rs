@@ -330,6 +330,8 @@ pub struct App {
     /// stem to read. They are waiting on a separation; when it lands, the
     /// recogniser is what happens next.
     want_cues: std::collections::HashSet<u32>,
+    /// A batch of separations waiting to be agreed to. See [`App::stems_sheet`].
+    stems_ahead: Option<StemsAhead>,
     /// Tracks changed here and on the drive since the two last agreed, worked
     /// out when the sync sheet opens rather than every frame: it reads the
     /// stick.
@@ -367,6 +369,20 @@ pub struct App {
 /// A button inside a panel cannot change the collection the panel is reading,
 /// so it records what it wants instead. The alternative is a panel that redraws
 /// half from the old state and half from the new.
+/// A batch of separations that has been asked for but not yet paid for.
+///
+/// Separation is the only job here measured in hours, and the way into it is
+/// often a click that does not mention it: cueing from the words needs an
+/// isolated vocal, so asking for cues on a playlist asks for a separation per
+/// track in it. So the batch is held here and described first.
+struct StemsAhead {
+    /// The tracks that would be separated.
+    tracks: Vec<u32>,
+    /// Whether the stems are wanted for cues rather than for themselves —
+    /// which is the case nobody sees coming, and reads differently.
+    for_cues: bool,
+}
+
 enum Pending {
     Select(u32),
     Forget(u32),
@@ -408,7 +424,12 @@ enum Pending {
     /// The list needs rebuilding in a new order.
     Resort,
     WriteTags(u32),
-    /// Move a cue to a new time, or add one if it is not there yet.
+    /// Go ahead with a batch of separations that has been warned about.
+    SeparateMany {
+        tracks: Vec<u32>,
+        /// Whether the stems are wanted for cues rather than for themselves.
+        for_cues: bool,
+    },
     /// Move the cue at this place in a track's list, which is how a drag on
     /// the waveform names one. See [`App::move_cue`].
     MoveCue {
@@ -681,6 +702,7 @@ impl App {
             remeasured: std::collections::HashSet::new(),
             re_enveloped: std::collections::HashSet::new(),
             want_cues: std::collections::HashSet::new(),
+            stems_ahead: None,
             clashes: Vec::new(),
             settled: std::collections::HashMap::new(),
             drive_now: std::collections::HashMap::new(),
@@ -780,6 +802,11 @@ impl App {
                     app.log.set_level(crate::log::Level::Debug);
                 }
                 "adopt" => app.asking = app.library.tracks.iter().map(|t| t.id).take(3).collect(),
+                "stems" => {
+                    let tracks: Vec<u32> =
+                        app.library.tracks.iter().map(|t| t.id).take(6).collect();
+                    app.stems_ahead = Some(StemsAhead { tracks, for_cues: true });
+                }
                 _ => app.sheet = true,
             }
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
@@ -1838,7 +1865,34 @@ impl App {
             self.note("everything showing already has a stem kit", theme::dim());
             return;
         }
-        self.separate_tracks(&waiting);
+        self.separate_or_warn(&waiting, false);
+    }
+
+    /// Start separating these, and cue each one from its words once its vocal
+    /// is there when that is what the stems were for.
+    fn separate_for(&mut self, ids: &[u32], for_cues: bool) {
+        if for_cues {
+            self.want_cues.extend(ids.iter().copied());
+            self.note(
+                format!("rendering stems for {} first", plural(ids.len(), "track")),
+                theme::dim(),
+            );
+        }
+        self.separate_tracks(ids);
+    }
+
+    /// The same, except that a batch says what it will cost before spending it.
+    ///
+    /// One track goes straight through: the note it prints is warning enough
+    /// for a few minutes, and a dialog in front of every record somebody cues
+    /// one at a time would be worse than no dialog at all. More than one is
+    /// where the minutes turn into an afternoon.
+    fn separate_or_warn(&mut self, ids: &[u32], for_cues: bool) {
+        if ids.len() < 2 || !self.config.warn_before_stems {
+            self.separate_for(ids, for_cues);
+            return;
+        }
+        self.stems_ahead = Some(StemsAhead { tracks: ids.to_vec(), for_cues });
     }
 
     // -- cues from the words -----------------------------------------------
@@ -1912,15 +1966,7 @@ impl App {
             return !known.is_empty();
         }
         if !rendering.is_empty() {
-            self.want_cues.extend(rendering.iter().copied());
-            self.note(
-                format!(
-                    "rendering stems for {} first",
-                    crate::library::plural(rendering.len(), "track")
-                ),
-                theme::dim(),
-            );
-            self.separate_tracks(&rendering);
+            self.separate_or_warn(&rendering, true);
         }
         if !reading.is_empty() {
             self.read_words(reading);
@@ -2021,6 +2067,9 @@ impl App {
         // reading is queued once, after the whole batch has been folded in,
         // rather than a job per track as each kit lands.
         let mut to_read: Vec<job::Transcribable> = Vec::new();
+        // Whether anything timed a separation, so the settings are written
+        // once at the end of the batch rather than once per track.
+        let mut paced = false;
 
         for update in updates {
             match update {
@@ -2248,13 +2297,21 @@ impl App {
                     }
                     changed = true;
                 }
-                Update::Separated { id, kit } => {
+                Update::Separated { id, kit, took_secs } => {
                     // Read before it is moved in, because what happens next
                     // depends on whether the part the recogniser needs is
                     // among what was rendered.
                     let vocals = kit.vocals.clone();
+                    let audio = self.library.get(id).map(|track| track.duration_secs);
                     if let Some(track) = self.library.get_mut(id) {
                         track.stems = kit;
+                    }
+                    // So the next batch can say how long it will take. Timed
+                    // here rather than guessed from the hardware, because the
+                    // same track is minutes on a CPU and seconds on a GPU.
+                    if let Some(audio) = audio {
+                        self.config.record_stem_pace(took_secs, audio as f32);
+                        paced = true;
                     }
                     if self.want_cues.remove(&id) {
                         match vocals {
@@ -2375,6 +2432,11 @@ impl App {
         }
         if !to_read.is_empty() {
             self.read_words(to_read);
+        }
+        if paced {
+            if let Err(e) = self.config.save(&self.config_path) {
+                crate::warn!("could not save what a separation took: {e:#}");
+            }
         }
         if changed {
             self.rebuild();
@@ -3078,6 +3140,9 @@ impl eframe::App for App {
         if !self.incompatible.is_empty() {
             self.compatibility_sheet(ctx);
         }
+        if self.stems_ahead.is_some() {
+            self.stems_sheet(ctx);
+        }
         self.questions_sheet(ctx);
         self.naming_sheet(ctx);
         if self.help {
@@ -3232,6 +3297,30 @@ fn path_label(ui: &mut Ui, path: &std::path::Path, color: egui::Color32) {
 /// title bar — and with it the close button, the only way out — off the top of
 /// the screen, and cuts the bottom off too. Capping the height and scrolling
 /// the body inside it is what keeps a long sheet closable on a small display.
+/// A span of seconds the way somebody waiting for it would say it.
+///
+/// Rounded on purpose. An estimate read off three timed separations does not
+/// know the seconds, and printing them would claim it does.
+fn roughly(secs: f64) -> String {
+    let minutes = (secs / 60.0).round() as u64;
+    match minutes {
+        0 => "under a minute".to_string(),
+        1 => "about a minute".to_string(),
+        m if m < 60 => format!("about {m} minutes"),
+        m => {
+            let hours = match m / 60 {
+                1 => "an hour".to_string(),
+                hours => format!("{hours} hours"),
+            };
+            match m % 60 {
+                0 => format!("about {hours}"),
+                1 => format!("about {hours} and a minute"),
+                left => format!("about {hours} and {left} minutes"),
+            }
+        }
+    }
+}
+
 fn sheet_height(ctx: &egui::Context) -> f32 {
     (ctx.content_rect().height() - 72.0).max(240.0)
 }
@@ -3289,6 +3378,10 @@ impl App {
         // waiting on, and dismissing the lot with a keystroke is not one.
         if !self.incompatible.is_empty() {
             self.incompatible.clear();
+            return true;
+        }
+        // Escape is "not now", which is the safe answer: nothing has started.
+        if self.stems_ahead.take().is_some() {
             return true;
         }
         if !self.asking.is_empty() {
@@ -5574,6 +5667,7 @@ impl App {
                 Pending::Analyze(id) => self.analyze_tracks(&[id]),
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
+                Pending::SeparateMany { tracks, for_cues } => self.separate_for(&tracks, for_cues),
                 Pending::AutoCue(id) => touched |= self.auto_cue_tracks(&[id]),
                 Pending::CopyPath(id) => {
                     // A companion's path is its stems, not its parent's file:
@@ -8269,6 +8363,32 @@ impl App {
                         .color(theme::dim())
                         .size(theme::SMALL),
                     );
+                    ui.add_space(8.0);
+                    if ui
+                        .checkbox(
+                            &mut self.config.warn_before_stems,
+                            "Say what a batch will take before starting it",
+                        )
+                        .on_hover_text(
+                            "Separating more than one track says how many and roughly how \
+                             long first. Cueing from the words needs a separation per track, \
+                             which is how an afternoon of it gets started by accident.",
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    if let Some(pace) = self.config.stem_pace {
+                        ui.label(
+                            RichText::new(format!(
+                                "Going by what has been rendered here, a five-minute track takes \
+                                 {}.",
+                                roughly(300.0 * pace as f64)
+                            ))
+                            .color(theme::dim())
+                            .size(theme::SMALL),
+                        );
+                    }
 
                     ui.add_space(14.0);
                     pane_label(ui, "Oldest player a drive must work on");
@@ -8941,6 +9061,152 @@ impl App {
             });
         if !open {
             self.incompatible.clear();
+        }
+    }
+
+    /// What a batch of separations will cost, before it is spent.
+    ///
+    /// The number worth knowing is the time, so that is what this leads with,
+    /// measured from what this machine has actually managed rather than from
+    /// anything about the hardware. Until it has managed one there is no
+    /// estimate and the sheet says so, which is better than a number made up.
+    fn stems_sheet(&mut self, ctx: &egui::Context) {
+        let Some(ahead) = &self.stems_ahead else { return };
+        let (tracks, for_cues) = (ahead.tracks.clone(), ahead.for_cues);
+        let named: Vec<String> = tracks
+            .iter()
+            .filter_map(|id| self.library.get(*id))
+            .map(|track| format!("{} \u{2014} {}", track.artist, track.display_title()))
+            .collect();
+        let audio: f64 =
+            tracks.iter().filter_map(|id| self.library.get(*id)).map(|t| t.duration_secs).sum();
+        let estimate = self.config.stem_estimate(audio);
+
+        let mut open = true;
+        let mut go = false;
+        let mut not_now = false;
+        let mut stop_asking = false;
+        egui::Window::new(format!("Stems for {} first", plural(tracks.len(), "track")))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(600.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                if for_cues {
+                    ui.label(
+                        RichText::new(
+                            "Cueing from the words means reading them off an isolated vocal, \
+                             and none of these have one yet. So the words come after a \
+                             separation each \u{2014} which is the slow part of this program, \
+                             and the part nothing else here waits on.",
+                        )
+                        .color(theme::text())
+                        .size(theme::SMALL),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(
+                            "Separation is the slow part of this program. A kit is rendered \
+                             once and then played for years, so it is worth doing \u{2014} but \
+                             it is worth knowing what it costs first.",
+                        )
+                        .color(theme::text())
+                        .size(theme::SMALL),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{}, {} of music. {}",
+                        plural(tracks.len(), "track"),
+                        roughly(audio),
+                        match estimate {
+                            Some(taking) => format!(
+                                "About {} at the rate this machine has been managing.",
+                                roughly(taking.as_secs_f64())
+                            ),
+                            None => "Nothing has been separated here yet, so there is no \
+                                     estimate \u{2014} reckon on minutes a track without a GPU."
+                                .to_string(),
+                        }
+                    ))
+                    .color(theme::amber())
+                    .size(theme::SMALL),
+                );
+                if for_cues {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "Paid once per track: the words are kept once they have been read, \
+                             and cueing from them again after that costs nothing.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+                }
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    for name in &named {
+                        ui.label(RichText::new(name).color(theme::dim()).size(theme::SMALL));
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(theme::label_text("Render stems"))
+                                    .size(11.0)
+                                    .color(theme::booth())
+                                    .strong(),
+                            )
+                            .fill(theme::amber()),
+                        )
+                        .on_hover_text(
+                            "Starts separating. It runs a track at a time in the background \
+                             and each kit is usable as soon as it is done; the job can be \
+                             stopped from the bar at the bottom.",
+                        )
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if ui
+                        .button("Not now")
+                        .on_hover_text("Nothing is rendered and nothing is changed.")
+                        .clicked()
+                    {
+                        not_now = true;
+                    }
+                    if ui
+                        .checkbox(&mut stop_asking, "Stop asking")
+                        .on_hover_text(
+                            "Separations start without this sheet from now on. Settings puts \
+                             it back.",
+                        )
+                        .changed()
+                    {
+                        // Only the setting. Whether this batch runs is still
+                        // the question on screen, and answering a different
+                        // one with a checkbox would be a trap.
+                        self.config.warn_before_stems = false;
+                        if let Err(e) = self.config.save(&self.config_path) {
+                            crate::warn!("could not save the settings: {e:#}");
+                        }
+                    }
+                });
+            });
+
+        if go {
+            self.pending.push(Pending::SeparateMany { tracks, for_cues });
+        }
+        if go || not_now || !open {
+            self.stems_ahead = None;
         }
     }
 
@@ -10022,6 +10288,27 @@ mod tests {
         }
     }
 
+    /// How long a wait is described as, for the sheet that says what a batch
+    /// of separations will cost.
+    mod saying_how_long {
+        use super::*;
+
+        #[test]
+        fn a_short_wait_is_not_described_in_seconds_it_does_not_know() {
+            assert_eq!(roughly(20.0), "under a minute");
+            assert_eq!(roughly(64.0), "about a minute");
+            assert_eq!(roughly(7.0 * 60.0), "about 7 minutes");
+        }
+
+        #[test]
+        fn an_hour_is_an_hour_rather_than_sixty_minutes() {
+            assert_eq!(roughly(3_600.0), "about an hour");
+            assert_eq!(roughly(3_600.0 + 20.0 * 60.0), "about an hour and 20 minutes");
+            assert_eq!(roughly(3.0 * 3_600.0), "about 3 hours");
+            assert_eq!(roughly(2.0 * 3_600.0 + 60.0), "about 2 hours and a minute");
+        }
+    }
+
     /// Driving the sidebar the way a person does: click, type, press a key,
     /// and see what the collection holds afterwards.
     ///
@@ -10530,6 +10817,53 @@ mod tests {
             }
 
             #[test]
+            fn cueing_a_playlist_with_no_stems_asks_before_spending_the_afternoon() {
+                // The fault: cueing from the words needs an isolated vocal,
+                // so one menu click on a playlist started a separation per
+                // track in it without the word "stems" appearing anywhere.
+                let (mut app, first) = sung("batch-one", &[]);
+                let second = {
+                    let path = app.library_path.with_file_name("second.flac");
+                    std::fs::write(&path, b"not really a flac").unwrap();
+                    app.library.add(&path)
+                };
+                app.rebuild();
+
+                app.auto_cue_tracks(&[first, second]);
+
+                let ahead = app.stems_ahead.as_ref().expect("the batch started unannounced");
+                assert_eq!(ahead.tracks.len(), 2);
+                assert!(ahead.for_cues, "the stems are for cues, which is what to say");
+                assert!(!app.running(), "nothing should have started yet");
+                assert!(app.want_cues.is_empty(), "nor should anything be queued to follow");
+            }
+
+            #[test]
+            fn one_track_is_not_worth_a_dialog() {
+                // A few minutes, asked for by clicking on one record. A sheet
+                // in front of every one of those is worse than no sheet.
+                let (mut app, id) = sung("single", &[]);
+                app.auto_cue_tracks(&[id]);
+                assert!(app.stems_ahead.is_none());
+            }
+
+            #[test]
+            fn the_warning_can_be_turned_off_and_then_the_batch_just_runs() {
+                let (mut app, first) = sung("unasked", &[]);
+                let second = {
+                    let path = app.library_path.with_file_name("second.flac");
+                    std::fs::write(&path, b"not really a flac").unwrap();
+                    app.library.add(&path)
+                };
+                app.rebuild();
+                app.config.warn_before_stems = false;
+
+                app.auto_cue_tracks(&[first, second]);
+                assert!(app.stems_ahead.is_none());
+                assert_eq!(app.want_cues.len(), 2, "both should be cued once their stems land");
+            }
+
+            #[test]
             fn a_line_said_once_is_not_cued_as_a_hook() {
                 let (mut app, id) = sung(
                     "once",
@@ -10767,6 +11101,41 @@ mod tests {
             assert!(
                 harness.state().query.terms.iter().all(|t| t.test != crate::query::Test::Invalid),
                 "and it has to be a query, not just text"
+            );
+        }
+
+        #[test]
+        fn the_sheet_warning_about_stems_says_the_cost_and_starts_the_batch() {
+            let mut app = app("stems-sheet");
+            let mut ids = Vec::new();
+            for name in ["one.flac", "two.flac"] {
+                let path = app.library_path.with_file_name(name);
+                std::fs::write(&path, b"not really a flac").unwrap();
+                let id = app.library.add(&path);
+                app.library.get_mut(id).unwrap().duration_secs = 300.0;
+                ids.push(id);
+            }
+            app.rebuild();
+            // Half of real time, measured over the separations before this
+            // one: ten minutes of music is five minutes of work.
+            app.config.stem_pace = Some(0.5);
+            app.stems_ahead = Some(StemsAhead { tracks: ids, for_cues: true });
+
+            let mut harness = Harness::new_state(|ctx, app: &mut App| app.stems_sheet(ctx), app);
+            harness.run();
+            harness.get_by_label_contains("about 5 minutes");
+
+            harness.get_by_label(&theme::label_text("Render stems")).click();
+            harness.run();
+
+            assert!(harness.state().stems_ahead.is_none(), "the sheet went unanswered");
+            assert!(
+                matches!(
+                    harness.state().pending.first(),
+                    Some(Pending::SeparateMany { for_cues: true, .. })
+                ),
+                "agreeing to it should start the batch: {:?}",
+                harness.state().pending.len()
             );
         }
 
