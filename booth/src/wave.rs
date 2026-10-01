@@ -418,7 +418,13 @@ pub enum Touched {
     /// The playhead was moved here, in milliseconds.
     Scrubbed(u32),
     /// A cue was dragged to here.
-    Moved { letter: u8, time_ms: u32 },
+    ///
+    /// `at` indexes the cues the panel was drawn from, not the cue's letter.
+    /// Every memory cue has letter zero, so a letter stopped being a name for
+    /// one the moment a track could have more than one of them — dragging
+    /// "Drop 2" moved whichever memory cue came first, which is the one the
+    /// grid is anchored to.
+    Moved { at: usize, time_ms: u32 },
 }
 
 /// How close to a line the pointer has to be to take hold of it, in points.
@@ -581,11 +587,18 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
     if held.is_some() || hovering_a_cue.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
+    // What the marker has no room to say. Not while one is being dragged: the
+    // help would sit over the thing being placed.
+    let response = match hovering_a_cue.filter(|_| held.is_none()).and_then(|at| wave.cues.get(at))
+    {
+        Some(cue) => response.on_hover_text(cue_help(cue)),
+        None => response,
+    };
 
     let touched = response.interact_pointer_pos().and_then(|at| {
         let time_ms = time_at(rect, wave, at.x);
         match held {
-            Some(letter) => Some(Touched::Moved { letter, time_ms }),
+            Some(at) => Some(Touched::Moved { at, time_ms }),
             // A drag that started on empty space is a scrub, not a cue move.
             None if response.dragged() || response.clicked() => Some(Touched::Scrubbed(time_ms)),
             None => None,
@@ -668,17 +681,18 @@ fn time_at(rect: Rect, wave: &Waveform<'_>, x: f32) -> u32 {
     (wave.zoom.into_track(across) * wave.duration_secs * 1000.0).round() as u32
 }
 
-/// Which cue the pointer is over, if any.
-fn cue_under(at: egui::Pos2, rect: Rect, wave: &Waveform<'_>) -> Option<u8> {
+/// Which cue the pointer is over, if any, by its place in the list drawn.
+fn cue_under(at: egui::Pos2, rect: Rect, wave: &Waveform<'_>) -> Option<usize> {
     if wave.duration_secs <= 0.0 {
         return None;
     }
     wave.cues
         .iter()
-        .map(|cue| (cue.letter, cue_x(rect, wave, cue.time_ms)))
+        .enumerate()
+        .map(|(index, cue)| (index, cue_x(rect, wave, cue.time_ms)))
         .filter(|(_, x)| (x - at.x).abs() <= GRAB)
         .min_by(|a, b| (a.1 - at.x).abs().total_cmp(&(b.1 - at.x).abs()))
-        .map(|(letter, _)| letter)
+        .map(|(index, _)| index)
 }
 
 /// Where a moment in the track falls on the panel.
@@ -697,7 +711,12 @@ fn cue_x(rect: Rect, wave: &Waveform<'_>, time_ms: u32) -> f32 {
 ///
 /// Which cue is under the pointer is decided once, when the drag starts:
 /// re-deciding every frame would let a fast drag hand over to a cue it passed.
-fn dragged_cue(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'_>) -> Option<u8> {
+fn dragged_cue(
+    ui: &Ui,
+    response: &egui::Response,
+    rect: Rect,
+    wave: &Waveform<'_>,
+) -> Option<usize> {
     let id = response.id.with("dragging-cue");
     if response.drag_started() {
         // From where the button went down, not from where the pointer is by
@@ -711,13 +730,13 @@ fn dragged_cue(ui: &Ui, response: &egui::Response, rect: Rect, wave: &Waveform<'
         ui.ctx().memory_mut(|memory| memory.data.insert_temp(id, under));
     }
     if response.drag_stopped() {
-        ui.ctx().memory_mut(|memory| memory.data.remove::<Option<u8>>(id));
+        ui.ctx().memory_mut(|memory| memory.data.remove::<Option<usize>>(id));
         return None;
     }
     if !response.dragged() {
         return None;
     }
-    ui.ctx().memory(|memory| memory.data.get_temp::<Option<u8>>(id)).flatten()
+    ui.ctx().memory(|memory| memory.data.get_temp::<Option<usize>>(id)).flatten()
 }
 
 /// The downbeat, in the colour every player draws it in.
@@ -774,13 +793,20 @@ fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
 
 /// A line and a flag per cue, with its letter. The one being dragged is drawn
 /// brighter, so it is clear which one moved.
-fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Option<u8>) {
+///
+/// Hot cues hang from the top and memory cues from the bottom. They are two
+/// different things — eight buttons against as many markers as a track needs —
+/// and a track with an arrangement's worth of memory cues on it was a row of
+/// identical flags along the top with the buttons lost among them. Opposite
+/// edges separate them at a glance and give each the full height of the panel
+/// to be read against.
+fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Option<usize>) {
     if wave.duration_secs <= 0.0 {
         return;
     }
     let total_ms = wave.duration_secs * 1000.0;
 
-    for cue in wave.cues {
+    for (index, cue) in wave.cues.iter().enumerate() {
         let fraction = (cue.time_ms as f64 / total_ms).clamp(0.0, 1.0);
         let across = wave.zoom.across(fraction);
         if !(0.0..=1.0).contains(&across) {
@@ -788,32 +814,64 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
         }
         let x = rect.left() + rect.width() * across;
         let mut color = Color32::from_rgb(cue.color[0], cue.color[1], cue.color[2]);
-        if held == Some(cue.letter) {
+        if held == Some(index) {
             color = theme::text();
         }
+        // A memory cue reads upwards from the bottom edge; a hot cue downwards
+        // from the top. `edge` is the edge it hangs off and `into` the
+        // direction the track is from there, so one set of arithmetic draws
+        // both the right way up.
+        let memory = cue.letter == 0;
+        let (edge, into) = match memory {
+            true => (rect.bottom(), -1.0),
+            false => (rect.top(), 1.0),
+        };
 
         painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom() - 10.0)],
+            [egui::pos2(x, edge), egui::pos2(x, edge + into * (rect.height() - 10.0))],
             Stroke::new(1.5_f32, color),
         );
         // A flag, pointing the way the cue reads: from the marker into the
         // track.
         painter.add(egui::Shape::convex_polygon(
             vec![
-                egui::pos2(x - 4.5, rect.top()),
-                egui::pos2(x + 6.0, rect.top()),
-                egui::pos2(x + 0.75, rect.top() + 9.0),
+                egui::pos2(x - 4.5, edge),
+                egui::pos2(x + 6.0, edge),
+                egui::pos2(x + 0.75, edge + into * 9.0),
             ],
             color,
             Stroke::NONE,
         ));
+        // The name only. What a memory cue is called is a sentence now — "V1
+        // Get Down" — and painting that along the panel would write it over
+        // the next three cues, so the whole of it is on the hover instead.
         painter.text(
-            egui::pos2(x + 8.0, rect.top() + 1.0),
-            egui::Align2::LEFT_TOP,
+            egui::pos2(x + 8.0, edge + into * 1.0),
+            match memory {
+                true => egui::Align2::LEFT_BOTTOM,
+                false => egui::Align2::LEFT_TOP,
+            },
             cue.name(),
             theme::mono(9.5),
             color,
         );
+    }
+}
+
+/// What resting on a cue says: what it is called, and where it is.
+///
+/// The marker itself has room for a letter or a dot. A memory cue's name is
+/// the thing worth reading — "Drop 2", "V1 Get Down" — and the only place it
+/// fits is here.
+fn cue_help(cue: &CueMark) -> String {
+    let at = crate::app::time_text(cue.time_ms);
+    let what = match cue.letter {
+        0 => "memory cue".to_string(),
+        _ => format!("hot cue {}", cue.name()),
+    };
+    match cue.label.trim().is_empty() {
+        true => format!("{what} \u{2014} {at}"),
+        false => format!("{} \u{2014} {what}, {at}", cue.label.trim()),
     }
 }
 
@@ -1318,6 +1376,46 @@ mod tests {
         );
     }
 
+    fn marked(letter: u8, time_ms: u32, label: &str) -> CueMark {
+        CueMark { letter, time_ms, label: label.into(), color: [200, 60, 60] }
+    }
+
+    #[test]
+    fn a_cue_is_named_by_where_it_is_in_the_list_rather_than_by_its_letter() {
+        // Every memory cue carries letter zero, so a letter stopped naming one
+        // the moment a track could have an arrangement's worth of them. Under
+        // the old rule, grabbing any of them named the first — which is the one
+        // the grid is anchored to, so dragging "Drop 2" silently re-gridded the
+        // record.
+        let cues = [marked(0, 0, "Start"), marked(1, 30_000, ""), marked(0, 60_000, "Drop 1")];
+        let wave = Waveform { cues: &cues, duration_secs: 120.0, ..wave(&[]) };
+        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 100.0));
+
+        let on_the_last = egui::pos2(cue_x(rect, &wave, 60_000), 50.0);
+        assert_eq!(cue_under(on_the_last, rect, &wave), Some(2), "the third cue, not the first");
+
+        let on_the_first = egui::pos2(cue_x(rect, &wave, 0), 50.0);
+        assert_eq!(cue_under(on_the_first, rect, &wave), Some(0));
+    }
+
+    #[test]
+    fn what_resting_on_a_cue_says_is_what_the_marker_has_no_room_for() {
+        // The marker is a letter or a dot. "V1 Get Down" is the thing worth
+        // reading and the one thing it cannot show.
+        let hook = cue_help(&marked(0, 62_500, "V1 Get Down"));
+        assert!(hook.starts_with("V1 Get Down"), "{hook}");
+        assert!(hook.contains("memory cue"), "{hook}");
+        assert!(hook.contains("1:02.50"), "and where it is: {hook}");
+
+        // A hot cue says which button it is, since that is what gets pressed.
+        let hot = cue_help(&marked(2, 1_000, "Drop 1"));
+        assert!(hot.contains("hot cue B"), "{hot}");
+
+        // And one nobody named still says what it is rather than nothing.
+        let bare = cue_help(&marked(0, 0, "   "));
+        assert!(bare.starts_with("memory cue"), "{bare}");
+    }
+
     #[test]
     fn a_section_is_drawn_and_grabbed_where_the_waveform_puts_it() {
         // The strip shows the window, not the whole track, so the boundary at
@@ -1639,7 +1737,8 @@ mod tests {
             // 90 s is halfway through a window running 60 s to 120 s.
             let x = cue_x(rect, &wave, 90_000);
             assert!((x - rect.center().x).abs() < 0.5, "drawn at {x}");
-            assert_eq!(cue_under(egui::pos2(x, 50.0), rect, &wave), Some(1));
+            // The only cue in the list, so its place is the first one.
+            assert_eq!(cue_under(egui::pos2(x, 50.0), rect, &wave), Some(0));
         }
 
         #[test]

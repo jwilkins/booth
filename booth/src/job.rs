@@ -55,6 +55,8 @@ pub enum Job {
     Draw(Vec<Drawable>),
     /// Read the words off tracks' vocal stems.
     Transcribe { tracks: Vec<Transcribable>, whisper: crate::config::Whisper },
+    /// Move words already read onto the onsets measured off their stem.
+    Realign { tracks: Vec<Realigning> },
     /// Decode one track into memory so it can be auditioned.
     Decode {
         id: u32,
@@ -128,6 +130,7 @@ impl Job {
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Transcribe { .. } => "reading the words",
+            Job::Realign { .. } => "placing the words",
             Job::Draw { .. } => "drawing",
             Job::Sync { .. } => "writing",
             Job::Keep { .. } => "copying a drive",
@@ -173,6 +176,17 @@ pub struct Drawable {
 pub struct Transcribable {
     pub id: u32,
     pub vocals: PathBuf,
+}
+
+/// Words already read, to be put back where the singing is.
+///
+/// The words do not change; the times do. Worth its own job rather than a
+/// re-transcription because reading a stem is minutes and decoding one is a
+/// second or two, and what was wrong was never the words.
+pub struct Realigning {
+    pub id: u32,
+    pub vocals: PathBuf,
+    pub lyrics: Vec<crate::library::Lyric>,
 }
 
 /// A track whose file should be copied into the library.
@@ -985,6 +999,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             separate(&tracks, &stems_in, backend, quality, reporter)
         }
         Job::Transcribe { tracks, whisper } => transcribe(&tracks, &whisper, reporter),
+        Job::Realign { tracks } => realign(tracks, reporter),
         Job::Draw(rows) => draw(&rows, reporter),
         Job::Sync { args, files } => {
             // The file list was settled when the plan was drawn up, so the
@@ -1479,6 +1494,58 @@ fn separate(
                     .tx
                     .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
             }
+        }
+        batch.finished_one();
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// Put words already read where the singing actually is.
+///
+/// The stem is decoded and its phrase onsets measured, and each line is moved
+/// to the one it belongs to. Nothing is re-listened to: the words were right,
+/// and only Whisper's idea of when they were sung was not. See
+/// `booth_cli::transcribe::align` for what it got wrong and by how much.
+///
+/// Reports through the same update a transcription does, so a realigned track
+/// is cued afterwards exactly as a freshly read one is.
+fn realign(tracks: Vec<Realigning>, reporter: &Channel) -> anyhow::Result<()> {
+    let batch = Batch {
+        inner: reporter,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        total: tracks.len(),
+    };
+    for track in tracks {
+        if reporter.cancelled() {
+            break;
+        }
+        batch.starting();
+        let name = track.vocals.file_name().unwrap_or_default().to_string_lossy().into_owned();
+
+        match booth_cli::audio::decode::decode_file(&track.vocals) {
+            Ok(audio) => {
+                let spans = booth_cli::transcribe::align::voiced_spans(&audio);
+                let mut transcript = crate::library::transcript(&track.lyrics);
+                let before: Vec<u32> = transcript.lines.iter().map(|l| l.start_ms).collect();
+                booth_cli::transcribe::align::to_the_voice(&mut transcript, &spans);
+                let moved = transcript
+                    .lines
+                    .iter()
+                    .zip(&before)
+                    .filter(|(line, was)| line.start_ms != **was)
+                    .count();
+                crate::info!(
+                    "{name}: {} of singing found, {} moved onto it",
+                    crate::library::plural(spans.len(), "stretch"),
+                    crate::library::plural(moved, "line")
+                );
+                let lyrics = crate::library::lyrics_from(&transcript);
+                let _ = reporter.tx.send(Update::Transcribed { id: track.id, lyrics });
+            }
+            // Not a failure worth stopping for: the stem has moved or will not
+            // decode, and the words that are already there are still the words.
+            Err(e) => crate::warn!("could not read {name} to place its words: {e:#}"),
         }
         batch.finished_one();
         (reporter.wake)();

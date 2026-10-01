@@ -765,10 +765,42 @@ one**: airings less than four seconds apart are one airing, which is true of a
 chorus that sings its line twice over and true of Whisper emitting "thanks for
 watching" forty times over a breakdown.
 
+### Where the words really were
+
+Whisper's timing on a stem is not to be taken at face value, and it is wrong in
+a specific way: **it anchors its first segment at zero however much silence
+comes before the first word.** Measured on a file shaped like a stem — speech, a
+long gap, more speech — the first phrase came back 4 seconds early and the
+second within a tenth of a second. Varying the lead-in moved the first error
+with it exactly: a second of silence, a second of error; six seconds, six.
+
+A vocal stem is the worst possible input for that, because a stem *is* mostly
+silence. The whole instrumental intro reads as nothing, the hook is usually
+inside that first segment, and so the cue for the line the crowd sings landed
+seconds before anybody sang it.
+
+So the lines are put where the singing is. The stem is the voice, so where a
+phrase begins is not something to take anybody's word for — it is the loudest
+thing in the file. Each line moves back to the start of the phrase it lands
+inside, or forward to the next one if it lands in a silence. On the measurement
+above that puts both phrases within 4 ms of the truth, and the back-to-the-start
+half is what stops a cue clipping its own first word.
+
+Words read before this existed say so, and are placed against their stem the
+next time they are cued — a second of decoding rather than another pass through
+the recogniser, because the words were never the thing that was wrong.
+
 The words are kept in the collection once they have been heard, so cueing the
 same track again is instant and costs no stem render and no recogniser. The
 memory cue the grid is anchored to is never moved, but the hot cues are replaced
 wholesale, which is what the button says it does.
+
+A cue's label is read on the waveform by resting on it: the marker has room
+for a letter or a dot, and "V1 Get Down" is the thing worth reading. **Memory
+cues hang from the bottom edge and hot cues from the top.** They are two
+different things — eight buttons against as many markers as a track needs — and
+once a track carried an arrangement's worth of memory cues, one row of identical
+flags along the top was a row with the buttons lost in it.
 
 ### The memory cues, which are the map
 
