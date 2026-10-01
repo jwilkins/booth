@@ -560,6 +560,43 @@ what a player draws and therefore what a DJ reads without having to think about
 it. One colour for all four made the one indistinguishable from the rest at a
 glance, which is the one thing a beat grid exists to show.
 
+### Why a grid holds up
+
+A grid is only worth anything if two players reading it agree, and the one
+thing that stops them is a tempo that will not hold still. Measured on a
+metronomic 128 BPM click track, what used to go on a drive was a grid whose
+beats sat 441 to 477 ms apart and whose tempo alternated between **126.05 and
+129.03 BPM** — neither of them 128. A 174 BPM track came out at 172.41.
+
+Three things were wrong, and all three were about reading a tempo off numbers
+that arrive quantised.
+
+**A grid was accepted as steady only if every beat sat on the fitted line.**
+The line itself was right — 128.000 BPM, with half the beats within 2.6 ms of
+it — but one mistracked beat in six hundred sat 30 ms off, which was past the
+tolerance, so the whole track kept its tracked times. Now the question is
+whether *most* beats are on the line: nine in ten within one analysis frame,
+which is the resolution the beats arrive at. The outliers are then left out and
+the line fitted again, so one bad beat cannot drag the tempo either. A record
+that really does bend leaves the line by hundreds of milliseconds and still
+keeps its own beats.
+
+**The tempo at each beat came from the gap to the next one.** Beat times are
+stored to the millisecond, so at 128 BPM the gaps alternate 468 and 469 and the
+tempo alternates 128.21 and 127.93. It is now read off a line fitted through
+the thirteen beats around it, which averages the quantisation away.
+
+**A line fitted through a whole track can start before the track does**, and
+that beat was clamped to zero — one beat off the grid at the one place every
+player parks. Beats before the start are dropped now, and the downbeat moves
+with them.
+
+What goes on a drive today, for the same click tracks: one exact tempo (128.00,
+127.30, 174.00), gaps that differ by a millisecond because that is the unit
+they are stored in, and **no drift at all** over five minutes, where there used
+to be 28 to 36 ms. A record that speeds up from 124 to 127 is still written
+speeding up, beat for beat.
+
 ### What the collection keeps of a grid
 
 An even grid is a tempo and a downbeat, and that is all the collection stores
