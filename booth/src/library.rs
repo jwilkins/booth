@@ -304,14 +304,22 @@ pub struct Lyric {
 pub struct Refrain {
     /// The wording it was heard with most often.
     pub text: String,
-    /// Where it comes round, in milliseconds, in time order.
+    /// Where it comes round, in milliseconds, in time order. Places, not
+    /// hearings: a line sung three times over in one breath lands once.
     pub at: Vec<u32>,
+    /// How many times it is sung in all, which is not how many places it
+    /// lands. See `booth_cli::transcribe::Refrain::times`.
+    ///
+    /// Zero on a collection stored before the two were told apart; `times`
+    /// falls back to the places, which is what it used to mean.
+    #[serde(default)]
+    pub heard: usize,
 }
 
 impl Refrain {
-    /// How many separate times it is sung.
+    /// How many times it is sung.
     pub fn times(&self) -> usize {
-        self.at.len()
+        self.heard.max(self.at.len())
     }
 }
 
@@ -323,7 +331,7 @@ pub fn refrains_from(lyrics: &[Lyric]) -> Vec<Refrain> {
     transcript(lyrics)
         .repeated()
         .into_iter()
-        .map(|refrain| Refrain { text: refrain.text, at: refrain.at })
+        .map(|refrain| Refrain { heard: refrain.times(), text: refrain.text, at: refrain.at })
         .collect()
 }
 

@@ -38,12 +38,33 @@ pub struct Refrain {
     /// The wording it was heard with most often.
     pub text: String,
     /// Where it comes round, in milliseconds, in time order.
+    ///
+    /// Places, not hearings. A line sung six times over in one breath lands
+    /// in one place, and six cues two seconds apart is six cues nobody can
+    /// use.
     pub at: Vec<u32>,
+    /// How many times it is sung in all. See [`Self::times`].
+    pub heard: usize,
 }
 
 impl Refrain {
-    /// How many separate times it is sung.
+    /// How many times it is sung.
+    ///
+    /// Counts the repeats inside one of the recogniser's segments as well as
+    /// the ones spread through the record: "get down, get down, get down" is
+    /// three, and it is what makes a line a hook rather than a line.
+    ///
+    /// Not every emission, though. A recogniser stuck in a loop writes the
+    /// same segment out forty times in a minute, and those are one — see
+    /// [`APART_MS`]. The difference is whether the repetition is inside a
+    /// segment, which is the recogniser telling you what it heard, or across
+    /// segments, which is the recogniser losing its place.
     pub fn times(&self) -> usize {
+        self.heard
+    }
+
+    /// How many separate places it lands, which is how many cues it is worth.
+    pub fn places(&self) -> usize {
         self.at.len()
     }
 }
@@ -99,6 +120,12 @@ const SAME: f32 = 0.75;
 /// in most vocal stems and mark nothing at all.
 const MIN_WORDS: usize = 2;
 
+/// The shortest segment worth looking inside for repeats of its own phrases.
+///
+/// Two phrases of the fewest words a phrase can have. Below that there is
+/// nothing a split could find, so there is no point looking.
+const LONG_LINE_WORDS: usize = MIN_WORDS * 2;
+
 /// How far apart two airings of a line have to be to count as two.
 ///
 /// Within a chorus a line lands twice in a few seconds, and a recogniser that
@@ -145,13 +172,21 @@ impl Transcript {
     pub fn refrains(&self) -> Vec<Refrain> {
         let mut groups: Vec<Group> = Vec::new();
         for line in &self.lines {
-            let said = words(&line.text);
-            if said.len() < MIN_WORDS {
-                continue;
-            }
-            match groups.iter_mut().find(|group| group.matches(&said)) {
-                Some(group) => group.add(line.start_ms, said, &line.text),
-                None => groups.push(Group::new(line.start_ms, said, &line.text)),
+            for (nth, phrase) in phrases(&line.text).into_iter().enumerate() {
+                let said = words(&phrase);
+                if said.len() < MIN_WORDS {
+                    continue;
+                }
+                // Only the first phrase of a segment is where the segment is.
+                // The ones after it are inside it: counted as hearings and
+                // never placed, because the recogniser timed the segment and
+                // not the phrases in it, and a cue on a guess at where a
+                // phrase began is worse than no cue there at all.
+                let placed = nth == 0;
+                match groups.iter_mut().find(|group| group.matches(&said)) {
+                    Some(group) => group.add(line.start_ms, said, &phrase, placed),
+                    None => groups.push(Group::new(line.start_ms, said, &phrase)),
+                }
             }
         }
 
@@ -267,11 +302,13 @@ struct Group {
     /// hearing is a new airing or the same one still going.
     last_seen: u32,
     at: Vec<u32>,
+    /// How many times the line is sung, as [`Refrain::times`] means it.
+    sung: usize,
 }
 
 impl Group {
     fn new(at: u32, said: Vec<String>, text: &str) -> Self {
-        Self { heard: vec![(said, tidy(text))], last_seen: at, at: vec![at] }
+        Self { heard: vec![(said, tidy(text))], last_seen: at, at: vec![at], sung: 1 }
     }
 
     /// Whether a line belongs here. Compared against every wording already in
@@ -281,8 +318,16 @@ impl Group {
         self.heard.iter().any(|(known, _)| similarity(known, said) >= SAME)
     }
 
-    fn add(&mut self, at: u32, said: Vec<String>, text: &str) {
+    fn add(&mut self, at: u32, said: Vec<String>, text: &str, placed: bool) {
         self.heard.push((said, tidy(text)));
+        if !placed {
+            // A phrase inside a segment the recogniser already timed and
+            // punctuated. That is another time the line is sung — it is what
+            // "get down, get down, get down" means — and not another place it
+            // lands.
+            self.sung += 1;
+            return;
+        }
         // Measured from the last time the line was heard at all, not from the
         // last airing that was counted. A chorus that sings its line twice over
         // is one airing; so is a recogniser that has lost its place and is
@@ -290,12 +335,13 @@ impl Group {
         // airing every four seconds for as long as it kept going.
         if at.saturating_sub(self.last_seen) >= APART_MS {
             self.at.push(at);
+            self.sung += 1;
         }
         self.last_seen = at;
     }
 
     fn into_refrain(self) -> Refrain {
-        Refrain { text: wording(&self.heard), at: self.at }
+        Refrain { text: wording(&self.heard), at: self.at, heard: self.sung }
     }
 }
 
@@ -372,7 +418,6 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// A line cut to what a player will show, on a word boundary where it can be.
 /// At most `how_many` of a list, evenly spaced through it.
 ///
 /// The ones in the middle as well as the ones at the ends: taking the first
@@ -394,6 +439,44 @@ fn spread<T>(items: Vec<T>, how_many: usize) -> Vec<T> {
         .collect()
 }
 
+/// A segment's phrases, where splitting it finds the same phrase twice.
+///
+/// A recogniser hands back a segment, not a lyric line, and a segment often
+/// holds a phrase and its repeats: "get down, get down, get down, I'm getting
+/// down, get down, get down, get down, I'm getting down" arrives whole, and
+/// read whole it is one long line that matches nothing else on the record —
+/// no hook, no refrain, and a marker saying a paragraph.
+///
+/// Split on the punctuation the recogniser put between the phrases, which is
+/// how it writes a repeated phrase down. Only kept when two of the pieces are
+/// the same line, so that an ordinary sentence stays whole: "wait, I remember
+/// you" split on its comma is two fragments that mean nothing apart, and
+/// nothing in it repeats, so it is returned as it came.
+///
+/// What it does not find is a repeat the recogniser did not punctuate. That
+/// wants reading the words for a phrase that tiles the line, and it would have
+/// to hand back the words rather than the writing — which is the wording a
+/// marker carries.
+fn phrases(text: &str) -> Vec<String> {
+    if words(text).len() < LONG_LINE_WORDS {
+        return vec![text.to_string()];
+    }
+    let pieces: Vec<String> = text
+        .split([',', '.', ';', ':', '!', '?', '\u{2014}'])
+        .map(|piece| piece.trim().to_string())
+        .filter(|piece| words(piece).len() >= MIN_WORDS)
+        .collect();
+    let repeats = pieces
+        .iter()
+        .enumerate()
+        .any(|(at, piece)| pieces[at + 1..].iter().any(|other| same_line(piece, other)));
+    match repeats {
+        true => pieces,
+        false => vec![text.to_string()],
+    }
+}
+
+/// A line cut to what a player will show, on a word boundary where it can be.
 fn comment(text: &str) -> String {
     if text.chars().count() <= COMMENT_CHARS {
         return text.to_string();
@@ -483,6 +566,61 @@ mod tests {
 
         let hook = transcript.hook().unwrap();
         assert_eq!(hook.text, "take me all the way down");
+    }
+
+    #[test]
+    fn a_phrase_repeated_inside_one_segment_is_counted_as_repeated() {
+        // The fault: a recogniser hands back a segment, not a lyric line, and
+        // a segment holding a phrase and its repeats read as one long line
+        // that matched nothing on the record — no hook, no refrain, and a
+        // marker saying a paragraph.
+        let transcript = said(&[(
+            30_000,
+            "get down, get down, get down, I'm getting down, get down, get down, get down, \
+             I'm getting down",
+        )]);
+
+        let refrains = transcript.refrains();
+        let down = refrains
+            .iter()
+            .find(|line| line.text.eq_ignore_ascii_case("get down"))
+            .unwrap_or_else(|| panic!("the phrase was never found: {refrains:?}"));
+        assert_eq!(down.times(), 6, "{refrains:?}");
+        let getting = refrains
+            .iter()
+            .find(|line| same_line(&line.text, "I'm getting down"))
+            .unwrap_or_else(|| panic!("the other phrase was never found: {refrains:?}"));
+        assert_eq!(getting.times(), 2, "{refrains:?}");
+
+        // It is one place all the same. Six cues two seconds apart is six
+        // cues nobody can use, and the recogniser timed the segment rather
+        // than the phrases inside it.
+        assert_eq!(down.places(), 1, "{down:?}");
+        assert_eq!(down.at, vec![30_000]);
+    }
+
+    #[test]
+    fn a_phrase_sung_over_in_one_breath_is_still_the_hook() {
+        let transcript = said(&[
+            (10_000, "walking through the city at night"),
+            (30_000, "get down, get down, get down, get down"),
+        ]);
+        let hook = transcript.hook().expect("a phrase sung four times is a hook");
+        assert!(hook.text.eq_ignore_ascii_case("get down"), "{hook:?}");
+        assert_eq!(hook.times(), 4);
+    }
+
+    #[test]
+    fn an_ordinary_sentence_with_a_comma_in_it_is_left_whole() {
+        // Splitting is only worth doing where it finds a repeat. "wait, I
+        // remember you" cut on its comma is two fragments that mean nothing
+        // apart.
+        let line = "wait, I remember you from somewhere a long time ago";
+        let transcript = said(&[(10_000, line), (90_000, line)]);
+        let refrains = transcript.refrains();
+        assert_eq!(refrains.len(), 1, "{refrains:?}");
+        assert_eq!(refrains[0].text, line);
+        assert_eq!(refrains[0].times(), 2);
     }
 
     #[test]
