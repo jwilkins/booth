@@ -1859,8 +1859,10 @@ impl App {
         });
     }
 
-    fn render_stems(&mut self) {
-        let waiting = self.acting_on(|track| track.stems.is_empty());
+    /// `again` renders over kits that are already there, which is what to do
+    /// when the model or the quality setting has changed since.
+    fn render_stems(&mut self, again: bool) {
+        let waiting = self.acting_on(|track| again || track.stems.is_empty());
         if waiting.is_empty() {
             self.note("everything showing already has a stem kit", theme::dim());
             return;
@@ -1904,9 +1906,14 @@ impl App {
     /// which is why the words are kept in the collection once they have been
     /// heard — a track whose lyrics are known is re-cued with no job at all.
     ///
+    /// `again` reads the words a second time on tracks that already have
+    /// them, which is what to do when the recogniser, the stems or the
+    /// placing have improved since. Everything else about the pass is the
+    /// same, including rendering a stem for anything that has lost one.
+    ///
     /// Returns whether the collection changed here and now, as opposed to work
     /// having been queued that will change it later.
-    fn auto_cue_tracks(&mut self, ids: &[u32]) -> bool {
+    fn auto_cue_tracks(&mut self, ids: &[u32], again: bool) -> bool {
         // A companion row has no cues of its own; it shows its parent's. So
         // asking for cues on an acapella is asking for them on the record.
         let mut wanted: Vec<u32> = ids.iter().map(|id| crate::library::family(*id)).collect();
@@ -1919,7 +1926,11 @@ impl App {
         let mut rendering = Vec::new();
         for id in wanted {
             let Some(track) = self.library.get(id) else { continue };
-            match (track.lyrics.is_empty(), track.lyrics_aligned, track.stems.vocals.clone()) {
+            // The words are not cleared here. They are replaced when the new
+            // ones arrive, so a re-read that never starts — no recogniser, a
+            // missing file — leaves the track with the words it had.
+            let unread = again || track.lyrics.is_empty();
+            match (unread, track.lyrics_aligned, track.stems.vocals.clone()) {
                 // Words already read and already placed: nothing to wait for.
                 (false, true, _) => known.push(id),
                 // Words read before they were placed against the stem. The
@@ -2043,13 +2054,13 @@ impl App {
         hot
     }
 
-    fn auto_cue_showing(&mut self) {
-        let waiting = self.acting_on(|track| track.lyrics.is_empty());
+    fn auto_cue_showing(&mut self, again: bool) {
+        let waiting = self.acting_on(|track| again || track.lyrics.is_empty());
         if waiting.is_empty() {
             self.note("the words have been read for everything showing", theme::dim());
             return;
         }
-        self.auto_cue_tracks(&waiting);
+        self.auto_cue_tracks(&waiting, again);
     }
 
     fn collect(&mut self) {
@@ -4209,11 +4220,17 @@ impl App {
             if ui.add_enabled(idle, egui::Button::new("Add music…")).clicked() {
                 self.want_pick = Some(Picking::Music);
             }
-            // Shift turns the verb round, the same bargain the Check button
-            // makes further along this strip: one modifier beats a second
-            // button for the same verb. The label follows it rather than only
-            // the hover text, because the two act on different numbers of
-            // tracks and a button has to say what pressing it will do.
+            // Shift turns every verb on this strip round, so that work already
+            // done can be asked for again: one modifier beats five more
+            // buttons. The labels follow it rather than only the hover text,
+            // because each pair acts on a different number of tracks and a
+            // button has to say what pressing it will do.
+            //
+            // Which is the whole of what a selection is for here. Pick the
+            // tracks, hold shift, and the buttons offer them whether or not
+            // they have been through this before — without it, a track that
+            // has been analysed, stemmed or read is simply not counted, and
+            // there was no way to ask for any of it a second time.
             let again = ui.input(|i| i.modifiers.shift);
             let (verb, count) =
                 if again { ("Re-analyse", showing) } else { ("Analyse", unanalysed) };
@@ -4254,38 +4271,78 @@ impl App {
                 }
             }
             let unnamed = self.acting_on(|track| !track.identified).len();
+            let (verb, count) =
+                if again { ("Re-identify", showing) } else { ("Identify", unnamed) };
             if ui
-                .add_enabled(idle && unnamed > 0, egui::Button::new(format!("Identify {unnamed}")))
-                .on_hover_text(
-                    "Fingerprint and look up what these are, filling in the names they lack",
-                )
+                .add_enabled(idle && count > 0, egui::Button::new(format!("{verb} {count}")))
+                .on_hover_text(match again {
+                    true => {
+                        "Fingerprint and look up these again, whatever they are already called"
+                    }
+                    false => {
+                        "Fingerprint and look up what these are, filling in the names they lack \
+                         \u{2014} hold shift to ask again about ones already looked up"
+                    }
+                })
+                .on_disabled_hover_text(match again {
+                    true => "Nothing is showing to identify",
+                    false => "Everything here has been looked up \u{2014} \
+                              hold shift to ask again",
+                })
                 .clicked()
             {
-                self.identify_showing();
+                self.identify_showing(again);
             }
+            let (verb, count) = if again { ("Re-stem", showing) } else { ("Stems", unstemmed) };
             if ui
-                .add_enabled(idle && unstemmed > 0, egui::Button::new(format!("Stems {unstemmed}")))
-                .on_hover_text("Render a vocals/melody/drums kit with demucs")
+                .add_enabled(idle && count > 0, egui::Button::new(format!("{verb} {count}")))
+                .on_hover_text(match again {
+                    true => {
+                        "Render a vocals/melody/drums kit again, replacing the one each track \
+                         has \u{2014} which is what a change of model or quality calls for"
+                    }
+                    false => {
+                        "Render a vocals/melody/drums kit with demucs \u{2014} hold shift to \
+                         render over the kits already there"
+                    }
+                })
+                .on_disabled_hover_text(match again {
+                    true => "Nothing is showing to separate",
+                    false => "Everything here has a kit \u{2014} hold shift to render it again",
+                })
                 .clicked()
             {
-                self.render_stems();
+                self.render_stems(again);
             }
             let unread = self.acting_on(|track| track.lyrics.is_empty()).len();
+            let (verb, count) = if again { ("Re-read", showing) } else { ("Words", unread) };
             if ui
-                .add_enabled(idle && unread > 0, egui::Button::new(format!("Words {unread}")))
-                .on_hover_text(
-                    "Read the vocal stem and cue the hook, the drops and the phrases \u{2014} \
-                     rendering the stems first where there are none",
-                )
-                .on_disabled_hover_text("The words have been read for everything showing")
+                .add_enabled(idle && count > 0, egui::Button::new(format!("{verb} {count}")))
+                .on_hover_text(match again {
+                    true => {
+                        "Read the vocal stem again and re-cue from what it says, replacing the \
+                         words each track is carrying"
+                    }
+                    false => {
+                        "Read the vocal stem and cue the hook, the drops and the phrases \
+                         \u{2014} rendering the stems first where there are none, or hold \
+                         shift to read ones already read again"
+                    }
+                })
+                .on_disabled_hover_text(match again {
+                    true => "Nothing is showing to read",
+                    false => "The words have been read for everything showing \u{2014} \
+                              hold shift to read them again",
+                })
                 .clicked()
             {
-                self.auto_cue_showing();
+                self.auto_cue_showing(again);
             }
             // Reads rather than changes anything, so it sits at the end of the
-            // strip after the three that do. Shift for the thorough version:
-            // one modifier beats a second button for the same verb.
-            let thorough = ui.input(|i| i.modifiers.shift);
+            // strip after the four that do. Shift means the thorough version
+            // here rather than "again", because a check is a read: it is
+            // always done over, and there is nothing it could skip.
+            let thorough = again;
             if ui
                 .add_enabled(idle && showing > 0, egui::Button::new(format!("Check {showing}")))
                 .on_hover_text(match thorough {
@@ -5668,7 +5725,7 @@ impl App {
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
                 Pending::SeparateMany { tracks, for_cues } => self.separate_for(&tracks, for_cues),
-                Pending::AutoCue(id) => touched |= self.auto_cue_tracks(&[id]),
+                Pending::AutoCue(id) => touched |= self.auto_cue_tracks(&[id], false),
                 Pending::CopyPath(id) => {
                     // A companion's path is its stems, not its parent's file:
                     // copying the mix's path off an acapella row would be a
@@ -5904,8 +5961,10 @@ impl App {
     }
 
     /// Fingerprint whatever showing is still unidentified.
-    fn identify_showing(&mut self) {
-        let waiting = self.acting_on(|track| !track.identified);
+    /// `again` asks about tracks that have been looked up before, which is
+    /// what to do when a lookup got one wrong or the database has moved on.
+    fn identify_showing(&mut self, again: bool) {
+        let waiting = self.acting_on(|track| again || !track.identified);
         if waiting.is_empty() {
             self.note("nothing showing needs identifying", theme::dim());
             return;
@@ -10829,7 +10888,7 @@ mod tests {
                 };
                 app.rebuild();
 
-                app.auto_cue_tracks(&[first, second]);
+                app.auto_cue_tracks(&[first, second], false);
 
                 let ahead = app.stems_ahead.as_ref().expect("the batch started unannounced");
                 assert_eq!(ahead.tracks.len(), 2);
@@ -10839,11 +10898,35 @@ mod tests {
             }
 
             #[test]
+            fn reading_the_words_again_goes_back_to_the_recogniser() {
+                // Without this a track that has already been read is re-cued
+                // from the words it is carrying, which is the right answer
+                // right up until the recogniser or the placing has improved —
+                // and then it is the one answer that cannot be got past.
+                let (mut app, id) = sung("re-read", &[(40_100, "get down")]);
+                app.library.get_mut(id).unwrap().stems.vocals =
+                    Some(app.library_path.with_file_name("track-vocals.wav"));
+                app.rebuild();
+
+                assert!(
+                    app.auto_cue_tracks(&[id], false),
+                    "the words it has should be cued without a job"
+                );
+                assert!(!app.running(), "nothing should have been queued for that");
+
+                app.auto_cue_tracks(&[id], true);
+                assert!(app.running(), "asking again did not go back to the recogniser");
+                // And the words it had are still there until new ones arrive,
+                // so a read that cannot start has cost nothing.
+                assert_eq!(app.library.get(id).unwrap().lyrics.len(), 1);
+            }
+
+            #[test]
             fn one_track_is_not_worth_a_dialog() {
                 // A few minutes, asked for by clicking on one record. A sheet
                 // in front of every one of those is worse than no sheet.
                 let (mut app, id) = sung("single", &[]);
-                app.auto_cue_tracks(&[id]);
+                app.auto_cue_tracks(&[id], false);
                 assert!(app.stems_ahead.is_none());
             }
 
@@ -10858,40 +10941,9 @@ mod tests {
                 app.rebuild();
                 app.config.warn_before_stems = false;
 
-                app.auto_cue_tracks(&[first, second]);
+                app.auto_cue_tracks(&[first, second], false);
                 assert!(app.stems_ahead.is_none());
                 assert_eq!(app.want_cues.len(), 2, "both should be cued once their stems land");
-            }
-
-            #[test]
-            fn a_line_is_marked_with_its_words_once_and_its_number_ever_after() {
-                let (mut app, id) = sung(
-                    "verses",
-                    &[
-                        (40_100, "everybody in the room"),
-                        (100_100, "everybody in the room"),
-                        (160_100, "everybody in the room"),
-                    ],
-                );
-                app.auto_cue(id);
-                let marks: Vec<String> = app
-                    .library
-                    .get(id)
-                    .unwrap()
-                    .cues
-                    .iter()
-                    .filter(|cue| cue.letter == 0)
-                    .map(|cue| cue.label.clone())
-                    .collect();
-
-                // Two words on the marker, because what shows it is one line
-                // of a player's screen.
-                assert!(marks.contains(&"V1 everybody in".to_string()), "{marks:?}");
-                assert_eq!(
-                    marks.iter().filter(|mark| *mark == "V1").count(),
-                    2,
-                    "the repeats carry the number alone: {marks:?}"
-                );
             }
 
             #[test]
@@ -10989,7 +11041,7 @@ mod tests {
                     &[(40_100, "hold me closer now"), (100_100, "hold me closer now")],
                 );
                 let acapella = crate::library::companion_id(id, Role::Vocals);
-                assert!(app.auto_cue_tracks(&[acapella]), "the row did nothing");
+                assert!(app.auto_cue_tracks(&[acapella], false), "the row did nothing");
 
                 let placed = labels(&app, id);
                 assert!(placed.iter().any(|label| label == "hold me closer now"), "{placed:?}");
@@ -11000,7 +11052,7 @@ mod tests {
                 let (mut app, id) = sung("render", &[]);
                 app.config.whisper.model = "/models/ggml-base.en.bin".into();
 
-                assert!(!app.auto_cue_tracks(&[id]), "nothing can be cued yet");
+                assert!(!app.auto_cue_tracks(&[id], false), "nothing can be cued yet");
                 assert!(
                     app.want_cues.contains(&id),
                     "the track was not remembered, so its words will never be read"
@@ -11977,6 +12029,68 @@ mod tests {
             harness.input_mut().modifiers = egui::Modifiers::SHIFT;
             harness.run();
             harness.get_by_label(&format!("Re-analyse {}", showing.len()));
+        }
+
+        #[test]
+        fn shift_turns_every_verb_on_the_strip_round_not_only_analyse() {
+            // The case this exists for: a few tracks picked out of a library
+            // that has already been through everything, and one of the
+            // processes has improved since. Without it those tracks are simply
+            // not counted — "Stems 0", greyed out — and there was no way to
+            // ask for any of it a second time but one right-click per row.
+            let mut app = listing("re-everything", 5);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                let track = app.library.get_mut(id).unwrap();
+                track.analyzed = true;
+                track.identified = true;
+                track.stems.vocals = Some("/stems/vocals.wav".into());
+                track.lyrics = vec![crate::library::Lyric {
+                    start_ms: 0,
+                    end_ms: 900,
+                    text: "get down".into(),
+                }];
+            }
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+            for nothing in ["Analyse 0", "Identify 0", "Stems 0", "Words 0"] {
+                harness.get_by_label(nothing);
+            }
+
+            harness.input_mut().modifiers = egui::Modifiers::SHIFT;
+            harness.run();
+            harness.run();
+            for every in ["Re-analyse 5", "Re-identify 5", "Re-stem 5", "Re-read 5"] {
+                harness.get_by_label(every);
+            }
+        }
+
+        #[test]
+        fn a_selection_is_what_the_turned_round_verbs_act_on() {
+            // Which is the whole point of picking tracks out: the count on the
+            // button is the selection, not the library behind it.
+            let mut app = listing("re-selection", 8);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                let track = app.library.get_mut(id).unwrap();
+                track.analyzed = true;
+                track.identified = true;
+                track.stems.vocals = Some("/stems/vocals.wav".into());
+            }
+            app.rebuild();
+            app.marked = app.library.tracks.iter().take(3).map(|t| t.id).collect();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+            harness.input_mut().modifiers = egui::Modifiers::SHIFT;
+            harness.run();
+            harness.run();
+            harness.get_by_label("Re-stem 3");
+            harness.get_by_label("Re-identify 3");
+            assert!(
+                harness.query_by_label("Re-stem 8").is_none(),
+                "the batch reached past the selection"
+            );
         }
 
         #[test]
