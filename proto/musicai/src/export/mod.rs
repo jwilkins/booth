@@ -37,6 +37,12 @@ pub struct Beat {
 /// The period a straight line through these beat times implies, by least
 /// squares. `None` when there are too few to fit one or they do not advance.
 fn fitted_period(times: &[u32]) -> Option<f64> {
+    fitted_line(times).map(|(period, _)| period)
+}
+
+/// The straight line through a set of beat times: the gap between beats, and
+/// where beat zero sits.
+fn fitted_line(times: &[u32]) -> Option<(f64, f64)> {
     if times.len() < 2 {
         return None;
     }
@@ -54,10 +60,78 @@ fn fitted_period(times: &[u32]) -> Option<f64> {
         return None;
     }
     let period = covariance / variance;
-    (period > 0.0).then_some(period)
+    (period > 0.0).then_some((period, mean_time - period * mean_index))
 }
 
-/// Whether beat times bend, meaning no single tempo places them all.
+/// The one tempo that places all of these beats, if one does.
+///
+/// `None` when the record really changes tempo — which is a different thing
+/// from its beats having been tracked untidily, and [`bow`] is what tells
+/// them apart.
+pub fn one_tempo(times: &[u32]) -> Option<f64> {
+    let (period, first) = fitted_line(times)?;
+    (bow(times, period, first) <= period * STRAIGHT_ENOUGH).then_some(60_000.0 / period)
+}
+
+/// How far the beats bow away from one tempo, in milliseconds at the worst
+/// point, once the scatter has been averaged out.
+///
+/// Two different things push a beat off a straight line, and the whole
+/// question of whether a track is at one tempo is telling them apart. A
+/// tracker finding a soft kick a few milliseconds late is as often early as
+/// late, so over sixteen bars it cancels out; a record that really speeds up
+/// leaves the line in one direction and stays there, and averaging is what is
+/// left of it.
+///
+/// Measured on 128 BPM click tracks. With the clicks nudged off the beat by up
+/// to ±60 ms — far more than a tracker is wrong by on a real record — this
+/// reads 4.6 ms. With the tempo moving by a single BPM across the same length
+/// it reads 10 ms, and across a 124→127 ramp, 29 ms. The scatter itself tells
+/// those apart nowhere near as well: ±60 ms of jitter puts a beat 37.8 ms off
+/// the line and the one-BPM drift puts one 44.4 ms off, which is why asking
+/// how far the worst beat sits was the wrong question.
+pub fn bow(times: &[u32], period: f64, first: f64) -> f64 {
+    let window = (times.len() / 2).clamp(8, BOW_WINDOW);
+    if times.len() < window {
+        return 0.0;
+    }
+    let residual: Vec<f64> =
+        (0..times.len()).map(|i| times[i] as f64 - (first + period * i as f64)).collect();
+    let mut worst = 0.0f64;
+    let mut running: f64 = residual[..window].iter().sum();
+    worst = worst.max((running / window as f64).abs());
+    for start in 1..=residual.len() - window {
+        running += residual[start + window - 1] - residual[start - 1];
+        worst = worst.max((running / window as f64).abs());
+    }
+    worst
+}
+
+/// How many beats the bow is measured over: sixteen bars, which is long
+/// enough for a tracker's scatter to cancel and short enough that half of a
+/// three-minute record is not being averaged into one number.
+const BOW_WINDOW: usize = 64;
+
+/// How much bow a grid may have and still be written as one tempo, as a
+/// fraction of a beat.
+///
+/// A sixty-fourth, which at 128 BPM is 7.3 ms. It sits between the worst a
+/// tracker's scatter produces (4.6 ms) and the least a real tempo change does
+/// (10 ms), and it is deliberately on the generous side: a straight grid that
+/// is a few milliseconds out at one end of the record costs far less than a
+/// grid that will not hold still, which is two decks that cannot be synced and
+/// loops that are different lengths depending on where they were taken.
+pub const STRAIGHT_ENOUGH: f64 = 1.0 / 64.0;
+
+/// Whether a tempo and a first beat would fail to reproduce these times
+/// exactly.
+///
+/// A narrower question than [`one_tempo`], and a different one. That asks
+/// whether a record is at one tempo, and forgives the scatter a tracker leaves
+/// on any real set of beats. This asks whether these particular numbers can be
+/// thrown away and rebuilt — which is what decides whether a grid a *player*
+/// bent by hand has to be kept beat for beat, since rebuilding that from a
+/// tempo would hand the drive a flattened copy of somebody's work.
 ///
 /// Measured against the even grid through the two ends, so a grid that speeds
 /// up and slows back down is caught by the bulge in the middle rather than
@@ -157,13 +231,22 @@ impl BeatGrid {
         /// Beats either side of one that are used to read the tempo at it.
         const AROUND: usize = 6;
 
+        // Asked of the whole track first. A line through a dozen beats of an
+        // even grid still wanders by a hundredth of a BPM, because the times
+        // it is fitted to are stored to the millisecond — and a hundredth is
+        // what this format records, so that wander is what a player reads.
+        // Where one tempo places every beat, that is the tempo written: the
+        // same answer at every beat rather than nearly the same answer.
+        let steady = one_tempo(times);
         let beats = times
             .iter()
             .enumerate()
             .map(|(i, &t)| {
                 let from = i.saturating_sub(AROUND);
                 let to = (i + AROUND + 1).min(times.len());
-                let bpm = fitted_period(&times[from..to]).map(|p| 60_000.0 / p).unwrap_or(0.0);
+                let bpm = steady
+                    .or_else(|| fitted_period(&times[from..to]).map(|p| 60_000.0 / p))
+                    .unwrap_or(0.0);
                 Beat {
                     number: (i % 4) as u16 + 1,
                     tempo_x100: (bpm * 100.0).round().clamp(0.0, u16::MAX as f64) as u16,
@@ -451,12 +534,51 @@ mod tests {
 
         let tempos: std::collections::BTreeSet<u16> =
             grid.beats.iter().map(|beat| beat.tempo_x100).collect();
-        // Every beat within a hundredth of a BPM of 128, which is the unit the
-        // format stores: there is nowhere further to go. Read off the single
-        // following gap, these spanned 12_793 to 12_821.
-        for tempo in &tempos {
-            assert!(tempo.abs_diff(12_800) <= 1, "{tempos:?} is not 128 BPM");
+        // One tempo, and the right one. Read off the single following gap
+        // these spanned 12_793 to 12_821; read off a line through the beats
+        // nearby they spanned 12_799 to 12_801, which is still a readout that
+        // will not settle, because a line through a dozen beat times stored to
+        // the millisecond still wanders by the unit the format records.
+        assert_eq!(tempos.into_iter().collect::<Vec<_>>(), vec![12_800]);
+    }
+
+    #[test]
+    fn a_run_of_beats_that_really_slows_is_not_written_at_one_tempo() {
+        // The other side of it. Writing one tempo is only right where one
+        // tempo places every beat, and a record that slows has to be written
+        // slowing or every cue in its second half is in the wrong place.
+        let mut times = vec![0u32];
+        let mut at = 0.0f64;
+        for beat in 0..256 {
+            at += 60_000.0 / (128.0 - 4.0 * beat as f64 / 256.0);
+            times.push(at.round() as u32);
         }
+        assert!(one_tempo(&times).is_none(), "a four-BPM slowdown read as steady");
+
+        let grid = BeatGrid::from_beat_times(&times);
+        let tempos: std::collections::BTreeSet<u16> =
+            grid.beats.iter().map(|beat| beat.tempo_x100).collect();
+        assert!(tempos.len() > 20, "it was flattened to {} tempos", tempos.len());
+    }
+
+    #[test]
+    fn beat_times_scattered_by_a_tracker_still_come_back_at_one_tempo() {
+        // What a real record's beat times look like: on the grid, give or
+        // take where the tracker found each kick. Asked whether every beat is
+        // close to the line, this fails; asked whether the beats bow away from
+        // it, it does not, because the scatter is as often early as late.
+        let period = 60_000.0 / 128.0;
+        let mut state = 99u64;
+        let times: Vec<u32> = (0..256)
+            .map(|i| {
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let nudge = ((state >> 33) as f64 / (1u64 << 31) as f64 - 1.0) * 20.0;
+                (period * i as f64 + nudge).max(0.0).round() as u32
+            })
+            .collect();
+
+        let found = one_tempo(&times).expect("scatter read as a tempo change");
+        assert!((found - 128.0).abs() < 0.1, "came out at {found:.3}");
     }
 
     #[test]

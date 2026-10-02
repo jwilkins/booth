@@ -94,7 +94,12 @@ pub fn detect_at(features: &Features, bpm: Option<f64>) -> Beats {
     // this frame rate is a step of more than a beat per minute — too coarse to
     // hold a mix together. The tracked beat times are far more precise than the
     // lag that produced them, so the tempo is read back off them.
-    let straightened = straighten(&mut times, 1000.0 / features.frame_rate);
+    let straightened = straighten(&mut times);
+    if straightened.is_none() {
+        // It really does move. Follow it, but follow the tempo rather than
+        // the tracker: see [`smooth`].
+        smooth(&mut times);
+    }
     let steady = straightened.as_ref().map(|s| s.bpm);
     let bpm = steady.unwrap_or_else(|| measured_bpm(&times));
     let mut grid = grid_from(&times, steady);
@@ -306,49 +311,43 @@ fn line_through(times: &[u32], using: impl Iterator<Item = usize> + Clone) -> Op
 /// that will not hold still. So: fit a line through the beat times, and where
 /// the track is plainly at one tempo, replace the tracked times with the line.
 ///
-/// # Why the test is not "no beat is far from the line"
+/// # Why the test is about bow and not about scatter
 ///
-/// It used to be, and it almost never fired. Measured on a metronomic 128 BPM
-/// click track: the fit came out at 128.000 BPM with a median deviation of
-/// 2.6 ms and a 90th percentile of 5.0 ms — and **one** beat out of 640 sat
-/// 30.3 ms off, which is past a twentieth of a beat, so the whole track kept
-/// its tracked times. A single bad beat threw away a perfect answer for the
-/// other 639, and what went on the drive was a grid whose gaps ran from 441 to
-/// 477 ms with a tempo that alternated between 126.05 and 129.03 BPM.
+/// It used to be "is no beat far from the line", which almost never fired: one
+/// mistracked beat in 640 threw away a perfect fit for the other 639. Then it
+/// was "are most beats near the line", measured at the ninetieth percentile
+/// against one analysis frame — and that fired on a metronome and gave up on
+/// anything else. Measured on a 128 BPM click track with the clicks nudged by
+/// ±24 ms, which is less than a drummer: the grid came back with 48 different
+/// tempos in it, a BPM that was a whole beat per minute wrong, and eight-beat
+/// stretches whose lengths differed by 46 ms depending on where in the track
+/// they were taken. Which is a loop walking away from the other deck.
 ///
-/// So the question asked is whether *most* beats are on the line, not whether
-/// all of them are. The ones that are not are then left out and the line is
-/// fitted again, so an outlier cannot drag the tempo either.
-///
-/// The tolerance is a frame, because that is the resolution the beats arrive
-/// at: the tracker reports whole analysis frames, so even a perfect track
-/// comes back quantised to about 11.6 ms and its deviations are half of that.
-/// Anything that genuinely bends — a disco record speeding up over five
-/// minutes — leaves the line by hundreds of milliseconds and fails this easily.
-fn straighten(times: &mut Vec<u32>, frame_ms: f64) -> Option<Straightened> {
+/// The trouble is that scatter and drift look the same beat by beat. Only
+/// their shape differs: scatter is as often early as late and drift is not. So
+/// the question asked is [`bend`] — how far the beats depart from the line
+/// once sixteen bars of them are averaged — and a track is written at one
+/// tempo unless it really moves.
+fn straighten(times: &mut Vec<u32>) -> Option<Straightened> {
     if times.len() < 8 {
         return None;
     }
     let (period, first) = line_through(times, 0..times.len())?;
-    let off =
-        |period: f64, first: f64, i: usize| (times[i] as f64 - (first + period * i as f64)).abs();
-
-    // How far the beats sit from the line, at the point where nine in ten are
-    // closer. A handful further out than that is a tracker that missed a beat,
-    // not a track that changed tempo.
-    let mut spread: Vec<f64> = (0..times.len()).map(|i| off(period, first, i)).collect();
-    spread.sort_by(f64::total_cmp);
-    let typical = spread[spread.len() * 9 / 10];
-    let tolerance = frame_ms.max(1.0);
-    if typical > tolerance {
+    if crate::export::bow(times, period, first) > period * crate::export::STRAIGHT_ENOUGH {
         return None;
     }
 
+    let off =
+        |period: f64, first: f64, i: usize| (times[i] as f64 - (first + period * i as f64)).abs();
     // Fitted again without the beats that disagree, so one mistracked beat
-    // moves nothing. Falls back to the first fit if too few are left to fit at
-    // all, which cannot happen while nine in ten are inliers but is not worth
-    // being wrong about.
-    let keep = || (0..times.len()).filter(|i| off(period, first, *i) <= tolerance * 2.0);
+    // moves nothing. The line for "disagrees" is drawn from the track's own
+    // scatter rather than from a fixed number of milliseconds: how far a
+    // tracker's beats sit from the truth depends on what it was tracking, and
+    // a threshold that suits a click track throws away most of a live take.
+    let mut spread: Vec<f64> = (0..times.len()).map(|i| off(period, first, i)).collect();
+    spread.sort_by(f64::total_cmp);
+    let tolerance = (spread[spread.len() * 9 / 10] * 2.0).max(1.0);
+    let keep = || (0..times.len()).filter(|i| off(period, first, *i) <= tolerance);
     let (period, first) = line_through(times, keep()).unwrap_or((period, first));
 
     // A line fitted through the whole track can start a little before the
@@ -369,6 +368,40 @@ fn straighten(times: &mut Vec<u32>, frame_ms: f64) -> Option<Straightened> {
     }
     Some(Straightened { bpm: 60_000.0 / period, dropped })
 }
+
+/// Put each beat where a line through the beats around it says it should be.
+///
+/// For the records that will not take one tempo. The alternative is the times
+/// the tracker measured, and those carry every missed kick and every soft
+/// attack straight into the grid — so two eight-beat loops taken from
+/// different parts of such a track come out different lengths, which is the
+/// complaint whether or not the tempo is constant. A line through sixteen bars
+/// follows a tempo that really moves and averages away the rest.
+///
+/// Monotonic afterwards, because a grid is a sequence of times and a player
+/// reading one that goes backwards has no good options.
+fn smooth(times: &mut [u32]) {
+    if times.len() < SMOOTH_AROUND * 2 {
+        return;
+    }
+    let fitted: Vec<u32> = (0..times.len())
+        .map(|i| {
+            let from = i.saturating_sub(SMOOTH_AROUND);
+            let to = (i + SMOOTH_AROUND + 1).min(times.len());
+            line_through(times, from..to)
+                .map(|(period, first)| (first + period * i as f64).round().max(0.0) as u32)
+                .unwrap_or(times[i])
+        })
+        .collect();
+    let mut last = 0;
+    for (time, fitted) in times.iter_mut().zip(fitted) {
+        last = fitted.max(last + u32::from(last > 0));
+        *time = last;
+    }
+}
+
+/// How many beats either side the smoothing fits through: eight bars.
+const SMOOTH_AROUND: usize = 32;
 
 /// What straightening a grid came to: the one tempo it is at, and how many
 /// beats came off the front because the line began before the track did.
@@ -470,6 +503,191 @@ mod tests {
             }
         }
         Audio::new(RATE, vec![plane.clone(), plane]).unwrap()
+    }
+
+    /// A click track built to order: its tempo at each point, and how far off
+    /// the beat each click is allowed to land.
+    ///
+    /// The jitter is what a tracker is up against on a real record — a soft
+    /// kick attack, a swung hat, a drummer — and it never changes the tempo.
+    /// Which is the whole point: a grid should come back straight from this.
+    fn made(bars: usize, jitter_ms: f64, seed: u64, tempo: impl Fn(f64) -> f64) -> Audio {
+        let beats = bars * 4;
+        let lead_in = RATE as usize / 2;
+        let mut state = seed | 1;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as f64 / (1u64 << 31) as f64) - 1.0
+        };
+
+        let mut at_secs = 0.0f64;
+        let mut starts = Vec::with_capacity(beats);
+        for beat in 0..beats {
+            starts.push(at_secs + next() * jitter_ms / 1000.0);
+            at_secs += 60.0 / tempo(beat as f64 / beats as f64);
+        }
+
+        let frames = lead_in + (RATE as f64 * at_secs) as usize + RATE as usize;
+        let mut plane = vec![0.0f32; frames];
+        for (beat, at) in starts.iter().enumerate() {
+            let start = lead_in + (RATE as f64 * at.max(0.0)) as usize;
+            let (hz, gain) = if beat % 4 == 0 { (55.0, 1.0) } else { (150.0, 0.5) };
+            for i in 0..(RATE as usize / 8) {
+                let frame = start + i;
+                if frame >= frames {
+                    break;
+                }
+                let t = i as f32 / RATE as f32;
+                let decay = (-30.0 * t).exp();
+                plane[frame] += gain * decay * (2.0 * std::f32::consts::PI * hz * t).sin();
+            }
+        }
+        Audio::new(RATE, vec![plane.clone(), plane]).unwrap()
+    }
+
+    fn jittered(bpm: f64, bars: usize, jitter_ms: f64, seed: u64) -> Audio {
+        made(bars, jitter_ms, seed, |_| bpm)
+    }
+
+    fn ramped(from_bpm: f64, to_bpm: f64, bars: usize, jitter_ms: f64) -> Audio {
+        made(bars, jitter_ms, 11, |at| from_bpm + (to_bpm - from_bpm) * at)
+    }
+
+    /// Every stretch of `beats` beats in a grid, by length in milliseconds.
+    fn loop_lengths(grid: &BeatGrid, beats: usize) -> Vec<u32> {
+        let times: Vec<u32> = grid.beats.iter().map(|b| b.time_ms).collect();
+        match times.len() > beats {
+            true => times.windows(beats + 1).map(|w| w[beats] - w[0]).collect(),
+            false => Vec::new(),
+        }
+    }
+
+    /// The worst disagreement between any two such stretches, which is what a
+    /// DJ feels as a loop walking away from the other deck.
+    fn loop_spread(grid: &BeatGrid, beats: usize) -> u32 {
+        let lengths = loop_lengths(grid, beats);
+        match lengths.is_empty() {
+            true => 0,
+            false => lengths.iter().max().unwrap() - lengths.iter().min().unwrap(),
+        }
+    }
+
+    /// The beat times the tracker produces, before anything straightens them.
+    fn tracked(f: &Features) -> Vec<u32> {
+        let envelope = onset_envelope(f);
+        let (period, _) = estimate_period(&envelope, f.frame_rate);
+        let frames = track_beats(&envelope, period.unwrap());
+        frames.iter().map(|&n| (f.seconds_at(n) * 1000.0).round() as u32).collect()
+    }
+
+    #[test]
+    fn eight_beats_anywhere_are_eight_beats_anywhere_else() {
+        // What a DJ actually needs from a grid, and the thing two players
+        // reading the same track have to agree about. A loop taken from the
+        // intro and a loop taken from the last drop have to be the same
+        // length, or one deck walks away from the other while they play.
+        //
+        // The fault: a tracker's beats scatter about the truth on any real
+        // record, and a grid accepted as steady only when they barely
+        // scattered at all gave up on most of them. At ±24 ms of scatter —
+        // less than a drummer — the grid came back with 48 different tempos
+        // in it and eight-beat stretches whose lengths differed by 46 ms.
+        for jitter in [0.0, 24.0, 40.0, 60.0] {
+            let found = detect(&features::extract(&jittered(128.0, 24, jitter, 7)));
+            assert!(
+                (found.bpm - 128.0).abs() < 0.05,
+                "±{jitter} ms of scatter moved the tempo to {:.3}",
+                found.bpm
+            );
+            assert_eq!(
+                loop_spread(&found.grid, 8),
+                1,
+                "±{jitter} ms of scatter left eight-beat loops disagreeing",
+            );
+            let tempos: std::collections::BTreeSet<u16> =
+                found.grid.beats.iter().map(|b| b.tempo_x100).collect();
+            assert_eq!(tempos.len(), 1, "±{jitter} ms of scatter gave {tempos:?}");
+        }
+    }
+
+    #[test]
+    fn scatter_is_told_from_drift_by_its_shape_and_not_by_its_size() {
+        // Why the test is [`bend`] and not how far the worst beat sits. These
+        // two are the same size beat by beat and nothing alike in shape: the
+        // scatter is as often early as late, and the drift is not.
+        let loose = features::extract(&jittered(128.0, 24, 60.0, 7));
+        let moving = features::extract(&ramped(128.0, 127.0, 24, 0.0));
+        let (loose, moving) = (tracked(&loose), tracked(&moving));
+
+        let worst = |times: &[u32]| {
+            let (period, first) = line_through(times, 0..times.len()).unwrap();
+            let off = (0..times.len())
+                .map(|i| (times[i] as f64 - (first + period * i as f64)).abs())
+                .fold(0.0, f64::max);
+            (off, crate::export::bow(times, period, first), period)
+        };
+        let (scatter_off, scatter_bend, period) = worst(&loose);
+        let (drift_off, drift_bend, _) = worst(&moving);
+
+        assert!(
+            scatter_off > drift_off * 0.7,
+            "the two are meant to scatter alike: {scatter_off:.1} against {drift_off:.1}"
+        );
+        assert!(
+            scatter_bend < period * crate::export::STRAIGHT_ENOUGH,
+            "scatter read as drift: {scatter_bend:.1} ms"
+        );
+        assert!(
+            drift_bend > period * crate::export::STRAIGHT_ENOUGH,
+            "a whole beat per minute of drift read as scatter: {drift_bend:.1} ms"
+        );
+    }
+
+    #[test]
+    fn a_track_whose_tempo_really_moves_is_still_written_moving() {
+        // The other half of the bargain, and the one that straightening too
+        // eagerly would break. A record that speeds up has to come back
+        // speeding up, or every cue in the second half is in the wrong place.
+        for (from, to) in [(128.0, 127.0), (124.0, 127.0), (128.0, 120.0)] {
+            let found = detect(&features::extract(&ramped(from, to, 24, 0.0)));
+            let tempos: std::collections::BTreeSet<u16> =
+                found.grid.beats.iter().map(|b| b.tempo_x100).collect();
+            assert!(tempos.len() > 20, "{from}→{to} was flattened to {} tempos", tempos.len());
+
+            // And in the right direction, by about the right amount.
+            let quoted: Vec<f64> =
+                found.grid.beats.iter().map(|b| b.tempo_x100 as f64 / 100.0).collect();
+            let moved = quoted.last().unwrap() - quoted.first().unwrap();
+            let real = to - from;
+            assert!(
+                moved.signum() == real.signum() && moved.abs() > real.abs() * 0.5,
+                "{from}→{to} came out moving by {moved:.2}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_grid_that_cannot_be_straightened_still_does_not_carry_the_scatter() {
+        // A track that really moves cannot have one tempo, but it can still
+        // have a tempo that only moves the way the record does. Left as the
+        // tracker measured them, the beats of a drifting record carry every
+        // missed kick into the grid as well — so a loop from one bar and a
+        // loop from the next are different lengths for no musical reason.
+        let found = detect(&features::extract(&ramped(128.0, 124.0, 24, 40.0)));
+        let lengths = loop_lengths(&found.grid, 8);
+        assert!(lengths.len() > 40, "{} eight-beat stretches", lengths.len());
+
+        // A track slowing down evenly: each stretch is longer than the one
+        // before it, give or take the millisecond the times are stored in.
+        // Scatter would show up here as stretches that jump about.
+        let backwards = lengths.windows(2).filter(|pair| pair[1] + 1 < pair[0]).count();
+        assert!(
+            backwards * 20 < lengths.len(),
+            "{backwards} of {} stretches got shorter on a track that only slows",
+            lengths.len()
+        );
     }
 
     fn detect_bpm(bpm: f64) -> Beats {
