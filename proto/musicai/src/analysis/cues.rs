@@ -258,20 +258,6 @@ fn section_word(kind: Kind) -> &'static str {
     }
 }
 
-/// How much of a sung line goes on the marker itself.
-///
-/// Two words. What shows it is one line of a player's screen beside the
-/// number, the artist and the title, and a whole sung phrase there is a phrase
-/// with its end cut off — which reads as a mistake rather than as a label. Two
-/// words is enough to tell one line of a record from another, which is all the
-/// marker has to do.
-const VERSE_WORDS: usize = 2;
-
-/// The start of a sung line, for a marker with no room for the rest of it.
-fn opening(text: &str) -> String {
-    text.split_whitespace().take(VERSE_WORDS).collect::<Vec<_>>().join(" ")
-}
-
 /// A named memory cue for every moment, in time order.
 ///
 /// The names are what a DJ would write on the markers themselves: Start, then
@@ -280,11 +266,11 @@ fn opening(text: &str) -> String {
 /// of them is the whole point: six markers all called "drop" say nothing that
 /// looking at the waveform does not.
 ///
-/// A sung line gets a verse number and the start of its words the first time
-/// it lands, and the number alone every time it comes back: "V1 Get Down",
-/// then "V1", "V1". A player shows a memory cue's comment while the track is
-/// loaded, so the second time round the line is already known and the number
-/// is what says where in the record you are.
+/// A sung line gets a verse number and its words, every time it lands: "V1 Get
+/// Down" wherever that line comes round. The number says which line of the
+/// record this is without having to read it, and the words say which line it
+/// is at a glance — a CDJ-3000X shows the whole comment, so there is no reason
+/// to make somebody remember what V1 was.
 ///
 /// `kept` is the folded, time-ordered list [`assemble`] works from.
 fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) -> Vec<Cue> {
@@ -316,13 +302,24 @@ fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) ->
             }
             _ => match candidate.label.as_deref() {
                 Some(text) => {
-                    match lines.iter().position(|seen| crate::transcribe::same_line(seen, text)) {
-                        Some(at) => format!("V{}", at + 1),
+                    // Numbered by the line it is, not by how many have been
+                    // seen: a line that comes round four times is V1 all four
+                    // times, and the one after it is V2 rather than V5.
+                    let at = match lines
+                        .iter()
+                        .position(|seen| crate::transcribe::same_line(seen, text))
+                    {
+                        Some(at) => at,
                         None => {
                             lines.push(text.to_string());
-                            format!("V{} {}", lines.len(), opening(text))
+                            lines.len() - 1
                         }
-                    }
+                    };
+                    // The words every time, not only the first. A player with
+                    // room for them is a player that should show them, and
+                    // "V1" on its own asks somebody in a booth to remember
+                    // what V1 was.
+                    format!("V{} {}", at + 1, lines[at])
                 }
                 // A voice the mix found and the words did not. Numbered on its
                 // own, because calling it V1 would claim it is a line that has
@@ -736,10 +733,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sung_line_is_named_once_and_numbered_ever_after() {
+    fn a_sung_line_is_named_wherever_it_lands_and_keeps_its_number() {
         // What a player shows while a track is loaded is the comment on the
-        // marker. The words are worth reading the first time the line lands;
-        // after that the number is what says where in the record you are.
+        // marker, and a CDJ-3000X shows the whole of it. So every landing says
+        // which line it is and what the line was, and the number stays with
+        // the line rather than counting the landings.
         let words = crate::transcribe::Transcript {
             lines: vec![
                 line(30_000, "get down"),
@@ -754,11 +752,14 @@ mod tests {
 
         let marks = marks(&assemble(0, None, candidates));
         assert_eq!(marks[0], "Start");
-        assert!(marks.contains(&"V1 get down".to_string()), "{marks:?}");
         assert_eq!(
-            marks.iter().filter(|mark| *mark == "V1").count(),
-            2,
-            "the repeats should carry the number alone: {marks:?}"
+            marks.iter().filter(|mark| *mark == "V1 get down").count(),
+            3,
+            "every landing of the line should say which line it is: {marks:?}"
+        );
+        assert!(
+            !marks.iter().any(|mark| *mark == "V1"),
+            "a number with no words asks somebody in a booth to remember: {marks:?}"
         );
         assert!(
             marks.iter().any(|mark| mark.starts_with("V2 ")),
@@ -767,10 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn a_verse_marker_carries_the_start_of_the_line_and_not_the_whole_of_it() {
-        // What the player shows is one line of a small screen beside the
-        // number, the artist and the title. A whole sung phrase there arrives
-        // with its end cut off, which reads as a fault rather than a label.
+    fn a_verse_marker_carries_the_whole_line() {
         let words = crate::transcribe::Transcript {
             lines: vec![
                 line(30_000, "everybody in the room put your hands up"),
@@ -781,10 +779,33 @@ mod tests {
         candidates.extend(words.moments().iter().map(from_moment));
 
         let marks = marks(&assemble(0, None, candidates));
-        assert!(marks.contains(&"V1 everybody in".to_string()), "{marks:?}");
         assert!(
-            !marks.iter().any(|mark| mark.contains("hands up")),
-            "the whole line should not be on the marker: {marks:?}"
+            marks.iter().all(|mark| !mark.starts_with('V')
+                || mark == "V1 everybody in the room put your hands up"),
+            "{marks:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_the_recogniser_wrote_two_ways_is_labelled_one_way() {
+        // Close enough to be the same line is close enough to carry the same
+        // marker: two spellings of one hook read as two hooks in a booth.
+        let words = crate::transcribe::Transcript {
+            lines: vec![
+                line(30_000, "hold me closer now"),
+                line(90_000, "hold me closer, now"),
+                line(150_000, "hold me closer now"),
+            ],
+        };
+        let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let marks = marks(&assemble(0, None, candidates));
+        let verses: Vec<&String> = marks.iter().filter(|mark| mark.starts_with('V')).collect();
+        assert!(verses.len() >= 2, "{marks:?}");
+        assert!(
+            verses.iter().all(|mark| *mark == verses[0]),
+            "one line should read one way: {verses:?}"
         );
     }
 

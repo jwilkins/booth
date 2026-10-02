@@ -591,7 +591,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
     // help would sit over the thing being placed.
     let response = match hovering_a_cue.filter(|_| held.is_none()).and_then(|at| wave.cues.get(at))
     {
-        Some(cue) => response.on_hover_text(cue_help(cue, wave.cues)),
+        Some(cue) => response.on_hover_text(cue_help(cue)),
         None => response,
     };
 
@@ -864,47 +864,20 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
 /// the thing worth reading — "Drop 2", "V1 Get Down" — and the only place it
 /// fits is here.
 ///
-/// `among` is the rest of the track's cues, for the verse numbers below.
-fn cue_help(cue: &CueMark, among: &[CueMark]) -> String {
+/// It does not add that a memory cue is a memory cue. The marker already says
+/// so: it hangs off the bottom edge where a hot cue hangs off the top, and it
+/// carries a dot where a hot cue carries its letter. A hot cue's letter is
+/// repeated because that is the button that gets pressed.
+fn cue_help(cue: &CueMark) -> String {
     let at = crate::app::time_text(cue.time_ms);
-    let what = match cue.letter {
-        0 => "memory cue".to_string(),
-        _ => format!("hot cue {}", cue.name()),
-    };
     let label = cue.label.trim();
-    if label.is_empty() {
-        return format!("{what} \u{2014} {at}");
+    match (label.is_empty(), cue.letter) {
+        // Nothing else to go on, so what it is is all there is to say.
+        (true, 0) => format!("memory cue \u{2014} {at}"),
+        (true, _) => format!("hot cue {} \u{2014} {at}", cue.name()),
+        (false, 0) => format!("{label} \u{2014} {at}"),
+        (false, _) => format!("{label} \u{2014} hot cue {}, {at}", cue.name()),
     }
-    match verse_words(label, among) {
-        Some(words) => format!("{label} {words} \u{2014} {what}, {at}"),
-        None => format!("{label} \u{2014} {what}, {at}"),
-    }
-}
-
-/// The words a bare verse number stands for.
-///
-/// A line that has already been named carries its number alone every time it
-/// comes back, which is right for the marker — a player shows that comment on
-/// one line of a small screen, and the line is known by the second time round.
-/// It is useless as hover help, though: "V1" is the one thing the pointer
-/// resting on it does not need to be told, since the marker is already there.
-///
-/// So the words are read back off the cue that named them, which is on the
-/// same track. Nothing is stored twice, and this cannot disagree with the
-/// numbering because it is reading the numbering's own answer. `None` when
-/// the label is not a bare verse number, or when the cue that named the line
-/// is not there — a first landing that sat on the start never got a marker.
-fn verse_words(label: &str, among: &[CueMark]) -> Option<String> {
-    let number = label.strip_prefix('V')?;
-    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let named = format!("V{number} ");
-    among
-        .iter()
-        .find_map(|cue| cue.label.trim().strip_prefix(&named).map(str::trim))
-        .filter(|words| !words.is_empty())
-        .map(str::to_string)
 }
 
 /// What the phrase strip was used for this frame.
@@ -1434,49 +1407,26 @@ mod tests {
     fn what_resting_on_a_cue_says_is_what_the_marker_has_no_room_for() {
         // The marker is a letter or a dot. "V1 Get Down" is the thing worth
         // reading and the one thing it cannot show.
-        let hook = cue_help(&marked(0, 62_500, "V1 Get Down"), &[]);
-        assert!(hook.starts_with("V1 Get Down"), "{hook}");
-        assert!(hook.contains("memory cue"), "{hook}");
-        assert!(hook.contains("1:02.50"), "and where it is: {hook}");
+        let hook = cue_help(&marked(0, 62_500, "V1 Get Down"));
+        assert_eq!(hook, "V1 Get Down \u{2014} 1:02.50");
 
         // A hot cue says which button it is, since that is what gets pressed.
-        let hot = cue_help(&marked(2, 1_000, "Drop 1"), &[]);
+        let hot = cue_help(&marked(2, 1_000, "Drop 1"));
         assert!(hot.contains("hot cue B"), "{hot}");
 
         // And one nobody named still says what it is rather than nothing.
-        let bare = cue_help(&marked(0, 0, "   "), &[]);
+        let bare = cue_help(&marked(0, 0, "   "));
         assert!(bare.starts_with("memory cue"), "{bare}");
     }
 
     #[test]
-    fn a_verse_coming_round_again_says_which_verse_it_is() {
-        // The marker on a repeat is the number alone, which is what a player
-        // has room for. Hovering it to be told "V1" is being told the one
-        // thing already on screen.
-        let track = [
-            marked(0, 40_000, "V1 Get Down"),
-            marked(0, 100_000, "V1"),
-            marked(0, 130_000, "Drop 2"),
-        ];
-        let repeat = cue_help(&track[1], &track);
-        assert!(repeat.starts_with("V1 Get Down"), "{repeat}");
-        assert!(repeat.contains("1:40.00"), "at its own time, not the first one's: {repeat}");
-    }
-
-    #[test]
-    fn a_marker_that_is_not_a_verse_number_is_left_as_it_is() {
-        let track = [marked(0, 40_000, "V1 Get Down"), marked(0, 80_000, "Vocal 2")];
-        let other = cue_help(&track[1], &track);
-        assert!(other.starts_with("Vocal 2 \u{2014}"), "{other}");
-    }
-
-    #[test]
-    fn a_verse_whose_first_landing_was_never_marked_says_what_it_can() {
-        // A line that first lands on the track start takes no marker of its
-        // own: the start already has one. There is then nothing to read the
-        // words back off, and the number alone is the honest answer.
-        let track = [marked(0, 100_000, "V1")];
-        assert!(cue_help(&track[0], &track).starts_with("V1 \u{2014}"));
+    fn a_memory_cue_is_not_told_it_is_a_memory_cue() {
+        // The marker already says so: it hangs off the bottom edge and carries
+        // a dot, where a hot cue hangs off the top and carries its letter.
+        let named = cue_help(&marked(0, 100_000, "V1 everybody in the room"));
+        assert!(!named.contains("memory cue"), "{named}");
+        assert!(named.starts_with("V1 everybody in the room"), "{named}");
+        assert!(named.contains("1:40.00"), "{named}");
     }
 
     #[test]

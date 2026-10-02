@@ -10947,6 +10947,37 @@ mod tests {
             }
 
             #[test]
+            fn every_landing_of_a_line_is_marked_with_the_whole_of_it() {
+                // A CDJ-3000X shows the whole comment, so there is no reason
+                // to make somebody in a booth remember what V1 was.
+                let (mut app, id) = sung(
+                    "verses",
+                    &[
+                        (40_100, "everybody in the room"),
+                        (100_100, "everybody in the room"),
+                        (160_100, "everybody in the room"),
+                    ],
+                );
+                app.auto_cue(id);
+                let marks: Vec<String> = app
+                    .library
+                    .get(id)
+                    .unwrap()
+                    .cues
+                    .iter()
+                    .filter(|cue| cue.letter == 0)
+                    .map(|cue| cue.label.clone())
+                    .collect();
+
+                assert_eq!(
+                    marks.iter().filter(|mark| *mark == "V1 everybody in the room").count(),
+                    3,
+                    "{marks:?}"
+                );
+                assert!(!marks.iter().any(|mark| *mark == "V1"), "{marks:?}");
+            }
+
+            #[test]
             fn a_line_said_once_is_not_cued_as_a_hook() {
                 let (mut app, id) = sung(
                     "once",
