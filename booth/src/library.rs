@@ -290,6 +290,51 @@ pub struct Lyric {
     pub text: String,
 }
 
+/// A line the track keeps coming back to, and every time it comes round.
+///
+/// The output of the frequency analysis over a track's words: the lines that
+/// are sung more than once, most repeated first. Which is what tells one
+/// record from another months later — a DJ remembers the line the room sings,
+/// not the file name.
+///
+/// Kept in the collection rather than worked out where it is wanted. Grouping
+/// compares every line against every other, and the two places that show this
+/// redraw sixty times a second.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refrain {
+    /// The wording it was heard with most often.
+    pub text: String,
+    /// Where it comes round, in milliseconds, in time order. Places, not
+    /// hearings: a line sung three times over in one breath lands once.
+    pub at: Vec<u32>,
+    /// How many times it is sung in all, which is not how many places it
+    /// lands. See `booth_cli::transcribe::Refrain::times`.
+    ///
+    /// Zero on a collection stored before the two were told apart; `times`
+    /// falls back to the places, which is what it used to mean.
+    #[serde(default)]
+    pub heard: usize,
+}
+
+impl Refrain {
+    /// How many times it is sung.
+    pub fn times(&self) -> usize {
+        self.heard.max(self.at.len())
+    }
+}
+
+/// What a track's words keep coming back to.
+///
+/// The one place this is worked out, so that the stored answer and the words
+/// it came from cannot mean two different things.
+pub fn refrains_from(lyrics: &[Lyric]) -> Vec<Refrain> {
+    transcript(lyrics)
+        .repeated()
+        .into_iter()
+        .map(|refrain| Refrain { heard: refrain.times(), text: refrain.text, at: refrain.at })
+        .collect()
+}
+
 /// The words as the engine wants them, for finding what repeats in them.
 pub fn transcript(lyrics: &[Lyric]) -> booth_cli::transcribe::Transcript {
     booth_cli::transcribe::Transcript {
@@ -513,6 +558,13 @@ pub struct Track {
     /// different things the inspector is careful to tell apart.
     #[serde(default)]
     pub lyrics: Vec<Lyric>,
+    /// The lines those words keep coming back to, most repeated first.
+    ///
+    /// Worked out from `lyrics` and kept beside them, by [`refrains_from`].
+    /// Rebuilt whenever the words change and filled in on load for a
+    /// collection transcribed before this existed, so the two cannot drift.
+    #[serde(default)]
+    pub refrains: Vec<Refrain>,
     /// Whether those words have been put where the singing actually is.
     ///
     /// Whisper's timing on a stem is wrong in a measurable way — see
@@ -630,6 +682,7 @@ impl Track {
             phrases: Vec::new(),
             cues: Vec::new(),
             lyrics: Vec::new(),
+            refrains: Vec::new(),
             lyrics_aligned: true,
             edited: None,
             loudness_lufs: None,
@@ -1742,7 +1795,16 @@ impl Library {
             return Ok(Self::new());
         }
         let text = std::fs::read_to_string(path)?;
-        let library: Library = serde_json::from_str(&text)?;
+        let mut library: Library = serde_json::from_str(&text)?;
+        // A collection transcribed before the frequency analysis was kept has
+        // the words and not what repeats in them. Worked out here rather than
+        // where it is shown, so nothing downstream has to wonder whether the
+        // track it was handed has been through this.
+        for track in &mut library.tracks {
+            if track.refrains.is_empty() && !track.lyrics.is_empty() {
+                track.refrains = refrains_from(&track.lyrics);
+            }
+        }
         Ok(library)
     }
 
@@ -2831,6 +2893,65 @@ mod tests {
 
         // And one with no words at all is not waiting on anything.
         assert!(Track::placeholder(2).lyrics_aligned);
+    }
+
+    #[test]
+    fn what_a_track_keeps_saying_is_the_lines_it_comes_back_to() {
+        let words = [
+            (0, "walking through the city at night"),
+            (40_000, "hold me closer now"),
+            (100_000, "hold me closer now"),
+            (160_000, "and then home"),
+            (200_000, "hold me closer now"),
+            (260_000, "and then home"),
+        ];
+        let lyrics: Vec<Lyric> = words
+            .iter()
+            .map(|&(start_ms, text)| Lyric {
+                start_ms,
+                end_ms: start_ms + 2_000,
+                text: text.into(),
+            })
+            .collect();
+
+        let refrains = refrains_from(&lyrics);
+        assert_eq!(refrains.len(), 2, "only what repeats: {refrains:?}");
+        assert_eq!(refrains[0].text, "hold me closer now", "most repeated first: {refrains:?}");
+        assert_eq!(refrains[0].times(), 3);
+        assert_eq!(refrains[0].at, vec![40_000, 100_000, 200_000], "and every time it lands");
+        assert_eq!(refrains[1].times(), 2);
+        assert!(
+            !refrains.iter().any(|r| r.text.contains("city")),
+            "a line said once is not something the track keeps saying: {refrains:?}"
+        );
+    }
+
+    #[test]
+    fn a_track_whose_words_were_read_before_this_existed_gets_them_on_load() {
+        // The field is new. A collection transcribed last week has the words
+        // and not what repeats in them, and the panel that shows it should not
+        // have to wonder which it has been handed.
+        let dir = scratch("old-library");
+        let path = dir.join("library.json");
+        let mut library = Library::new();
+        let id = library.add(Path::new("/music/one.flac"));
+        library.get_mut(id).unwrap().lyrics = [40_000, 100_000, 160_000]
+            .into_iter()
+            .map(|start_ms| Lyric { start_ms, end_ms: start_ms + 2_000, text: "get down".into() })
+            .collect();
+        library.save(&path).unwrap();
+
+        // Exactly what an older Booth would have written: the words, and no
+        // mention of the analysis over them.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut stored: serde_json::Value = serde_json::from_str(&text).unwrap();
+        stored["tracks"][0].as_object_mut().unwrap().remove("refrains");
+        std::fs::write(&path, serde_json::to_vec_pretty(&stored).unwrap()).unwrap();
+
+        let back = Library::load(&path).unwrap();
+        let track = back.get(id).unwrap();
+        assert_eq!(track.refrains.len(), 1, "{:?}", track.refrains);
+        assert_eq!(track.refrains[0].times(), 3);
     }
 
     #[test]

@@ -863,15 +863,20 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
 /// The marker itself has room for a letter or a dot. A memory cue's name is
 /// the thing worth reading — "Drop 2", "V1 Get Down" — and the only place it
 /// fits is here.
+///
+/// It does not add that a memory cue is a memory cue. The marker already says
+/// so: it hangs off the bottom edge where a hot cue hangs off the top, and it
+/// carries a dot where a hot cue carries its letter. A hot cue's letter is
+/// repeated because that is the button that gets pressed.
 fn cue_help(cue: &CueMark) -> String {
     let at = crate::app::time_text(cue.time_ms);
-    let what = match cue.letter {
-        0 => "memory cue".to_string(),
-        _ => format!("hot cue {}", cue.name()),
-    };
-    match cue.label.trim().is_empty() {
-        true => format!("{what} \u{2014} {at}"),
-        false => format!("{} \u{2014} {what}, {at}", cue.label.trim()),
+    let label = cue.label.trim();
+    match (label.is_empty(), cue.letter) {
+        // Nothing else to go on, so what it is is all there is to say.
+        (true, 0) => format!("memory cue \u{2014} {at}"),
+        (true, _) => format!("hot cue {} \u{2014} {at}", cue.name()),
+        (false, 0) => format!("{label} \u{2014} {at}"),
+        (false, _) => format!("{label} \u{2014} hot cue {}, {at}", cue.name()),
     }
 }
 
@@ -1403,9 +1408,7 @@ mod tests {
         // The marker is a letter or a dot. "V1 Get Down" is the thing worth
         // reading and the one thing it cannot show.
         let hook = cue_help(&marked(0, 62_500, "V1 Get Down"));
-        assert!(hook.starts_with("V1 Get Down"), "{hook}");
-        assert!(hook.contains("memory cue"), "{hook}");
-        assert!(hook.contains("1:02.50"), "and where it is: {hook}");
+        assert_eq!(hook, "V1 Get Down \u{2014} 1:02.50");
 
         // A hot cue says which button it is, since that is what gets pressed.
         let hot = cue_help(&marked(2, 1_000, "Drop 1"));
@@ -1414,6 +1417,16 @@ mod tests {
         // And one nobody named still says what it is rather than nothing.
         let bare = cue_help(&marked(0, 0, "   "));
         assert!(bare.starts_with("memory cue"), "{bare}");
+    }
+
+    #[test]
+    fn a_memory_cue_is_not_told_it_is_a_memory_cue() {
+        // The marker already says so: it hangs off the bottom edge and carries
+        // a dot, where a hot cue hangs off the top and carries its letter.
+        let named = cue_help(&marked(0, 100_000, "V1 everybody in the room"));
+        assert!(!named.contains("memory cue"), "{named}");
+        assert!(named.starts_with("V1 everybody in the room"), "{named}");
+        assert!(named.contains("1:40.00"), "{named}");
     }
 
     #[test]

@@ -330,6 +330,8 @@ pub struct App {
     /// stem to read. They are waiting on a separation; when it lands, the
     /// recogniser is what happens next.
     want_cues: std::collections::HashSet<u32>,
+    /// A batch of separations waiting to be agreed to. See [`App::stems_sheet`].
+    stems_ahead: Option<StemsAhead>,
     /// Tracks changed here and on the drive since the two last agreed, worked
     /// out when the sync sheet opens rather than every frame: it reads the
     /// stick.
@@ -367,6 +369,20 @@ pub struct App {
 /// A button inside a panel cannot change the collection the panel is reading,
 /// so it records what it wants instead. The alternative is a panel that redraws
 /// half from the old state and half from the new.
+/// A batch of separations that has been asked for but not yet paid for.
+///
+/// Separation is the only job here measured in hours, and the way into it is
+/// often a click that does not mention it: cueing from the words needs an
+/// isolated vocal, so asking for cues on a playlist asks for a separation per
+/// track in it. So the batch is held here and described first.
+struct StemsAhead {
+    /// The tracks that would be separated.
+    tracks: Vec<u32>,
+    /// Whether the stems are wanted for cues rather than for themselves —
+    /// which is the case nobody sees coming, and reads differently.
+    for_cues: bool,
+}
+
 enum Pending {
     Select(u32),
     Forget(u32),
@@ -408,7 +424,12 @@ enum Pending {
     /// The list needs rebuilding in a new order.
     Resort,
     WriteTags(u32),
-    /// Move a cue to a new time, or add one if it is not there yet.
+    /// Go ahead with a batch of separations that has been warned about.
+    SeparateMany {
+        tracks: Vec<u32>,
+        /// Whether the stems are wanted for cues rather than for themselves.
+        for_cues: bool,
+    },
     /// Move the cue at this place in a track's list, which is how a drag on
     /// the waveform names one. See [`App::move_cue`].
     MoveCue {
@@ -681,6 +702,7 @@ impl App {
             remeasured: std::collections::HashSet::new(),
             re_enveloped: std::collections::HashSet::new(),
             want_cues: std::collections::HashSet::new(),
+            stems_ahead: None,
             clashes: Vec::new(),
             settled: std::collections::HashMap::new(),
             drive_now: std::collections::HashMap::new(),
@@ -780,6 +802,11 @@ impl App {
                     app.log.set_level(crate::log::Level::Debug);
                 }
                 "adopt" => app.asking = app.library.tracks.iter().map(|t| t.id).take(3).collect(),
+                "stems" => {
+                    let tracks: Vec<u32> =
+                        app.library.tracks.iter().map(|t| t.id).take(6).collect();
+                    app.stems_ahead = Some(StemsAhead { tracks, for_cues: true });
+                }
                 _ => app.sheet = true,
             }
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
@@ -1832,13 +1859,42 @@ impl App {
         });
     }
 
-    fn render_stems(&mut self) {
-        let waiting = self.acting_on(|track| track.stems.is_empty());
+    /// `again` renders over kits that are already there, which is what to do
+    /// when the model or the quality setting has changed since.
+    fn render_stems(&mut self, again: bool) {
+        let waiting = self.acting_on(|track| again || track.stems.is_empty());
         if waiting.is_empty() {
             self.note("everything showing already has a stem kit", theme::dim());
             return;
         }
-        self.separate_tracks(&waiting);
+        self.separate_or_warn(&waiting, false);
+    }
+
+    /// Start separating these, and cue each one from its words once its vocal
+    /// is there when that is what the stems were for.
+    fn separate_for(&mut self, ids: &[u32], for_cues: bool) {
+        if for_cues {
+            self.want_cues.extend(ids.iter().copied());
+            self.note(
+                format!("rendering stems for {} first", plural(ids.len(), "track")),
+                theme::dim(),
+            );
+        }
+        self.separate_tracks(ids);
+    }
+
+    /// The same, except that a batch says what it will cost before spending it.
+    ///
+    /// One track goes straight through: the note it prints is warning enough
+    /// for a few minutes, and a dialog in front of every record somebody cues
+    /// one at a time would be worse than no dialog at all. More than one is
+    /// where the minutes turn into an afternoon.
+    fn separate_or_warn(&mut self, ids: &[u32], for_cues: bool) {
+        if ids.len() < 2 || !self.config.warn_before_stems {
+            self.separate_for(ids, for_cues);
+            return;
+        }
+        self.stems_ahead = Some(StemsAhead { tracks: ids.to_vec(), for_cues });
     }
 
     // -- cues from the words -----------------------------------------------
@@ -1850,9 +1906,14 @@ impl App {
     /// which is why the words are kept in the collection once they have been
     /// heard — a track whose lyrics are known is re-cued with no job at all.
     ///
+    /// `again` reads the words a second time on tracks that already have
+    /// them, which is what to do when the recogniser, the stems or the
+    /// placing have improved since. Everything else about the pass is the
+    /// same, including rendering a stem for anything that has lost one.
+    ///
     /// Returns whether the collection changed here and now, as opposed to work
     /// having been queued that will change it later.
-    fn auto_cue_tracks(&mut self, ids: &[u32]) -> bool {
+    fn auto_cue_tracks(&mut self, ids: &[u32], again: bool) -> bool {
         // A companion row has no cues of its own; it shows its parent's. So
         // asking for cues on an acapella is asking for them on the record.
         let mut wanted: Vec<u32> = ids.iter().map(|id| crate::library::family(*id)).collect();
@@ -1865,7 +1926,11 @@ impl App {
         let mut rendering = Vec::new();
         for id in wanted {
             let Some(track) = self.library.get(id) else { continue };
-            match (track.lyrics.is_empty(), track.lyrics_aligned, track.stems.vocals.clone()) {
+            // The words are not cleared here. They are replaced when the new
+            // ones arrive, so a re-read that never starts — no recogniser, a
+            // missing file — leaves the track with the words it had.
+            let unread = again || track.lyrics.is_empty();
+            match (unread, track.lyrics_aligned, track.stems.vocals.clone()) {
                 // Words already read and already placed: nothing to wait for.
                 (false, true, _) => known.push(id),
                 // Words read before they were placed against the stem. The
@@ -1912,15 +1977,7 @@ impl App {
             return !known.is_empty();
         }
         if !rendering.is_empty() {
-            self.want_cues.extend(rendering.iter().copied());
-            self.note(
-                format!(
-                    "rendering stems for {} first",
-                    crate::library::plural(rendering.len(), "track")
-                ),
-                theme::dim(),
-            );
-            self.separate_tracks(&rendering);
+            self.separate_or_warn(&rendering, true);
         }
         if !reading.is_empty() {
             self.read_words(reading);
@@ -1997,13 +2054,13 @@ impl App {
         hot
     }
 
-    fn auto_cue_showing(&mut self) {
-        let waiting = self.acting_on(|track| track.lyrics.is_empty());
+    fn auto_cue_showing(&mut self, again: bool) {
+        let waiting = self.acting_on(|track| again || track.lyrics.is_empty());
         if waiting.is_empty() {
             self.note("the words have been read for everything showing", theme::dim());
             return;
         }
-        self.auto_cue_tracks(&waiting);
+        self.auto_cue_tracks(&waiting, again);
     }
 
     fn collect(&mut self) {
@@ -2021,6 +2078,9 @@ impl App {
         // reading is queued once, after the whole batch has been folded in,
         // rather than a job per track as each kit lands.
         let mut to_read: Vec<job::Transcribable> = Vec::new();
+        // Whether anything timed a separation, so the settings are written
+        // once at the end of the batch rather than once per track.
+        let mut paced = false;
 
         for update in updates {
             match update {
@@ -2248,13 +2308,21 @@ impl App {
                     }
                     changed = true;
                 }
-                Update::Separated { id, kit } => {
+                Update::Separated { id, kit, took_secs } => {
                     // Read before it is moved in, because what happens next
                     // depends on whether the part the recogniser needs is
                     // among what was rendered.
                     let vocals = kit.vocals.clone();
+                    let audio = self.library.get(id).map(|track| track.duration_secs);
                     if let Some(track) = self.library.get_mut(id) {
                         track.stems = kit;
+                    }
+                    // So the next batch can say how long it will take. Timed
+                    // here rather than guessed from the hardware, because the
+                    // same track is minutes on a CPU and seconds on a GPU.
+                    if let Some(audio) = audio {
+                        self.config.record_stem_pace(took_secs, audio as f32);
+                        paced = true;
                     }
                     if self.want_cues.remove(&id) {
                         match vocals {
@@ -2279,6 +2347,11 @@ impl App {
                 Update::Transcribed { id, lyrics } => {
                     let heard = lyrics.len();
                     if let Some(track) = self.library.get_mut(id) {
+                        // What repeats in them, worked out here and kept: it
+                        // is shown in two panels that redraw every frame, and
+                        // it is the thing a DJ recognises a record by months
+                        // later.
+                        track.refrains = crate::library::refrains_from(&lyrics);
                         track.lyrics = lyrics;
                         // Both paths that produce this update place the words
                         // against the stem first, so arriving here is what
@@ -2375,6 +2448,11 @@ impl App {
         }
         if !to_read.is_empty() {
             self.read_words(to_read);
+        }
+        if paced {
+            if let Err(e) = self.config.save(&self.config_path) {
+                crate::warn!("could not save what a separation took: {e:#}");
+            }
         }
         if changed {
             self.rebuild();
@@ -3078,6 +3156,9 @@ impl eframe::App for App {
         if !self.incompatible.is_empty() {
             self.compatibility_sheet(ctx);
         }
+        if self.stems_ahead.is_some() {
+            self.stems_sheet(ctx);
+        }
         self.questions_sheet(ctx);
         self.naming_sheet(ctx);
         if self.help {
@@ -3232,6 +3313,36 @@ fn path_label(ui: &mut Ui, path: &std::path::Path, color: egui::Color32) {
 /// title bar — and with it the close button, the only way out — off the top of
 /// the screen, and cuts the bottom off too. Capping the height and scrolling
 /// the body inside it is what keeps a long sheet closable on a small display.
+/// A span of seconds the way somebody waiting for it would say it.
+///
+/// Rounded on purpose. An estimate read off three timed separations does not
+/// know the seconds, and printing them would claim it does.
+fn roughly(secs: f64) -> String {
+    let minutes = (secs / 60.0).round() as u64;
+    match minutes {
+        0 => "under a minute".to_string(),
+        1 => "about a minute".to_string(),
+        m if m < 60 => format!("about {m} minutes"),
+        m => {
+            let hours = match m / 60 {
+                1 => "an hour".to_string(),
+                hours => format!("{hours} hours"),
+            };
+            match m % 60 {
+                0 => format!("about {hours}"),
+                1 => format!("about {hours} and a minute"),
+                left => format!("about {hours} and {left} minutes"),
+            }
+        }
+    }
+}
+
+/// How many of a track's repeated lines the inspector shows.
+///
+/// Enough to recognise a record by and not enough to become the lyric sheet:
+/// past the third, what a line is repeated is no longer what the track is.
+const SAYINGS: usize = 4;
+
 fn sheet_height(ctx: &egui::Context) -> f32 {
     (ctx.content_rect().height() - 72.0).max(240.0)
 }
@@ -3289,6 +3400,10 @@ impl App {
         // waiting on, and dismissing the lot with a keystroke is not one.
         if !self.incompatible.is_empty() {
             self.incompatible.clear();
+            return true;
+        }
+        // Escape is "not now", which is the safe answer: nothing has started.
+        if self.stems_ahead.take().is_some() {
             return true;
         }
         if !self.asking.is_empty() {
@@ -4116,11 +4231,17 @@ impl App {
             if ui.add_enabled(idle, egui::Button::new("Add music…")).clicked() {
                 self.want_pick = Some(Picking::Music);
             }
-            // Shift turns the verb round, the same bargain the Check button
-            // makes further along this strip: one modifier beats a second
-            // button for the same verb. The label follows it rather than only
-            // the hover text, because the two act on different numbers of
-            // tracks and a button has to say what pressing it will do.
+            // Shift turns every verb on this strip round, so that work already
+            // done can be asked for again: one modifier beats five more
+            // buttons. The labels follow it rather than only the hover text,
+            // because each pair acts on a different number of tracks and a
+            // button has to say what pressing it will do.
+            //
+            // Which is the whole of what a selection is for here. Pick the
+            // tracks, hold shift, and the buttons offer them whether or not
+            // they have been through this before — without it, a track that
+            // has been analysed, stemmed or read is simply not counted, and
+            // there was no way to ask for any of it a second time.
             let again = ui.input(|i| i.modifiers.shift);
             let (verb, count) =
                 if again { ("Re-analyse", showing) } else { ("Analyse", unanalysed) };
@@ -4161,38 +4282,78 @@ impl App {
                 }
             }
             let unnamed = self.acting_on(|track| !track.identified).len();
+            let (verb, count) =
+                if again { ("Re-identify", showing) } else { ("Identify", unnamed) };
             if ui
-                .add_enabled(idle && unnamed > 0, egui::Button::new(format!("Identify {unnamed}")))
-                .on_hover_text(
-                    "Fingerprint and look up what these are, filling in the names they lack",
-                )
+                .add_enabled(idle && count > 0, egui::Button::new(format!("{verb} {count}")))
+                .on_hover_text(match again {
+                    true => {
+                        "Fingerprint and look up these again, whatever they are already called"
+                    }
+                    false => {
+                        "Fingerprint and look up what these are, filling in the names they lack \
+                         \u{2014} hold shift to ask again about ones already looked up"
+                    }
+                })
+                .on_disabled_hover_text(match again {
+                    true => "Nothing is showing to identify",
+                    false => "Everything here has been looked up \u{2014} \
+                              hold shift to ask again",
+                })
                 .clicked()
             {
-                self.identify_showing();
+                self.identify_showing(again);
             }
+            let (verb, count) = if again { ("Re-stem", showing) } else { ("Stems", unstemmed) };
             if ui
-                .add_enabled(idle && unstemmed > 0, egui::Button::new(format!("Stems {unstemmed}")))
-                .on_hover_text("Render a vocals/melody/drums kit with demucs")
+                .add_enabled(idle && count > 0, egui::Button::new(format!("{verb} {count}")))
+                .on_hover_text(match again {
+                    true => {
+                        "Render a vocals/melody/drums kit again, replacing the one each track \
+                         has \u{2014} which is what a change of model or quality calls for"
+                    }
+                    false => {
+                        "Render a vocals/melody/drums kit with demucs \u{2014} hold shift to \
+                         render over the kits already there"
+                    }
+                })
+                .on_disabled_hover_text(match again {
+                    true => "Nothing is showing to separate",
+                    false => "Everything here has a kit \u{2014} hold shift to render it again",
+                })
                 .clicked()
             {
-                self.render_stems();
+                self.render_stems(again);
             }
             let unread = self.acting_on(|track| track.lyrics.is_empty()).len();
+            let (verb, count) = if again { ("Re-read", showing) } else { ("Words", unread) };
             if ui
-                .add_enabled(idle && unread > 0, egui::Button::new(format!("Words {unread}")))
-                .on_hover_text(
-                    "Read the vocal stem and cue the hook, the drops and the phrases \u{2014} \
-                     rendering the stems first where there are none",
-                )
-                .on_disabled_hover_text("The words have been read for everything showing")
+                .add_enabled(idle && count > 0, egui::Button::new(format!("{verb} {count}")))
+                .on_hover_text(match again {
+                    true => {
+                        "Read the vocal stem again and re-cue from what it says, replacing the \
+                         words each track is carrying"
+                    }
+                    false => {
+                        "Read the vocal stem and cue the hook, the drops and the phrases \
+                         \u{2014} rendering the stems first where there are none, or hold \
+                         shift to read ones already read again"
+                    }
+                })
+                .on_disabled_hover_text(match again {
+                    true => "Nothing is showing to read",
+                    false => "The words have been read for everything showing \u{2014} \
+                              hold shift to read them again",
+                })
                 .clicked()
             {
-                self.auto_cue_showing();
+                self.auto_cue_showing(again);
             }
             // Reads rather than changes anything, so it sits at the end of the
-            // strip after the three that do. Shift for the thorough version:
-            // one modifier beats a second button for the same verb.
-            let thorough = ui.input(|i| i.modifiers.shift);
+            // strip after the four that do. Shift means the thorough version
+            // here rather than "again", because a check is a read: it is
+            // always done over, and there is nothing it could skip.
+            let thorough = again;
             if ui
                 .add_enabled(idle && showing > 0, egui::Button::new(format!("Check {showing}")))
                 .on_hover_text(match thorough {
@@ -4656,11 +4817,10 @@ impl App {
             // the hook was. Shown because a hook found in a badly heard
             // transcript is a cue in the wrong place, and the only way to know
             // that has happened is to be told what it thinks it heard.
-            let heard = crate::library::transcript(&track.lyrics);
             measurement(
                 ui,
                 "words",
-                &match (track.lyrics.len(), heard.hook()) {
+                &match (track.lyrics.len(), track.refrains.first()) {
                     (0, _) => "not read".to_string(),
                     (lines, Some(hook)) => format!(
                         "{lines} lines \u{b7} {}\u{d7} \u{201c}{}\u{201d}",
@@ -5331,6 +5491,79 @@ impl App {
             }
 
             ui.add_space(14.0);
+            pane_label(ui, "What it keeps saying");
+            // The line the room sings is what a DJ recognises a record by
+            // months later, long after the file name and the artwork have gone
+            // out of their head. It is already measured — the cues are placed
+            // off it — and it was only ever shown one line at a time on a
+            // marker.
+            match (track.lyrics.is_empty(), track.refrains.is_empty()) {
+                (true, _) => ui.label(
+                    RichText::new("the words have not been read")
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                ),
+                (false, true) => ui.label(
+                    RichText::new(format!(
+                        "{} \u{2014} no line comes round twice",
+                        plural(track.lyrics.len(), "line")
+                    ))
+                    .color(theme::dim())
+                    .size(theme::SMALL),
+                ),
+                (false, false) => ui.label(
+                    RichText::new(format!("{} heard", plural(track.lyrics.len(), "line")))
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                ),
+            };
+            for refrain in track.refrains.iter().take(SAYINGS) {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{}\u{d7}", refrain.times()))
+                            .font(theme::mono(10.0))
+                            .color(theme::amber()),
+                    );
+                    // Clickable, because the use for a line you recognise is
+                    // getting to where it lands.
+                    if ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new(&refrain.text)
+                                    .color(theme::text())
+                                    .size(theme::SMALL),
+                            )
+                            .wrap()
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Go to where this line first lands")
+                        .clicked()
+                    {
+                        // Takes the deck with it, the same as clicking a cue:
+                        // a line you half remember is one an ear settles
+                        // faster than an eye.
+                        if let Some(&at) = refrain.at.first() {
+                            self.playhead_ms = Some(at);
+                            self.pending.push(Pending::SeekDeck { id: track.id, time_ms: at });
+                        }
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        refrain
+                            .at
+                            .iter()
+                            .map(|at| time_text(*at))
+                            .collect::<Vec<_>>()
+                            .join(" \u{b7} "),
+                    )
+                    .font(theme::mono(9.5))
+                    .color(theme::dim()),
+                );
+            }
+
+            ui.add_space(14.0);
             pane_label(ui, "Tags");
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
@@ -5574,7 +5807,8 @@ impl App {
                 Pending::Analyze(id) => self.analyze_tracks(&[id]),
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
-                Pending::AutoCue(id) => touched |= self.auto_cue_tracks(&[id]),
+                Pending::SeparateMany { tracks, for_cues } => self.separate_for(&tracks, for_cues),
+                Pending::AutoCue(id) => touched |= self.auto_cue_tracks(&[id], false),
                 Pending::CopyPath(id) => {
                     // A companion's path is its stems, not its parent's file:
                     // copying the mix's path off an acapella row would be a
@@ -5810,8 +6044,10 @@ impl App {
     }
 
     /// Fingerprint whatever showing is still unidentified.
-    fn identify_showing(&mut self) {
-        let waiting = self.acting_on(|track| !track.identified);
+    /// `again` asks about tracks that have been looked up before, which is
+    /// what to do when a lookup got one wrong or the database has moved on.
+    fn identify_showing(&mut self, again: bool) {
+        let waiting = self.acting_on(|track| again || !track.identified);
         if waiting.is_empty() {
             self.note("nothing showing needs identifying", theme::dim());
             return;
@@ -8269,6 +8505,32 @@ impl App {
                         .color(theme::dim())
                         .size(theme::SMALL),
                     );
+                    ui.add_space(8.0);
+                    if ui
+                        .checkbox(
+                            &mut self.config.warn_before_stems,
+                            "Say what a batch will take before starting it",
+                        )
+                        .on_hover_text(
+                            "Separating more than one track says how many and roughly how \
+                             long first. Cueing from the words needs a separation per track, \
+                             which is how an afternoon of it gets started by accident.",
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    if let Some(pace) = self.config.stem_pace {
+                        ui.label(
+                            RichText::new(format!(
+                                "Going by what has been rendered here, a five-minute track takes \
+                                 {}.",
+                                roughly(300.0 * pace as f64)
+                            ))
+                            .color(theme::dim())
+                            .size(theme::SMALL),
+                        );
+                    }
 
                     ui.add_space(14.0);
                     pane_label(ui, "Oldest player a drive must work on");
@@ -8941,6 +9203,152 @@ impl App {
             });
         if !open {
             self.incompatible.clear();
+        }
+    }
+
+    /// What a batch of separations will cost, before it is spent.
+    ///
+    /// The number worth knowing is the time, so that is what this leads with,
+    /// measured from what this machine has actually managed rather than from
+    /// anything about the hardware. Until it has managed one there is no
+    /// estimate and the sheet says so, which is better than a number made up.
+    fn stems_sheet(&mut self, ctx: &egui::Context) {
+        let Some(ahead) = &self.stems_ahead else { return };
+        let (tracks, for_cues) = (ahead.tracks.clone(), ahead.for_cues);
+        let named: Vec<String> = tracks
+            .iter()
+            .filter_map(|id| self.library.get(*id))
+            .map(|track| format!("{} \u{2014} {}", track.artist, track.display_title()))
+            .collect();
+        let audio: f64 =
+            tracks.iter().filter_map(|id| self.library.get(*id)).map(|t| t.duration_secs).sum();
+        let estimate = self.config.stem_estimate(audio);
+
+        let mut open = true;
+        let mut go = false;
+        let mut not_now = false;
+        let mut stop_asking = false;
+        egui::Window::new(format!("Stems for {} first", plural(tracks.len(), "track")))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(600.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                if for_cues {
+                    ui.label(
+                        RichText::new(
+                            "Cueing from the words means reading them off an isolated vocal, \
+                             and none of these have one yet. So the words come after a \
+                             separation each \u{2014} which is the slow part of this program, \
+                             and the part nothing else here waits on.",
+                        )
+                        .color(theme::text())
+                        .size(theme::SMALL),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(
+                            "Separation is the slow part of this program. A kit is rendered \
+                             once and then played for years, so it is worth doing \u{2014} but \
+                             it is worth knowing what it costs first.",
+                        )
+                        .color(theme::text())
+                        .size(theme::SMALL),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{}, {} of music. {}",
+                        plural(tracks.len(), "track"),
+                        roughly(audio),
+                        match estimate {
+                            Some(taking) => format!(
+                                "About {} at the rate this machine has been managing.",
+                                roughly(taking.as_secs_f64())
+                            ),
+                            None => "Nothing has been separated here yet, so there is no \
+                                     estimate \u{2014} reckon on minutes a track without a GPU."
+                                .to_string(),
+                        }
+                    ))
+                    .color(theme::amber())
+                    .size(theme::SMALL),
+                );
+                if for_cues {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "Paid once per track: the words are kept once they have been read, \
+                             and cueing from them again after that costs nothing.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+                }
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    for name in &named {
+                        ui.label(RichText::new(name).color(theme::dim()).size(theme::SMALL));
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(theme::label_text("Render stems"))
+                                    .size(11.0)
+                                    .color(theme::booth())
+                                    .strong(),
+                            )
+                            .fill(theme::amber()),
+                        )
+                        .on_hover_text(
+                            "Starts separating. It runs a track at a time in the background \
+                             and each kit is usable as soon as it is done; the job can be \
+                             stopped from the bar at the bottom.",
+                        )
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if ui
+                        .button("Not now")
+                        .on_hover_text("Nothing is rendered and nothing is changed.")
+                        .clicked()
+                    {
+                        not_now = true;
+                    }
+                    if ui
+                        .checkbox(&mut stop_asking, "Stop asking")
+                        .on_hover_text(
+                            "Separations start without this sheet from now on. Settings puts \
+                             it back.",
+                        )
+                        .changed()
+                    {
+                        // Only the setting. Whether this batch runs is still
+                        // the question on screen, and answering a different
+                        // one with a checkbox would be a trap.
+                        self.config.warn_before_stems = false;
+                        if let Err(e) = self.config.save(&self.config_path) {
+                            crate::warn!("could not save the settings: {e:#}");
+                        }
+                    }
+                });
+            });
+
+        if go {
+            self.pending.push(Pending::SeparateMany { tracks, for_cues });
+        }
+        if go || not_now || !open {
+            self.stems_ahead = None;
         }
     }
 
@@ -10022,6 +10430,27 @@ mod tests {
         }
     }
 
+    /// How long a wait is described as, for the sheet that says what a batch
+    /// of separations will cost.
+    mod saying_how_long {
+        use super::*;
+
+        #[test]
+        fn a_short_wait_is_not_described_in_seconds_it_does_not_know() {
+            assert_eq!(roughly(20.0), "under a minute");
+            assert_eq!(roughly(64.0), "about a minute");
+            assert_eq!(roughly(7.0 * 60.0), "about 7 minutes");
+        }
+
+        #[test]
+        fn an_hour_is_an_hour_rather_than_sixty_minutes() {
+            assert_eq!(roughly(3_600.0), "about an hour");
+            assert_eq!(roughly(3_600.0 + 20.0 * 60.0), "about an hour and 20 minutes");
+            assert_eq!(roughly(3.0 * 3_600.0), "about 3 hours");
+            assert_eq!(roughly(2.0 * 3_600.0 + 60.0), "about 2 hours and a minute");
+        }
+    }
+
     /// Driving the sidebar the way a person does: click, type, press a key,
     /// and see what the collection holds afterwards.
     ///
@@ -10462,6 +10891,17 @@ mod tests {
                 let path = app.library_path.with_file_name("track.flac");
                 std::fs::write(&path, b"not really a flac").unwrap();
 
+                // A recogniser, as far as these tests are concerned. Whether
+                // one is installed on the machine running them is not what any
+                // of them is about, and reading that from the environment is
+                // exactly how two tests that had been green for a week went
+                // red without a line of the code under test changing — see
+                // `config::Whisper::chosen`. Left to itself this passes on a
+                // developer's machine, where the session-start hook exports
+                // BOOTH_WHISPER_MODEL, and fails in CI, where it does not.
+                app.config.whisper.program = "whisper-cli".into();
+                app.config.whisper.model = "/not-really/base.en.bin".into();
+
                 let id = app.library.add(&path);
                 let track = app.library.get_mut(id).unwrap();
                 track.bpm = 120.0;
@@ -10530,19 +10970,133 @@ mod tests {
             }
 
             #[test]
-            fn a_line_said_once_is_not_cued_as_a_hook() {
+            fn cueing_a_playlist_with_no_stems_asks_before_spending_the_afternoon() {
+                // The fault: cueing from the words needs an isolated vocal,
+                // so one menu click on a playlist started a separation per
+                // track in it without the word "stems" appearing anywhere.
+                let (mut app, first) = sung("batch-one", &[]);
+                let second = {
+                    let path = app.library_path.with_file_name("second.flac");
+                    std::fs::write(&path, b"not really a flac").unwrap();
+                    app.library.add(&path)
+                };
+                app.rebuild();
+
+                app.auto_cue_tracks(&[first, second], false);
+
+                let ahead = app.stems_ahead.as_ref().expect("the batch started unannounced");
+                assert_eq!(ahead.tracks.len(), 2);
+                assert!(ahead.for_cues, "the stems are for cues, which is what to say");
+                assert!(!app.running(), "nothing should have started yet");
+                assert!(app.want_cues.is_empty(), "nor should anything be queued to follow");
+            }
+
+            #[test]
+            fn reading_the_words_again_goes_back_to_the_recogniser() {
+                // Without this a track that has already been read is re-cued
+                // from the words it is carrying, which is the right answer
+                // right up until the recogniser or the placing has improved —
+                // and then it is the one answer that cannot be got past.
+                let (mut app, id) = sung("re-read", &[(40_100, "get down")]);
+                app.library.get_mut(id).unwrap().stems.vocals =
+                    Some(app.library_path.with_file_name("track-vocals.wav"));
+                app.rebuild();
+
+                assert!(
+                    app.auto_cue_tracks(&[id], false),
+                    "the words it has should be cued without a job"
+                );
+                assert!(!app.running(), "nothing should have been queued for that");
+
+                app.auto_cue_tracks(&[id], true);
+                assert!(app.running(), "asking again did not go back to the recogniser");
+                // And the words it had are still there until new ones arrive,
+                // so a read that cannot start has cost nothing.
+                assert_eq!(app.library.get(id).unwrap().lyrics.len(), 1);
+            }
+
+            #[test]
+            fn one_track_is_not_worth_a_dialog() {
+                // A few minutes, asked for by clicking on one record. A sheet
+                // in front of every one of those is worse than no sheet.
+                let (mut app, id) = sung("single", &[]);
+                app.auto_cue_tracks(&[id], false);
+                assert!(app.stems_ahead.is_none());
+            }
+
+            #[test]
+            fn the_warning_can_be_turned_off_and_then_the_batch_just_runs() {
+                let (mut app, first) = sung("unasked", &[]);
+                let second = {
+                    let path = app.library_path.with_file_name("second.flac");
+                    std::fs::write(&path, b"not really a flac").unwrap();
+                    app.library.add(&path)
+                };
+                app.rebuild();
+                app.config.warn_before_stems = false;
+
+                app.auto_cue_tracks(&[first, second], false);
+                assert!(app.stems_ahead.is_none());
+                assert_eq!(app.want_cues.len(), 2, "both should be cued once their stems land");
+            }
+
+            #[test]
+            fn every_landing_of_a_line_is_marked_with_the_whole_of_it() {
+                // A CDJ-3000X shows the whole comment, so there is no reason
+                // to make somebody in a booth remember what V1 was.
+                let (mut app, id) = sung(
+                    "verses",
+                    &[
+                        (40_100, "everybody in the room"),
+                        (100_100, "everybody in the room"),
+                        (160_100, "everybody in the room"),
+                    ],
+                );
+                app.auto_cue(id);
+                let marks: Vec<String> = app
+                    .library
+                    .get(id)
+                    .unwrap()
+                    .cues
+                    .iter()
+                    .filter(|cue| cue.letter == 0)
+                    .map(|cue| cue.label.clone())
+                    .collect();
+
+                assert_eq!(
+                    marks.iter().filter(|mark| *mark == "V1 everybody in the room").count(),
+                    3,
+                    "{marks:?}"
+                );
+                assert!(!marks.iter().any(|mark| *mark == "V1"), "{marks:?}");
+            }
+
+            #[test]
+            fn a_line_said_once_is_cued_as_itself_and_not_as_the_hook() {
+                // It takes a spare button, because a track that repeats
+                // nothing has nothing better to put there — but not the
+                // hook's colour, which on a waveform is a promise that the
+                // room is about to sing.
+                use booth_cli::analysis::cues::Reason;
                 let (mut app, id) = sung(
                     "once",
                     &[(20_000, "walking through the city at night"), (60_000, "and then home")],
                 );
                 app.auto_cue(id);
-                let placed = labels(&app, id);
-                assert!(
-                    placed.iter().all(|label| !label.contains("city")),
-                    "a line nobody repeats is not a hook: {placed:?}"
+
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let line = cues
+                    .iter()
+                    .find(|cue| cue.letter != 0 && cue.label.contains("city"))
+                    .unwrap_or_else(|| panic!("the only words on the track went uncued: {cues:?}"));
+                let hook = Reason::Hook.color();
+                assert_ne!(
+                    line.color,
+                    [hook.r, hook.g, hook.b],
+                    "a line nobody repeats is not the hook: {line:?}"
                 );
-                // The voice arriving is still worth a cue.
-                assert!(placed.iter().any(|label| label == "vocal"), "{placed:?}");
+                let expected = Reason::Line.color();
+                assert_eq!(line.color, [expected.r, expected.g, expected.b]);
             }
 
             #[test]
@@ -10624,7 +11178,7 @@ mod tests {
                     &[(40_100, "hold me closer now"), (100_100, "hold me closer now")],
                 );
                 let acapella = crate::library::companion_id(id, Role::Vocals);
-                assert!(app.auto_cue_tracks(&[acapella]), "the row did nothing");
+                assert!(app.auto_cue_tracks(&[acapella], false), "the row did nothing");
 
                 let placed = labels(&app, id);
                 assert!(placed.iter().any(|label| label == "hold me closer now"), "{placed:?}");
@@ -10635,7 +11189,7 @@ mod tests {
                 let (mut app, id) = sung("render", &[]);
                 app.config.whisper.model = "/models/ggml-base.en.bin".into();
 
-                assert!(!app.auto_cue_tracks(&[id]), "nothing can be cued yet");
+                assert!(!app.auto_cue_tracks(&[id], false), "nothing can be cued yet");
                 assert!(
                     app.want_cues.contains(&id),
                     "the track was not remembered, so its words will never be read"
@@ -10767,6 +11321,41 @@ mod tests {
             assert!(
                 harness.state().query.terms.iter().all(|t| t.test != crate::query::Test::Invalid),
                 "and it has to be a query, not just text"
+            );
+        }
+
+        #[test]
+        fn the_sheet_warning_about_stems_says_the_cost_and_starts_the_batch() {
+            let mut app = app("stems-sheet");
+            let mut ids = Vec::new();
+            for name in ["one.flac", "two.flac"] {
+                let path = app.library_path.with_file_name(name);
+                std::fs::write(&path, b"not really a flac").unwrap();
+                let id = app.library.add(&path);
+                app.library.get_mut(id).unwrap().duration_secs = 300.0;
+                ids.push(id);
+            }
+            app.rebuild();
+            // Half of real time, measured over the separations before this
+            // one: ten minutes of music is five minutes of work.
+            app.config.stem_pace = Some(0.5);
+            app.stems_ahead = Some(StemsAhead { tracks: ids, for_cues: true });
+
+            let mut harness = Harness::new_state(|ctx, app: &mut App| app.stems_sheet(ctx), app);
+            harness.run();
+            harness.get_by_label_contains("about 5 minutes");
+
+            harness.get_by_label(&theme::label_text("Render stems")).click();
+            harness.run();
+
+            assert!(harness.state().stems_ahead.is_none(), "the sheet went unanswered");
+            assert!(
+                matches!(
+                    harness.state().pending.first(),
+                    Some(Pending::SeparateMany { for_cues: true, .. })
+                ),
+                "agreeing to it should start the batch: {:?}",
+                harness.state().pending.len()
             );
         }
 
@@ -11577,6 +12166,112 @@ mod tests {
             harness.input_mut().modifiers = egui::Modifiers::SHIFT;
             harness.run();
             harness.get_by_label(&format!("Re-analyse {}", showing.len()));
+        }
+
+        #[test]
+        fn the_panel_says_what_the_track_keeps_coming_back_to() {
+            // The thing a DJ actually recognises a record by. It was already
+            // measured — the cues are placed off it — and until now it was
+            // only ever shown one line at a time on a marker.
+            let mut app = listing("sayings", 2);
+            let id = app.library.tracks[0].id;
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.lyrics = [40_000, 100_000, 160_000]
+                    .into_iter()
+                    .map(|start_ms| crate::library::Lyric {
+                        start_ms,
+                        end_ms: start_ms + 2_000,
+                        text: "hold me closer now".into(),
+                    })
+                    .collect();
+                track.refrains = crate::library::refrains_from(&track.lyrics.clone());
+            }
+            app.selected = Some(id);
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+            harness.get_by_label_contains("hold me closer now");
+            // How many times, which is the whole of the analysis.
+            harness.get_by_label_contains("3\u{d7}");
+            // And where, so a line half remembered can be gone to.
+            harness.get_by_label_contains("0:40.00");
+        }
+
+        #[test]
+        fn a_track_nobody_has_read_the_words_of_says_so_rather_than_nothing() {
+            // An empty section reads as a feature that is broken. The three
+            // cases are different answers and the panel tells them apart.
+            let mut app = listing("unread", 2);
+            app.selected = Some(app.library.tracks[0].id);
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+            harness.get_by_label_contains("the words have not been read");
+        }
+
+        #[test]
+        fn shift_turns_every_verb_on_the_strip_round_not_only_analyse() {
+            // The case this exists for: a few tracks picked out of a library
+            // that has already been through everything, and one of the
+            // processes has improved since. Without it those tracks are simply
+            // not counted — "Stems 0", greyed out — and there was no way to
+            // ask for any of it a second time but one right-click per row.
+            let mut app = listing("re-everything", 5);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                let track = app.library.get_mut(id).unwrap();
+                track.analyzed = true;
+                track.identified = true;
+                track.stems.vocals = Some("/stems/vocals.wav".into());
+                track.lyrics = vec![crate::library::Lyric {
+                    start_ms: 0,
+                    end_ms: 900,
+                    text: "get down".into(),
+                }];
+            }
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+            for nothing in ["Analyse 0", "Identify 0", "Stems 0", "Words 0"] {
+                harness.get_by_label(nothing);
+            }
+
+            harness.input_mut().modifiers = egui::Modifiers::SHIFT;
+            harness.run();
+            harness.run();
+            for every in ["Re-analyse 5", "Re-identify 5", "Re-stem 5", "Re-read 5"] {
+                harness.get_by_label(every);
+            }
+        }
+
+        #[test]
+        fn a_selection_is_what_the_turned_round_verbs_act_on() {
+            // Which is the whole point of picking tracks out: the count on the
+            // button is the selection, not the library behind it.
+            let mut app = listing("re-selection", 8);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                let track = app.library.get_mut(id).unwrap();
+                track.analyzed = true;
+                track.identified = true;
+                track.stems.vocals = Some("/stems/vocals.wav".into());
+            }
+            app.rebuild();
+            app.marked = app.library.tracks.iter().take(3).map(|t| t.id).collect();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+            harness.input_mut().modifiers = egui::Modifiers::SHIFT;
+            harness.run();
+            harness.run();
+            harness.get_by_label("Re-stem 3");
+            harness.get_by_label("Re-identify 3");
+            assert!(
+                harness.query_by_label("Re-stem 8").is_none(),
+                "the batch reached past the selection"
+            );
         }
 
         #[test]

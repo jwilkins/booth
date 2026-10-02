@@ -383,6 +383,23 @@ pub struct Config {
     pub counting: Counting,
     /// How much work a separation is worth.
     pub stem_quality: Quality,
+    /// Whether a batch of separations says what it will cost before it starts.
+    ///
+    /// On, because the expensive job is also the one asked for by accident:
+    /// cueing from the words needs an isolated vocal, so a playlist with no
+    /// stems rendered turns one menu click into hours of separation without
+    /// the word "stems" appearing anywhere.
+    #[serde(default = "yes")]
+    pub warn_before_stems: bool,
+    /// How long a separation takes here, in seconds of work per second of
+    /// audio.
+    ///
+    /// Measured rather than set: the same track is minutes on a laptop's CPU
+    /// and seconds on a GPU, so the only honest estimate is what this machine
+    /// has just done. `None` means nothing has been timed here yet, and the
+    /// warning says so rather than inventing a number.
+    #[serde(default)]
+    pub stem_pace: Option<f32>,
     /// Whether analysis also fingerprints a track and looks up what it is.
     pub identify: bool,
     /// AcoustID API key. Free from https://acoustid.org/new-application.
@@ -429,11 +446,6 @@ pub struct Config {
     /// not silently repaint somebody's window into a different one.
     #[serde(default = "default_theme")]
     pub theme: String,
-    /// Where a CDJ-3000 emulator is listening for machine-protocol calls.
-    ///
-    /// Its first instance is 4445 and each further one is a port along, so
-    /// this is what to change when the emulator in front of you is a second
-    /// one. Only used by "send to the emulator"; nothing connects on its own.
     /// How long the pointer has to rest on a control before its help appears,
     /// in milliseconds.
     ///
@@ -454,6 +466,11 @@ pub struct Config {
     /// is a library that passed every check and will not load.
     #[serde(default)]
     pub oldest_player: booth_cli::compat::Player,
+    /// Where a CDJ-3000 emulator is listening for machine-protocol calls.
+    ///
+    /// Its first instance is 4445 and each further one is a port along, so
+    /// this is what to change when the emulator in front of you is a second
+    /// one. Only used by "send to the emulator"; nothing connects on its own.
     #[serde(default = "default_emulator_port")]
     pub emulator_port: u16,
     /// Whether a drive is copied when it is written or plugged in.
@@ -661,6 +678,27 @@ impl WriteTags {
     }
 }
 
+/// What one timed separation makes of the pace so far.
+///
+/// A running average weighted towards the last few rather than a mean over
+/// everything, so that moving a laptop onto its GPU, or off battery, shows up
+/// within a handful of tracks instead of being averaged away over a library.
+/// `None` out means the measurement said nothing usable and the stored pace
+/// should stand.
+fn folded(previous: Option<f32>, took_secs: f32, audio_secs: f32) -> Option<f32> {
+    if !took_secs.is_finite() || !audio_secs.is_finite() || took_secs <= 0.0 || audio_secs <= 0.0 {
+        return None;
+    }
+    let measured = took_secs / audio_secs;
+    Some(match previous {
+        Some(pace) if pace > 0.0 => pace * (1.0 - PACE_WEIGHT) + measured * PACE_WEIGHT,
+        _ => measured,
+    })
+}
+
+/// How much of the pace one fresh measurement is allowed to be.
+const PACE_WEIGHT: f32 = 0.3;
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -676,6 +714,8 @@ impl Default for Config {
             length: Length::default(),
             counting: Counting::default(),
             stem_quality: Quality::default(),
+            warn_before_stems: true,
+            stem_pace: None,
             identify: true,
             acoustid_key: String::new(),
             // High, because the cost of being wrong is a library that quietly
@@ -732,6 +772,20 @@ impl Config {
 
     pub fn path() -> PathBuf {
         data_dir().join("config.json")
+    }
+
+    /// Fold one timed separation into what this machine is known to manage.
+    pub fn record_stem_pace(&mut self, took_secs: f32, audio_secs: f32) {
+        if let Some(pace) = folded(self.stem_pace, took_secs, audio_secs) {
+            self.stem_pace = Some(pace);
+        }
+    }
+
+    /// How long separating this much audio should take here, if anything has
+    /// been timed here to say.
+    pub fn stem_estimate(&self, audio_secs: f64) -> Option<std::time::Duration> {
+        let pace = self.stem_pace.filter(|pace| *pace > 0.0)? as f64;
+        Some(std::time::Duration::from_secs_f64((audio_secs * pace).max(0.0)))
     }
 
     /// Read the settings, or the defaults if there are none yet.
@@ -897,6 +951,37 @@ fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_separation_timed_is_the_pace() {
+        assert_eq!(folded(None, 120.0, 240.0), Some(0.5));
+    }
+
+    #[test]
+    fn a_later_separation_moves_the_pace_towards_itself_without_replacing_it() {
+        let pace = folded(Some(1.0), 120.0, 240.0).unwrap();
+        assert!(pace > 0.5 && pace < 1.0, "one measurement took over: {pace}");
+        assert!((pace - 0.85).abs() < 0.001, "{pace}");
+    }
+
+    #[test]
+    fn a_measurement_of_nothing_leaves_the_pace_alone() {
+        assert_eq!(folded(Some(2.0), 0.0, 240.0), None);
+        assert_eq!(folded(Some(2.0), 120.0, 0.0), None);
+        assert_eq!(folded(Some(2.0), f32::NAN, 240.0), None);
+    }
+
+    #[test]
+    fn nothing_timed_yet_means_no_estimate_rather_than_a_guess() {
+        let config = Config { stem_pace: None, ..Config::default() };
+        assert_eq!(config.stem_estimate(600.0), None);
+    }
+
+    #[test]
+    fn an_estimate_is_the_pace_over_the_audio() {
+        let config = Config { stem_pace: Some(0.5), ..Config::default() };
+        assert_eq!(config.stem_estimate(600.0), Some(std::time::Duration::from_secs(300)));
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("booth-cfg-{name}-{}", std::process::id()));

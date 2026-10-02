@@ -161,14 +161,24 @@ is different for a first pass and a re-run. Re-analysing is the same code path
 as analysing — there is no separate re-do, which is how the two would come to
 disagree.
 
-**Hold shift and the batch Analyse button becomes Re-analyse**, acting on
-everything showing rather than only the tracks that have never been done. That
-is the button to reach for when what analysis produces has changed — a new
-waveform, a different grid — and every track in the collection is holding an
-answer from the old code. The label changes with the key, not just the hover
-text, because the two act on different numbers of tracks and a button has to
-say what pressing it will do. The query bar still decides what the batch is, so
-narrowing the list narrows the work.
+**Hold shift and every verb on the batch strip turns round**: Analyse becomes
+Re-analyse, Identify becomes Re-identify, Stems becomes Re-stem and Words
+becomes Re-read, each acting on everything showing rather than only the tracks
+that have never been done. That is what to reach for when what one of them
+produces has changed — a new waveform, a different grid, a better recogniser —
+and every track in the collection is holding an answer from the old code.
+Without it a track that has been through a job is simply not counted, so a
+collection that has had everything done to it reads "Stems 0" and offers no way
+to ask again.
+
+The labels change with the key, not just the hover text, because each pair acts
+on a different number of tracks and a button has to say what pressing it will
+do. The disabled hover says so too, which is the case it most needs saying in:
+a finished collection is exactly the one with no enabled button to hover over.
+The query bar still decides what the batch is, so narrowing the list narrows
+the work — and so does picking tracks out, which is most of what a selection is
+for. Check keeps shift for the thorough read it already meant: a check is
+always done over, so there is nothing for it to skip.
 
 Right-clicking does not move the selection, and the menu names the track it will
 act on. A stem companion offers only play and copy-path: it is a file its parent
@@ -781,14 +791,28 @@ lines get a cue at all: the hook, a second line and a tag is already generous,
 and everything past that is a slot taken from a drop.
 
 Around them go **where the singing starts** and **the start of every phrase** the
-arrangement analysis found — intro, build, break, drop, outro. A player holds
-eight hot cues and a busy track offers more than eight moments, so they are
-ranked: the hook outranks even the drop, because a drop can be found by looking
-at the waveform and the line the crowd sings cannot be found by looking at
-anything. The other lines sit below the breakdowns, so the arrangement keeps the
-slots the words give back. Two moments that land on top of each other become one
-cue, and it keeps the words: a drop that is also where a line falls says which
-line.
+arrangement analysis found — intro, build, break, drop, outro.
+
+A player holds eight hot cues and a busy track offers more than eight moments,
+so **the buttons are shared rather than ranked against each other**: four to
+the arrangement, four to the words, and then whatever the other kind did not
+want. They are two different ways of finding your place in a record — the drop
+is where the floor moves and the hook is where the room sings — and ranking
+them together produced sets that were all of one or all of the other. Neither
+share is held open: an instrumental gets all eight for its sections. Within
+each share they are ranked, so the hook takes the words' first slot and the
+drop the arrangement's.
+
+**A track that repeats nothing still comes back cued.** A rap, a live take, a
+record with one verse and no chorus has no hook and no refrains, and its lines
+are what it has, so they fill the spare buttons — in time order, spread through
+the record rather than taken from the front, because four cues in the first
+ninety seconds map a verse and not a track. What nothing was found for stays
+empty: an empty button says "nothing here" and a made-up one says the wrong
+thing in a booth.
+
+Two moments that land on top of each other become one cue, and it keeps the
+words: a drop that is also where a line falls says which line.
 
 Cues from the words are rounded **down** to the beat rather than to the nearest
 one. A sung line rarely starts on the beat — a pickup is the whole point of a

@@ -18,6 +18,11 @@ use super::structure::{Kind, Structure};
 
 /// A player has eight hot cues, A through H.
 const HOT_CUES: usize = 8;
+/// How many of those each kind of cue gets before the other kind may have the
+/// rest. Half each: the arrangement and the words are two different ways of
+/// finding your place in a record, and a set that is all of one of them is
+/// only half a set.
+const SHARE: usize = HOT_CUES / 2;
 /// How long the voice has to keep going before its arrival counts, in seconds.
 /// Shorter than this is a vocal stab, not an entry.
 const MIN_VOCAL_SECONDS: f64 = 1.0;
@@ -38,6 +43,11 @@ pub enum Reason {
     Hook,
     /// Where another line the track keeps coming back to first lands.
     Refrain,
+    /// A line sung once and never again.
+    ///
+    /// Only ever fills a button nothing better wanted — see [`to_the_buttons`]
+    /// — which on a track with no chorus is most of them.
+    Line,
 }
 
 impl Reason {
@@ -49,6 +59,7 @@ impl Reason {
             Reason::Vocal => "vocal",
             Reason::Hook => "hook",
             Reason::Refrain => "refrain",
+            Reason::Line => "line",
         }
     }
 
@@ -65,6 +76,7 @@ impl Reason {
             Reason::Vocal => (0x9a, 0x6b, 0xd4),
             Reason::Hook => (0xe8, 0x3c, 0x9e),
             Reason::Refrain => (0xb4, 0x5c, 0xc8),
+            Reason::Line => (0x74, 0x55, 0xa4),
         };
         Rgb { r, g, b }
     }
@@ -85,6 +97,7 @@ impl Reason {
             Reason::Vocal => 60,
             Reason::Section(Kind::Outro) => 55,
             Reason::Section(Kind::Up) => 50,
+            Reason::Line => 45,
         }
     }
 
@@ -143,6 +156,7 @@ pub fn from_moment(moment: &crate::transcribe::Moment) -> Candidate {
         MomentKind::VocalIn => Reason::Vocal,
         MomentKind::Hook | MomentKind::Return => Reason::Hook,
         MomentKind::Refrain => Reason::Refrain,
+        MomentKind::Line => Reason::Line,
     };
     let candidate = Candidate::named(moment.time_ms, reason, &moment.text);
     match moment.kind {
@@ -230,13 +244,7 @@ pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) 
     }
     kept.retain(|(candidate, _)| !candidate.memory_only);
 
-    if kept.len() > HOT_CUES {
-        kept.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.time_ms.cmp(&b.0.time_ms)));
-        kept.truncate(HOT_CUES);
-        kept.sort_by_key(|(candidate, _)| candidate.time_ms);
-    }
-
-    for (letter, (candidate, _)) in kept.into_iter().enumerate() {
+    for (letter, (candidate, _)) in to_the_buttons(kept).into_iter().enumerate() {
         let color = candidate.reason.color();
         cues.push(
             Cue::hot(letter as u8 + 1, candidate.time_ms)
@@ -245,6 +253,43 @@ pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) 
         );
     }
     cues
+}
+
+/// Which of the candidates get the eight buttons, in time order.
+///
+/// Half to the arrangement and half to the words, and then whatever the other
+/// kind did not want. The two are different ways of finding your place in a
+/// record — the drop is where the floor moves and the hook is where the room
+/// sings — and ranking them against each other produced sets that were all of
+/// one or all of the other: a busy arrangement took every button and left a
+/// track's words uncued, and a wordy record took them all back.
+///
+/// Neither half is held open. A track with nine sections and no words gets
+/// eight sections; an instrumental gets its eight and nothing is left blank
+/// that could have been filled. What *is* left blank is what nothing was found
+/// for, which is the honest answer — an empty button says "nothing here" and a
+/// made-up one says the wrong thing in a booth.
+fn to_the_buttons(kept: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
+    let (mut sections, mut words): (Vec<_>, Vec<_>) =
+        kept.into_iter().partition(|(candidate, _)| candidate.reason.is_section());
+
+    // Best first within each kind, so taking from the front of each takes the
+    // ones worth having. Ties go to the earlier moment.
+    let worth = |a: &(Candidate, u32), b: &(Candidate, u32)| {
+        b.1.cmp(&a.1).then(a.0.time_ms.cmp(&b.0.time_ms))
+    };
+    sections.sort_by(worth);
+    words.sort_by(worth);
+
+    let from_sections = SHARE.max(HOT_CUES.saturating_sub(words.len())).min(sections.len());
+    let from_words = (HOT_CUES - from_sections).min(words.len());
+    sections.truncate(from_sections);
+    words.truncate(from_words);
+
+    let mut out = sections;
+    out.extend(words);
+    out.sort_by_key(|(candidate, _)| candidate.time_ms);
+    out
 }
 
 /// What a section is called on a marker, in the words a DJ uses about a record.
@@ -266,11 +311,11 @@ fn section_word(kind: Kind) -> &'static str {
 /// of them is the whole point: six markers all called "drop" say nothing that
 /// looking at the waveform does not.
 ///
-/// A sung line gets a verse number and its words the first time it lands, and
-/// the number alone every time it comes back: "V1 Get Down", then "V1", "V1".
-/// A player shows a memory cue's comment while the track is loaded, so the
-/// second time round the line is already known and the number is what says
-/// where in the record you are.
+/// A sung line gets a verse number and its words, every time it lands: "V1 Get
+/// Down" wherever that line comes round. The number says which line of the
+/// record this is without having to read it, and the words say which line it
+/// is at a glance — a CDJ-3000X shows the whole comment, so there is no reason
+/// to make somebody remember what V1 was.
 ///
 /// `kept` is the folded, time-ordered list [`assemble`] works from.
 fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) -> Vec<Cue> {
@@ -302,13 +347,24 @@ fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) ->
             }
             _ => match candidate.label.as_deref() {
                 Some(text) => {
-                    match lines.iter().position(|seen| crate::transcribe::same_line(seen, text)) {
-                        Some(at) => format!("V{}", at + 1),
+                    // Numbered by the line it is, not by how many have been
+                    // seen: a line that comes round four times is V1 all four
+                    // times, and the one after it is V2 rather than V5.
+                    let at = match lines
+                        .iter()
+                        .position(|seen| crate::transcribe::same_line(seen, text))
+                    {
+                        Some(at) => at,
                         None => {
                             lines.push(text.to_string());
-                            format!("V{} {text}", lines.len())
+                            lines.len() - 1
                         }
-                    }
+                    };
+                    // The words every time, not only the first. A player with
+                    // room for them is a player that should show them, and
+                    // "V1" on its own asks somebody in a booth to remember
+                    // what V1 was.
+                    format!("V{} {}", at + 1, lines[at])
                 }
                 // A voice the mix found and the words did not. Numbered on its
                 // own, because calling it V1 would claim it is a line that has
@@ -722,10 +778,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sung_line_is_named_once_and_numbered_ever_after() {
+    fn a_sung_line_is_named_wherever_it_lands_and_keeps_its_number() {
         // What a player shows while a track is loaded is the comment on the
-        // marker. The words are worth reading the first time the line lands;
-        // after that the number is what says where in the record you are.
+        // marker, and a CDJ-3000X shows the whole of it. So every landing says
+        // which line it is and what the line was, and the number stays with
+        // the line rather than counting the landings.
         let words = crate::transcribe::Transcript {
             lines: vec![
                 line(30_000, "get down"),
@@ -740,15 +797,60 @@ mod tests {
 
         let marks = marks(&assemble(0, None, candidates));
         assert_eq!(marks[0], "Start");
-        assert!(marks.contains(&"V1 get down".to_string()), "{marks:?}");
         assert_eq!(
-            marks.iter().filter(|mark| *mark == "V1").count(),
-            2,
-            "the repeats should carry the number alone: {marks:?}"
+            marks.iter().filter(|mark| *mark == "V1 get down").count(),
+            3,
+            "every landing of the line should say which line it is: {marks:?}"
+        );
+        assert!(
+            !marks.iter().any(|mark| *mark == "V1"),
+            "a number with no words asks somebody in a booth to remember: {marks:?}"
         );
         assert!(
             marks.iter().any(|mark| mark.starts_with("V2 ")),
             "the other line is another verse: {marks:?}"
+        );
+    }
+
+    #[test]
+    fn a_verse_marker_carries_the_whole_line() {
+        let words = crate::transcribe::Transcript {
+            lines: vec![
+                line(30_000, "everybody in the room put your hands up"),
+                line(90_000, "everybody in the room put your hands up"),
+            ],
+        };
+        let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let marks = marks(&assemble(0, None, candidates));
+        assert!(
+            marks.iter().all(|mark| !mark.starts_with('V')
+                || mark == "V1 everybody in the room put your hands up"),
+            "{marks:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_the_recogniser_wrote_two_ways_is_labelled_one_way() {
+        // Close enough to be the same line is close enough to carry the same
+        // marker: two spellings of one hook read as two hooks in a booth.
+        let words = crate::transcribe::Transcript {
+            lines: vec![
+                line(30_000, "hold me closer now"),
+                line(90_000, "hold me closer, now"),
+                line(150_000, "hold me closer now"),
+            ],
+        };
+        let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let marks = marks(&assemble(0, None, candidates));
+        let verses: Vec<&String> = marks.iter().filter(|mark| mark.starts_with('V')).collect();
+        assert!(verses.len() >= 2, "{marks:?}");
+        assert!(
+            verses.iter().all(|mark| *mark == verses[0]),
+            "one line should read one way: {verses:?}"
         );
     }
 
@@ -853,6 +955,141 @@ mod tests {
         assert_eq!(hot[0].time_ms, 60_000);
         assert_eq!(hot[0].comment.as_deref(), Some("hold me closer now"));
         assert_eq!(hot[0].color, Some(Reason::Section(Kind::Chorus).color()));
+    }
+
+    /// Six lines with nothing in common, so the grouping keeps them apart and
+    /// the track genuinely repeats nothing. Lines that differ by one word do
+    /// not do: the whole point of the grouping is that those are one line.
+    const VERSE: [&str; 6] = [
+        "walking through the city at night",
+        "nobody told me it would end",
+        "a coat on the back of a chair",
+        "every window on the eighteenth floor",
+        "she said wait for the rain",
+        "counting the stops to the river",
+    ];
+
+    /// The hot cues a set came out with, in time order.
+    fn buttons(cues: &[Cue]) -> Vec<String> {
+        cues.iter()
+            .filter(|cue| cue.is_hot())
+            .map(|cue| cue.comment.clone().unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn a_track_where_nothing_repeats_still_comes_back_with_lyric_cues() {
+        // The fault: a rap, a live take, a record with one verse and no
+        // chorus has no hook and no refrains, so the words came back with one
+        // marker for the voice arriving and nothing else. Its lines are what
+        // it has.
+        let words = crate::transcribe::Transcript {
+            lines: VERSE
+                .iter()
+                .enumerate()
+                .map(|(i, text)| line(20_000 + i as u32 * 40_000, text))
+                .collect(),
+        };
+        let mut candidates = vec![
+            Candidate::new(0, Reason::Section(Kind::Intro)),
+            Candidate::new(100_000, Reason::Section(Kind::Chorus)),
+        ];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let hot = buttons(&assemble(0, None, candidates));
+        let sung = hot.iter().filter(|name| VERSE.contains(&name.as_str())).count();
+        assert!(sung >= 4, "the spare buttons should have gone to the words: {hot:?}");
+        assert!(hot.len() <= HOT_CUES, "{hot:?}");
+    }
+
+    #[test]
+    fn the_buttons_are_shared_between_the_arrangement_and_the_words() {
+        // Four and four where there are four of each to be had. Ranking them
+        // against one another gave sets that were all of one or all of the
+        // other: a busy arrangement took every button and left the words
+        // uncued.
+        let words = crate::transcribe::Transcript {
+            lines: VERSE
+                .iter()
+                .enumerate()
+                .map(|(i, text)| line(25_000 + i as u32 * 40_000, text))
+                .collect(),
+        };
+        let kinds = [Kind::Intro, Kind::Up, Kind::Chorus, Kind::Down, Kind::Chorus, Kind::Down];
+        let mut candidates: Vec<Candidate> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, &kind)| Candidate::new(i as u32 * 45_000 + 2_000, Reason::Section(kind)))
+            .collect();
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let hot = buttons(&assemble(0, None, candidates));
+        let sung = hot.iter().filter(|name| VERSE.contains(&name.as_str())).count();
+        assert_eq!(hot.len(), HOT_CUES, "{hot:?}");
+        assert_eq!(sung, SHARE, "the words should have had half: {hot:?}");
+        assert_eq!(hot.len() - sung, SHARE, "and the arrangement the other half: {hot:?}");
+    }
+
+    #[test]
+    fn an_instrumental_gets_every_button_for_its_arrangement() {
+        // Neither half is held open. There is nothing to put in the words'
+        // share, so the arrangement has it.
+        let kinds = [
+            Kind::Intro,
+            Kind::Up,
+            Kind::Chorus,
+            Kind::Down,
+            Kind::Up,
+            Kind::Chorus,
+            Kind::Down,
+            Kind::Chorus,
+            Kind::Outro,
+        ];
+        let candidates: Vec<Candidate> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, &kind)| Candidate::new(i as u32 * 30_000 + 1_000, Reason::Section(kind)))
+            .collect();
+
+        let hot = buttons(&assemble(0, None, candidates));
+        assert_eq!(hot.len(), HOT_CUES, "{hot:?}");
+    }
+
+    #[test]
+    fn a_track_with_little_to_cue_leaves_the_rest_of_the_buttons_empty() {
+        // Rather than filling them with something made up. An empty button
+        // says "nothing here"; a made-up one says the wrong thing in a booth.
+        let candidates = vec![
+            Candidate::new(30_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(90_000, Reason::Section(Kind::Down)),
+        ];
+        let hot = buttons(&assemble(0, None, candidates));
+        assert_eq!(hot.len(), 2, "{hot:?}");
+    }
+
+    #[test]
+    fn a_line_only_fills_a_button_nothing_better_wanted() {
+        // A hook and two refrains is already a full share, so the one-off
+        // lines stay markers.
+        let mut lines: Vec<crate::transcribe::Line> =
+            (0..3).map(|i| line(20_000 + i * 90_000, "hold me closer now")).collect();
+        lines.extend((0..3).map(|i| line(50_000 + i * 90_000, "and the night comes down")));
+        lines.push(line(300_000, "something said once and never again"));
+        let words = crate::transcribe::Transcript { lines };
+
+        let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let hot = buttons(&assemble(0, None, candidates));
+        assert!(hot.iter().any(|name| name == "hold me closer now"), "{hot:?}");
+        assert!(hot.iter().any(|name| name == "and the night comes down"), "{hot:?}");
+        // And it is still a marker, which costs nothing.
+        let marks = marks(&assemble(0, None, {
+            let mut again = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
+            again.extend(words.moments().iter().map(from_moment));
+            again
+        }));
+        assert!(marks.iter().any(|mark| mark.contains("said once")), "{marks:?}");
     }
 
     #[test]

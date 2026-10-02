@@ -25,11 +25,17 @@ with a free key.
   against the files it describes.
 - **Listens to every track.** Tempo, beat grid, key, phrases, cue points and the colour waveforms
   a player draws, all measured locally. No analysis step on the player, no waiting in the booth.
+  A record at one tempo is gridded at one tempo — eight beats from anywhere in it are eight beats
+  from anywhere else — and one that really moves is gridded moving.
 - **Levels them.** EBU R128 loudness normalisation, by re-encoding or by ReplayGain tags with the
   audio left untouched.
 - **Names them.** Acoustic fingerprinting through AcoustID and MusicBrainz, and — for the white
   labels and promos no database has heard of — what the file's own path says it is.
 - **Splits them.** Vocals, melody and drums as separate stems, rendered ahead of time.
+- **Reads the words.** The vocal stem goes through a speech recogniser, and what comes back is
+  read for repetition: the line the room sings becomes a cue, every time it comes round becomes a
+  marker that says which line it is, and the whole of it is in the panel — so months later you
+  know which record this is from the thing you actually remember about it.
 - **Writes drives a player will open.** Both on-drive databases from one collection, so they
   cannot disagree about what is on the stick, with everything read back and checked afterwards.
   Every generation's analysis files go on — `.DAT`, `.EXT` and `.2EX` — so one stick works from
