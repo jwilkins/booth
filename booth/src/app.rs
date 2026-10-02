@@ -10891,6 +10891,17 @@ mod tests {
                 let path = app.library_path.with_file_name("track.flac");
                 std::fs::write(&path, b"not really a flac").unwrap();
 
+                // A recogniser, as far as these tests are concerned. Whether
+                // one is installed on the machine running them is not what any
+                // of them is about, and reading that from the environment is
+                // exactly how two tests that had been green for a week went
+                // red without a line of the code under test changing — see
+                // `config::Whisper::chosen`. Left to itself this passes on a
+                // developer's machine, where the session-start hook exports
+                // BOOTH_WHISPER_MODEL, and fails in CI, where it does not.
+                app.config.whisper.program = "whisper-cli".into();
+                app.config.whisper.model = "/not-really/base.en.bin".into();
+
                 let id = app.library.add(&path);
                 let track = app.library.get_mut(id).unwrap();
                 track.bpm = 120.0;
