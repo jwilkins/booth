@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use booth::config::Config;
-use booth::library::{CueMark, Drive, Library, Phrase, Track};
+use booth::library::{CueMark, Drive, Library, Lyric, Phrase, Track};
 
 /// The records, in the order they go in the list. Artist, title, album, tempo,
 /// key, energy, seconds.
@@ -45,6 +45,19 @@ const ARRANGEMENT: [(f64, f64, &str); 7] = [
     (0.54, 0.64, "build"),
     (0.64, 0.88, "drop"),
     (0.88, 1.00, "outro"),
+];
+
+/// What the records sing, as fractions of their length. The hook lands on
+/// each of the two drops, which is what makes it the hook — the panel that
+/// shows what a track keeps saying has nothing to show without words, and a
+/// screenshot of an empty section says the feature is broken.
+const SUNG: [(f64, &str); 6] = [
+    (0.14, "walking through the city at night"),
+    (0.24, "hold me closer now"),
+    (0.46, "nothing here but the lights and us"),
+    (0.66, "hold me closer now"),
+    (0.80, "hold me closer now"),
+    (0.92, "nothing here but the lights and us"),
 ];
 
 fn main() -> anyhow::Result<()> {
@@ -201,6 +214,19 @@ fn fill_in(
         });
     }
     track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
+
+    // And what a recogniser made of the vocal stem, with the analysis over it
+    // worked out the way the window works it out rather than written in here.
+    track.lyrics = SUNG
+        .iter()
+        .map(|(at, text)| Lyric {
+            start_ms: (total * at) as u32,
+            end_ms: (total * at) as u32 + 2_400,
+            text: (*text).to_string(),
+        })
+        .collect();
+    track.lyrics_aligned = true;
+    track.refrains = booth::library::refrains_from(&track.lyrics);
 }
 
 /// A three-band picture with the shape of the arrangement above.

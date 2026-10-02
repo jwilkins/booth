@@ -2347,6 +2347,11 @@ impl App {
                 Update::Transcribed { id, lyrics } => {
                     let heard = lyrics.len();
                     if let Some(track) = self.library.get_mut(id) {
+                        // What repeats in them, worked out here and kept: it
+                        // is shown in two panels that redraw every frame, and
+                        // it is the thing a DJ recognises a record by months
+                        // later.
+                        track.refrains = crate::library::refrains_from(&lyrics);
                         track.lyrics = lyrics;
                         // Both paths that produce this update place the words
                         // against the stem first, so arriving here is what
@@ -3331,6 +3336,12 @@ fn roughly(secs: f64) -> String {
         }
     }
 }
+
+/// How many of a track's repeated lines the inspector shows.
+///
+/// Enough to recognise a record by and not enough to become the lyric sheet:
+/// past the third, what a line is repeated is no longer what the track is.
+const SAYINGS: usize = 4;
 
 fn sheet_height(ctx: &egui::Context) -> f32 {
     (ctx.content_rect().height() - 72.0).max(240.0)
@@ -4806,11 +4817,10 @@ impl App {
             // the hook was. Shown because a hook found in a badly heard
             // transcript is a cue in the wrong place, and the only way to know
             // that has happened is to be told what it thinks it heard.
-            let heard = crate::library::transcript(&track.lyrics);
             measurement(
                 ui,
                 "words",
-                &match (track.lyrics.len(), heard.hook()) {
+                &match (track.lyrics.len(), track.refrains.first()) {
                     (0, _) => "not read".to_string(),
                     (lines, Some(hook)) => format!(
                         "{lines} lines \u{b7} {}\u{d7} \u{201c}{}\u{201d}",
@@ -5478,6 +5488,79 @@ impl App {
                         theme::dim()
                     }));
                 });
+            }
+
+            ui.add_space(14.0);
+            pane_label(ui, "What it keeps saying");
+            // The line the room sings is what a DJ recognises a record by
+            // months later, long after the file name and the artwork have gone
+            // out of their head. It is already measured — the cues are placed
+            // off it — and it was only ever shown one line at a time on a
+            // marker.
+            match (track.lyrics.is_empty(), track.refrains.is_empty()) {
+                (true, _) => ui.label(
+                    RichText::new("the words have not been read")
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                ),
+                (false, true) => ui.label(
+                    RichText::new(format!(
+                        "{} \u{2014} no line comes round twice",
+                        plural(track.lyrics.len(), "line")
+                    ))
+                    .color(theme::dim())
+                    .size(theme::SMALL),
+                ),
+                (false, false) => ui.label(
+                    RichText::new(format!("{} heard", plural(track.lyrics.len(), "line")))
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                ),
+            };
+            for refrain in track.refrains.iter().take(SAYINGS) {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{}\u{d7}", refrain.times()))
+                            .font(theme::mono(10.0))
+                            .color(theme::amber()),
+                    );
+                    // Clickable, because the use for a line you recognise is
+                    // getting to where it lands.
+                    if ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new(&refrain.text)
+                                    .color(theme::text())
+                                    .size(theme::SMALL),
+                            )
+                            .wrap()
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Go to where this line first lands")
+                        .clicked()
+                    {
+                        // Takes the deck with it, the same as clicking a cue:
+                        // a line you half remember is one an ear settles
+                        // faster than an eye.
+                        if let Some(&at) = refrain.at.first() {
+                            self.playhead_ms = Some(at);
+                            self.pending.push(Pending::SeekDeck { id: track.id, time_ms: at });
+                        }
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        refrain
+                            .at
+                            .iter()
+                            .map(|at| time_text(*at))
+                            .collect::<Vec<_>>()
+                            .join(" \u{b7} "),
+                    )
+                    .font(theme::mono(9.5))
+                    .color(theme::dim()),
+                );
             }
 
             ui.add_space(14.0);
@@ -10978,19 +11061,31 @@ mod tests {
             }
 
             #[test]
-            fn a_line_said_once_is_not_cued_as_a_hook() {
+            fn a_line_said_once_is_cued_as_itself_and_not_as_the_hook() {
+                // It takes a spare button, because a track that repeats
+                // nothing has nothing better to put there — but not the
+                // hook's colour, which on a waveform is a promise that the
+                // room is about to sing.
+                use booth_cli::analysis::cues::Reason;
                 let (mut app, id) = sung(
                     "once",
                     &[(20_000, "walking through the city at night"), (60_000, "and then home")],
                 );
                 app.auto_cue(id);
-                let placed = labels(&app, id);
-                assert!(
-                    placed.iter().all(|label| !label.contains("city")),
-                    "a line nobody repeats is not a hook: {placed:?}"
+
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let line = cues
+                    .iter()
+                    .find(|cue| cue.letter != 0 && cue.label.contains("city"))
+                    .unwrap_or_else(|| panic!("the only words on the track went uncued: {cues:?}"));
+                let hook = Reason::Hook.color();
+                assert_ne!(
+                    line.color,
+                    [hook.r, hook.g, hook.b],
+                    "a line nobody repeats is not the hook: {line:?}"
                 );
-                // The voice arriving is still worth a cue.
-                assert!(placed.iter().any(|label| label == "vocal"), "{placed:?}");
+                let expected = Reason::Line.color();
+                assert_eq!(line.color, [expected.r, expected.g, expected.b]);
             }
 
             #[test]
@@ -12060,6 +12155,50 @@ mod tests {
             harness.input_mut().modifiers = egui::Modifiers::SHIFT;
             harness.run();
             harness.get_by_label(&format!("Re-analyse {}", showing.len()));
+        }
+
+        #[test]
+        fn the_panel_says_what_the_track_keeps_coming_back_to() {
+            // The thing a DJ actually recognises a record by. It was already
+            // measured — the cues are placed off it — and until now it was
+            // only ever shown one line at a time on a marker.
+            let mut app = listing("sayings", 2);
+            let id = app.library.tracks[0].id;
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.lyrics = [40_000, 100_000, 160_000]
+                    .into_iter()
+                    .map(|start_ms| crate::library::Lyric {
+                        start_ms,
+                        end_ms: start_ms + 2_000,
+                        text: "hold me closer now".into(),
+                    })
+                    .collect();
+                track.refrains = crate::library::refrains_from(&track.lyrics.clone());
+            }
+            app.selected = Some(id);
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+            harness.get_by_label_contains("hold me closer now");
+            // How many times, which is the whole of the analysis.
+            harness.get_by_label_contains("3\u{d7}");
+            // And where, so a line half remembered can be gone to.
+            harness.get_by_label_contains("0:40.00");
+        }
+
+        #[test]
+        fn a_track_nobody_has_read_the_words_of_says_so_rather_than_nothing() {
+            // An empty section reads as a feature that is broken. The three
+            // cases are different answers and the panel tells them apart.
+            let mut app = listing("unread", 2);
+            app.selected = Some(app.library.tracks[0].id);
+            app.rebuild();
+
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+            harness.get_by_label_contains("the words have not been read");
         }
 
         #[test]

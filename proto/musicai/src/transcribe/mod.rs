@@ -64,6 +64,14 @@ pub enum MomentKind {
     /// memory cue, which costs nothing and is what turns a list of markers
     /// into a map of the record.
     Return,
+    /// A line that is sung once and never comes back.
+    ///
+    /// Worth less than any of the above and worth more than an empty button.
+    /// A track where nothing repeats — a rap, a live take, a record with one
+    /// verse and no chorus — has no hook and no refrains, and used to come
+    /// back from the words with one marker for the voice arriving and nothing
+    /// else. Its lines are what it has.
+    Line,
 }
 
 /// One of those, placed.
@@ -109,9 +117,20 @@ const MIN_TIMES: usize = 2;
 /// generous, and everything past that is a slot taken from a drop.
 const LINES: usize = 3;
 
-/// The longest comment worth putting on a cue. A player shows a line of text
-/// under the cue, not a verse.
-const COMMENT_CHARS: usize = 40;
+/// The longest comment worth putting on a cue.
+///
+/// Was forty, on the assumption that a player had room for a few words. A
+/// CDJ-3000X shows considerably more than that, so the cap is no longer about
+/// the screen: it is there to stop a recogniser that has run a whole verse
+/// together from putting a paragraph on a marker.
+const COMMENT_CHARS: usize = 120;
+
+/// How many of its one-off lines a track offers the buttons.
+///
+/// Eight, which is a player's whole set: on a record with no chorus there is
+/// nothing else to fill them with, and what the cue assembly does not use is
+/// a marker in the list rather than a wasted button.
+const SPARE_LINES: usize = 8;
 
 impl Transcript {
     pub fn is_empty(&self) -> bool {
@@ -146,9 +165,19 @@ impl Transcript {
         refrains
     }
 
+    /// The lines the track actually comes back to, most repeated first.
+    ///
+    /// [`Self::refrains`] groups every line, including the ones said once.
+    /// This is the frequency analysis proper: what is left once a line has to
+    /// come round to count, which is what tells one record from another when
+    /// you are trying to remember which one it was.
+    pub fn repeated(&self) -> Vec<Refrain> {
+        self.refrains().into_iter().filter(|refrain| refrain.times() >= MIN_TIMES).collect()
+    }
+
     /// The line the track repeats most, if any line is repeated at all.
     pub fn hook(&self) -> Option<Refrain> {
-        self.refrains().into_iter().find(|refrain| refrain.times() >= MIN_TIMES)
+        self.repeated().into_iter().next()
     }
 
     /// Where the singing starts.
@@ -196,6 +225,21 @@ impl Transcript {
             for &at in again {
                 moments.push(Moment { time_ms: at, kind: MomentKind::Return, text: text.clone() });
             }
+        }
+
+        // Then the lines that never come back. They are offered rather than
+        // used: the cue assembly fills its spare buttons from these and leaves
+        // the rest as markers, so a track with a chorus is unaffected and one
+        // without stops coming back from the words empty-handed.
+        //
+        // Spread through the record rather than taken from the front, because
+        // four cues in the first ninety seconds map a verse and not a track.
+        let mut once: Vec<Refrain> =
+            self.refrains().into_iter().filter(|line| line.times() < MIN_TIMES).collect();
+        once.sort_by_key(|line| line.at.first().copied().unwrap_or(0));
+        for line in spread(once, SPARE_LINES) {
+            let Some(&at) = line.at.first() else { continue };
+            moments.push(Moment { time_ms: at, kind: MomentKind::Line, text: comment(&line.text) });
         }
 
         if let Some(at) = self.vocal_in() {
@@ -329,6 +373,27 @@ fn words(text: &str) -> Vec<String> {
 }
 
 /// A line cut to what a player will show, on a word boundary where it can be.
+/// At most `how_many` of a list, evenly spaced through it.
+///
+/// The ones in the middle as well as the ones at the ends: taking the first
+/// few off the front of a time-ordered list puts every cue in the first verse.
+fn spread<T>(items: Vec<T>, how_many: usize) -> Vec<T> {
+    if how_many == 0 {
+        return Vec::new();
+    }
+    if items.len() <= how_many {
+        return items;
+    }
+    let step = items.len() as f64 / how_many as f64;
+    let wanted: Vec<usize> = (0..how_many).map(|n| ((n as f64 + 0.5) * step) as usize).collect();
+    items
+        .into_iter()
+        .enumerate()
+        .filter(|(at, _)| wanted.contains(at))
+        .map(|(_, item)| item)
+        .collect()
+}
+
 fn comment(text: &str) -> String {
     if text.chars().count() <= COMMENT_CHARS {
         return text.to_string();
@@ -480,10 +545,14 @@ mod tests {
         let kinds: Vec<MomentKind> = moments.iter().map(|m| m.kind).collect();
         assert_eq!(
             kinds,
-            vec![MomentKind::VocalIn, MomentKind::Hook, MomentKind::Return, MomentKind::Return],
+            // The opening line is sung once, so it comes through as itself
+            // rather than as a nameless "the voice arrives" — which is the
+            // same moment with the words on it.
+            vec![MomentKind::Line, MomentKind::Hook, MomentKind::Return, MomentKind::Return],
             "the line is named once and comes back as returns"
         );
         assert_eq!(moments[0].time_ms, 10_000);
+        assert_eq!(moments[0].text, "walking through the city at night");
         assert_eq!(moments[1].time_ms, 30_000, "where the line first lands");
         assert_eq!(
             moments.iter().filter(|m| m.kind == MomentKind::Hook).count(),
@@ -581,7 +650,11 @@ mod tests {
 
     #[test]
     fn a_long_line_is_cut_to_something_a_player_can_show() {
-        let long = "and we will keep on running until the morning comes around again";
+        // Not because the screen is small — a CDJ-3000X shows a good deal
+        // more than a line — but because a recogniser that has run a whole
+        // verse together should not put a paragraph on a marker.
+        let long = "and we will keep on running until the morning comes around again and the \
+                    streetlights go out one by one behind us all the way home";
         let transcript = said(&[(10_000, long), (70_000, long)]);
         let hook = transcript.moments().into_iter().find(|m| m.kind == MomentKind::Hook).unwrap();
 
