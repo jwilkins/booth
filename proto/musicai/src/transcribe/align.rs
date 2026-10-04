@@ -271,6 +271,7 @@ mod tests {
                     text: "something".into(),
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 

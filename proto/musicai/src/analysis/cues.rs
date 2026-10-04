@@ -791,6 +791,7 @@ mod tests {
                 line(120_000, "everybody in the room"),
                 line(150_000, "get down"),
             ],
+            ..Default::default()
         };
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
@@ -819,6 +820,7 @@ mod tests {
                 line(30_000, "everybody in the room put your hands up"),
                 line(90_000, "everybody in the room put your hands up"),
             ],
+            ..Default::default()
         };
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
@@ -841,6 +843,7 @@ mod tests {
                 line(90_000, "hold me closer, now"),
                 line(150_000, "hold me closer now"),
             ],
+            ..Default::default()
         };
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
@@ -870,6 +873,7 @@ mod tests {
                 line(90_000, "hold me closer now"),
                 line(150_000, "hold me closer now"),
             ],
+            ..Default::default()
         };
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
@@ -894,6 +898,7 @@ mod tests {
         // the eight and the breaks and builds were pushed out.
         let words = crate::transcribe::Transcript {
             lines: (0..5).map(|i| line(30_000 + i * 60_000, "hold me closer now")).collect(),
+            ..Default::default()
         };
         let kinds = [
             Kind::Intro,
@@ -989,6 +994,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, text)| line(20_000 + i as u32 * 40_000, text))
                 .collect(),
+            ..Default::default()
         };
         let mut candidates = vec![
             Candidate::new(0, Reason::Section(Kind::Intro)),
@@ -1014,6 +1020,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, text)| line(25_000 + i as u32 * 40_000, text))
                 .collect(),
+            ..Default::default()
         };
         let kinds = [Kind::Intro, Kind::Up, Kind::Chorus, Kind::Down, Kind::Chorus, Kind::Down];
         let mut candidates: Vec<Candidate> = kinds
@@ -1075,7 +1082,7 @@ mod tests {
             (0..3).map(|i| line(20_000 + i * 90_000, "hold me closer now")).collect();
         lines.extend((0..3).map(|i| line(50_000 + i * 90_000, "and the night comes down")));
         lines.push(line(300_000, "something said once and never again"));
-        let words = crate::transcribe::Transcript { lines };
+        let words = crate::transcribe::Transcript { lines, ..Default::default() };
 
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));

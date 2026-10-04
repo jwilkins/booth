@@ -323,6 +323,42 @@ impl Refrain {
     }
 }
 
+/// The language this collection is mostly in, if it is mostly in one.
+///
+/// A recogniser left to itself guesses the language from the first few seconds
+/// of what it is handed, and the first few seconds of an isolated vocal are
+/// usually a breath. The guess is wrong often enough to matter and wrong in an
+/// expensive way: it transcribes an English record as though it were Welsh and
+/// the words are nonsense, which cues nonsense.
+///
+/// A library knows better than that, because it has been round this already.
+/// What the recogniser decided on everything read so far is the best available
+/// hint for the next one — so this is the collection answering its own
+/// question, and it only answers where there is a clear majority: a shelf
+/// that is genuinely half German is one where guessing per track is right.
+pub fn common_language(tracks: &[Track]) -> Option<String> {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for track in tracks {
+        let said = track.language.trim();
+        if !said.is_empty() {
+            *counts.entry(said).or_default() += 1;
+        }
+    }
+    let total: usize = counts.values().sum();
+    if total < ENOUGH_TO_SAY {
+        return None;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .filter(|(_, count)| *count * 2 > total)
+        .map(|(language, _)| language.to_string())
+}
+
+/// How many tracks have to have been read before the collection's own answer
+/// is worth preferring to the recogniser's guess.
+const ENOUGH_TO_SAY: usize = 8;
+
 /// What a track's words keep coming back to.
 ///
 /// The one place this is worked out, so that the stored answer and the words
@@ -380,6 +416,7 @@ pub fn transcript(lyrics: &[Lyric]) -> booth_cli::transcribe::Transcript {
                 text: line.text.clone(),
             })
             .collect(),
+        ..Default::default()
     }
 }
 
@@ -618,6 +655,19 @@ pub struct Track {
     /// it, every press of Words paid for the same answer again.
     #[serde(default)]
     pub instrumental: bool,
+    /// How sure the recogniser was of the words, from 0 to 1.
+    ///
+    /// `None` on words nothing has said anything about — read before this
+    /// existed, or by a recogniser that does not report it. See
+    /// `booth_cli::transcribe::Transcript::confidence` for what the number is
+    /// and, more to the point, what it is not: a threshold anything is
+    /// dropped on.
+    #[serde(default)]
+    pub heard_surely: Option<f32>,
+    /// The language the recogniser decided it was listening to, as a code
+    /// like `en`. Empty where nothing has said.
+    #[serde(default)]
+    pub language: String,
     pub loudness_lufs: Option<f64>,
     pub peak_dbtp: Option<f64>,
 
@@ -728,6 +778,8 @@ impl Track {
             refrains: Vec::new(),
             lyrics_aligned: true,
             instrumental: false,
+            heard_surely: None,
+            language: String::new(),
             edited: None,
             loudness_lufs: None,
             peak_dbtp: None,
@@ -2937,6 +2989,42 @@ mod tests {
 
         // And one with no words at all is not waiting on anything.
         assert!(Track::placeholder(2).lyrics_aligned);
+    }
+
+    fn spoken(language: &str) -> Track {
+        let mut track = Track::placeholder(1);
+        track.language = language.to_string();
+        track
+    }
+
+    #[test]
+    fn a_collection_mostly_in_one_language_says_so() {
+        let mut tracks: Vec<Track> = (0..9).map(|_| spoken("en")).collect();
+        tracks.push(spoken("de"));
+        assert_eq!(common_language(&tracks).as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn a_collection_split_between_languages_lets_the_recogniser_decide() {
+        // Half a shelf in German is a shelf where guessing per track is the
+        // right answer, and a hint would be wrong half the time.
+        let mut tracks: Vec<Track> = (0..6).map(|_| spoken("en")).collect();
+        tracks.extend((0..6).map(|_| spoken("de")));
+        assert_eq!(common_language(&tracks), None);
+    }
+
+    #[test]
+    fn a_collection_with_too_little_read_yet_does_not_presume() {
+        let tracks: Vec<Track> = (0..3).map(|_| spoken("en")).collect();
+        assert_eq!(common_language(&tracks), None);
+        assert_eq!(common_language(&[]), None);
+    }
+
+    #[test]
+    fn tracks_nothing_has_been_read_off_do_not_count_towards_it() {
+        let mut tracks: Vec<Track> = (0..9).map(|_| spoken("")).collect();
+        tracks.extend((0..9).map(|_| spoken("fr")));
+        assert_eq!(common_language(&tracks).as_deref(), Some("fr"));
     }
 
     #[test]

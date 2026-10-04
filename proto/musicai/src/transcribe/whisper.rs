@@ -146,7 +146,11 @@ pub fn transcribe_audio(
                 // JSON out, written next to the audio under a name we chose,
                 // rather than parsed off the console: the console format is for
                 // people and changes between releases.
-                .arg("-oj")
+                // The full JSON rather than the short one: it is the same
+                // transcript with a probability against every token, which is
+                // the only thing either recogniser offers that says how much
+                // of what it wrote it actually heard.
+                .arg("-ojf")
                 .arg("-of")
                 .arg(config.work_dir.join("words"))
                 .arg("--print-progress");
@@ -240,7 +244,63 @@ fn read(json: &str, flavour: Flavour) -> Result<Transcript> {
         };
         lines.push(Line { start_ms, end_ms: end_ms.max(start_ms), text });
     }
-    Ok(Transcript { lines })
+    Ok(Transcript {
+        lines,
+        confidence: how_sure(segments, flavour),
+        language: value
+            .get("result")
+            .or(Some(&value))
+            .and_then(|r| r.get("language"))
+            .and_then(|l| l.as_str())
+            .map(str::to_string),
+    })
+}
+
+/// How sure the recogniser was, from 0 to 1, out of whatever it said about
+/// itself.
+///
+/// The two of them report it differently. whisper.cpp gives a probability per
+/// token, which is the finer measurement and the reason this asks for the full
+/// JSON: the word it invents is the one with the low number against it, where
+/// the segment as a whole still averages well. OpenAI's gives one average log
+/// probability per segment, which comes back through `exp` as the same kind of
+/// number.
+///
+/// `None` when neither said anything, which is what an older whisper.cpp
+/// writing the short JSON does — the transcript is still worth having, it just
+/// comes with nothing to say about itself.
+fn how_sure(segments: &[serde_json::Value], flavour: Flavour) -> Option<f32> {
+    let mut total = 0.0f64;
+    let mut count = 0usize;
+    match flavour {
+        Flavour::Cpp => {
+            for segment in segments {
+                let tokens = segment.get("tokens").and_then(|t| t.as_array())?;
+                for token in tokens {
+                    // The markers whisper puts in its own stream — [_BEG_] and
+                    // the timestamps — are not words it heard, and they score
+                    // high enough to flatter a transcript that is all of them.
+                    let text = token.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if text.starts_with("[_") {
+                        continue;
+                    }
+                    if let Some(p) = token.get("p").and_then(|p| p.as_f64()) {
+                        total += p;
+                        count += 1;
+                    }
+                }
+            }
+        }
+        Flavour::Python => {
+            for segment in segments {
+                if let Some(logprob) = segment.get("avg_logprob").and_then(|v| v.as_f64()) {
+                    total += logprob.exp();
+                    count += 1;
+                }
+            }
+        }
+    }
+    (count > 0).then(|| (total / count as f64) as f32)
 }
 
 /// Whether a line is somebody singing rather than the recogniser describing
@@ -529,6 +589,115 @@ mod tests {
               "text": " (screaming)" }
         ]
     }"#;
+
+    /// Captured from whisper.cpp —  on
+    /// the spoken sentence "hold me closer now before the morning comes
+    /// around", trimmed to its first few tokens.
+    ///
+    /// What it is here for: the recogniser got it **wrong**, and the numbers
+    /// say so. It wrote "Though we'll meet closer now" — a line that reads
+    /// like a lyric and would cue like one — and the words it invented carry
+    /// 0.34 and 0.36 where the ones it heard carry over 0.95.
+    const MISHEARD: &str = r#"{
+  "params": {
+    "model": "/root/.cache/booth/models/ggml-base.en.bin",
+    "language": "en",
+    "translate": false
+  },
+  "result": {
+    "language": "en"
+  },
+  "transcription": [
+    {
+      "offsets": {
+        "from": 0,
+        "to": 2720
+      },
+      "text": " Though we'll meet closer now before the morning comes around.",
+      "tokens": [
+        {
+          "text": " Though",
+          "p": 0.338354,
+          "offsets": {
+            "from": 50,
+            "to": 280
+          }
+        },
+        {
+          "text": " we",
+          "p": 0.363759,
+          "offsets": {
+            "from": 340,
+            "to": 400
+          }
+        },
+        {
+          "text": "'ll",
+          "p": 0.796068,
+          "offsets": {
+            "from": 400,
+            "to": 520
+          }
+        },
+        {
+          "text": " meet",
+          "p": 0.60176,
+          "offsets": {
+            "from": 550,
+            "to": 740
+          }
+        },
+        {
+          "text": " closer",
+          "p": 0.971652,
+          "offsets": {
+            "from": 780,
+            "to": 1050
+          }
+        },
+        {
+          "text": " now",
+          "p": 0.971704,
+          "offsets": {
+            "from": 1050,
+            "to": 1200
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+
+    #[test]
+    fn how_sure_the_recogniser_was_comes_back_with_the_words() {
+        let heard = read(MISHEARD, Flavour::Cpp).unwrap();
+        let sure = heard.confidence.expect("whisper.cpp said and it was not read");
+        assert!((sure - 0.674).abs() < 0.01, "{sure}");
+        assert_eq!(heard.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn the_markers_whisper_writes_into_its_own_stream_are_not_scored() {
+        // `[_BEG_]` scores 0.99 and is not a word anybody sang. Counting it
+        // flatters a transcript in proportion to how little of it is words.
+        let with_marker = MISHEARD.replace(
+            r#""tokens": ["#,
+            r#""tokens": [{"text": "[_BEG_]", "p": 0.99, "offsets": {"from": 0, "to": 0}},"#,
+        );
+        let plain = read(MISHEARD, Flavour::Cpp).unwrap().confidence.unwrap();
+        let marked = read(&with_marker, Flavour::Cpp).unwrap().confidence.unwrap();
+        assert!((plain - marked).abs() < 0.001, "{plain} against {marked}");
+    }
+
+    #[test]
+    fn a_recogniser_that_says_nothing_about_itself_still_gives_its_words() {
+        // The short JSON an older whisper.cpp writes has no tokens in it. The
+        // transcript is still worth having; there is just nothing to say about
+        // how sure it was.
+        let heard = read(CPP_JSON, Flavour::Cpp).unwrap();
+        assert!(!heard.lines.is_empty());
+        assert_eq!(heard.confidence, None);
+    }
 
     #[test]
     fn what_a_recogniser_makes_of_music_is_not_words() {

@@ -27,9 +27,27 @@ pub struct Line {
 }
 
 /// What was sung, and when.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Transcript {
     pub lines: Vec<Line>,
+    /// How sure the recogniser was of what it wrote, from 0 to 1, or `None`
+    /// from one that did not say.
+    ///
+    /// Worth keeping because a transcript is not either right or wrong. On a
+    /// vocal stem a recogniser writes plausible words it did not hear —
+    /// measured here, "hold me closer now" came back as "Though we'll meet
+    /// closer now", which reads like a lyric and cues like one. What marks it
+    /// out is that the word it invented scored 0.34 where the rest of the line
+    /// scored over 0.95.
+    ///
+    /// Not a threshold anything is dropped on. The separation between a bad
+    /// transcript and a good one is real but not sharp — 0.62 against 0.80 on
+    /// the samples here — so this is recorded and shown rather than acted on,
+    /// and it is one of the things that decides whether a lyrics server is
+    /// worth preferring to what was heard.
+    pub confidence: Option<f32>,
+    /// The language it decided it was listening to, as a code like `en`.
+    pub language: Option<String>,
 }
 
 /// A line the track returns to, and every time it does.
@@ -610,6 +628,7 @@ mod tests {
                     text: text.to_string(),
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 

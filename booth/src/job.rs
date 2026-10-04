@@ -284,6 +284,10 @@ pub enum Update {
     Transcribed {
         id: u32,
         lyrics: Vec<crate::library::Lyric>,
+        /// How sure it was, and what language it decided it was listening to.
+        /// `None` from a recogniser that did not say.
+        confidence: Option<f32>,
+        language: Option<String>,
     },
     /// One row's waveform, measured from its own audio.
     Drawn {
@@ -1548,7 +1552,14 @@ fn realign(tracks: Vec<Realigning>, reporter: &Channel) -> anyhow::Result<()> {
                     crate::library::plural(moved, "line")
                 );
                 let lyrics = crate::library::lyrics_from(&transcript);
-                let _ = reporter.tx.send(Update::Transcribed { id: track.id, lyrics });
+                // Realigning moves the times and never the words, so what the
+                // recogniser said about itself is unchanged and is not resent.
+                let _ = reporter.tx.send(Update::Transcribed {
+                    id: track.id,
+                    lyrics,
+                    confidence: None,
+                    language: None,
+                });
             }
             // Not a failure worth stopping for: the stem has moved or will not
             // decode, and the words that are already there are still the words.
@@ -1606,7 +1617,12 @@ fn transcribe(
                     transcript.hook().map(|refrain| refrain.text)
                 );
                 let lyrics = crate::library::lyrics_from(&transcript);
-                let _ = reporter.tx.send(Update::Transcribed { id: track.id, lyrics });
+                let _ = reporter.tx.send(Update::Transcribed {
+                    id: track.id,
+                    lyrics,
+                    confidence: transcript.confidence,
+                    language: transcript.language.clone(),
+                });
             }
             Err(e) => {
                 let _ = reporter

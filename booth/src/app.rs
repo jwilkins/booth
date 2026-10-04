@@ -2024,9 +2024,21 @@ impl App {
     }
 
     /// Hand stems that are already on disk to the recogniser.
+    ///
+    /// With the language the collection is mostly in, where the setting does
+    /// not name one and the collection has an answer of its own. A recogniser
+    /// left to guess takes it from the first few seconds of an isolated vocal,
+    /// which are usually a breath — see [`crate::library::common_language`].
     fn read_words(&mut self, tracks: Vec<job::Transcribable>) {
         crate::info!("reading the words off {}", crate::library::plural(tracks.len(), "track"));
-        self.start(Job::Transcribe { tracks, whisper: self.config.whisper.clone() });
+        let mut whisper = self.config.whisper.clone();
+        if whisper.language.trim().is_empty() {
+            if let Some(mostly) = crate::library::common_language(&self.library.tracks) {
+                crate::info!("telling the recogniser this collection is mostly {mostly}");
+                whisper.language = mostly;
+            }
+        }
+        self.start(Job::Transcribe { tracks, whisper });
     }
 
     /// Set one track's cues from everything known about it, and say how many
@@ -2383,7 +2395,7 @@ impl App {
                     }
                     changed = true;
                 }
-                Update::Transcribed { id, lyrics } => {
+                Update::Transcribed { id, lyrics, confidence, language } => {
                     let heard = lyrics.len();
                     if let Some(track) = self.library.get_mut(id) {
                         // What repeats in them, worked out here and kept: it
@@ -2392,6 +2404,16 @@ impl App {
                         // later.
                         track.refrains = crate::library::refrains_from(&lyrics);
                         track.lyrics = lyrics;
+                        // Only where the recogniser said. A realignment moves
+                        // the times and never the words, so it has nothing new
+                        // to report about either and must not wipe what is
+                        // already known.
+                        if confidence.is_some() {
+                            track.heard_surely = confidence;
+                        }
+                        if let Some(language) = language.filter(|l| !l.trim().is_empty()) {
+                            track.language = language;
+                        }
                         // Both paths that produce this update place the words
                         // against the stem first, so arriving here is what
                         // being placed means.
@@ -3385,6 +3407,15 @@ fn roughly(secs: f64) -> String {
         }
     }
 }
+
+/// Below this, a transcript is worth doubting out loud.
+///
+/// Measured against whisper.cpp on a spoken line it got wrong: the sentence
+/// came back at 0.67 with the invented words carrying 0.34, where the ones it
+/// really heard carried over 0.95. Nothing is dropped on it — the separation
+/// between a bad transcript and a good one is real but not sharp — so this
+/// only decides when to say so.
+const POORLY_HEARD: f32 = 0.7;
 
 /// How many of a track's repeated lines the inspector shows.
 ///
@@ -5567,6 +5598,27 @@ impl App {
                         .size(theme::SMALL),
                 ),
             };
+            // What the recogniser thought of its own answer. Shown only when
+            // it is poor, because the useful case is the one where the words
+            // read like a lyric and are not one: a transcript nobody doubts
+            // places cues exactly as confidently as a transcript that is
+            // right, and until now there was nothing on screen to tell them
+            // apart.
+            if let Some(sure) = track.heard_surely.filter(|sure| *sure < POORLY_HEARD) {
+                ui.label(
+                    RichText::new(format!(
+                        "heard poorly \u{2014} {:.0}% sure, so these words may not be the words",
+                        sure * 100.0
+                    ))
+                    .color(theme::amber())
+                    .size(theme::SMALL),
+                )
+                .on_hover_text(
+                    "What the recogniser made of its own answer. A low score usually means it \
+                     wrote plausible words it did not hear, which read like a lyric and cue \
+                     like one.",
+                );
+            }
             for refrain in track.refrains.iter().take(SAYINGS) {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
