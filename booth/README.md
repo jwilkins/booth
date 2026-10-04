@@ -872,11 +872,11 @@ then each section numbered within its own kind — Build 1, Drop 1, Break 1,
 Drop 2 — and **End** on the last bar. Numbering within the kind is the point;
 six markers all reading "drop" say nothing that looking at the waveform does not.
 
-A sung line gets a verse number and its words the first time it lands, and the
-number alone every time it comes back: `V1 Get Down`, then `V1`, `V1`. A player
-shows a memory cue's comment while the track is loaded, so the second time round
-the line is already known and the number is what says where in the record you
-are. Those returns cost no button — they are marked as moments that can only
+A sung line gets a verse number and the line itself every time it lands:
+`V1 Get Down`, then `V1 Get Down` again where it comes back. A player shows a
+memory cue's comment while the track is loaded, and a CDJ-3000X has been seen to
+show the whole of a line that long, so the words are on the deck in front of you
+and the number says where in the record you are. Those returns cost no button — they are marked as moments that can only
 ever be memory cues, so they never take a slot from a drop and never lend their
 words to a section they happen to land on.
 
@@ -1422,9 +1422,9 @@ drive played only on older hardware has a history nothing here can see.
   rendered first — so the first track costs minutes twice over. What it hears is
   whatever Whisper hears: a heavily processed vocal, a language it was not told
   about, or a chopped-up sample comes back as noise, and a hook found in noise is
-  a cue in the wrong place. The inspector shows how many lines were heard and
-  what it decided the hook was, so a bad reading can be seen to be one; there is
-  no way yet to correct it by hand.
+  a cue in the wrong place. The inspector shows how many lines were heard, what
+  it decided the hook was, and where the words came from, so a bad reading can
+  be seen to be one — and the words can be corrected by hand from there.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with
   its confidence for that reason.

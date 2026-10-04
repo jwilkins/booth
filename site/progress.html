@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Progress — Booth</title>
+<meta name="description" content="What Booth does today, what it has not been proven to do, and what every release since the first one changed.">
+<link rel="stylesheet" href="booth.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%2312161A'/><rect x='3' y='4' width='2' height='8' fill='%23E2A03F'/><rect x='7' y='2' width='2' height='12' fill='%23E2A03F'/><rect x='11' y='6' width='2' height='4' fill='%23E2A03F'/></svg>">
+
+<div class="bar"><div class="wrap bar-in">
+  <a class="brand" href="./">Booth<span>.</span></a>
+  <nav>
+    <a href="./">Home</a>
+    <a href="#today">What works</a>
+    <a href="#unproven">What is unproven</a>
+    <a href="#releases">Releases</a>
+    <a href="#next">What is next</a>
+    <a href="background.html">Background</a>
+    <a href="https://github.com/jwilkins/booth">Source</a>
+  </nav>
+</div></div>
+
+<header class="hero"><div class="wrap">
+  <p class="eyebrow">Progress · 0.0.7 · 4 October 2026</p>
+  <h1>Seven releases<br>in a month.<br><em>Here is where it is.</em></h1>
+  <p class="standfirst">Booth has gone from writing its first drive to placing cue points from the
+  words a record sings in about five weeks. This page is the honest state of it — including the
+  parts that are written but not demonstrated, which on a page like this are the parts that
+  matter.</p>
+</div></header>
+
+<section id="today"><div class="wrap">
+  <span class="snum">01 — What works today</span>
+  <h2>Demonstrated, on hardware or in the test suite</h2>
+  <ul class="plain">
+    <li><b>A CDJ-3000X on firmware 1.40 browses and plays a drive this writes</b> — playlists,
+    track list, key search, colour waveforms, beat grid and hot cues on a loaded track, with
+    nothing rekordbox has touched on the stick.</li>
+    <li><b>Both on-drive databases from one collection</b>, written in one pass so they cannot
+    disagree, and read back and checked afterwards.</li>
+    <li><b>Analysis for every generation</b> — <code>.DAT</code>, <code>.EXT</code> and
+    <code>.2EX</code> — written from one set of measurements.</li>
+    <li><b>Tempo, beat grid, key, phrases, cues and colour waveforms</b>, all measured locally. A
+    record at one tempo comes out gridded at one tempo; one that really moves is gridded
+    moving.</li>
+    <li><b>Loudness normalisation</b> to EBU R128, by re-encoding or by ReplayGain tags with the
+    audio left untouched.</li>
+    <li><b>Stems</b> — vocals, melody and drums — rendered ahead of time and carried to the drive
+    as tracks sorted under their parent.</li>
+    <li><b>Cues from the words</b>: the vocal stem through a speech recogniser, the transcript read
+    for repetition, the hook cued where it first lands, and every memory cue carrying its
+    line.</li>
+    <li><b>Lyrics looked up before they are listened for</b>, taken outright when the evidence is
+    strong, put up for a yes or no when it is not, and correctable by hand either way.</li>
+    <li><b>Fingerprinting</b> through AcoustID and MusicBrainz, and for the records no database has
+    heard of, what the file's own path says it is.</li>
+    <li><b>A copy of every drive</b>, with the audio hard-linked, and the player's own history read
+    back into playlists.</li>
+    <li><b>Per-generation checks</b>: a drive is checked against the oldest player it has to work
+    on, and anything that player could not open is carried as a 320&nbsp;kbps MP3 while the library
+    keeps its lossless file.</li>
+  </ul>
+</div></section>
+
+<section id="unproven"><div class="wrap">
+  <span class="snum">02 — What is unproven, and what is simply missing</span>
+  <h2>The parts to know about before a gig</h2>
+  <div class="col">
+    <p class="lede">Written is not the same as demonstrated. These are the gaps, stated the way
+    they are stated in the project's own documentation rather than softened for a front page.</p>
+  </div>
+  <div class="tablewrap">
+    <table class="doc">
+      <thead><tr><th scope="col">The gap</th><th scope="col">Where that leaves you</th></tr></thead>
+      <tbody>
+        <tr>
+          <th scope="row">No player older than a CDJ-3000X has been seen to browse a drive this
+          writes</th>
+          <td>A CDJ-3000 on firmware 2.05 refused the legacy <code>export.pdb</code> outright. The
+          file parses under two independent parsers, so what is wrong is something a parser
+          tolerates and a player does not, and it is not known to be fixed. Everything a nexus deck
+          reads is written; whether it loads has not been shown. <b>Try a stick on the hardware
+          before the night.</b></td>
+        </tr>
+        <tr>
+          <th scope="row">Phrase data and the three-band waveform have not been seen on a
+          player</th>
+          <td>The colour waveform, beat grid and hot cues have. Those two sit in parts of the
+          analysis files nobody has reported on.</td>
+        </tr>
+        <tr>
+          <th scope="row">The waveform colours are a judgement call</th>
+          <td>What rekordbox puts in those three bits for given audio is not published, and this
+          has never been compared against a real export column by column.</td>
+        </tr>
+        <tr>
+          <th scope="row">Key detection is right about 37% of the time</th>
+          <td>And confuses a key with its relative major or minor about another 18%. It is shown
+          with its confidence for that reason. Treat it as a hint.</td>
+        </tr>
+        <tr>
+          <th scope="row">Cueing from the words costs minutes a track, twice over</th>
+          <td>A separation and then a recogniser pass, and the recogniser is installed separately.
+          What it hears is whatever Whisper hears: a heavily processed vocal or a chopped-up sample
+          comes back as noise. Since 0.0.7 a lyrics server is asked first, which skips both steps
+          when it answers, and what a track's words came from is recorded and shown.</td>
+        </tr>
+        <tr>
+          <th scope="row">One deck, and no mixing</th>
+          <td>No pitch, no sync. It is for auditioning what you are preparing, not for
+          performing.</td>
+        </tr>
+        <tr>
+          <th scope="row">Cues and grids are not written back into your files</th>
+          <td>They live in the collection and on the drive. Names can be written back, on
+          request.</td>
+        </tr>
+        <tr>
+          <th scope="row">Ogg, Opus and WMA are recognised but not converted</th>
+          <td>Nothing in this build decodes them. Nothing resamples either: a file above
+          96&nbsp;kHz is reported and left alone.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>The project's own <a href="https://github.com/jwilkins/booth/blob/main/booth/README.md#what-it-does-not-do-yet">full
+    list</a> is longer and more technical, and it is the authority. Nothing on this page is meant to
+    be gentler than it.</p>
+  </div>
+</div></section>
+
+<section id="releases"><div class="wrap">
+  <span class="snum">03 — Releases</span>
+  <h2>Five weeks, seven tags</h2>
+
+  <div class="rel">
+    <div class="v">0.0.7<small>4 October 2026</small></div>
+    <div>
+      <h4>The words looked up, not just listened for</h4>
+      <p>A lyrics server asked before anything expensive — taken outright where the track was named
+      by its own sound or where the lyric agrees with what was heard, put up for a yes or no where
+      it is plausible and not certain, and editable by hand. A server saying a record is an
+      instrumental saves the separation and the pass that would have ended in “nothing was
+      sung”.</p>
+      <p>The recogniser's own doubt is recorded and shown when it is poor, its language is taken
+      from what the collection decided on everything read so far rather than guessed from a breath
+      at the top of a stem, and a stem is no longer rendered just to find out whether anybody sings
+      on the track. No database page is ever written with a row cut in half.</p>
+    </div>
+  </div>
+
+  <div class="rel">
+    <div class="v">0.0.6<small>2 October 2026</small></div>
+    <div>
+      <h4>Grids that hold, and the line the room sings</h4>
+      <p>A record at one tempo is gridded at one tempo however untidily its beats were tracked, so
+      eight beats from anywhere in it are eight beats from anywhere else — which is what stops two
+      loops from one track drifting apart on two players. Scatter and drift are told apart by their
+      shape rather than their size.</p>
+      <p>What a track keeps saying is kept and shown: the lines it comes back to, how often each is
+      sung, and where each one lands. Markers carry the whole sung line every time it lands, tested
+      against a CDJ-3000X.</p>
+    </div>
+  </div>
+
+  <div class="rel">
+    <div class="v">0.0.5<small>1 October 2026</small></div>
+    <div>
+      <h4>Beat grids that hold still, and per-generation drives</h4>
+      <p>A metronomic track stopped alternating between two wrong tempos every beat. Lyric cues
+      moved onto the stem rather than onto Whisper's clock, which anchors its first segment at zero
+      however long the intro runs. A drive is checked against the oldest player it has to work on,
+      and music on a strange stick is copied into the collection by default.</p>
+    </div>
+  </div>
+
+  <div class="rel">
+    <div class="v">0.0.4<small>29 September 2026</small></div>
+    <div>
+      <h4>Every marker named, and drives that behave</h4>
+      <p>Memory cues named and each return of a line marked. Eleven colour schemes. A second drive
+      can be added and told apart from the first. A drive stopped re-copying itself every five
+      minutes, and a grid that bends is kept with its own downbeat. Tracks that will be slow to
+      reach are called out at import.</p>
+    </div>
+  </div>
+
+  <div class="rel">
+    <div class="v">0.03<small>10 September 2026</small></div>
+    <div>
+      <h4>The waveform made legible</h4>
+      <p>Drawn against the track rather than against full scale, as an envelope rather than a comb,
+      with the loudest band first so the kick is visible at all. The phrase strip became
+      correctable by hand, any section of the window can be sent to a window of its own, and
+      switching between a track and its stems keeps your place.</p>
+    </div>
+  </div>
+
+  <div class="rel">
+    <div class="v">0.0.2<small>5 September 2026</small></div>
+    <div>
+      <h4>One name each, and all three of them Booth's</h4>
+      <p>The rename: the engine, the command and the app settled on the names they have now. What a
+      file's own path says it is became a source of names for the records no database has heard of,
+      and tagging asks first when a file is named nothing like its tags.</p>
+    </div>
+  </div>
+
+  <div class="rel">
+    <div class="v">0.01<small>4 September 2026</small></div>
+    <div>
+      <h4>The first one</h4>
+      <p>A copy of every drive written or plugged in, the player's history read back into playlists,
+      the macOS app, the licence, and CI on every push. The point at which it was a program rather
+      than a prototype.</p>
+    </div>
+  </div>
+</div></section>
+
+<section id="next"><div class="wrap">
+  <span class="snum">04 — What is next</span>
+  <h2>In rough order of how much it matters</h2>
+  <ul class="plain">
+    <li><b>A drive an older deck will actually open.</b> This is the one that matters most and the
+    one that needs hardware rather than code: a nexus-generation player, a stick, and a morning.</li>
+    <li><b>Correcting a bad reading by hand.</b> Landed for the words in 0.0.7; the phrase strip
+    has been correctable since 0.03. What is left is the rest of the analysis.</li>
+    <li><b>Archiving the drive copies.</b> The linked half of a copy cannot be zipped, but the
+    copied half can — once there are enough of them to see what they cost.</li>
+    <li><b>A second deck.</b> The specification asks for one eventually. The deck here is for
+    auditioning, and that is deliberate until it is not.</li>
+    <li><b>Reading a CDJ-3000's history.</b> Newer players write theirs where Booth can read it;
+    older ones write into <code>export.pdb</code>, and pulling individual rows back out of that is
+    a parser this does not have yet.</li>
+  </ul>
+  <div class="col">
+    <p style="margin-top:28px">Issues and pull requests are on
+    <a href="https://github.com/jwilkins/booth">GitHub</a>. The most useful thing anybody can send
+    is a report from a player this has not been tried on — which deck, which firmware, and what it
+    did with the stick.</p>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <p><a href="./">← Back to the front page</a> · <a href="background.html">Why this exists →</a></p>
+</div></footer>
+</html>

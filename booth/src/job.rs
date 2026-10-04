@@ -1550,8 +1550,24 @@ fn separate(
 /// A miss is not a failure. Most of a crate of white labels will not be in any
 /// lyrics database, so a track nothing is known about reports a verdict of
 /// `No` and the ordinary path — separate, listen — carries on from there.
+///
+/// Every track asked about is answered for, including the misses and the ones
+/// the service could not be reached about. The window holds a track's
+/// recogniser pass back while this is outstanding, so a track that went
+/// unanswered would be one whose words were never read at all.
 fn look_up_words(tracks: &[Askable], reporter: &Channel) -> anyhow::Result<()> {
     use booth_cli::tag::lyrics;
+
+    /// Nothing came back for this track, which is an answer like any other.
+    fn nothing(id: u32, batch: &Batch, reporter: &Channel) {
+        let _ = reporter.tx.send(Update::WordsLookedUp {
+            id,
+            found: Box::default(),
+            verdict: lyrics::Verdict::No,
+        });
+        batch.finished_one();
+        (reporter.wake)();
+    }
 
     let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
     let batch = Batch {
@@ -1568,14 +1584,14 @@ fn look_up_words(tracks: &[Askable], reporter: &Channel) -> anyhow::Result<()> {
             Ok(Some(found)) => found,
             Ok(None) => {
                 crate::debug!("#{}: no lyrics for {} — {}", track.id, track.artist, track.title);
-                batch.finished_one();
+                nothing(track.id, &batch, reporter);
                 continue;
             }
             // A service being down is not a reason to stop: every track after
             // this one still has a stem that can be listened to.
             Err(e) => {
                 crate::warn!("#{}: could not look up the words: {e:#}", track.id);
-                batch.finished_one();
+                nothing(track.id, &batch, reporter);
                 continue;
             }
         };

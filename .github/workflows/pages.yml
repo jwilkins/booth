@@ -1,0 +1,50 @@
+name: Pages
+
+# The site is plain files — no build step, no generator, no dependencies — so
+# this only assembles the directory and hands it to Pages. The one thing it
+# assembles is the specification page, which lives in docs/ because that is
+# where it is read from the repository, and is copied in rather than duplicated
+# so the two cannot drift apart.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "docs/booth-spec-page.html"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Pages needs these to publish; nothing here writes to the repository.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a run already under way is left to finish: a
+# half-published site is worse than a slightly stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the site
+        run: |
+          cp docs/booth-spec-page.html site/booth-spec-page.html
+          # Pages runs Jekyll over an artifact otherwise, which would hide
+          # anything whose name begins with an underscore.
+          touch site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
