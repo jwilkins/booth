@@ -55,6 +55,8 @@ pub enum Job {
     Draw(Vec<Drawable>),
     /// Read the words off tracks' vocal stems.
     Transcribe { tracks: Vec<Transcribable>, whisper: crate::config::Whisper },
+    /// Ask a lyrics server for words, rather than listening for them.
+    LookUpWords { tracks: Vec<Askable> },
     /// Move words already read onto the onsets measured off their stem.
     Realign { tracks: Vec<Realigning> },
     /// Decode one track into memory so it can be auditioned.
@@ -130,6 +132,7 @@ impl Job {
             Job::Analyze(_) => "analysing",
             Job::Separate { .. } => "stems",
             Job::Transcribe { .. } => "reading the words",
+            Job::LookUpWords { .. } => "looking up the words",
             Job::Realign { .. } => "placing the words",
             Job::Draw { .. } => "drawing",
             Job::Sync { .. } => "writing",
@@ -176,6 +179,22 @@ pub struct Drawable {
 pub struct Transcribable {
     pub id: u32,
     pub vocals: PathBuf,
+}
+
+/// What a lyrics server needs to be asked about one track, and what is
+/// already known that can judge the answer.
+pub struct Askable {
+    pub id: u32,
+    pub artist: String,
+    pub title: String,
+    pub duration_secs: f64,
+    /// How sure the fingerprint that named it was, where one did. The server
+    /// is asked under those names, so this is most of what decides whether
+    /// what comes back is this record's words.
+    pub identified_surely: Option<f64>,
+    /// What has already been heard off the stem, which may be nothing. A
+    /// remix keeps the hook, so even a few lines are evidence.
+    pub heard: Vec<crate::library::Lyric>,
 }
 
 /// Words already read, to be put back where the singing is.
@@ -278,6 +297,15 @@ pub enum Update {
         /// How long the separation itself took, drawing aside. What the
         /// warning before the next batch of them estimates from.
         took_secs: f32,
+    },
+    /// A lyrics server was asked about a track and answered.
+    ///
+    /// The verdict is what to do with the answer, not whether there was one:
+    /// see `booth_cli::tag::lyrics::verdict`.
+    WordsLookedUp {
+        id: u32,
+        found: Box<booth_cli::tag::lyrics::Found>,
+        verdict: booth_cli::tag::lyrics::Verdict,
     },
     /// A vocal stem has been through the recogniser. Empty lines are a real
     /// answer: it means nothing was sung, or nothing could be made out.
@@ -1006,6 +1034,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             separate(&tracks, &stems_in, backend, quality, reporter)
         }
         Job::Transcribe { tracks, whisper } => transcribe(&tracks, &whisper, reporter),
+        Job::LookUpWords { tracks } => look_up_words(&tracks, reporter),
         Job::Realign { tracks } => realign(tracks, reporter),
         Job::Draw(rows) => draw(&rows, reporter),
         Job::Sync { args, files } => {
@@ -1506,6 +1535,68 @@ fn separate(
                     .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
             }
         }
+        batch.finished_one();
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// Ask a lyrics server about each track, and say what its answer is worth.
+///
+/// One at a time and paced, like the other services this talks to: LRCLIB
+/// costs nothing and asks only that clients identify themselves, which is the
+/// kind of service it is worth being careful with.
+///
+/// A miss is not a failure. Most of a crate of white labels will not be in any
+/// lyrics database, so a track nothing is known about reports a verdict of
+/// `No` and the ordinary path — separate, listen — carries on from there.
+fn look_up_words(tracks: &[Askable], reporter: &Channel) -> anyhow::Result<()> {
+    use booth_cli::tag::lyrics;
+
+    let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
+    let batch = Batch {
+        inner: reporter,
+        done: std::sync::atomic::AtomicUsize::new(0),
+        total: tracks.len(),
+    };
+    for track in tracks {
+        if reporter.cancelled() {
+            break;
+        }
+        batch.starting();
+        let found = match client.lookup(&track.artist, &track.title, Some(track.duration_secs)) {
+            Ok(Some(found)) => found,
+            Ok(None) => {
+                crate::debug!("#{}: no lyrics for {} — {}", track.id, track.artist, track.title);
+                batch.finished_one();
+                continue;
+            }
+            // A service being down is not a reason to stop: every track after
+            // this one still has a stem that can be listened to.
+            Err(e) => {
+                crate::warn!("#{}: could not look up the words: {e:#}", track.id);
+                batch.finished_one();
+                continue;
+            }
+        };
+        let heard = crate::library::transcript(&track.heard);
+        let verdict = lyrics::verdict(&found, &heard, track.identified_surely, track.duration_secs);
+        crate::info!(
+            "#{}: {} — {} says {:?}{}",
+            track.id,
+            track.artist,
+            track.title,
+            verdict,
+            match found.instrumental {
+                true => " (an instrumental)",
+                false => "",
+            }
+        );
+        let _ = reporter.tx.send(Update::WordsLookedUp {
+            id: track.id,
+            found: Box::new(found),
+            verdict,
+        });
         batch.finished_one();
         (reporter.wake)();
     }
