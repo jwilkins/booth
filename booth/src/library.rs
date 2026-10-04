@@ -335,6 +335,40 @@ pub fn refrains_from(lyrics: &[Lyric]) -> Vec<Refrain> {
         .collect()
 }
 
+/// What a track's words say, as the comment a player shows.
+///
+/// Both drive databases carry one free-text field per track — `djComment` in
+/// the OneLibrary one, the twenty-first string in a pdb row — and a CDJ shows
+/// it in the browser and on the track info screen. It has been empty on every
+/// drive this program has ever written, which is a waste of the one place the
+/// words could be read in a booth.
+///
+/// The lines the track keeps coming back to go first, with how often each is
+/// sung, and the whole lyric follows after a blank line. That order is not
+/// decoration: the comment shares a 4 kB row with the path and the title, and
+/// anything past what fits is cut off the end — so what a long lyric loses is
+/// its last verse, and never the line that identifies the record.
+pub fn words_as_comment(lyrics: &[Lyric], refrains: &[Refrain]) -> String {
+    if lyrics.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for refrain in refrains {
+        out.push_str(&format!("{}\u{d7} {}\n", refrain.times(), refrain.text.trim()));
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    for line in lyrics {
+        let said = line.text.trim();
+        if !said.is_empty() {
+            out.push_str(said);
+            out.push('\n');
+        }
+    }
+    out.trim_end().to_string()
+}
+
 /// The words as the engine wants them, for finding what repeats in them.
 pub fn transcript(lyrics: &[Lyric]) -> booth_cli::transcribe::Transcript {
     booth_cli::transcribe::Transcript {
@@ -575,6 +609,15 @@ pub struct Track {
     /// rather than minutes of listening all over again.
     #[serde(default)]
     pub lyrics_aligned: bool,
+    /// Whether this track has been found to have no singing on it.
+    ///
+    /// Different from having no words *yet*, which is what empty `lyrics`
+    /// means on its own, and the difference is minutes: a track nobody has
+    /// asked about is worth a separation and a pass through the recogniser,
+    /// and one already known to be an instrumental is worth neither. Without
+    /// it, every press of Words paid for the same answer again.
+    #[serde(default)]
+    pub instrumental: bool,
     pub loudness_lufs: Option<f64>,
     pub peak_dbtp: Option<f64>,
 
@@ -684,6 +727,7 @@ impl Track {
             lyrics: Vec::new(),
             refrains: Vec::new(),
             lyrics_aligned: true,
+            instrumental: false,
             edited: None,
             loudness_lufs: None,
             peak_dbtp: None,
@@ -2893,6 +2937,69 @@ mod tests {
 
         // And one with no words at all is not waiting on anything.
         assert!(Track::placeholder(2).lyrics_aligned);
+    }
+
+    #[test]
+    fn the_comment_leads_with_the_lines_the_track_keeps_coming_back_to() {
+        // Both drive databases carry one free-text field per track and a CDJ
+        // shows it. It had been empty on every drive this ever wrote.
+        let lyrics: Vec<Lyric> = [
+            (0, "walking through the city at night"),
+            (40_000, "hold me closer now"),
+            (100_000, "hold me closer now"),
+            (160_000, "and then home"),
+        ]
+        .iter()
+        .map(|&(start_ms, text)| Lyric { start_ms, end_ms: start_ms + 2_000, text: text.into() })
+        .collect();
+        let refrains = refrains_from(&lyrics);
+
+        let comment = words_as_comment(&lyrics, &refrains);
+        let lines: Vec<&str> = comment.lines().collect();
+
+        assert_eq!(lines[0], "2\u{d7} hold me closer now", "{comment:?}");
+        assert_eq!(lines[1], "", "a blank line separates the hooks from the lyric");
+        assert_eq!(lines[2], "walking through the city at night");
+        assert_eq!(lines.last(), Some(&"and then home"));
+    }
+
+    #[test]
+    fn the_hooks_lead_because_the_end_is_what_gets_cut() {
+        // The comment shares a 4 kB row with the path and the title, and
+        // anything past what fits comes off the end. So a long lyric loses its
+        // last verse and never the line that identifies the record.
+        // Filler with nothing in common, so the grouping keeps it apart and
+        // none of it out-counts the hook. Lines that differ by one word would
+        // group into a single refrain, which is the whole point of the
+        // grouping and makes a poor fixture.
+        const FILLER: [&str; 8] = [
+            "walking through the city at night",
+            "nobody told me it would end",
+            "a coat on the back of a chair",
+            "every window on the eighteenth floor",
+            "she said wait for the rain",
+            "counting the stops to the river",
+            "somewhere a door closes twice",
+            "the last train out of the station",
+        ];
+        let lyrics: Vec<Lyric> = (0..400)
+            .map(|i| Lyric {
+                start_ms: i * 5_000,
+                end_ms: i * 5_000 + 500,
+                text: match i % 3 {
+                    0 => "hold me closer now".to_string(),
+                    _ => FILLER[i as usize % FILLER.len()].to_string(),
+                },
+            })
+            .collect();
+        let comment = words_as_comment(&lyrics, &refrains_from(&lyrics));
+        assert!(comment.len() > 4_000, "the fixture is not long enough to prove anything");
+        assert!(comment.starts_with("134\u{d7} hold me closer now"), "{:?}", &comment[..40]);
+    }
+
+    #[test]
+    fn a_track_nobody_has_read_the_words_of_gets_no_comment() {
+        assert_eq!(words_as_comment(&[], &[]), "");
     }
 
     #[test]

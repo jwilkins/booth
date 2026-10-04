@@ -297,7 +297,7 @@ impl Database {
         rows.insert(Table::PlaylistTree as u8, tree);
         rows.insert(Table::PlaylistEntries as u8, entries);
 
-        Ok(self.lay_out(&rows))
+        self.lay_out(&rows)
     }
 
     /// Refuse to write something a player would choke on, while there is still
@@ -344,12 +344,12 @@ impl Database {
     /// rows still gets its pair of pages; the second is left as zeroes and the
     /// table's `last_page` points back at the first, which is what a real
     /// export does.
-    fn lay_out(&self, rows: &BTreeMap<u8, Vec<RowData>>) -> Vec<u8> {
+    fn lay_out(&self, rows: &BTreeMap<u8, Vec<RowData>>) -> Result<Vec<u8>> {
         let empty = Vec::new();
         let packed: Vec<(Table, Vec<Vec<&RowData>>)> = Table::ALL
             .iter()
-            .map(|table| (*table, pack(rows.get(&(*table as u8)).unwrap_or(&empty))))
-            .collect();
+            .map(|table| Ok((*table, pack(rows.get(&(*table as u8)).unwrap_or(&empty))?)))
+            .collect::<Result<_>>()?;
 
         // Every table costs its header page plus its data pages, and an empty
         // table still costs two, so the page count is known before anything is
@@ -416,7 +416,7 @@ impl Database {
         }
         header.resize(PAGE_LEN, 0);
 
-        std::iter::once(header).chain(pages).flatten().collect()
+        Ok(std::iter::once(header).chain(pages).flatten().collect())
     }
 }
 
@@ -466,12 +466,22 @@ impl Interner {
 // -- pages -----------------------------------------------------------------
 
 /// Split rows into page-sized groups.
-fn pack(rows: &[RowData]) -> Vec<Vec<&RowData>> {
+///
+/// Fails on a row that will not fit a page at all. Nothing should reach here
+/// that does — [`track_row`] shortens the one field that can grow without
+/// bound, and [`Database::check`] rejects the rest — but the alternative to
+/// failing is a page that claims more free space than it has and gets cut back
+/// to 4 kB with a row sliced through the middle, which is a database a player
+/// may refuse or crash on rather than one it reads badly.
+fn pack(rows: &[RowData]) -> Result<Vec<Vec<&RowData>>> {
     let mut pages = Vec::new();
     let mut current: Vec<&RowData> = Vec::new();
     let mut used = 0usize;
 
     for row in rows {
+        if aligned(row.bytes.len()) > MAX_ROW_LEN {
+            bail!("a {}-byte row will not fit a {PAGE_LEN}-byte page", row.bytes.len());
+        }
         let size = aligned(row.bytes.len());
         let next_count = current.len() + 1;
         let index_len = index_size(next_count);
@@ -488,7 +498,7 @@ fn pack(rows: &[RowData]) -> Vec<Vec<&RowData>> {
     if !current.is_empty() {
         pages.push(current);
     }
-    pages
+    Ok(pages)
 }
 
 fn aligned(len: usize) -> usize {
@@ -793,12 +803,75 @@ fn playlist_entry_row(position: u32, track_id: u32, playlist_id: u32) -> Vec<u8>
     row
 }
 
+/// The most a row may take, which is a page with one row in it.
+///
+/// A row cannot span pages: the page header counts its rows and its free space
+/// in sixteen bits, and the index at the end of the page points at each row's
+/// start. So a row that does not fit a page cannot be written at all — and
+/// until this existed, one was: the page writer worked out its free space as
+/// `PAGE_LEN - header - used`, which underflowed, and what went on the stick
+/// was a page truncated back to 4 kB with a row cut in half inside it. Debug
+/// builds panicked on the subtraction; release builds wrote the corrupt page.
+pub(crate) const MAX_ROW_LEN: usize = PAGE_LEN - PAGE_HEADER_LEN - ROW_INDEX_LEN;
+
+/// What the index at the end of a page costs for a single row: two bytes for
+/// its offset, four for its group's flags.
+const ROW_INDEX_LEN: usize = 6;
+
 /// The number of strings a track row carries, whatever their contents.
 const TRACK_STRINGS: usize = 21;
 /// Fixed part of a track row: the numbers, then the table of string offsets.
 const TRACK_FIXED_LEN: usize = 0x5e + TRACK_STRINGS * 2;
 
+/// A track row, with the comment shortened if that is what it takes to fit.
+///
+/// The comment is the one field somebody can make arbitrarily long — it is
+/// free text, and a lyric or a long note goes in it — so it is the one that
+/// gives way. Refusing to write a whole drive because a note is long would be
+/// a worse answer than putting a shorter note on the stick, and the
+/// collection keeps the whole of it either way.
+///
+/// Everything else that can overflow a row is a path or a name, and those are
+/// not ours to shorten: a truncated path is a track the player cannot open,
+/// which is worse than being told the drive cannot be written. Those are
+/// caught by [`Database::check`].
 fn track_row(
+    track: &Track,
+    artist_id: u32,
+    album_id: u32,
+    genre_id: u32,
+    label_id: u32,
+    key_id: u32,
+) -> Vec<u8> {
+    let row = track_row_exactly(track, artist_id, album_id, genre_id, label_id, key_id);
+    if row.len() <= MAX_ROW_LEN {
+        return row;
+    }
+    // How much of the comment there is room for, in bytes of encoded string.
+    // Taken off what the row came to rather than guessed at, so it is right
+    // whatever else the row is carrying.
+    let over = row.len() - MAX_ROW_LEN;
+    let mut shorter = track.clone();
+    shorter.comment = shorten(&track.comment, track.comment.len().saturating_sub(over + 8));
+    track_row_exactly(&shorter, artist_id, album_id, genre_id, label_id, key_id)
+}
+
+/// A string cut to at most `bytes`, on a character boundary.
+///
+/// Characters rather than bytes because the string encoding is UTF-16 for
+/// anything that is not ASCII, and half a character is not a string.
+fn shorten(text: &str, bytes: usize) -> String {
+    if text.len() <= bytes {
+        return text.to_string();
+    }
+    let mut end = bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+fn track_row_exactly(
     track: &Track,
     artist_id: u32,
     album_id: u32,
@@ -994,6 +1067,77 @@ mod tests {
     /// Every page after the file header, as its own slice.
     fn pages(bytes: &[u8]) -> Vec<&[u8]> {
         bytes.chunks_exact(PAGE_LEN).skip(1).collect()
+    }
+
+    /// Every page is exactly one page long and says how much of itself is used.
+    fn pages_are_sane(bytes: &[u8]) {
+        assert_eq!(bytes.len() % PAGE_LEN, 0, "the file is not a whole number of pages");
+        for (n, page) in pages(bytes).iter().enumerate() {
+            let free = u16::from_le_bytes(page[0x1c..0x1e].try_into().unwrap()) as usize;
+            let used = u16::from_le_bytes(page[0x1e..0x20].try_into().unwrap()) as usize;
+            assert!(
+                used + free <= PAGE_LEN,
+                "page {n} claims {used} used and {free} free, which is more than a page"
+            );
+        }
+    }
+
+    #[test]
+    fn a_comment_too_long_for_a_page_is_shortened_rather_than_cutting_the_row_in_half() {
+        // The fault, and it reached a drive: a row is laid out inside one
+        // 4 kB page, and the page writer worked out its free space as
+        // `PAGE_LEN - header - used`. A comment of a few thousand characters
+        // made `used` the larger, the subtraction went backwards, and what
+        // was written was a page truncated back to 4 kB with a row cut
+        // through the middle of it. Debug builds panicked; release builds
+        // put it on the stick.
+        for len in [100usize, 3_000, 3_900, 20_000, 200_000] {
+            let mut track = a_track(1);
+            track.comment = "x".repeat(len);
+            let mut db = Database::new();
+            db.tracks.push(track);
+
+            let bytes = db.to_bytes().unwrap_or_else(|e| panic!("{len}-char comment: {e:#}"));
+            pages_are_sane(&bytes);
+            assert_eq!(table(&bytes, Table::Tracks).rows, 1, "the track went missing at {len}");
+        }
+    }
+
+    #[test]
+    fn a_comment_that_fits_is_left_alone() {
+        // The shortening is a last resort, not a policy: a note somebody
+        // typed should reach the player as they typed it.
+        let mut track = a_track(1);
+        track.comment = "peak time \u{2014} big room".to_string();
+        let mut db = Database::new();
+        db.tracks.push(track.clone());
+
+        let bytes = db.to_bytes().unwrap();
+        let text = String::from_utf16_lossy(
+            &bytes.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect::<Vec<_>>(),
+        );
+        assert!(
+            text.contains(&track.comment)
+                || String::from_utf8_lossy(&bytes).contains(&track.comment),
+            "the comment did not survive"
+        );
+    }
+
+    #[test]
+    fn a_row_that_cannot_fit_a_page_is_refused_rather_than_written_broken() {
+        // Everything but the comment is a path or a name, and those are not
+        // ours to shorten — a truncated path is a track the player cannot
+        // open. So the write fails and says why.
+        let mut track = a_track(1);
+        track.file_path = format!("/Contents/{}.flac", "d".repeat(5_000));
+        let mut db = Database::new();
+        db.tracks.push(track);
+
+        let refused = db.to_bytes().expect_err("a 5 kB path should not be writable");
+        assert!(
+            refused.to_string().contains("will not fit"),
+            "the error should say what is wrong: {refused}"
+        );
     }
 
     #[test]

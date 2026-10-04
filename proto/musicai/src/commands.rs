@@ -1022,6 +1022,7 @@ fn prepare(
             .or_else(|| parent_tags.as_ref().and_then(|tags| tags.album.clone()))
             .unwrap_or_default(),
         key: key.clone(),
+        comment: supplied.map(|prep| prep.comment.clone()).unwrap_or_default(),
         file_path: on_drive.clone(),
         analyze_path,
         tempo_x100: (listened.bpm * 100.0).round() as u32,

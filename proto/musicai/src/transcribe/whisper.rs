@@ -108,23 +108,36 @@ pub fn transcribe_audio(
     config: &Config,
     on_progress: &dyn Fn(u8),
 ) -> Result<Transcript> {
+    let flavour = config.kind();
+    // Before the audio is looked at, because a recogniser that is not set up
+    // is not set up whatever it was handed — and a misconfiguration that only
+    // showed itself on tracks that *do* have singing would be one somebody
+    // finds out about in a booth.
+    if flavour == Flavour::Cpp && config.model.is_none() {
+        bail!(
+            "whisper.cpp needs a model file and none is set. Download one — \
+             ggml-base.en.bin is a good first choice — and point at it with \
+             --whisper-model, or use OpenAI's `whisper` instead."
+        );
+    }
+    // Then, before anything expensive: a stem with no voice on it is an
+    // instrumental, and a recogniser handed one does not hand back an empty
+    // transcript — it hallucinates. See [`super::align::has_singing`].
+    if !super::align::has_singing(audio) {
+        return Ok(Transcript::default());
+    }
+
     std::fs::create_dir_all(&config.work_dir)
         .with_context(|| format!("creating {}", config.work_dir.display()))?;
 
     let speech = config.work_dir.join("words.wav");
     write_speech(audio, &speech)?;
 
-    let flavour = config.kind();
     let mut command = Command::new(&config.program);
     match flavour {
         Flavour::Cpp => {
-            let model = config.model.as_ref().ok_or_else(|| {
-                anyhow!(
-                    "whisper.cpp needs a model file and none is set. Download one — \
-                     ggml-base.en.bin is a good first choice — and point at it with \
-                     --whisper-model, or use OpenAI's `whisper` instead."
-                )
-            })?;
+            // Checked above, before the audio was looked at.
+            let model = config.model.as_ref().expect("a cpp config without a model got this far");
             command
                 .arg("-m")
                 .arg(model)
@@ -585,13 +598,30 @@ mod tests {
     }
 
     #[test]
+    fn a_stem_with_nothing_sung_on_it_never_reaches_the_recogniser() {
+        // The binary does not exist, so reaching it would be an error. An
+        // instrumental is answered before that and costs nothing.
+        let dir = std::env::temp_dir().join("musicai-whisper-instrumental");
+        let mut config = Config::new(dir);
+        config.program = OsString::from("definitely-not-a-real-whisper-binary");
+        config.model = Some(PathBuf::from("model.bin"));
+
+        let audio = Audio::new(16_000, vec![vec![0.0; 16_000 * 4]]).unwrap();
+        let heard = transcribe_audio(&audio, &config, &|_| {})
+            .expect("an instrumental should not need a recogniser at all");
+        assert!(heard.lines.is_empty(), "{heard:?}");
+    }
+
+    #[test]
     fn a_missing_binary_says_what_to_install() {
         let dir = std::env::temp_dir().join("musicai-whisper-missing");
         let mut config = Config::new(dir);
         config.program = OsString::from("definitely-not-a-real-whisper-binary");
         config.model = Some(PathBuf::from("model.bin"));
 
-        let audio = Audio::new(16_000, vec![vec![0.0; 16_000]]).unwrap();
+        // Audio with a voice on it: the binary is only reached for a stem
+        // worth transcribing, and silence is now answered before that.
+        let audio = Audio::new(16_000, vec![tone(220.0, 16_000, 1.0)]).unwrap();
         let err = transcribe_audio(&audio, &config, &|_| {}).unwrap_err();
         assert!(err.to_string().contains("not on PATH"), "{err}");
         assert!(err.to_string().contains("works without it"), "{err}");
@@ -599,6 +629,8 @@ mod tests {
 
     #[test]
     fn whisper_cpp_without_a_model_says_so_before_running_anything() {
+        // Including before deciding there is nothing to transcribe: silence
+        // here, and it still says the recogniser is not set up.
         let config = Config::new(std::env::temp_dir().join("musicai-whisper-nomodel"));
         let audio = Audio::new(16_000, vec![vec![0.0; 16_000]]).unwrap();
         let err = transcribe_audio(&audio, &config, &|_| {}).unwrap_err();

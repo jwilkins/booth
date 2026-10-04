@@ -64,6 +64,49 @@ const FLOOR_OF_PEAK: f32 = 0.04;
 const REACH_MS: u32 = 30_000;
 
 /// The stretches of a stem that have singing in them, in milliseconds.
+/// Whether a stem has any singing on it at all.
+///
+/// A separation of an instrumental still produces a vocal stem — what is in it
+/// is bleed, a ghost of the snare, the tail of a reverb — and handing that to
+/// a recogniser costs a minute or two for a transcript of things nobody sang.
+/// Worse than nothing, in fact: a recogniser given something that is not
+/// speech does not hand back nothing, it hallucinates, and "thanks for
+/// watching" is the sentence it writes. There is already code downstream
+/// whose whole job is to not believe that.
+///
+/// Measured absolutely rather than against the stem's own range, which is the
+/// whole difference from [`voiced_spans`]: that asks which parts of a stem are
+/// its loud ones and finds some in anything, where this asks whether the loud
+/// ones are loud enough to be a voice.
+pub fn has_singing(audio: &Audio) -> bool {
+    loudest(audio) > QUIETEST_VOICE
+}
+
+/// How loud a stem gets, as a fraction of full scale.
+///
+/// Taken near the top rather than at the very top, so one separation artefact
+/// cannot answer for the whole file.
+fn loudest(audio: &Audio) -> f32 {
+    let mono = audio.to_mono();
+    if mono.is_empty() {
+        return 0.0;
+    }
+    let mut levels: Vec<f32> = mono.iter().map(|s| s.abs()).collect();
+    levels.sort_by(f32::total_cmp);
+    levels[levels.len() * 999 / 1000]
+}
+
+/// The quietest a stem's loud parts can be and still hold a voice: −40 dBFS.
+///
+/// A sung vocal separated out of a mix sits far above this — it is the loudest
+/// thing in the file by design, which is what a separator was asked for. What
+/// sits below it is what the separator could not remove.
+///
+/// Picked rather than measured against a library of real instrumentals, which
+/// is the honest limit of it: it is well clear of both cases as synthesised
+/// here, and it is one number to move if a real stem lands on the wrong side.
+const QUIETEST_VOICE: f32 = 0.01;
+
 pub fn voiced_spans(audio: &Audio) -> Vec<(u32, u32)> {
     const FRAME_MS: u32 = 20;
     let mono = audio.to_mono();
@@ -163,6 +206,45 @@ pub fn aligned(mut transcript: Transcript, audio: &Audio) -> Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stem-shaped file: a burst of sound at the given level, then silence.
+    fn stem_at(level: f32) -> Audio {
+        const RATE: u32 = 16_000;
+        let mut plane = vec![0.0f32; RATE as usize * 4];
+        for (i, sample) in plane.iter_mut().enumerate().take(RATE as usize * 2) {
+            let t = i as f32 / RATE as f32;
+            *sample = level * (2.0 * std::f32::consts::PI * 220.0 * t).sin();
+        }
+        Audio::new(RATE, vec![plane.clone(), plane]).unwrap()
+    }
+
+    #[test]
+    fn a_stem_with_a_voice_on_it_is_worth_a_recogniser() {
+        // What a separated vocal looks like: the loudest thing in the file,
+        // because that is what the separator was asked for.
+        assert!(has_singing(&stem_at(0.5)));
+        assert!(has_singing(&stem_at(0.1)));
+    }
+
+    #[test]
+    fn a_stem_that_is_only_what_the_separator_could_not_remove_is_not() {
+        // An instrumental still produces a vocal stem. What is in it is bleed
+        // — a ghost of the snare, the tail of a reverb — tens of dB below a
+        // voice, and a recogniser handed it does not return nothing: it
+        // hallucinates.
+        assert!(!has_singing(&stem_at(0.003)));
+        assert!(!has_singing(&stem_at(0.0)));
+    }
+
+    #[test]
+    fn the_question_is_how_loud_and_not_which_parts_are_loudest() {
+        // The difference from `voiced_spans`, which measures against the
+        // stem's own range and so finds something in anything — including in
+        // bleed, which is why it cannot answer this on its own.
+        let bleed = stem_at(0.003);
+        assert!(!voiced_spans(&bleed).is_empty(), "the relative measure finds spans in bleed");
+        assert!(!has_singing(&bleed), "and the absolute one does not call it a voice");
+    }
 
     /// Tone bursts and silence, which is the shape of a vocal stem.
     fn stem(bursts: &[(f32, f32)], seconds: f32) -> Audio {
