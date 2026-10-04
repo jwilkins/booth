@@ -375,6 +375,22 @@ fn tidy(text: &str) -> String {
     text.trim().trim_matches(|c: char| c == '"' || c == '\'').trim().to_string()
 }
 
+/// Whether a track's name says there is nothing sung on it.
+///
+/// "(Instrumental)" in a file name or a title is somebody telling you the
+/// answer, and finding it out for yourself costs a stem separation and a pass
+/// through a recogniser — minutes a track, for a transcript of nothing.
+///
+/// Narrow on purpose. "Dub", "beats" and "mix" mean an instrumental in some
+/// rooms and a vocal record in others, and a rule that skipped the words on a
+/// dub plate with a vocal on it would be worse than no rule: the cost of being
+/// wrong here is a record that silently never gets cued from its words.
+/// "Instrumental" means one thing everywhere.
+pub fn named_as_instrumental(name: &str) -> bool {
+    let said = words(name);
+    said.iter().any(|word| word == "instrumental" || word == "inst")
+}
+
 /// Whether two written-out lines are the same sung line.
 ///
 /// The question a cue set asks about its own labels: a hook heard four times is
@@ -940,6 +956,30 @@ mod tests {
         assert!(hook.text.ends_with('…'));
         // Cut between words rather than through one.
         assert!(long.starts_with(hook.text.trim_end_matches('…')), "{:?}", hook.text);
+    }
+
+    #[test]
+    fn a_name_that_says_instrumental_is_taken_at_its_word() {
+        assert!(named_as_instrumental("Der Kommissar (Instrumental)"));
+        assert!(named_as_instrumental("artist - title [instrumental].flac"));
+        assert!(named_as_instrumental("Something (Inst)"));
+    }
+
+    #[test]
+    fn a_name_that_only_might_mean_instrumental_is_not() {
+        // The cost of being wrong is a record that silently never gets cued
+        // from its words, so only the word that means one thing everywhere
+        // counts. "Dub" and "beats" mean an instrumental in some rooms and a
+        // vocal record in others.
+        for name in [
+            "Peverelist - Dub",
+            "Dub Mix",
+            "Boogie Beats",
+            "Instant Crush",
+            "The Instrument Of My Hands",
+        ] {
+            assert!(!named_as_instrumental(name), "{name} should not count");
+        }
     }
 
     #[test]

@@ -609,6 +609,15 @@ pub struct Track {
     /// rather than minutes of listening all over again.
     #[serde(default)]
     pub lyrics_aligned: bool,
+    /// Whether this track has been found to have no singing on it.
+    ///
+    /// Different from having no words *yet*, which is what empty `lyrics`
+    /// means on its own, and the difference is minutes: a track nobody has
+    /// asked about is worth a separation and a pass through the recogniser,
+    /// and one already known to be an instrumental is worth neither. Without
+    /// it, every press of Words paid for the same answer again.
+    #[serde(default)]
+    pub instrumental: bool,
     pub loudness_lufs: Option<f64>,
     pub peak_dbtp: Option<f64>,
 
@@ -718,6 +727,7 @@ impl Track {
             lyrics: Vec::new(),
             refrains: Vec::new(),
             lyrics_aligned: true,
+            instrumental: false,
             edited: None,
             loudness_lufs: None,
             peak_dbtp: None,

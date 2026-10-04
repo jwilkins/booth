@@ -1924,8 +1924,46 @@ impl App {
         let mut placing = Vec::new();
         let mut reading = Vec::new();
         let mut rendering = Vec::new();
+        // A name that says "instrumental" is somebody telling you the answer,
+        // and it is worth taking: finding it out instead costs a separation
+        // and a pass through the recogniser. Marked before the pass below
+        // rather than inside it, so the track is skipped by the same rule as
+        // one that was listened to and found silent.
+        let named: Vec<u32> = wanted
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.library.get(*id).is_some_and(|track| {
+                    !track.instrumental
+                        && booth_cli::transcribe::named_as_instrumental(&format!(
+                            "{} {}",
+                            track.display_title(),
+                            track.path.file_name().unwrap_or_default().to_string_lossy()
+                        ))
+                })
+            })
+            .collect();
+        if !named.is_empty() {
+            crate::info!(
+                "{} say they are instrumental, so the words are not read off them",
+                plural(named.len(), "track")
+            );
+            for id in &named {
+                if let Some(track) = self.library.get_mut(*id) {
+                    track.instrumental = true;
+                }
+            }
+        }
+
         for id in wanted {
             let Some(track) = self.library.get(id) else { continue };
+            // An instrumental is not a track waiting to be read: it has been
+            // read, or its name said so. Asking again is minutes for the same
+            // answer, so it takes holding shift like any other re-run.
+            if track.instrumental && !again {
+                known.push(id);
+                continue;
+            }
             // The words are not cleared here. They are replaced when the new
             // ones arrive, so a re-read that never starts — no recogniser, a
             // missing file — leaves the track with the words it had.
@@ -2055,7 +2093,8 @@ impl App {
     }
 
     fn auto_cue_showing(&mut self, again: bool) {
-        let waiting = self.acting_on(|track| again || track.lyrics.is_empty());
+        let waiting =
+            self.acting_on(|track| again || (track.lyrics.is_empty() && !track.instrumental));
         if waiting.is_empty() {
             self.note("the words have been read for everything showing", theme::dim());
             return;
@@ -2363,7 +2402,17 @@ impl App {
                     // track that turns out to have no words should say so
                     // rather than leave somebody waiting for cues.
                     match heard {
-                        0 => self.note("nothing sung was made out", theme::dim()),
+                        0 => {
+                            // Recorded rather than only reported. An empty
+                            // transcript off a stem that was listened to is a
+                            // real answer — this record has no singing on it —
+                            // and without keeping it every press of Words paid
+                            // for the same minutes again.
+                            if let Some(track) = self.library.get_mut(id) {
+                                track.instrumental = true;
+                            }
+                            self.note("nothing sung was made out", theme::dim());
+                        }
                         _ => {
                             let placed = self.auto_cue(id);
                             self.note(
@@ -4325,7 +4374,8 @@ impl App {
             {
                 self.render_stems(again);
             }
-            let unread = self.acting_on(|track| track.lyrics.is_empty()).len();
+            let unread =
+                self.acting_on(|track| track.lyrics.is_empty() && !track.instrumental).len();
             let (verb, count) = if again { ("Re-read", showing) } else { ("Words", unread) };
             if ui
                 .add_enabled(idle && count > 0, egui::Button::new(format!("{verb} {count}")))
@@ -10989,6 +11039,44 @@ mod tests {
                 assert!(ahead.for_cues, "the stems are for cues, which is what to say");
                 assert!(!app.running(), "nothing should have started yet");
                 assert!(app.want_cues.is_empty(), "nor should anything be queued to follow");
+            }
+
+            #[test]
+            fn a_track_known_to_have_no_singing_is_not_paid_for_twice() {
+                // An empty transcript off a stem that was listened to is a
+                // real answer, and without keeping it every press of Words
+                // bought the same minutes again.
+                let (mut app, id) = sung("instrumental", &[]);
+                app.library.get_mut(id).unwrap().stems.vocals =
+                    Some(app.library_path.with_file_name("track-vocals.wav"));
+                app.library.get_mut(id).unwrap().instrumental = true;
+                app.rebuild();
+
+                app.auto_cue_tracks(&[id], false);
+                assert!(!app.running(), "an instrumental went back to the recogniser");
+
+                // Holding shift still asks, because a better recogniser is
+                // exactly the reason to doubt the old answer.
+                app.auto_cue_tracks(&[id], true);
+                assert!(app.running(), "asking again should still be possible");
+            }
+
+            #[test]
+            fn a_name_that_says_instrumental_costs_no_separation_at_all() {
+                // The filename is somebody telling you the answer. Finding it
+                // out instead is a stem render and a pass through Whisper.
+                let mut app = app("named-instrumental");
+                let path =
+                    app.library_path.with_file_name("Falco - Der Kommissar (Instrumental).flac");
+                std::fs::write(&path, b"not really a flac").unwrap();
+                let id = app.library.add(&path);
+                app.rebuild();
+
+                app.auto_cue_tracks(&[id], false);
+
+                assert!(app.library.get(id).unwrap().instrumental, "the name was not believed");
+                assert!(app.stems_ahead.is_none(), "it asked to separate an instrumental");
+                assert!(!app.running(), "it started work on an instrumental");
             }
 
             #[test]
