@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Background — Booth</title>
+<meta name="description" content="Why Booth exists, what is actually on a CDJ's USB stick, how the format was worked out, and how the writer is checked against somebody else's reader.">
+<link rel="stylesheet" href="booth.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%2312161A'/><rect x='3' y='4' width='2' height='8' fill='%23E2A03F'/><rect x='7' y='2' width='2' height='12' fill='%23E2A03F'/><rect x='11' y='6' width='2' height='4' fill='%23E2A03F'/></svg>">
+
+<div class="bar"><div class="wrap bar-in">
+  <a class="brand" href="./">Booth<span>.</span></a>
+  <nav>
+    <a href="./">Home</a>
+    <a href="#why">Why</a>
+    <a href="#stick">What is on the stick</a>
+    <a href="#worked-out">How it was worked out</a>
+    <a href="#checking">Being wrong safely</a>
+    <a href="#parts">The parts</a>
+    <a href="progress.html">Progress</a>
+    <a href="https://github.com/jwilkins/booth">Source</a>
+  </nav>
+</div></div>
+
+<header class="hero"><div class="wrap">
+  <p class="eyebrow">Background</p>
+  <h1>The lock-in is not<br>the software.<br><em>It is the stick.</em></h1>
+  <p class="standfirst">A CDJ does not care what prepared the drive it is reading. It cares that the
+  files on it are the ones it expects, laid out the way it expects. That is a format question, and
+  a format question has an answer.</p>
+</div></header>
+
+<section id="why"><div class="wrap">
+  <span class="snum">01 — Why</span>
+  <h2>Load-bearing, not loved</h2>
+  <div class="col">
+    <p class="lede">Every DJ playing club hardware has the same workflow bolted to the same
+    application, not because it is the one they would choose but because it is the one that writes
+    the drive. Change anything about how you want to prepare music and the answer is the same:
+    rekordbox does it that way.</p>
+    <p>The interesting part is that this is not really an application problem. The databases a
+    player reads are files on a FAT32 or HFS+ volume. They have been read, parsed and documented by
+    other people for years — Deep&nbsp;Symmetry's work on the legacy format and
+    <a href="https://github.com/Holzhaus/rekordcrate">rekordcrate</a>'s parser are both public, and
+    the players themselves are the ultimate specification: a drive either loads or it does not.</p>
+    <p>So the project is not “re-implement rekordbox”. It is: build the library you actually want,
+    write the drive yourself, and then do the things the official tool cannot — stems on a
+    standalone player, cues placed from the words, a copy of every stick you have ever written.</p>
+    <div class="callout">A player that loads the drive is the test. Everything else is a theory
+    about the format.</div>
+  </div>
+</div></section>
+
+<section id="stick"><div class="wrap">
+  <span class="snum">02 — What is actually on the stick</span>
+  <h2>Two databases and three kinds of analysis file</h2>
+  <div class="col">
+    <p class="lede">A prepared drive carries its music, and under a <code>PIONEER</code> directory it
+    carries everything the player knows about that music. There is more than one generation of it
+    on the same stick, because there is more than one generation of player in the world.</p>
+  </div>
+  <div class="tablewrap">
+    <table class="doc">
+      <thead><tr><th scope="col">On the drive</th><th scope="col">What it is</th></tr></thead>
+      <tbody>
+        <tr>
+          <th scope="row"><code>export.pdb</code></th>
+          <td>The legacy browse database — a DeviceSQL file, fixed 4&nbsp;KB pages, with its own
+          string encoding and its own ideas about indexes. Everything from 2009 onwards reads it.
+          It is the format the public research covers best.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>exportLibrary.db</code></th>
+          <td>The newer OneLibrary database — SQLite, encrypted. Every player sold since 2023 needs
+          it, and when Booth started, no other free tool had been seen to write one.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>.DAT</code> / <code>.EXT</code> / <code>.2EX</code></th>
+          <td>One analysis file per track per generation: beat grid, cue points, waveforms —
+          monochrome, colour and the three-band kind the newest players draw — and the phrase
+          structure. Booth writes all three so one stick works from a 2009 deck to a CDJ-3000X.</td>
+        </tr>
+        <tr>
+          <th scope="row">The history</th>
+          <td>What the player actually loaded, in order, one session a night. It is the only thing
+          on a drive a library cannot produce for itself, which is why Booth reads it back.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>The two databases have to agree with each other. A track present in one and missing from the
+    other, or carrying a different id, is a drive that browses strangely or not at all — so Booth
+    writes both from one collection in one pass, rather than treating the newer one as an export of
+    the older.</p>
+  </div>
+</div></section>
+
+<section id="worked-out"><div class="wrap">
+  <span class="snum">03 — How it was worked out</span>
+  <h2>Public research, then a great many hexdumps</h2>
+  <div class="col">
+    <p class="lede">The legacy format was mostly already documented. The newer one was not, and what
+    this project learned about it is written down in
+    <a href="https://github.com/jwilkins/booth/blob/main/docs/onelibrary.md"><code>docs/onelibrary.md</code></a>
+    — including the parts that turned out to be wrong, which are left in deliberately. A format
+    note that records only the correct conclusions is a note you cannot tell apart from a guess.</p>
+    <p>Some of what that took is unglamorous and worth saying out loud. A row that is one byte too
+    long for a page does not fail loudly; it writes a database a parser will happily read back and
+    a player may refuse. A string under 127 bytes is encoded one way, a longer ASCII one another,
+    and anything non-ASCII a third. A count read from the wrong offset comes back as 65,535 and
+    looks like corruption rather than a mistake in the reader. None of that is visible from a diff:
+    it is visible from writing a file, reading it with somebody else's parser, and then putting the
+    stick in a player.</p>
+    <p>The original pitch for all this — written before the code, including the parts it got
+    wrong — is still here: <a href="booth-spec-page.html">the specification page</a>.</p>
+  </div>
+</div></section>
+
+<section id="checking"><div class="wrap">
+  <span class="snum">04 — Being wrong safely</span>
+  <h2>A misunderstanding you share with yourself is invisible</h2>
+  <div class="col">
+    <p class="lede">The dangerous failure here is not a crash. It is writing a file that is
+    confidently, consistently wrong — because the program that writes it and the program that reads
+    it back are both yours, and they agree.</p>
+    <p>So the drive writer's output is read back by
+    <a href="https://github.com/Holzhaus/rekordcrate">rekordcrate</a>, a separate implementation by
+    other people, written from the same public research but not from this code. A misunderstanding
+    of the format cannot be symmetrical and invisible across both.</p>
+    <p>The window is tested the same way round: its tests drive it through its own accessibility
+    tree, so they click the real buttons and read the real labels rather than calling the functions
+    underneath and assuming a person could have reached them.</p>
+    <p>Everything in the suite is offline. What would talk to AcoustID, MusicBrainz or a lyrics
+    server is marked ignored and run deliberately, so a green test run never depends on somebody
+    else's service being up — and a service being down is never mistaken for a bug.</p>
+    <div class="callout">The honest limit: the analysis-file reader was written from the same
+    understanding of the format as the writer, so the two agreeing says nothing about whether either
+    matches rekordbox. What that reader is for is reading back a file this program wrote and a
+    player has since edited.</div>
+  </div>
+</div></section>
+
+<section id="parts"><div class="wrap">
+  <span class="snum">05 — The parts</span>
+  <h2>One engine, two windows</h2>
+  <div class="tablewrap">
+    <table class="doc">
+      <thead><tr><th scope="col">Where</th><th scope="col">What</th></tr></thead>
+      <tbody>
+        <tr>
+          <th scope="row"><code>booth/</code></th>
+          <td>The library window. This is the program, and what <code>cargo build</code>
+          builds.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>proto/musicai/</code></th>
+          <td><code>booth-cli</code>: the engine — analysis, loudness, stems, tagging, the drive
+          writer — and a command-line tool around it. It came first, which is all the directory's
+          old name means.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>gui/</code></th>
+          <td>The older batch window: pick files, pick a task, run it. It is a front end to the
+          engine's own argument types, not a second implementation, so an option cannot drift
+          between the two.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>docs/</code></th>
+          <td>The specification this was built to, and what is known about the newer format.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <h3>Written in Rust, run on your machine</h3>
+    <p>No account, no telemetry, no upload. The one thing that reaches the network is asking
+    AcoustID and MusicBrainz what a recording is — a feature you turn on with a free key — and,
+    since 0.0.7, asking a lyrics server for words rather than spending minutes listening for them.
+    Both are optional and both are off until you say otherwise.</p>
+    <h3>The licence</h3>
+    <p>The <a href="https://github.com/jwilkins/booth/blob/main/LICENSE">Booth Public Source
+    License</a>: free to download, run and modify for personal, educational and internal use, and
+    free to redistribute through non-commercial and open-source channels. Putting it inside a
+    proprietary commercial product needs a separate licence. It is not an OSI-approved licence, so
+    GitHub shows it as “Other”.</p>
+    <p>Not affiliated with AlphaTheta or Pioneer DJ.</p>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <p><a href="./">← Back to the front page</a> · <a href="progress.html">What works today →</a></p>
+</div></footer>
+</html>

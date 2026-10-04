@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Booth — a DJ library that writes the USB drive itself</title>
+<meta name="description" content="Booth prepares tracks and writes the USB drives a Pioneer / AlphaTheta player reads, without rekordbox anywhere in the process. Cues placed from the words, stems rendered ahead, and a copy of every drive.">
+<meta property="og:title" content="Booth — a DJ library that writes the USB drive itself">
+<meta property="og:description" content="Cues placed from the words the room sings. Stems rendered ahead. A copy of every drive. No rekordbox, no account, nothing uploaded.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="media/booth.png">
+<link rel="stylesheet" href="booth.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%2312161A'/><rect x='3' y='4' width='2' height='8' fill='%23E2A03F'/><rect x='7' y='2' width='2' height='12' fill='%23E2A03F'/><rect x='11' y='6' width='2' height='4' fill='%23E2A03F'/></svg>">
+
+<div class="bar"><div class="wrap bar-in">
+  <a class="brand" href="./">Booth<span>.</span></a>
+  <nav>
+    <a href="#words">The words</a>
+    <a href="#markers">The markers</a>
+    <a href="#drive">The drive</a>
+    <a href="#copies">The copies</a>
+    <a href="#against">Versus rekordbox</a>
+    <a href="background.html">Background</a>
+    <a href="progress.html">Progress</a>
+    <a href="https://github.com/jwilkins/booth">Source</a>
+  </nav>
+</div></div>
+
+<header class="hero"><div class="wrap">
+  <p class="eyebrow">Version 0.0.7 · for macOS and Linux · free</p>
+  <h1>Your cues go where<br>the room sings.<br><em>No rekordbox involved.</em></h1>
+  <p class="standfirst">Booth holds your collection, listens to every track, and writes the USB
+  drive a Pioneer&nbsp;/ AlphaTheta player reads — both of its on-drive databases, from one
+  window, with nothing rekordbox has touched on the stick.</p>
+  <div class="btnrow">
+    <a class="btn" href="https://github.com/jwilkins/booth/releases/latest">Get the latest build</a>
+    <a class="btn ghost" href="https://github.com/jwilkins/booth">Read the source</a>
+  </div>
+  <div class="facts" style="margin-top:38px">
+    <div class="fact"><b>CDJ-3000X</b><span>plays a drive this writes</span></div>
+    <div class="fact"><b>0</b><span>accounts or uploads</span></div>
+    <div class="fact"><b>2009</b><span>oldest deck written for</span></div>
+    <div class="fact"><b>~5&nbsp;MB</b><span>to archive a 64&nbsp;GB stick</span></div>
+  </div>
+</div></header>
+
+<section id="window"><div class="wrap">
+  <span class="snum">00 — The window</span>
+  <h2>One window, and the drive is in it</h2>
+  <div class="col">
+    <p class="lede">The collection on the left, the tracks in the middle, the track you are looking
+    at on the right, the waveform underneath and the drive along the bottom. There is no import
+    mode, no export mode and no second application: preparing a record and putting it on a stick
+    happen in the same place.</p>
+  </div>
+  <figure class="figure" data-clip="media/one-window.mp4">
+    <span class="shot"><img src="media/booth.png" alt="The Booth window: collection and playlists on the left, the track list in the middle, the inspector on the right, a coloured waveform with cue markers and phrase bands below, and the drive dock along the bottom."></span>
+    <figcaption class="figcap"><span class="await">clip to come</span>
+    <b>The library window.</b> The query bar at the top is the browser — <code>bpm:124–128
+    key:~8A -played:30d tag:peak</code> is a search, and saving it makes a playlist that keeps
+    itself. Everything runs on your machine; the one thing that touches the network is asking
+    AcoustID what a recording is, which is a feature you turn on.</figcaption>
+  </figure>
+</div></section>
+
+<section id="words"><div class="wrap">
+  <span class="snum">01 — Cues from the words</span>
+  <h2>A hook and the verse before it look identical</h2>
+  <div class="col">
+    <p class="lede">Cue points placed by energy can only ever find the loud part. That is worth
+    having — the drop is where most mixes turn — but the moment you actually reach for is usually
+    the line the crowd sings, and a hook and the verse before it are the same loudness, the same
+    instruments and the same key. Nothing in a spectrum tells them apart. The words do.</p>
+    <p>So Booth renders the vocal stem, runs it through a speech recogniser, and reads what comes
+    back for repetition. Lines that say the same thing are grouped loosely, because a recogniser
+    writes one sung phrase four slightly different ways and matching word-for-word would count a
+    hook sung eight times as eight different lines. The group with the most separate airings is
+    the hook, and it becomes a cue where it <em>first</em> lands.</p>
+    <p>Two things it refuses to do. An ad-lib is not a hook — a line needs at least two words,
+    because “yeah” is the most repeated thing in half the vocal stems ever recorded and marks
+    nothing. And a recogniser stuck in a loop does not invent one: airings less than four seconds
+    apart count once, which is true of a chorus that sings its line twice over and true of Whisper
+    emitting “thanks for watching” forty times over a breakdown.</p>
+  </div>
+  <figure class="figure" data-clip="media/cues-from-words.mp4">
+    <span class="shot crop"><img loading="lazy" decoding="async" src="media/words-panel.png" alt="The inspector's “What it keeps saying” panel: six lines heard, the line “hold me closer now” three times with the three places it lands, and a second line twice."></span>
+    <figcaption class="figcap"><span class="await">clip to come</span>
+    <b>What it keeps saying.</b> The frequency analysis of a track's words, in the panel: how many
+    lines were heard, which ones come back, how often, and every place each one lands. Click a time
+    and the deck goes there. Months later this is how you know which record it is — not from the
+    file name, from the thing you actually remember about it.</figcaption>
+  </figure>
+  <div class="col">
+    <h3>Where the words came from, and how sure anything is</h3>
+    <p>Before anything expensive, Booth asks a lyrics server. A hit costs one request where
+    listening costs a stem separation and a recogniser pass — and what comes back is what somebody
+    wrote down rather than a machine's guess at a vocal. Where the track was named by its own
+    sound, or where the lyric agrees with what was already heard, it is taken outright. Where it
+    is plausible and not certain — a remix is a different length from the record it is built on and
+    keeps only some of its words — it is put up for a yes or a no, with both sets of words on
+    screen, and you can correct them by hand.</p>
+    <p>The times a lyric arrives with are not trusted as this pressing's: an LRC is synced against
+    one release and a DJ's library is extended mixes, so the words go in needing placing and are
+    moved onto singing measured off the stem. Each track then says where its words came from —
+    heard off the stem, looked up, or corrected by hand — because a recogniser's mistakes read
+    like lyrics, and when a cue reads oddly that is most of what there is to go on.</p>
+  </div>
+  <figure class="figure" data-clip="media/lyrics-lookup.mp4">
+    <span class="shot"><img loading="lazy" decoding="async" src="media/booth-words.png" alt="The “Are these the words?” sheet: the lyric a server returned, the lines already heard off the stem below it, the note that 67% of the heard lines turn up in the found ones, and three buttons — These are the words, Not this record, and Edit."></span>
+    <figcaption class="figcap"><span class="await">clip to come</span>
+    <b>Plausible, and not certain.</b> The lyric is two minutes shorter than this track, so it is
+    another pressing, and two of the three lines heard off the stem turn up in it. That is real
+    evidence and partial evidence at the same time — which is why it is a question rather than a
+    silent write. A wrong lyric looks right: it reads like a lyric, it cues like one, and nothing
+    downstream doubts it.</figcaption>
+  </figure>
+  <div class="col">
+    <h3>And it says what it will cost first</h3>
+    <p>Reading the words off a track that has no vocal stem yet means separating one, which is the
+    slow part of this program and the part nothing else waits on. Asking for cues on a playlist is
+    therefore asking for a separation per track in it — so the batch is described and priced before
+    it starts, in minutes measured from the last separations this machine did rather than guessed
+    from the hardware.</p>
+  </div>
+  <figure class="figure" data-clip="media/stems-ahead.mp4">
+    <span class="shot"><img loading="lazy" decoding="async" src="media/booth-stems-ahead.png" alt="The sheet that opens before a batch of separations: “Stems for 6 tracks first”, how much music that is, that it is paid once per track, the tracks it would separate, and buttons to render the stems or not now."></span>
+    <figcaption class="figcap"><span class="await">clip to come</span>
+    <b>Before the hours, not after them.</b> Paid once per track: the words are kept once they have
+    been read, and cueing from them again after that costs nothing.</figcaption>
+  </figure>
+</div></section>
+
+<section id="markers"><div class="wrap">
+  <span class="snum">02 — The markers are the map</span>
+  <h2>Eight hot cues, and as many memory cues as the track needs</h2>
+  <div class="col">
+    <p class="lede">A player holds eight hot cues and a busy track offers more than eight moments.
+    So the buttons are shared rather than ranked against each other — four to the arrangement, four
+    to the words, then whatever the other kind did not want — and everything else worth marking
+    becomes a memory cue, which costs no button at all.</p>
+    <p>They are named the way a DJ writes on the markers themselves: <b>Start</b>, then each
+    section numbered within its own kind — Build&nbsp;1, Drop&nbsp;1, Break&nbsp;1, Drop&nbsp;2 —
+    and <b>End</b> on the last bar. Numbering within the kind is the point; six markers all reading
+    “drop” say nothing that looking at the waveform does not.</p>
+    <p>A sung line gets a verse number and <em>the line itself</em>, every time it comes round:
+    <code>V1 hold me closer now</code>. A player shows a memory cue's comment while the track is
+    loaded, so the words are on the deck in front of you and the number says where in the record
+    you are. Cues from the words are rounded <em>down</em> to the beat rather than to the nearest
+    one — a sung line rarely starts on the beat, and a hook cue that clips its own first word is
+    one nobody presses twice.</p>
+  </div>
+  <figure class="figure" data-clip="media/memory-cues.mp4">
+    <span class="shot"><img loading="lazy" decoding="async" src="media/waveform-phrases.png" alt="The colour waveform with hot cue markers A and B above it, memory cue triangles along the top, and the phrase bar below reading INTRO 21, BUILD 24, DROP 40, BREAK 24, BUILD 20, DROP 49, OUTRO 24."></span>
+    <figcaption class="figcap"><span class="await">clip to come</span>
+    <b>The arrangement, measured not guessed.</b> Phrase boundaries with their lengths in bars, the
+    cue row underneath, and the grid. A record at one tempo is gridded at one tempo — eight beats
+    from anywhere in it are eight beats from anywhere else, so two loops from the same track stay
+    together on two players — and a record that really moves is gridded moving.</figcaption>
+  </figure>
+</div></section>
+
+<section id="drive"><div class="wrap">
+  <span class="snum">03 — Writing the drive</span>
+  <h2>Both databases, from one collection, read back afterwards</h2>
+  <div class="col">
+    <p class="lede">A drive a player opens has two databases on it that have to agree about what is
+    on the stick: the legacy <code>export.pdb</code> every deck since 2009 reads, and the newer
+    <code>exportLibrary.db</code> that every player sold since 2023 needs. Booth writes both from
+    one collection, so they cannot disagree, and every generation's analysis files go on —
+    <code>.DAT</code>, <code>.EXT</code> and <code>.2EX</code>.</p>
+    <p>Then it reads the stick back and checks it. You say the oldest player the drive has to work
+    on, and the checks use that generation's rules: anything it could not open — a FLAC on a nexus
+    deck, a 96&nbsp;kHz file on an NXS2 — is re-encoded to a 320&nbsp;kbps MP3 on the way onto the
+    stick, while your library keeps its lossless copy.</p>
+  </div>
+  <figure class="figure" data-clip="media/writing-a-drive.mp4">
+    <span class="shot"><img loading="lazy" decoding="async" src="media/booth-sync.png" alt="The sync sheet: what will be added, replaced and removed on the drive, what the target player will accept, and how the drive is formatted."></span>
+    <figcaption class="figcap"><span class="await">clip to come</span>
+    <b>The sync sheet.</b> What goes on, what comes off, what the target player will take, and what
+    the drive is formatted as — before anything is written. What goes on the drive is what the
+    collection says, and where the player has edited the stick too, that is noticed rather than
+    flattened.</figcaption>
+  </figure>
+</div></section>
+
+<section id="copies"><div class="wrap">
+  <span class="snum">04 — A copy of every drive</span>
+  <h2>A stick is hours of work living on the cheapest thing in the booth</h2>
+  <div class="col">
+    <p class="lede">The audio on a USB stick is replaceable. The cues, the grids, the playlist order
+    and the history a player wrote back after a gig are not, and they are a few files under
+    <code>PIONEER</code>.</p>
+    <p>So every time a drive is written — or a prepared one is plugged in while Booth is running —
+    those files are copied beside your library. Databases, analysis, artwork, settings, the lot.
+    The audio is <b>hard-linked</b> to the library's own copy rather than duplicated, so archiving a
+    64&nbsp;GB stick costs a few megabytes and a directory entry per track. Each copy is a plain
+    folder with a manifest saying what was found: getting one back onto a stick is a copy, with no
+    tool in the middle.</p>
+    <p>A drive is stored once per state. Leaving it plugged in does nothing; writing to it and
+    plugging it in again stores the new state beside the old one. What counts as a state is the
+    drive's own files — deliberately not the <code>.DS_Store</code> breadcrumbs macOS sprinkles on
+    a stick the moment anything looks at one, which would otherwise make a drive that is different
+    every time it is read, and copied every time it is read.</p>
+
+    <h3>The repair that cannot be done afterwards</h3>
+    <p>A track your collection names but the disk has lost — the greyed-out row — is <b>put
+    back</b>, off the drive, at the path the collection already gives it. That one happens whatever
+    your settings say, because a row that cannot be played is broken rather than absent: the names
+    are in the collection, the music is on the stick, and once the stick is gone neither half
+    answers for the other.</p>
+    <p>Music on the stick your library has not got is copied in by default — the expensive option,
+    on purpose. Everything else here is measured in disk, which can be bought.</p>
+
+    <h3>And what you actually played comes back</h3>
+    <p>A player writes a history to the stick it played from: every track it loaded, in order, one
+    session a night. It is the only thing on a drive a collection cannot produce for itself, and it
+    is the record of what was <em>played</em> rather than what was prepared. When a drive is copied,
+    its history is read back and becomes playlists, named by the date the player gave them.</p>
+  </div>
+  <figure class="figure" data-clip="media/drive-copies.mp4">
+    <span class="shot"><img loading="lazy" decoding="async" src="media/dock.png" alt="The drive dock along the bottom of the window: the drive's name, the playlist it carries, how many tracks are still to add, and the sync button."></span>
+    <figcaption class="figcap"><span class="await">clip to come</span>
+    <b>The dock.</b> Which stick is plugged in, what it is carrying, and how far it is from what the
+    collection says. A drive this program writes is copied the moment it is written; one somebody
+    else prepared is copied the moment it is seen.</figcaption>
+  </figure>
+</div></section>
+
+<section id="against"><div class="wrap">
+  <span class="snum">05 — Against rekordbox</span>
+  <h2>Where this wins, and where it does not</h2>
+  <div class="col">
+    <p class="lede">rekordbox is not disliked because it is bad at its job. It is disliked because
+    it is load-bearing: the lock-in is not the application, it is the format on the stick. That
+    format is public, documented and writable — so the honest comparison is feature by feature,
+    including the features that go the other way.</p>
+  </div>
+
+  <h3>What Booth does that rekordbox does not</h3>
+  <div class="tablewrap">
+    <table class="doc">
+      <thead><tr><th scope="col">Booth</th><th scope="col">What it means in the booth</th></tr></thead>
+      <tbody>
+        <tr>
+          <th scope="row">Cues placed from the lyric</th>
+          <td>The hook becomes a cue and every memory cue carries the line that lands there, so the
+          words are on the deck while the track is loaded. Nothing else places cues from what is
+          sung.</td>
+        </tr>
+        <tr>
+          <th scope="row">Stems a standalone player can read</th>
+          <td>Vocals, melody and drums rendered at home and written to the stick as tracks, sorted
+          directly under the record they came from. rekordbox separates stems in Performance mode —
+          which means a computer is running. Two CDJs and no laptop is the difference.</td>
+        </tr>
+        <tr>
+          <th scope="row">A copy of every drive, automatically</th>
+          <td>Every write and every plug-in archives the stick's databases and analysis, with the
+          audio hard-linked. A stick lost on the way home costs you the stick.</td>
+        </tr>
+        <tr>
+          <th scope="row">A collection you can read</th>
+          <td>Your files in your folders, and a collection file you can open in a text editor.
+          Nothing is uploaded, there is no account, and nothing stops working if this project
+          does.</td>
+        </tr>
+        <tr>
+          <th scope="row">It says what will be slow before the night does</th>
+          <td>A quarantined download, a file still in Downloads, one inside Dropbox or iCloud —
+          seconds to open rather than milliseconds. Booth says so at import.</td>
+        </tr>
+        <tr>
+          <th scope="row">Free, and no subscription tier above it</th>
+          <td>Free to download, run and modify for personal and internal use. There is no paid
+          version of this with the good features in it.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>What rekordbox does that Booth does not</h3>
+  <div class="tablewrap">
+    <table class="doc">
+      <thead><tr><th scope="col">rekordbox</th><th scope="col">Where that leaves this</th></tr></thead>
+      <tbody>
+        <tr>
+          <th scope="row">It is tested on every player there is</th>
+          <td>A CDJ-3000X on firmware 1.40 browses and plays a drive this writes. No older deck has
+          been <em>seen</em> to — the files are written, but try a stick on the hardware before the
+          night. This is the honest headline risk and it is covered in full on the
+          <a href="progress.html">progress page</a>.</td>
+        </tr>
+        <tr>
+          <th scope="row">It performs</th>
+          <td>Booth has one deck, for auditioning what you are preparing. No pitch, no sync, no
+          mixing, and it will not play out to a club by itself.</td>
+        </tr>
+        <tr>
+          <th scope="row">Hardware integration, cloud, lighting, video</th>
+          <td>None of it. This writes drives and prepares tracks.</td>
+        </tr>
+        <tr>
+          <th scope="row">Official support, and a company behind it</th>
+          <td>This is one project with a licence, a test suite and an issue tracker. The formats it
+          writes were worked out from public research and a lot of hexdumps.</td>
+        </tr>
+        <tr>
+          <th scope="row">Key detection you can lean on</th>
+          <td>Booth's is right about 37% of the time on a real library and confuses a key with its
+          relative major or minor about another 18%. It is shown with its confidence for exactly
+          that reason.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="figcap" style="margin-top:22px">Not affiliated with AlphaTheta or Pioneer DJ. rekordbox's
+  plans and features change; check theirs rather than taking this page's word for it.</p>
+</div></section>
+
+<section id="get"><div class="wrap">
+  <span class="snum">06 — Getting it</span>
+  <h2>Two commands, or one download</h2>
+  <div class="col">
+    <p>The macOS app is built by the project's own packaging script and attached to each release —
+    the library window and the <code>booth-cli</code> command-line tool in one bundle, universal for
+    Apple silicon and Intel, so the two can never be different versions of each other.</p>
+    <pre><code>git clone https://github.com/jwilkins/booth
+cd booth
+cargo run --release          # the library window</code></pre>
+    <p>Cueing from the words needs a speech recogniser installed separately — Booth does not ship
+    one and will not download one — and stems need a separation backend. Both are pointed at in
+    Settings, and everything else works without them.</p>
+    <div class="btnrow">
+      <a class="btn" href="https://github.com/jwilkins/booth/releases/latest">Releases</a>
+      <a class="btn ghost" href="https://github.com/jwilkins/booth/blob/main/booth/README.md">The manual, screen by screen</a>
+      <a class="btn ghost" href="progress.html">What works today</a>
+    </div>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>
+      <h5>The pages</h5>
+      <ul>
+        <li><a href="background.html">Background — why this exists</a></li>
+        <li><a href="progress.html">Progress — what works, what does not</a></li>
+        <li><a href="booth-spec-page.html">The original specification</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>The source</h5>
+      <ul>
+        <li><a href="https://github.com/jwilkins/booth">github.com/jwilkins/booth</a></li>
+        <li><a href="https://github.com/jwilkins/booth/blob/main/booth/README.md">The library window</a></li>
+        <li><a href="https://github.com/jwilkins/booth/blob/main/docs/onelibrary.md">What is known about the format</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Terms</h5>
+      <ul>
+        <li><a href="https://github.com/jwilkins/booth/blob/main/LICENSE">Booth Public Source License</a></li>
+        <li>Free for personal, educational and internal use</li>
+        <li>Not affiliated with AlphaTheta or Pioneer DJ</li>
+      </ul>
+    </div>
+  </div>
+  <p>Everything on this page is a screenshot of the program running. Nothing here is uploaded,
+  and the collection in the pictures is not anybody's music.</p>
+</div></footer>
+
+<script src="booth.js"></script>
+</html>

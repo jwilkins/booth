@@ -865,6 +865,35 @@ impl App {
                         app.library.tracks.iter().map(|t| t.id).take(6).collect();
                     app.stems_ahead = Some(StemsAhead { tracks, for_cues: true });
                 }
+                "words" => {
+                    if let Some(track) = app.library.tracks.first() {
+                        // The case the sheet exists for, rather than an easy
+                        // one: a lyric the right length to be another
+                        // pressing, keeping some of what was heard off this
+                        // stem and not the rest. A fixture where both sides
+                        // agree outright shows a sheet nobody would ever have
+                        // needed to see.
+                        let lines = [
+                            "walking through the city at night",
+                            "hold me closer now",
+                            "and the lights go down on us",
+                            "hold me closer now",
+                            "hold me closer now",
+                            "and the lights go down on us",
+                        ];
+                        app.wondering.push(Wondering {
+                            id: track.id,
+                            found: booth_cli::tag::lyrics::Found {
+                                synced: booth_cli::transcribe::Transcript::default(),
+                                plain: lines.iter().map(|line| line.to_string()).collect(),
+                                instrumental: false,
+                                artist: track.artist.clone(),
+                                title: track.title.clone(),
+                                duration_secs: track.duration_secs - 94.0,
+                            },
+                        });
+                    }
+                }
                 _ => app.sheet = true,
             }
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
