@@ -300,6 +300,12 @@ pub struct Prep {
     /// because a grid somebody bent by hand on a player is not something to
     /// measure over.
     pub beat_ms: Vec<u32>,
+    /// The free-text field a player shows about the track. Empty means write
+    /// nothing, which is what every drive carried before this existed.
+    ///
+    /// The exporter does not make one of its own: what belongs here is what
+    /// the collection knows and the audio does not.
+    pub comment: String,
 }
 
 impl Prep {
@@ -310,6 +316,7 @@ impl Prep {
             && self.bpm.is_none()
             && self.key.is_empty()
             && self.beat_ms.is_empty()
+            && self.comment.is_empty()
     }
 }
 

@@ -282,6 +282,11 @@ pub fn fingerprint(track: &Track) -> u64 {
         eat(&phrase.end_ms.to_le_bytes());
         eat(phrase.kind.as_bytes());
     }
+    // The words, as the comment they become rather than line by line: that is
+    // the thing that actually goes on the drive, so hashing it is exactly
+    // right — re-reading a track and getting the same words back is not a
+    // change the drive is missing, and getting different ones is.
+    eat(crate::library::words_as_comment(&track.lyrics, &track.refrains).as_bytes());
     hash
 }
 
@@ -334,6 +339,9 @@ pub fn prep(track: &Track) -> booth_cli::export::Prep {
         // as good as the collection's. It fills in for a grid that bends,
         // which is the one case re-measuring would destroy.
         beat_ms: track.beat_ms.clone(),
+        // The one place in a booth where the words can be read. See
+        // [`crate::library::words_as_comment`].
+        comment: crate::library::words_as_comment(&track.lyrics, &track.refrains),
     }
 }
 

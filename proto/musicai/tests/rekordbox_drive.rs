@@ -728,6 +728,47 @@ fn a_second_sync_keeps_what_the_first_one_wrote() {
 const ONELIBRARY_KEY: &str = "a-key-that-is-not-the-real-one";
 
 #[test]
+fn the_words_a_collection_knows_reach_both_databases_on_the_drive() {
+    // The one place in a booth where a track's words can be read: both
+    // databases carry a free-text field per track and a CDJ shows it. It was
+    // empty on every drive this ever wrote.
+    let scratch = Scratch::new("comment");
+    let drive = scratch.path("USB");
+    let source = write_song(&scratch, "sung.flac");
+    let comment = "3\u{d7} hold me closer now\n\nwalking through the city at night\n\
+                   hold me closer now";
+
+    let mut args = ExportArgs { drive: Some(drive.clone()), ..args_for(vec![source.clone()]) };
+    args.onelibrary_key = Some(ONELIBRARY_KEY.to_string());
+    args.prepared = vec![(
+        source,
+        booth_cli::export::Prep { comment: comment.to_string(), ..Default::default() },
+    )];
+    let reporter = Collected::new();
+    commands::export(&args, &reporter).expect("export failed");
+
+    // The newer database, which is what a CDJ-3000X reads.
+    let at = drive.join("PIONEER/rekordbox/exportLibrary.db");
+    let connection = booth_cli::rekordbox::open(&at, ONELIBRARY_KEY).unwrap();
+    let written: String = connection
+        .query_row("SELECT djComment FROM content", [], |row| row.get(0))
+        .expect("no row in the OneLibrary database");
+    assert_eq!(written, comment, "the words did not reach exportLibrary.db");
+
+    // And the older one, which is a different writer and could disagree.
+    // A comment with a × in it is not ASCII, so a pdb row carries it as
+    // UTF-16 — searched for as the bytes it is written as rather than by
+    // decoding the file, which has no alignment to decode against.
+    let pdb = std::fs::read(drive.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let needle: Vec<u8> =
+        "hold me closer now".encode_utf16().flat_map(|unit| unit.to_le_bytes()).collect();
+    assert!(
+        pdb.windows(needle.len()).any(|window| window == needle),
+        "the words did not reach export.pdb"
+    );
+}
+
+#[test]
 fn a_drive_written_with_a_key_carries_both_databases_and_they_agree() {
     let scratch = Scratch::new("onelibrary");
     let drive = scratch.path("drive");
@@ -1328,6 +1369,7 @@ mod what_the_collection_knows {
                 cues: Vec::new(),
                 parts: Vec::new(),
                 beat_ms: Vec::new(),
+                comment: String::new(),
             },
         );
         assert_eq!(on_drive(&drive, &analysis, ".EXT"), measured);
