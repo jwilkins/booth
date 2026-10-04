@@ -14,6 +14,7 @@ pub mod copy;
 pub mod coverart;
 pub mod fingerprint;
 pub mod http;
+pub mod lyrics;
 pub mod musicbrainz;
 
 use std::fmt;

@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use booth_cli::tag::{acoustid, coverart, musicbrainz, Metadata};
+use booth_cli::tag::{acoustid, coverart, lyrics, musicbrainz, Metadata};
 
 /// Radiohead, "Creep". A long-established recording, unlikely to be merged
 /// away and so stable enough to assert against.
@@ -126,4 +126,45 @@ fn synthetic_audio(seconds: usize) -> booth_cli::audio::Audio {
         plane.push(v * 0.5);
     }
     booth_cli::audio::Audio::new(sample_rate as u32, vec![plane.clone(), plane]).unwrap()
+}
+
+#[test]
+#[ignore = "hits the live lrclib service"]
+fn lrclib_returns_words_with_times_on_them() {
+    let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
+    let found = client
+        .lookup("Radiohead", "Creep", Some(239.0))
+        .expect("the request failed")
+        .expect("Creep should be in any lyrics database");
+
+    assert_eq!(found.artist, "Radiohead");
+    assert!(!found.plain.is_empty(), "no plain lyrics");
+    assert!(!found.synced.lines.is_empty(), "no synced lyrics, which is the point of lrclib");
+    assert!(found.synced.lines[0].start_ms > 0, "the first line should not be at zero");
+    assert!(!found.instrumental);
+}
+
+#[test]
+#[ignore = "hits the live lrclib service"]
+fn lrclib_says_outright_when_a_record_is_an_instrumental() {
+    // The answer worth the most here: it saves a stem separation and a pass
+    // through the recogniser, and costs one request.
+    let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
+    let found = client
+        .lookup("Floating Points", "Last Bloom", None)
+        .expect("the request failed")
+        .expect("the track should be in the database");
+    assert!(found.instrumental, "{found:?}");
+}
+
+#[test]
+#[ignore = "hits the live lrclib service"]
+fn a_track_the_database_has_never_heard_of_is_a_miss_and_not_a_failure() {
+    // Most of a crate of white labels will land here, so it has to be an
+    // ordinary answer rather than an error.
+    let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
+    let found = client
+        .lookup("A Label Nobody Pressed", "A Track Nobody Cut", None)
+        .expect("a miss should not be an error");
+    assert!(found.is_none(), "{found:?}");
 }
