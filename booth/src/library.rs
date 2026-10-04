@@ -290,6 +290,32 @@ pub struct Lyric {
     pub text: String,
 }
 
+/// Where a track's words came from.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WordsFrom {
+    /// Nothing has read them, or they were read before this was recorded.
+    #[default]
+    Unsaid,
+    /// Heard off the vocal stem by a speech recogniser.
+    Recogniser,
+    /// Looked up, under a name a fingerprint or the file's tags gave.
+    Server,
+    /// Typed or corrected by hand, which outranks both.
+    ByHand,
+}
+
+impl WordsFrom {
+    /// What to call it on screen.
+    pub fn label(self) -> &'static str {
+        match self {
+            WordsFrom::Unsaid => "",
+            WordsFrom::Recogniser => "heard off the stem",
+            WordsFrom::Server => "looked up",
+            WordsFrom::ByHand => "corrected by hand",
+        }
+    }
+}
+
 /// A line the track keeps coming back to, and every time it comes round.
 ///
 /// The output of the frequency analysis over a track's words: the lines that
@@ -664,6 +690,15 @@ pub struct Track {
     /// dropped on.
     #[serde(default)]
     pub heard_surely: Option<f32>,
+    /// Where this track's words came from.
+    ///
+    /// Worth recording because the two are not alike. A recogniser's words are
+    /// a machine's best guess at a vocal and are wrong in ways that read like
+    /// lyrics; a lyrics server's are what somebody wrote down. Somebody
+    /// looking at a doubtful cue should be able to tell which they are
+    /// looking at.
+    #[serde(default)]
+    pub words_from: WordsFrom,
     /// The language the recogniser decided it was listening to, as a code
     /// like `en`. Empty where nothing has said.
     #[serde(default)]
@@ -708,6 +743,15 @@ pub struct Track {
     /// not looked up again on every pass.
     #[serde(default)]
     pub identified: bool,
+    /// How sure the fingerprint was, from 0 to 1, where one named this track.
+    ///
+    /// Kept rather than thrown away with the match, because it answers a
+    /// question that comes up later: whether the artist and title are an
+    /// answer or a guess off a file name. A lyrics server is asked under
+    /// those names, so what comes back is only this record's words if they
+    /// were this record's names.
+    #[serde(default)]
+    pub identified_surely: Option<f64>,
     /// A FairPlay purchase, found by reading the container's brand at import.
     /// Nothing here can convert one, so it is worth saying early.
     #[serde(default)]
@@ -779,6 +823,7 @@ impl Track {
             lyrics_aligned: true,
             instrumental: false,
             heard_surely: None,
+            words_from: WordsFrom::default(),
             language: String::new(),
             edited: None,
             loudness_lufs: None,
@@ -793,6 +838,7 @@ impl Track {
             analyzed: false,
             from_tags: false,
             identified: false,
+            identified_surely: None,
             protected: false,
         }
     }

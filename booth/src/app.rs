@@ -332,6 +332,11 @@ pub struct App {
     want_cues: std::collections::HashSet<u32>,
     /// A batch of separations waiting to be agreed to. See [`App::stems_sheet`].
     stems_ahead: Option<StemsAhead>,
+    /// Lyrics a server offered that are not certain enough to write in
+    /// unasked. See [`App::wondering_sheet`].
+    wondering: Vec<Wondering>,
+    /// A track's words, open for correcting. See [`App::words_sheet`].
+    editing_words: Option<EditingWords>,
     /// Tracks changed here and on the drive since the two last agreed, worked
     /// out when the sync sheet opens rather than every frame: it reads the
     /// stick.
@@ -363,12 +368,6 @@ pub struct App {
     wake_installed: bool,
 }
 
-/// Something a click asked for, to be done once the panel that drew it has
-/// finished.
-///
-/// A button inside a panel cannot change the collection the panel is reading,
-/// so it records what it wants instead. The alternative is a panel that redraws
-/// half from the old state and half from the new.
 /// A batch of separations that has been asked for but not yet paid for.
 ///
 /// Separation is the only job here measured in hours, and the way into it is
@@ -383,6 +382,36 @@ struct StemsAhead {
     for_cues: bool,
 }
 
+/// Words a lyrics server offered for a track, waiting on somebody to say
+/// whether they are the right ones.
+///
+/// What makes this worth asking rather than guessing: a remix is a different
+/// length from the record it is built on and keeps only some of its words, so
+/// the evidence is real and partial at the same time. Writing the wrong lyric
+/// in quietly is worse than writing none, because a wrong lyric looks right —
+/// it reads like a lyric, it cues like one, and nothing downstream doubts it.
+struct Wondering {
+    id: u32,
+    found: booth_cli::tag::lyrics::Found,
+}
+
+/// A track's words, open for correcting by hand.
+///
+/// The answer to the case neither a recogniser nor a server gets right: a
+/// remix that keeps half a lyric, a bootleg with a different vocal over it, a
+/// record whose words nobody has written down correctly. One person with the
+/// track in front of them settles it in a minute.
+struct EditingWords {
+    id: u32,
+    text: String,
+}
+
+/// Something a click asked for, to be done once the panel that drew it has
+/// finished.
+///
+/// A button inside a panel cannot change the collection the panel is reading,
+/// so it records what it wants instead. The alternative is a panel that redraws
+/// half from the old state and half from the new.
 enum Pending {
     Select(u32),
     Forget(u32),
@@ -424,6 +453,12 @@ enum Pending {
     /// The list needs rebuilding in a new order.
     Resort,
     WriteTags(u32),
+    /// Take words a lyrics server offered, after somebody looked at them.
+    TakeFoundWords(u32, Box<booth_cli::tag::lyrics::Found>),
+    /// Open a track's words for correcting by hand.
+    EditWords(u32),
+    /// Keep the words somebody typed.
+    SaveWords(u32),
     /// Go ahead with a batch of separations that has been warned about.
     SeparateMany {
         tracks: Vec<u32>,
@@ -703,6 +738,8 @@ impl App {
             re_enveloped: std::collections::HashSet::new(),
             want_cues: std::collections::HashSet::new(),
             stems_ahead: None,
+            wondering: Vec::new(),
+            editing_words: None,
             clashes: Vec::new(),
             settled: std::collections::HashMap::new(),
             drive_now: std::collections::HashMap::new(),
@@ -2004,6 +2041,32 @@ impl App {
             self.start(Job::Realign { tracks: placing });
         }
 
+        // Before anything expensive: somebody may have written these words
+        // down already. A hit costs one request where listening costs a
+        // separation and a recogniser pass, and the answer is a person's
+        // rather than a machine's guess at a vocal.
+        //
+        // Only for tracks with no stem yet, so the lookup never delays a track
+        // that is one decode away from an answer, and only where there is a
+        // name to ask under — "Unknown Artist" asks nothing of anybody.
+        let asking: Vec<job::Askable> = rendering
+            .iter()
+            .filter_map(|id| self.library.get(*id))
+            .filter(|track| !track.artist.trim().is_empty() && !track.title.trim().is_empty())
+            .map(|track| job::Askable {
+                id: track.id,
+                artist: track.artist.clone(),
+                title: track.display_title(),
+                duration_secs: track.duration_secs,
+                identified_surely: track.identified_surely,
+                heard: track.lyrics.clone(),
+            })
+            .collect();
+        if !asking.is_empty() {
+            crate::info!("asking a lyrics server about {}", plural(asking.len(), "track"));
+            self.start(Job::LookUpWords { tracks: asking });
+        }
+
         if reading.is_empty() && rendering.is_empty() {
             return !known.is_empty();
         }
@@ -2021,6 +2084,85 @@ impl App {
             self.read_words(reading);
         }
         !known.is_empty()
+    }
+
+    /// Whether a track's words are settled, so a stem landing on it is for
+    /// placing them rather than for reading over them.
+    ///
+    /// A lyrics server answers in a second where a separation takes minutes,
+    /// so by the time a stem is rendered the words may already be in. Words
+    /// somebody wrote down outrank a recogniser's guess at the same vocal, and
+    /// a recogniser handed a track already known to be an instrumental spends
+    /// minutes to write down things nobody sang.
+    fn words_answered(&self, id: u32) -> bool {
+        self.library.get(id).is_some_and(|track| {
+            track.instrumental
+                || (track.words_from != crate::library::WordsFrom::Recogniser
+                    && !track.lyrics.is_empty())
+        })
+    }
+
+    /// Take the words a lyrics server offered, and cue from them.
+    ///
+    /// The synced lyric where there is one, because a line with a time on it
+    /// is a cue; otherwise the plain text, which is still worth having for the
+    /// panel and for searching even though it places nothing.
+    ///
+    /// Times that come back are **not** trusted as this pressing's. They were
+    /// synced against one release and the library is full of extended mixes,
+    /// so the words go in marked as needing placing and the existing aligner
+    /// moves them onto singing measured off the stem — the same path words
+    /// read before the aligner existed take. Where there is no stem they stay
+    /// where the server put them, which is the best available answer and is
+    /// why the words are still worth taking without one.
+    ///
+    /// Returns whether the collection changed.
+    fn take_found_words(&mut self, id: u32, found: &booth_cli::tag::lyrics::Found) -> bool {
+        let timed = !found.synced.lines.is_empty();
+        let lyrics = match timed {
+            true => crate::library::lyrics_from(&found.synced),
+            false => found
+                .plain
+                .iter()
+                .map(|text| crate::library::Lyric { start_ms: 0, end_ms: 0, text: text.clone() })
+                .collect(),
+        };
+
+        let Some(track) = self.library.get_mut(id) else { return false };
+        if found.instrumental {
+            // The server saying so outright is worth as much as listening and
+            // finding nothing, and costs one request instead of minutes.
+            track.instrumental = true;
+            crate::info!("#{id} is an instrumental, so there are no words to read");
+            return true;
+        }
+        if lyrics.is_empty() {
+            return false;
+        }
+        let lines = lyrics.len();
+        track.refrains = crate::library::refrains_from(&lyrics);
+        track.lyrics = lyrics;
+        track.words_from = crate::library::WordsFrom::Server;
+        // Somebody wrote these down, so there is no recogniser's doubt to
+        // record — and the old doubt belonged to words that are gone.
+        track.heard_surely = None;
+        // Timed against another pressing, so they are words without places
+        // until the stem says otherwise.
+        track.lyrics_aligned = !timed;
+        let has_stem = track.stems.vocals.is_some();
+
+        crate::info!(
+            "#{id} took {} from a lyrics server{}",
+            plural(lines, "line"),
+            match (timed, has_stem) {
+                (true, true) => ", to be placed against its stem",
+                (true, false) => ", timed against another pressing",
+                _ => "",
+            }
+        );
+        self.auto_cue(id);
+        self.prep_changed(id);
+        true
     }
 
     /// Hand stems that are already on disk to the recogniser.
@@ -2129,6 +2271,9 @@ impl App {
         // reading is queued once, after the whole batch has been folded in,
         // rather than a job per track as each kit lands.
         let mut to_read: Vec<job::Transcribable> = Vec::new();
+        // Tracks whose stem landed on words they already had. See the
+        // `Separated` arm below.
+        let mut to_cue: Vec<u32> = Vec::new();
         // Whether anything timed a separation, so the settings are written
         // once at the end of the batch rather than once per track.
         let mut paced = false;
@@ -2376,9 +2521,15 @@ impl App {
                         paced = true;
                     }
                     if self.want_cues.remove(&id) {
-                        match vocals {
-                            Some(vocals) => to_read.push(job::Transcribable { id, vocals }),
-                            None => self.note(
+                        match (self.words_answered(id), vocals) {
+                            // Whether those words still need placing is the
+                            // question `auto_cue_tracks` already answers, so
+                            // it is left to answer it.
+                            (true, _) => to_cue.push(id),
+                            (false, Some(vocals)) => {
+                                to_read.push(job::Transcribable { id, vocals })
+                            }
+                            (false, None) => self.note(
                                 "the separation produced no vocal stem to read",
                                 theme::amber(),
                             ),
@@ -2394,6 +2545,24 @@ impl App {
                         self.waveform = Some((id, bands));
                     }
                     changed = true;
+                }
+                Update::WordsLookedUp { id, found, verdict } => {
+                    use booth_cli::tag::lyrics::Verdict;
+                    match verdict {
+                        // Taken without asking. The track was identified by
+                        // its sound, or what was written down agrees with what
+                        // was heard — either way nothing here is a guess.
+                        Verdict::Keep => {
+                            if self.take_found_words(id, &found) {
+                                changed = true;
+                            }
+                        }
+                        // Plausible and not certain. The one thing not to do
+                        // is write it in quietly: wrong words on a cue are
+                        // worse than no words, because they look right.
+                        Verdict::Ask => self.wondering.push(Wondering { id, found: *found }),
+                        Verdict::No => {}
+                    }
                 }
                 Update::Transcribed { id, lyrics, confidence, language } => {
                     let heard = lyrics.len();
@@ -2413,6 +2582,9 @@ impl App {
                         }
                         if let Some(language) = language.filter(|l| !l.trim().is_empty()) {
                             track.language = language;
+                        }
+                        if confidence.is_some() {
+                            track.words_from = crate::library::WordsFrom::Recogniser;
                         }
                         // Both paths that produce this update place the words
                         // against the stem first, so arriving here is what
@@ -2519,6 +2691,9 @@ impl App {
         }
         if !to_read.is_empty() {
             self.read_words(to_read);
+        }
+        if !to_cue.is_empty() {
+            changed |= self.auto_cue_tracks(&to_cue, false);
         }
         if paced {
             if let Err(e) = self.config.save(&self.config_path) {
@@ -3230,6 +3405,13 @@ impl eframe::App for App {
         if self.stems_ahead.is_some() {
             self.stems_sheet(ctx);
         }
+        if !self.wondering.is_empty() {
+            self.wondering_sheet(ctx);
+        }
+        // Over the sheet that opens it, so answering one leads into the other.
+        if self.editing_words.is_some() {
+            self.words_sheet(ctx);
+        }
         self.questions_sheet(ctx);
         self.naming_sheet(ctx);
         if self.help {
@@ -3483,6 +3665,13 @@ impl App {
             return true;
         }
         // Escape is "not now", which is the safe answer: nothing has started.
+        if self.editing_words.take().is_some() {
+            return true;
+        }
+        if !self.wondering.is_empty() {
+            self.wondering.remove(0);
+            return true;
+        }
         if self.stems_ahead.take().is_some() {
             return true;
         }
@@ -5593,11 +5782,35 @@ impl App {
                     .size(theme::SMALL),
                 ),
                 (false, false) => ui.label(
-                    RichText::new(format!("{} heard", plural(track.lyrics.len(), "line")))
+                    RichText::new(plural(track.lyrics.len(), "line"))
                         .color(theme::dim())
                         .size(theme::SMALL),
                 ),
             };
+            // Which it is decides how far to trust a cue that reads oddly: a
+            // recogniser's words are a machine's guess at a vocal and go wrong
+            // in ways that still read like lyrics, where a server's are what
+            // somebody wrote down.
+            if !track.lyrics.is_empty() && !track.words_from.label().is_empty() {
+                ui.label(
+                    RichText::new(track.words_from.label())
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                )
+                .on_hover_text(match track.words_from {
+                    crate::library::WordsFrom::Recogniser => {
+                        "Read off this track's own vocal stem by the recogniser."
+                    }
+                    crate::library::WordsFrom::Server => {
+                        "Looked up on a lyrics server under this track's artist and title, and \
+                         placed against its stem."
+                    }
+                    crate::library::WordsFrom::ByHand => {
+                        "Typed or corrected here, which nothing overwrites on its own."
+                    }
+                    crate::library::WordsFrom::Unsaid => "",
+                });
+            }
             // What the recogniser thought of its own answer. Shown only when
             // it is poor, because the useful case is the one where the words
             // read like a lyric and are not one: a transcript nobody doubts
@@ -5910,6 +6123,27 @@ impl App {
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
                 Pending::SeparateMany { tracks, for_cues } => self.separate_for(&tracks, for_cues),
+                Pending::TakeFoundWords(id, found) => {
+                    touched |= self.take_found_words(id, &found);
+                }
+                Pending::SaveWords(id) => {
+                    touched |= self.save_edited_words(id);
+                }
+                Pending::EditWords(id) => {
+                    let text = self
+                        .library
+                        .get(id)
+                        .map(|track| {
+                            track
+                                .lyrics
+                                .iter()
+                                .map(|line| line.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default();
+                    self.editing_words = Some(EditingWords { id, text });
+                }
                 Pending::AutoCue(id) => touched |= self.auto_cue_tracks(&[id], false),
                 Pending::CopyPath(id) => {
                     // A companion's path is its stems, not its parent's file:
@@ -6270,8 +6504,10 @@ impl App {
             track.year = Some(year);
         }
         // Its names are now an answer rather than a guess, so a later
-        // fingerprint will ask before overriding them.
+        // fingerprint will ask before overriding them — and so a lyrics
+        // server asked under them is being asked about this record.
         track.from_tags = true;
+        track.identified_surely = Some(found.score);
         crate::info!("#{id} named from its fingerprint: {}", found.describe());
 
         if let Some(on_existing) = self.config.write_tags.on_existing() {
@@ -9454,6 +9690,283 @@ impl App {
         }
     }
 
+    /// Words a server offered that nobody has agreed to yet.
+    ///
+    /// One track at a time, because this is a judgement rather than a batch:
+    /// what is on screen is what was found against what is known, and the only
+    /// person who can say whether a remix really is built on that record is
+    /// the one who owns it.
+    fn wondering_sheet(&mut self, ctx: &egui::Context) {
+        let Some(wondering) = self.wondering.first() else { return };
+        let id = wondering.id;
+        let found = wondering.found.clone();
+        let Some(track) = self.library.get(id).cloned() else {
+            self.wondering.remove(0);
+            return;
+        };
+        let agrees = booth_cli::tag::lyrics::how_much_agrees(
+            &found,
+            &crate::library::transcript(&track.lyrics),
+        );
+
+        let mut open = true;
+        let mut decided = false;
+        egui::Window::new("Are these the words?")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(620.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!("{} \u{2014} {}", track.artist, track.display_title()))
+                        .color(theme::text()),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "A lyrics server has words for \u{201c}{} \u{2014} {}\u{201d}, {}. {}",
+                        found.artist,
+                        found.title,
+                        time_text((found.duration_secs * 1000.0) as u32),
+                        match found.apart_from(track.duration_secs) {
+                            apart if apart < 10.0 => "The same length as this track.".to_string(),
+                            apart => format!(
+                                "That is {} from this track, so it is another pressing \u{2014} \
+                                 an edit, an extended mix, or a different record with the same \
+                                 name.",
+                                roughly(apart)
+                            ),
+                        }
+                    ))
+                    .color(theme::dim())
+                    .size(theme::SMALL),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(match agrees {
+                        Some(share) => format!(
+                            "{:.0}% of the lines already heard off this track turn up in them.",
+                            share * 100.0
+                        ),
+                        None => "Nothing has been heard off this track to compare them with."
+                            .to_string(),
+                    })
+                    .color(theme::amber())
+                    .size(theme::SMALL),
+                );
+
+                ui.add_space(10.0);
+                pane_label(ui, "What was found");
+                egui::ScrollArea::vertical().max_height(200.0).id_salt("found").show(ui, |ui| {
+                    let shown: Vec<&str> = match found.synced.lines.is_empty() {
+                        true => found.plain.iter().map(String::as_str).collect(),
+                        false => found.synced.lines.iter().map(|l| l.text.as_str()).collect(),
+                    };
+                    for line in shown {
+                        ui.label(RichText::new(line).color(theme::text()).size(theme::SMALL));
+                    }
+                });
+
+                if !track.lyrics.is_empty() {
+                    ui.add_space(10.0);
+                    pane_label(ui, "What was heard off the stem");
+                    egui::ScrollArea::vertical().max_height(120.0).id_salt("heard").show(
+                        ui,
+                        |ui| {
+                            for line in &track.lyrics {
+                                ui.label(
+                                    RichText::new(&line.text)
+                                        .color(theme::dim())
+                                        .size(theme::SMALL),
+                                );
+                            }
+                        },
+                    );
+                }
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(theme::label_text("These are the words"))
+                                    .size(11.0)
+                                    .color(theme::booth())
+                                    .strong(),
+                            )
+                            .fill(theme::amber()),
+                        )
+                        .on_hover_text(
+                            "Takes them and re-cues the track. Where it has a vocal stem they \
+                             are placed against it, since the times came from another pressing.",
+                        )
+                        .clicked()
+                    {
+                        self.pending.push(Pending::TakeFoundWords(id, Box::new(found.clone())));
+                        decided = true;
+                    }
+                    if ui
+                        .button("Not this record")
+                        .on_hover_text(
+                            "Leaves the track as it is. Its words are still read off the stem \
+                             the ordinary way.",
+                        )
+                        .clicked()
+                    {
+                        decided = true;
+                    }
+                    if ui
+                        .button("Edit…")
+                        .on_hover_text(
+                            "Takes them, then opens the words for correcting by hand \u{2014} \
+                             for a remix that keeps some of a lyric and not the rest.",
+                        )
+                        .clicked()
+                    {
+                        self.pending.push(Pending::TakeFoundWords(id, Box::new(found.clone())));
+                        self.pending.push(Pending::EditWords(id));
+                        decided = true;
+                    }
+                });
+            });
+
+        if decided || !open {
+            self.wondering.remove(0);
+        }
+    }
+
+    /// A track's words, open for correcting by hand.
+    ///
+    /// One line per row, which is how the collection keeps them and how a
+    /// cue is placed. Times are not shown and not editable here: they are
+    /// measured off the stem by the aligner, and a number typed in by hand
+    /// would be the one thing in a cue set that nothing had checked.
+    fn words_sheet(&mut self, ctx: &egui::Context) {
+        let Some(editing) = &self.editing_words else { return };
+        let id = editing.id;
+        let mut text = editing.text.clone();
+        let name = self
+            .library
+            .get(id)
+            .map(|track| format!("{} \u{2014} {}", track.artist, track.display_title()))
+            .unwrap_or_default();
+
+        let mut open = true;
+        let mut save = false;
+        let mut cancel = false;
+        egui::Window::new("The words")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                ui.label(RichText::new(&name).color(theme::text()));
+                ui.label(
+                    RichText::new(
+                        "One line each, in the order they are sung. Where the track has a vocal \
+                         stem these are placed against it after saving, so the times look after \
+                         themselves.",
+                    )
+                    .color(theme::dim())
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut text)
+                            .desired_width(ui.available_width())
+                            .desired_rows(14)
+                            .font(theme::mono(11.0)),
+                    )
+                    .on_hover_text("The track's words, one line each.");
+                });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(theme::label_text("Save"))
+                                    .size(11.0)
+                                    .color(theme::booth())
+                                    .strong(),
+                            )
+                            .fill(theme::amber()),
+                        )
+                        .on_hover_text("Keeps these words and cues the track from them again.")
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                    if ui.button("Cancel").on_hover_text("Leaves the words as they were.").clicked()
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if let Some(editing) = &mut self.editing_words {
+            editing.text = text;
+        }
+        // Saving leaves the words in place for the pending call to take, which
+        // is what closes the sheet on that path.
+        if save {
+            self.pending.push(Pending::SaveWords(id));
+        } else if cancel || !open {
+            self.editing_words = None;
+        }
+    }
+
+    /// Keep words somebody typed, and cue from them.
+    fn save_edited_words(&mut self, id: u32) -> bool {
+        let Some(editing) = self.editing_words.take() else { return false };
+        let lines: Vec<String> = editing
+            .text
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let Some(track) = self.library.get_mut(id) else { return false };
+
+        // Times are kept where a line is still the line that was there — a
+        // correction usually fixes a word, not the order — and cleared where
+        // the shape changed, since a time carried onto a different line is a
+        // cue in the wrong place. Either way the aligner has the last word
+        // when there is a stem to measure.
+        let same_shape = lines.len() == track.lyrics.len();
+        let lyrics: Vec<crate::library::Lyric> = lines
+            .into_iter()
+            .enumerate()
+            .map(|(at, text)| match same_shape {
+                true => crate::library::Lyric { text, ..track.lyrics[at].clone() },
+                false => crate::library::Lyric { start_ms: 0, end_ms: 0, text },
+            })
+            .collect();
+
+        let count = lyrics.len();
+        let placed = track.lyrics_aligned;
+        track.refrains = crate::library::refrains_from(&lyrics);
+        track.lyrics = lyrics;
+        track.words_from = crate::library::WordsFrom::ByHand;
+        // Nobody's doubt survives somebody typing the words in.
+        track.heard_surely = None;
+        track.instrumental = false;
+        // The aligner is owed a pass only where there are times for it to
+        // place: a correction that kept the order kept them, where one that
+        // changed it has none, and the aligner moves a line by the time on it
+        // — hand it a dozen lines at zero and it stacks them all on the
+        // first word sung.
+        track.lyrics_aligned = placed || !same_shape;
+        crate::info!("#{id} took {} corrected by hand", plural(count, "line"));
+        self.auto_cue(id);
+        self.prep_changed(id);
+        true
+    }
+
     fn adopt_sheet(&mut self, ctx: &egui::Context) {
         let waiting: Vec<(u32, String, PathBuf)> = self
             .asking
@@ -11334,6 +11847,219 @@ mod tests {
                     app.want_cues.contains(&id),
                     "the track was not remembered, so its words will never be read"
                 );
+            }
+
+            /// Words somebody wrote down, rather than words heard off a stem.
+            mod looked_up {
+                use super::*;
+                use crate::library::WordsFrom;
+                use booth_cli::tag::lyrics::Found;
+                use booth_cli::transcribe::{Line, Transcript};
+
+                /// What a server answers for a track whose lyric it has timed.
+                fn found(lines: &[(u32, &str)]) -> Found {
+                    Found {
+                        synced: Transcript {
+                            lines: lines
+                                .iter()
+                                .map(|&(start_ms, text)| Line {
+                                    start_ms,
+                                    end_ms: start_ms + 2_000,
+                                    text: text.to_string(),
+                                })
+                                .collect(),
+                            ..Transcript::default()
+                        },
+                        plain: lines.iter().map(|(_, text)| text.to_string()).collect(),
+                        instrumental: false,
+                        artist: "Falco".into(),
+                        title: "Der Kommissar".into(),
+                        duration_secs: 300.0,
+                    }
+                }
+
+                #[test]
+                fn words_a_server_timed_are_taken_but_left_for_the_stem_to_place() {
+                    let (mut app, id) = sung("looked-up", &[]);
+                    app.library.get_mut(id).unwrap().heard_surely = Some(0.4);
+
+                    let offered = found(&[(1_000, "drei, vier"), (9_000, "jetzt gehn wir ab")]);
+                    assert!(app.take_found_words(id, &offered), "nothing was taken");
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(
+                        track.lyrics.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+                        ["drei, vier", "jetzt gehn wir ab"]
+                    );
+                    assert_eq!(track.words_from, WordsFrom::Server);
+                    // The lyric was synced against one pressing and this is a
+                    // library of extended mixes, so the times are words-shaped
+                    // evidence and nothing more until a stem is measured.
+                    assert!(
+                        !track.lyrics_aligned,
+                        "another pressing's times were taken as this track's"
+                    );
+                    // The doubt that was recorded belonged to words that are
+                    // gone, and nobody doubts the ones that replaced them.
+                    assert_eq!(track.heard_surely, None);
+                }
+
+                #[test]
+                fn words_a_server_only_had_as_text_are_kept_though_nothing_can_place_them() {
+                    let (mut app, id) = sung("plain", &[]);
+                    let mut offered = found(&[(1_000, "drei, vier"), (9_000, "jetzt gehn wir ab")]);
+                    offered.synced = Transcript::default();
+                    assert!(app.take_found_words(id, &offered), "nothing was taken");
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(track.lyrics.len(), 2);
+                    assert!(
+                        track.lyrics.iter().all(|line| line.start_ms == 0),
+                        "{:?}",
+                        track.lyrics
+                    );
+                    // Nothing for the aligner to do: it moves a line by the
+                    // time on it, so a set of lines all at zero would come out
+                    // stacked on the first word sung. These are here to be
+                    // read in the panel and searched for, not to be cued from.
+                    assert!(track.lyrics_aligned, "a line at zero was sent off to be placed");
+                }
+
+                #[test]
+                fn a_server_calling_a_track_an_instrumental_saves_finding_out_the_slow_way() {
+                    let (mut app, id) = sung("instrumental", &[]);
+                    let offered = Found {
+                        instrumental: true,
+                        artist: "Floating Points".into(),
+                        title: "Last Bloom".into(),
+                        duration_secs: 300.0,
+                        ..Found::default()
+                    };
+                    assert!(app.take_found_words(id, &offered), "the answer was thrown away");
+
+                    assert!(app.library.get(id).unwrap().instrumental);
+                    // Which is the row that earns the lookup its place: one
+                    // request against a separation and a recogniser pass that
+                    // end in "nothing was sung".
+                    assert!(app.words_answered(id));
+                }
+
+                #[test]
+                fn a_stem_landing_on_words_nobody_guessed_is_for_placing_them_not_reading_over() {
+                    let (mut app, id) = sung("answered", &[(40_000, "hold me closer now")]);
+                    app.library.get_mut(id).unwrap().words_from = WordsFrom::Recogniser;
+                    // Read off a stem, so a stem is worth another pass: that
+                    // is what asking again means.
+                    assert!(!app.words_answered(id));
+
+                    app.library.get_mut(id).unwrap().words_from = WordsFrom::Server;
+                    assert!(
+                        app.words_answered(id),
+                        "a recogniser would have written over words somebody wrote down"
+                    );
+                }
+
+                #[test]
+                fn correcting_a_word_keeps_the_times_the_lines_already_had() {
+                    let (mut app, id) = sung(
+                        "corrected",
+                        &[(40_000, "hold me close now"), (100_000, "hold me close now")],
+                    );
+                    app.editing_words = Some(EditingWords {
+                        id,
+                        text: "hold me closer now\nhold me closer now".into(),
+                    });
+                    assert!(app.save_edited_words(id), "the correction was dropped");
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(track.lyrics[0].text, "hold me closer now");
+                    assert_eq!(track.lyrics[0].start_ms, 40_000);
+                    assert_eq!(track.lyrics[1].start_ms, 100_000);
+                    assert_eq!(track.words_from, WordsFrom::ByHand);
+                    // Typing the words in is the last word on them: nothing
+                    // reads them off the stem again on its own.
+                    assert!(app.words_answered(id));
+                }
+
+                #[test]
+                fn adding_a_line_by_hand_gives_up_the_times_rather_than_shifting_them_all_down() {
+                    let (mut app, id) = sung(
+                        "added",
+                        &[(40_000, "hold me closer now"), (100_000, "hold me closer now")],
+                    );
+                    app.editing_words = Some(EditingWords {
+                        id,
+                        text: "walking through the city\nhold me closer now\nhold me closer now"
+                            .into(),
+                    });
+                    assert!(app.save_edited_words(id), "the correction was dropped");
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(track.lyrics.len(), 3);
+                    // A time carried onto a different line is a cue under the
+                    // wrong words, which is worse than a line with no cue.
+                    assert!(
+                        track.lyrics.iter().all(|line| line.start_ms == 0),
+                        "{:?}",
+                        track.lyrics
+                    );
+                }
+
+                #[test]
+                fn the_panel_says_where_a_track_got_its_words() {
+                    // The case it is for: a cue that reads oddly. A
+                    // recogniser's mistakes still read like lyrics, so the
+                    // only way to tell a doubtful cue from a solid one is to
+                    // know which kind of answer it came from.
+                    let (mut app, id) = sung("provenance", &[(40_000, "hold me closer now")]);
+                    let track = app.library.get_mut(id).unwrap();
+                    track.words_from = WordsFrom::Recogniser;
+                    track.heard_surely = Some(0.4);
+                    app.rebuild();
+                    app.selected = Some(id);
+
+                    // Tall, because the words sit below the tags and the file
+                    // in a scroll area, and what a default-sized harness
+                    // clips is not in the tree to be found.
+                    let mut harness = Harness::builder()
+                        .with_size(egui::vec2(360.0, 1600.0))
+                        .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+                    harness.run();
+                    harness.get_by_label_contains("heard off the stem");
+                    harness.get_by_label_contains("heard poorly");
+
+                    harness.state_mut().library.get_mut(id).unwrap().words_from = WordsFrom::Server;
+                    harness.state_mut().rebuild();
+                    harness.run();
+                    harness.get_by_label_contains("looked up");
+                }
+
+                #[test]
+                fn the_sheet_asking_about_found_words_shows_both_sets_and_takes_them() {
+                    let (mut app, id) = sung("wondering", &[(40_000, "hold me closer now")]);
+                    let offered = found(&[(1_000, "hold me closer now"), (9_000, "all night")]);
+                    app.wondering.push(Wondering { id, found: offered });
+
+                    let mut harness =
+                        Harness::new_state(|ctx, app: &mut App| app.wondering_sheet(ctx), app);
+                    harness.run();
+                    // Both sides of the judgement, because the judgement is
+                    // whether these two are the same record.
+                    harness.get_by_label_contains("all night");
+                    harness.get_by_label_contains("The same length as this track");
+
+                    harness.get_by_label(&theme::label_text("These are the words")).click();
+                    harness.run();
+
+                    assert!(harness.state().wondering.is_empty(), "the sheet went unanswered");
+                    assert!(
+                        matches!(
+                            harness.state().pending.first(),
+                            Some(Pending::TakeFoundWords(..))
+                        ),
+                        "agreeing to them should take them"
+                    );
+                }
             }
         }
 
