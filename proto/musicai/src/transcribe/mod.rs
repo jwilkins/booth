@@ -472,9 +472,100 @@ fn phrases(text: &str) -> Vec<String> {
         .any(|(at, piece)| pieces[at + 1..].iter().any(|other| same_line(piece, other)));
     match repeats {
         true => pieces,
-        false => vec![text.to_string()],
+        // Nothing the punctuation found. The phrase may still be in there
+        // unpunctuated, which is the other way a recogniser writes a repeat
+        // down.
+        false => by_repeat(text).unwrap_or_else(|| vec![text.to_string()]),
     }
 }
+
+/// The words of a line, lower-cased, each with where it sits in the original.
+///
+/// The positions are the point: a piece is handed back as a slice of what was
+/// written, so it keeps its capitals and its apostrophes. A marker carries the
+/// wording, not the search key.
+fn word_spans(text: &str) -> Vec<(String, std::ops::Range<usize>)> {
+    let mut found = Vec::new();
+    let mut start = None;
+    for (at, ch) in text.char_indices() {
+        let part_of_a_word = ch.is_alphanumeric() || ch == '\'';
+        match (part_of_a_word, start) {
+            (true, None) => start = Some(at),
+            (false, Some(from)) => {
+                found.push((text[from..at].trim_matches('\'').to_lowercase(), from..at));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = start {
+        found.push((text[from..].trim_matches('\'').to_lowercase(), from..text.len()));
+    }
+    found.retain(|(word, _)| !word.is_empty());
+    found
+}
+
+/// A line read as repeats of a phrase it does not punctuate.
+///
+/// The other half of [`phrases`]. "get down get down get down" arrives as one
+/// segment with no commas in it, and read whole it is a line nothing on the
+/// record matches — same fault as the punctuated case, and a recogniser does
+/// both.
+///
+/// Each phrase length is tried, shortest first, so that a phrase said twice
+/// over is found as itself rather than as one phrase of twice the length. The
+/// run may start anywhere: a line often opens on a word that is not part of it
+/// ("oh, get down get down"), and what comes before and after the run is kept
+/// as its own piece where there is enough of it to be a line.
+///
+/// `None` when no phrase repeats, which is the ordinary case and leaves the
+/// line alone.
+fn by_repeat(text: &str) -> Option<Vec<String>> {
+    let spans = word_spans(text);
+    let n = spans.len();
+    if !(LONG_LINE_WORDS..=MOST_WORDS_TO_SEARCH).contains(&n) {
+        return None;
+    }
+    let same = |a: usize, b: usize, k: usize| (0..k).all(|i| spans[a + i].0 == spans[b + i].0);
+
+    for k in MIN_WORDS..=n / 2 {
+        for at in 0..=n - 2 * k {
+            if !same(at, at + k, k) {
+                continue;
+            }
+            let mut times = 2;
+            while at + (times + 1) * k <= n && same(at, at + times * k, k) {
+                times += 1;
+            }
+            // The run, with whatever sits either side of it: a pickup before
+            // and a different line after are both worth keeping, and both are
+            // dropped if they are too short to be a line of their own.
+            let said = |from: usize, to: usize| {
+                text[spans[from].1.start..spans[to - 1].1.end].trim().to_string()
+            };
+            let mut out = Vec::with_capacity(times + 2);
+            if at >= MIN_WORDS {
+                out.push(said(0, at));
+            }
+            for n in 0..times {
+                out.push(said(at + n * k, at + (n + 1) * k));
+            }
+            let after = at + times * k;
+            if n - after >= MIN_WORDS {
+                out.push(said(after, n));
+            }
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// The longest line worth searching for an unpunctuated repeat.
+///
+/// The search is every phrase length against every position, so it grows with
+/// the cube of the line. Past this a segment is a passage rather than a line,
+/// and the punctuation in it is what to read instead.
+const MOST_WORDS_TO_SEARCH: usize = 64;
 
 /// A line cut to what a player will show, on a word boundary where it can be.
 fn comment(text: &str) -> String {
@@ -608,6 +699,55 @@ mod tests {
         let hook = transcript.hook().expect("a phrase sung four times is a hook");
         assert!(hook.text.eq_ignore_ascii_case("get down"), "{hook:?}");
         assert_eq!(hook.times(), 4);
+    }
+
+    #[test]
+    fn a_phrase_repeated_without_any_punctuation_is_still_found() {
+        // The other way a recogniser writes a repeat down, and the half the
+        // punctuation split cannot reach.
+        let transcript = said(&[(30_000, "Get Down Get Down Get Down Get Down")]);
+        let refrains = transcript.refrains();
+        assert_eq!(refrains.len(), 1, "{refrains:?}");
+        assert_eq!(refrains[0].times(), 4, "{refrains:?}");
+        // And it keeps the writing, not the search key: a marker carries the
+        // wording, so the capitals survive.
+        assert_eq!(refrains[0].text, "Get Down", "{refrains:?}");
+    }
+
+    #[test]
+    fn a_run_is_found_wherever_it_starts_and_what_sits_round_it_is_kept() {
+        let transcript =
+            said(&[(30_000, "oh yeah get down get down get down and then we go home again")]);
+        let refrains = transcript.refrains();
+        let down = refrains
+            .iter()
+            .find(|r| r.text.eq_ignore_ascii_case("get down"))
+            .unwrap_or_else(|| panic!("{refrains:?}"));
+        assert_eq!(down.times(), 3, "{refrains:?}");
+        // What came after the run is a line of its own rather than lost.
+        assert!(
+            refrains.iter().any(|r| r.text.contains("home again")),
+            "the tail was dropped: {refrains:?}"
+        );
+    }
+
+    #[test]
+    fn a_phrase_said_twice_over_is_found_as_itself_and_not_as_a_longer_one() {
+        // Shortest length first: "get down" four times, not "get down get
+        // down" twice.
+        let transcript = said(&[(30_000, "get down get down get down get down")]);
+        assert_eq!(transcript.refrains()[0].text.split_whitespace().count(), 2);
+    }
+
+    #[test]
+    fn an_ordinary_line_with_no_repeat_in_it_is_left_alone() {
+        // The search must not invent a phrase. Nothing here repeats, so the
+        // line stays whole however long it is.
+        let line = "walking through the city at night with nobody else around at all";
+        let transcript = said(&[(10_000, line), (90_000, line)]);
+        let refrains = transcript.refrains();
+        assert_eq!(refrains.len(), 1, "{refrains:?}");
+        assert_eq!(refrains[0].text, line);
     }
 
     #[test]
