@@ -159,6 +159,50 @@ fn lrclib_says_outright_when_a_record_is_an_instrumental() {
 
 #[test]
 #[ignore = "hits the live lrclib service"]
+fn a_remix_finds_the_record_it_was_built_on() {
+    // The case the whole lookup was asked for: a record a recogniser makes a
+    // hash of, held as a club mix nothing like the length the database has it
+    // at. `duration` on this endpoint is a filter rather than a hint, so
+    // asking by the mix's own length is a 404 — and this used to stop there,
+    // which made every remix in a library a miss.
+    let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
+    let found = client
+        .lookup("Falco", "Der Kommissar", Some(350.0))
+        .expect("the request failed")
+        .expect("the record should be found at its own length even when the mix is not");
+
+    assert!(!found.plain.is_empty(), "{found:?}");
+    assert!(
+        found.apart_from(350.0) > 60.0,
+        "this is meant to be the other pressing, not a lucky exact match: {found:?}"
+    );
+    // Another pressing's words and another pressing's times, which is a
+    // question for somebody rather than something to write in quietly.
+    let verdict =
+        lyrics::verdict(&found, &booth_cli::transcribe::Transcript::default(), None, 350.0);
+    assert_eq!(verdict, lyrics::Verdict::Ask, "{found:?}");
+}
+
+#[test]
+#[ignore = "hits the live lrclib service"]
+fn a_track_at_its_own_length_is_taken_without_anybody_being_asked() {
+    // The ordinary case, and the one that was broken: no stem, no words heard,
+    // no fingerprint — just a name and a length, both of which agree with what
+    // came back. Every track in a fresh library looks like this.
+    let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
+    let found = client
+        .lookup("Burial", "Archangel", Some(239.0))
+        .expect("the request failed")
+        .expect("the track should be in the database");
+
+    let verdict =
+        lyrics::verdict(&found, &booth_cli::transcribe::Transcript::default(), None, 239.0);
+    assert_eq!(verdict, lyrics::Verdict::Keep, "{found:?}");
+    assert!(!found.synced.lines.is_empty(), "{found:?}");
+}
+
+#[test]
+#[ignore = "hits the live lrclib service"]
 fn a_track_the_database_has_never_heard_of_is_a_miss_and_not_a_failure() {
     // Most of a crate of white labels will land here, so it has to be an
     // ordinary answer rather than an error.

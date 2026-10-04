@@ -12122,7 +12122,7 @@ mod tests {
                     // on screen, seen that they are wrong, and asked for them
                     // again. A track that already has a stem went straight to
                     // the recogniser, which is the one thing already known not
-                    // to have worked \u2014 so the lookup never ran on the pass
+                    // to have worked — so the lookup never ran on the pass
                     // where it was most wanted.
                     let (mut app, id) = read_already("re-read");
                     let plan = app.words_plan(&[id], true);

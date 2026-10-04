@@ -28,6 +28,12 @@
 //! an instrumental costs one request, where finding out by listening costs the
 //! separation *and* the recogniser, and ends in "nothing was sung".
 //!
+//! Those were all asked for at the length the database holds them at. A DJ's
+//! copy is usually some other length, and that is not a detail: `duration` on
+//! this endpoint is a filter, so asking for a club mix by its own length is a
+//! 404 even when the record is right there. Hence [`Client::lookup`] asking
+//! twice.
+//!
 //! # The times are not this pressing's times
 //!
 //! A lyric is synced against one release. A DJ's library is extended mixes and
@@ -57,12 +63,13 @@ const GET_URL: &str = "https://lrclib.net/api/get";
 /// is owed rather than a rule being obeyed.
 pub const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How far a track's length may be from the one a lyric was written against.
+/// How far a track's length may be from the one a lyric was written against
+/// and still be taken for the same pressing.
 ///
-/// Ten seconds. The point is not to be strict — a remix is a different length
-/// by design and is still worth looking at — but to stop a radio edit being
-/// served up as though it were the record. LRCLIB matches on duration itself
-/// when one is given, so this is what decides whether to give it one.
+/// Ten seconds. Not a filter — a remix is a different length by design and is
+/// still worth looking at — but the line between "these are this record's
+/// words and its times" and "these are this record's words and somebody
+/// else's times", which is what decides whether anybody is asked.
 const SAME_LENGTH_SECS: f64 = 10.0;
 
 /// What a lyrics server knows about a track.
@@ -109,11 +116,28 @@ impl Client {
         Self { http: Http::new(min_interval) }
     }
 
-    /// Ask for one track's words.
+    /// Ask for one track's words: this pressing if the server has it, the
+    /// record otherwise.
     ///
-    /// `duration_secs` is passed to the server where it is known, because that
-    /// is how it tells one pressing from another — but only as a hint, since a
-    /// miss on the duration is still a hit on the words.
+    /// The length is **not** a hint. `duration` on this endpoint is a filter,
+    /// and a length a couple of seconds out is a 404 — so asking for a 6:12
+    /// club mix by its own length is a miss even when the database has the
+    /// record, and this went looking for a problem it had created:
+    ///
+    /// | asked | with its length | without |
+    /// | --- | --- | --- |
+    /// | Falco — Der Kommissar, 5:50 | miss | 62 lines |
+    /// | Floating Points — Last Bloom, 7:00 | miss | `instrumental: true` |
+    ///
+    /// Both of those are the cases this exists for. The first is the record a
+    /// recogniser makes a hash of; the second is the one answer that saves a
+    /// separation and a recogniser pass outright.
+    ///
+    /// So: with the length first, because a hit there is *this* pressing and
+    /// its times are this pressing's times; then without it, which finds the
+    /// record a remix was built on. The second request is only ever made after
+    /// a miss, and what comes back at another length is for
+    /// [`verdict`] to be careful with rather than for this to refuse.
     pub fn lookup(
         &mut self,
         artist: &str,
@@ -123,12 +147,22 @@ impl Client {
         if artist.trim().is_empty() || title.trim().is_empty() {
             return Ok(None);
         }
+        if let Some(secs) = duration_secs.filter(|secs| *secs > 0.0) {
+            if let Some(found) = self.ask(artist, title, Some(secs))? {
+                return Ok(Some(found));
+            }
+        }
+        self.ask(artist, title, None)
+    }
+
+    /// One request, for exactly the length asked for or for any length.
+    fn ask(&mut self, artist: &str, title: &str, secs: Option<f64>) -> Result<Option<Found>> {
         let mut url = format!(
             "{GET_URL}?artist_name={}&track_name={}",
             urlencoding(artist.trim()),
             urlencoding(title.trim())
         );
-        if let Some(secs) = duration_secs.filter(|s| *s > 0.0) {
+        if let Some(secs) = secs {
             url.push_str(&format!("&duration={}", secs.round() as u64));
         }
 
@@ -278,9 +312,11 @@ pub enum Verdict {
 /// line — which is exactly what [`crate::transcribe::same_line`] measures, and
 /// a few lines in common is a signal nothing else explains.
 ///
-/// `heard` is what the recogniser made of the stem, which may be nothing: a
-/// track nobody has listened to has no evidence either way, and the answer
-/// then rests on the identification alone.
+/// `heard` is what the recogniser made of the stem, which may be nothing, and
+/// most often is: the tracks worth looking up are the ones nobody has spent
+/// the minutes listening to. What is left to weigh then is the name the server
+/// was asked under and the length it answered with — which agree or they do
+/// not, and were not derived from one another.
 pub fn verdict(
     found: &Found,
     heard: &Transcript,
@@ -310,13 +346,34 @@ pub fn verdict(
             None => Verdict::Ask,
         };
     }
-    // Not identified, or barely. The words are all there is.
+    // Not identified, or barely. The words are the evidence where there are
+    // any, and the name and the length where there are not.
     match agrees {
         Some(agrees) if agrees >= PLAINLY_THE_SAME => Verdict::Keep,
         Some(agrees) if agrees >= WORTH_ASKING => Verdict::Ask,
+        // Heard plenty and they are not these words — but the length says
+        // this is the record it was asked about, so the two cannot both be
+        // right and somebody should say which. A recogniser handed a thick
+        // accent or a language nobody told it about writes a transcript that
+        // agrees with nothing, the real lyric included.
+        Some(_) if same_pressing(found, duration_secs) => Verdict::Ask,
         Some(_) => Verdict::No,
-        None if sure >= WORTH_ASKING_IDENTIFIED => Verdict::Ask,
-        None => Verdict::No,
+        // Nothing heard, which is most of a library and the case this whole
+        // feature exists for: it is the track nobody has spent the minutes on
+        // that has the most to gain from somebody else having written the
+        // words down.
+        //
+        // What there is to go on is real. The server was asked under this
+        // track's artist and title, and answered with a record of this
+        // track's length — two things agreeing that were not derived from
+        // each other, which is how a lyrics service is meant to be used.
+        // Refusing here is what made the lookup look like it was not running:
+        // the words came back and were thrown away.
+        None if same_pressing(found, duration_secs) => Verdict::Keep,
+        // The same name at a different length: an edit, an extended mix, or a
+        // different record that happens to share a title. Real evidence and
+        // partial evidence at once, which is exactly what the sheet is for.
+        None => Verdict::Ask,
     }
 }
 
@@ -365,10 +422,6 @@ const PLAINLY_THE_SAME: f32 = 0.5;
 
 /// And how much makes it worth somebody's glance rather than nothing.
 const WORTH_ASKING: f32 = 0.2;
-
-/// How sure a fingerprint has to be to be worth asking about on its own, with
-/// no words heard yet to weigh against it.
-const WORTH_ASKING_IDENTIFIED: f64 = 0.5;
 
 #[cfg(test)]
 mod tests {
@@ -509,10 +562,55 @@ mod tests {
     }
 
     #[test]
-    fn words_that_agree_with_nothing_heard_are_not_this_record() {
+    fn words_that_agree_with_nothing_heard_at_another_length_are_not_this_record() {
+        // Nothing in common and not even the same length. Two records that
+        // share a name, which is the ordinary way a lyrics database is wrong.
+        let found = written(&["something else entirely", "nothing like it at all"], 190.0);
+        let heard = sung(&["hold me closer now", "and then home", "walking through the city"]);
+        assert_eq!(verdict(&found, &heard, Some(0.4), 400.0), Verdict::No);
+    }
+
+    #[test]
+    fn words_that_agree_with_nothing_heard_at_this_length_are_put_to_somebody() {
+        // The same name and the same length, and a transcript that matches
+        // none of it. One of the two is wrong and it is not decidable from
+        // here: a recogniser given a thick accent, a language nobody told it
+        // about, or a vocal buried in a club mix writes something that agrees
+        // with nothing, the real lyric included. Dropping it quietly would
+        // throw away the right words on the word of the wrong ones.
         let found = written(&["something else entirely", "nothing like it at all"], 240.0);
         let heard = sung(&["hold me closer now", "and then home", "walking through the city"]);
-        assert_eq!(verdict(&found, &heard, Some(0.4), 240.0), Verdict::No);
+        assert_eq!(verdict(&found, &heard, Some(0.4), 240.0), Verdict::Ask);
+    }
+
+    #[test]
+    fn a_track_nobody_has_listened_to_takes_a_lyric_of_its_own_length() {
+        // The ordinary case, and the one the whole feature is for: a track
+        // with no stem, no fingerprint and no words yet. The server was asked
+        // under its artist and title and answered with a record of its length.
+        // This used to come back `No`, which meant the words were fetched and
+        // thrown away on nearly every track in a library — a lookup that
+        // looked from the outside like a lookup that never ran.
+        let found = written(&["hold me closer now", "and then home"], 240.0);
+        assert_eq!(verdict(&found, &Transcript::default(), None, 240.0), Verdict::Keep);
+        assert_eq!(verdict(&found, &Transcript::default(), None, 236.0), Verdict::Keep);
+    }
+
+    #[test]
+    fn a_track_nobody_has_listened_to_is_asked_about_at_another_length() {
+        // Same name, nothing heard, and eight minutes against four: an
+        // extended mix of the right record, or a different record that shares
+        // a title, and nothing here can tell which.
+        let found = written(&["hold me closer now", "and then home"], 240.0);
+        assert_eq!(verdict(&found, &Transcript::default(), None, 480.0), Verdict::Ask);
+    }
+
+    #[test]
+    fn a_server_calling_a_record_an_instrumental_is_believed_at_the_same_length() {
+        // The answer that earns the lookup its place: one request against a
+        // separation and a recogniser pass that end in "nothing was sung".
+        let found = Found { instrumental: true, duration_secs: 240.0, ..Found::default() };
+        assert_eq!(verdict(&found, &Transcript::default(), None, 240.0), Verdict::Keep);
     }
 
     #[test]
