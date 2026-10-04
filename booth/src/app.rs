@@ -368,6 +368,27 @@ pub struct App {
     wake_installed: bool,
 }
 
+/// What cueing a batch of tracks from their words would take, worked out
+/// before any of it is started.
+///
+/// The three steps of the pass — render the stem, read it, place the cues —
+/// with each track in whichever one it has got to, plus the tracks worth
+/// asking a lyrics server about before any of that is spent on them.
+struct WordsPlan {
+    /// Words already read and already placed: cue them now, no job at all.
+    known: Vec<u32>,
+    /// Words read before they were placed against the stem. A decode, not
+    /// another pass through the recogniser.
+    placing: Vec<job::Realigning>,
+    /// Stems that are on disk and have not been listened to. Tracks a lyrics
+    /// server is being asked about are not here: see [`App::words_plan`].
+    reading: Vec<job::Transcribable>,
+    /// No stem yet, so the slow part comes first.
+    rendering: Vec<u32>,
+    /// Worth asking a server about before listening.
+    asking: Vec<job::Askable>,
+}
+
 /// A batch of separations that has been asked for but not yet paid for.
 ///
 /// Separation is the only job here measured in hours, and the way into it is
@@ -1936,21 +1957,13 @@ impl App {
 
     // -- cues from the words -----------------------------------------------
 
-    /// Set cues from a track's sections and from what is sung over them.
+    /// Where each of these tracks is in the three steps of cueing from the
+    /// words, and which of them are worth asking a lyrics server about first.
     ///
-    /// Three steps, each skipped when it has already been taken: render the
-    /// stems, read the vocal one, place the cues. Only the last is instant,
-    /// which is why the words are kept in the collection once they have been
-    /// heard — a track whose lyrics are known is re-cued with no job at all.
-    ///
-    /// `again` reads the words a second time on tracks that already have
-    /// them, which is what to do when the recogniser, the stems or the
-    /// placing have improved since. Everything else about the pass is the
-    /// same, including rendering a stem for anything that has lost one.
-    ///
-    /// Returns whether the collection changed here and now, as opposed to work
-    /// having been queued that will change it later.
-    fn auto_cue_tracks(&mut self, ids: &[u32], again: bool) -> bool {
+    /// Separated from the pass that acts on it because this is the whole of
+    /// the decision and none of the work: it starts nothing, so it can be
+    /// asked what it would do.
+    fn words_plan(&mut self, ids: &[u32], again: bool) -> WordsPlan {
         // A companion row has no cues of its own; it shows its parent's. So
         // asking for cues on an acapella is asking for them on the record.
         let mut wanted: Vec<u32> = ids.iter().map(|id| crate::library::family(*id)).collect();
@@ -1959,8 +1972,8 @@ impl App {
 
         let mut known = Vec::new();
         let mut placing = Vec::new();
-        let mut reading = Vec::new();
-        let mut rendering = Vec::new();
+        let mut reading: Vec<job::Transcribable> = Vec::new();
+        let mut rendering: Vec<u32> = Vec::new();
         // A name that says "instrumental" is somebody telling you the answer,
         // and it is worth taking: finding it out instead costs a separation
         // and a pass through the recogniser. Marked before the pass below
@@ -2022,6 +2035,61 @@ impl App {
             }
         }
 
+        // Before anything expensive: somebody may have written these words
+        // down already. A hit costs one request where listening costs a
+        // recogniser pass — and a separation too where there is no stem yet —
+        // and the answer is a person's rather than a machine's guess at a
+        // vocal.
+        //
+        // Every track about to have its words read, whether it has a stem or
+        // not. Asking only about the stemless ones meant that re-reading a
+        // track never asked at all, since a track with a stem goes straight to
+        // the recogniser — which is the one case where somebody has said out
+        // loud that the words it has are wrong.
+        //
+        // Only where there is a name to ask under: "Unknown Artist" asks
+        // nothing of anybody.
+        let asking: Vec<job::Askable> = reading
+            .iter()
+            .map(|wanting| wanting.id)
+            .chain(rendering.iter().copied())
+            .filter_map(|id| self.library.get(id))
+            .filter(|track| !track.artist.trim().is_empty() && !track.title.trim().is_empty())
+            .map(|track| job::Askable {
+                id: track.id,
+                artist: track.artist.clone(),
+                title: track.display_title(),
+                duration_secs: track.duration_secs,
+                identified_surely: track.identified_surely,
+                heard: track.lyrics.clone(),
+            })
+            .collect();
+        // Held back rather than read alongside. A recogniser pass that runs
+        // anyway would spend the minutes the lookup exists to save, and would
+        // then write its guess over the words the lookup found. Whatever the
+        // server does not settle is handed to it in `Update::WordsLookedUp`.
+        let asked: std::collections::HashSet<u32> = asking.iter().map(|track| track.id).collect();
+        reading.retain(|wanting| !asked.contains(&wanting.id));
+
+        WordsPlan { known, placing, reading, rendering, asking }
+    }
+
+    /// Set cues from a track's sections and from what is sung over them.
+    ///
+    /// Three steps, each skipped when it has already been taken: render the
+    /// stems, read the vocal one, place the cues. Only the last is instant,
+    /// which is why the words are kept in the collection once they have been
+    /// heard — a track whose lyrics are known is re-cued with no job at all.
+    ///
+    /// `again` reads the words a second time on tracks that already have
+    /// them, which is what to do when the recogniser, the stems or the
+    /// placing have improved since. Everything else about the pass is the
+    /// same, including rendering a stem for anything that has lost one.
+    ///
+    /// Returns whether the collection changed here and now, as opposed to work
+    /// having been queued that will change it later.
+    fn auto_cue_tracks(&mut self, ids: &[u32], again: bool) -> bool {
+        let WordsPlan { known, placing, reading, rendering, asking } = self.words_plan(ids, again);
         let mut placed = 0;
         for id in &known {
             placed += self.auto_cue(*id);
@@ -2043,25 +2111,7 @@ impl App {
 
         // Before anything expensive: somebody may have written these words
         // down already. A hit costs one request where listening costs a
-        // separation and a recogniser pass, and the answer is a person's
-        // rather than a machine's guess at a vocal.
-        //
-        // Only for tracks with no stem yet, so the lookup never delays a track
-        // that is one decode away from an answer, and only where there is a
-        // name to ask under — "Unknown Artist" asks nothing of anybody.
-        let asking: Vec<job::Askable> = rendering
-            .iter()
-            .filter_map(|id| self.library.get(*id))
-            .filter(|track| !track.artist.trim().is_empty() && !track.title.trim().is_empty())
-            .map(|track| job::Askable {
-                id: track.id,
-                artist: track.artist.clone(),
-                title: track.display_title(),
-                duration_secs: track.duration_secs,
-                identified_surely: track.identified_surely,
-                heard: track.lyrics.clone(),
-            })
-            .collect();
+        // recogniser pass — and a separation too where there is no stem yet.
         if !asking.is_empty() {
             crate::info!("asking a lyrics server about {}", plural(asking.len(), "track"));
             self.start(Job::LookUpWords { tracks: asking });
@@ -2548,6 +2598,10 @@ impl App {
                 }
                 Update::WordsLookedUp { id, found, verdict } => {
                     use booth_cli::tag::lyrics::Verdict;
+                    // The recogniser pass this track would have had was held
+                    // back while the server was asked. Only a verdict that
+                    // settles the words lets it go.
+                    let settled = verdict == Verdict::Keep;
                     match verdict {
                         // Taken without asking. The track was identified by
                         // its sound, or what was written down agrees with what
@@ -2556,12 +2610,28 @@ impl App {
                             if self.take_found_words(id, &found) {
                                 changed = true;
                             }
+                            // The words are this record's and the times are
+                            // another pressing's, so the stem still has
+                            // something to say about where they go.
+                            to_cue.push(id);
                         }
                         // Plausible and not certain. The one thing not to do
                         // is write it in quietly: wrong words on a cue are
                         // worse than no words, because they look right.
                         Verdict::Ask => self.wondering.push(Wondering { id, found: *found }),
                         Verdict::No => {}
+                    }
+                    // Nothing settled it, so the slow way round after all.
+                    // Reading the stem while the question is still open is
+                    // deliberate: somebody who answers "not this record" wants
+                    // the words that were sung, not an empty panel and another
+                    // wait.
+                    if !settled {
+                        if let Some(vocals) =
+                            self.library.get(id).and_then(|track| track.stems.vocals.clone())
+                        {
+                            to_read.push(job::Transcribable { id, vocals });
+                        }
                     }
                 }
                 Update::Transcribed { id, lyrics, confidence, language } => {
@@ -12003,6 +12073,88 @@ mod tests {
                         "{:?}",
                         track.lyrics
                     );
+                }
+
+                /// A track with a stem, words already read, and a name to
+                /// ask a server under.
+                fn read_already(name: &str) -> (App, u32) {
+                    let (mut app, id) = sung(name, &[(40_000, "hold me closer now")]);
+                    let track = app.library.get_mut(id).unwrap();
+                    track.artist = "Falco".into();
+                    track.title = "Der Kommissar".into();
+                    track.stems.vocals = Some(track.path.with_extension("vocals.wav"));
+                    app.rebuild();
+                    (app, id)
+                }
+
+                #[test]
+                fn re_reading_a_track_asks_the_server_before_the_recogniser() {
+                    // The case this is for: somebody has looked at the words
+                    // on screen, seen that they are wrong, and asked for them
+                    // again. A track that already has a stem went straight to
+                    // the recogniser, which is the one thing already known not
+                    // to have worked \u2014 so the lookup never ran on the pass
+                    // where it was most wanted.
+                    let (mut app, id) = read_already("re-read");
+                    let plan = app.words_plan(&[id], true);
+
+                    assert_eq!(
+                        plan.asking.iter().map(|ask| ask.id).collect::<Vec<_>>(),
+                        [id],
+                        "a re-read did not ask the server"
+                    );
+                    assert!(
+                        plan.reading.is_empty(),
+                        "the recogniser was started alongside the lookup, so it would \
+                         spend the minutes the lookup exists to save and then write over \
+                         what came back"
+                    );
+                }
+
+                #[test]
+                fn a_first_reading_asks_the_server_too() {
+                    let (mut app, id) = read_already("first-read");
+                    app.library.get_mut(id).unwrap().lyrics.clear();
+                    app.rebuild();
+
+                    let plan = app.words_plan(&[id], false);
+                    assert_eq!(plan.asking.len(), 1, "nothing was asked about");
+                    assert!(plan.reading.is_empty());
+                }
+
+                #[test]
+                fn a_track_with_no_name_to_ask_under_goes_straight_to_the_recogniser() {
+                    // Most of a crate of white labels. Asking a lyrics
+                    // database about "Unknown Artist" wastes a request and
+                    // delays the only answer there is going to be.
+                    let (mut app, id) = read_already("nameless");
+                    let track = app.library.get_mut(id).unwrap();
+                    track.artist.clear();
+                    app.rebuild();
+
+                    let plan = app.words_plan(&[id], true);
+                    assert!(plan.asking.is_empty(), "a nameless track was looked up");
+                    assert_eq!(
+                        plan.reading.iter().map(|read| read.id).collect::<Vec<_>>(),
+                        [id],
+                        "and then it was not read either"
+                    );
+                }
+
+                #[test]
+                fn a_track_with_no_stem_is_asked_about_before_it_is_separated() {
+                    let (mut app, id) = read_already("stemless");
+                    let track = app.library.get_mut(id).unwrap();
+                    track.stems.vocals = None;
+                    track.lyrics.clear();
+                    app.rebuild();
+
+                    let plan = app.words_plan(&[id], false);
+                    assert_eq!(plan.asking.len(), 1);
+                    // Still separated: the words may come back needing placing
+                    // against this pressing, and there is nothing to place
+                    // them against until the stem exists.
+                    assert_eq!(plan.rendering, [id]);
                 }
 
                 #[test]
