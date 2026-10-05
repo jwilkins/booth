@@ -425,6 +425,25 @@ pub enum Mood {
 pub struct Phrase {
     pub beat: u16,
     pub kind: u16,
+    /// Which numbered variant of the label a player draws, in [`Mood::High`]:
+    /// the 1 or the 2 in "Chorus 1", "Intro 2", "Up 1".
+    ///
+    /// It is not part of `kind`. The format carries it in three separate flag
+    /// bytes whose meaning depends on the kind, and [`anlz::song_structure`]
+    /// turns this back into them. 1 or 2 for an intro, a chorus or an outro; 1
+    /// to 3 for an up; ignored for a down, which has no variants.
+    ///
+    /// Left at 1 by anything that does not care. Zero is **not** a safe
+    /// default: a player reads the flags rather than this field, and all-zero
+    /// flags mean "Intro 2", "Chorus 2" and "Outro 2" — so a track whose
+    /// phrases were all written zeroed draws as a column of twos.
+    pub variant: u8,
+}
+
+impl Default for Phrase {
+    fn default() -> Self {
+        Self { beat: 1, kind: 1, variant: 1 }
+    }
 }
 
 /// The phrase analysis of a track, as the CDJ-3000 draws it under the waveform.

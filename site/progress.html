@@ -33,8 +33,8 @@
   <span class="snum">01 — What works today</span>
   <h2>Demonstrated, on hardware or in the test suite</h2>
   <ul class="plain">
-    <li><b>A CDJ-3000X on firmware 1.40 and a CDJ-1500X browse and play a drive this
-    writes</b> — playlists,
+    <li><b>A CDJ-3000X on firmware 1.40 and a CDJ-1500X on firmware 1.10 — two current models —
+    both browse and play a drive this writes, each from its own slot</b> — playlists,
     track list, key search, colour waveforms, beat grid and hot cues on a loaded track, with
     nothing rekordbox has touched on the stick.</li>
     <li><b>Both on-drive databases from one collection</b>, written in one pass so they cannot
@@ -75,21 +75,20 @@
       <thead><tr><th scope="col">The gap</th><th scope="col">Where that leaves you</th></tr></thead>
       <tbody>
         <tr>
-          <th scope="row">Two players are confirmed, and the gap between them is not
-          understood</th>
-          <td>A CDJ-3000X on firmware 1.40 and a CDJ-1500X both browse and play a drive this
-          writes. Between them sits the one refusal on record: a CDJ-3000 on firmware 2.05
-          rejected the legacy <code>export.pdb</code> outright. The file parses under two
-          independent parsers, so what that player objected to is something a parser tolerates
-          and it does not — and a drive an older deck opens makes that refusal stranger rather
-          than less real. <b>Try a stick on the hardware before the night</b>, on every deck you
-          have not seen it on.</td>
+          <th scope="row">Only current players have been seen to open a drive this writes</th>
+          <td>The two that do — a CDJ-3000X and a CDJ-1500X — are both AlphaTheta's current
+          generation. A CDJ-3000 on firmware 2.05 refused the legacy <code>export.pdb</code>
+          outright, and the file parses under two independent parsers, so what is wrong is
+          something a parser tolerates and a player does not. Everything a nexus deck reads is
+          written; whether it loads has not been shown. <b>Try a stick on the hardware before
+          the night.</b></td>
         </tr>
         <tr>
-          <th scope="row">Phrase data and the three-band waveform have not been seen on a
-          player</th>
-          <td>The colour waveform, beat grid and hot cues have. Those two sit in parts of the
-          analysis files nobody has reported on.</td>
+          <th scope="row">The three-band waveform has not been seen on a player</th>
+          <td>The colour waveform, beat grid, hot cues and the phrase strip have — the last
+          of those photographed on a CDJ-1500X, drawing the section names and boundaries this
+          program wrote. The three-band waveform sits in a part of the analysis files nobody
+          has reported on.</td>
         </tr>
         <tr>
           <th scope="row">The waveform colours are a judgement call</th>
@@ -225,9 +224,10 @@
   <span class="snum">04 — What is next</span>
   <h2>In rough order of how much it matters</h2>
   <ul class="plain">
-    <li><b>Why one CDJ-3000 refused a drive two other players open.</b> This is the one that
-    matters most and the one that needs hardware rather than code — and it got stranger rather
-    than simpler when a CDJ-1500X turned out to read one. A player, a stick, and a morning.</li>
+    <li><b>A drive a player outside the current generation will open.</b> Still the one that
+    matters most and the one that needs hardware rather than code: both confirmations so far are
+    current models, and the one older deck tried refused outright. A nexus-generation player, a
+    stick, and a morning.</li>
     <li><b>Correcting a bad reading by hand.</b> Landed for the words in 0.0.7; the phrase strip
     has been correctable since 0.03. What is left is the rest of the analysis.</li>
     <li><b>Archiving the drive copies.</b> The linked half of a copy cannot be zipped, but the

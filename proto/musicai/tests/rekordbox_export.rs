@@ -72,9 +72,9 @@ impl Fixture {
                 end_beat: 16,
                 bank: 0,
                 phrases: vec![
-                    Phrase { beat: 1, kind: 1 },
-                    Phrase { beat: 9, kind: 9 },
-                    Phrase { beat: 13, kind: 10 },
+                    Phrase { beat: 1, kind: 1, ..Phrase::default() },
+                    Phrase { beat: 9, kind: 9, ..Phrase::default() },
+                    Phrase { beat: 13, kind: 10, ..Phrase::default() },
                 ],
             },
         }

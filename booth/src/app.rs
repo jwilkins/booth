@@ -478,6 +478,8 @@ enum Pending {
     TakeFoundWords(u32, Box<booth_cli::tag::lyrics::Found>),
     /// Ask a lyrics server about a track, and do nothing else.
     LookUpWords(u32),
+    /// Find words for a track: a lyric file beside it, else the server.
+    FindWords(u32),
     /// Open a track's words for correcting by hand.
     EditWords(u32),
     /// Keep the words somebody typed.
@@ -2013,6 +2015,64 @@ impl App {
     /// none — which is worth having on its own, because a hit here is the
     /// minutes of a separation and a recogniser pass not spent.
     ///
+    /// Find words for one track: a lyric file beside it, else the server.
+    ///
+    /// The file first, and not only because it is free. A file somebody put
+    /// next to *this* file is their answer about this record; a server match
+    /// on name and length is an inference about it, however good. And a lyric
+    /// file works for the white labels and the dubplates, which is most of
+    /// what a database has never heard of.
+    ///
+    /// Returns whether the collection changed here and now.
+    fn find_words(&mut self, id: u32) -> bool {
+        let id = crate::library::family(id);
+        let Some(track) = self.library.get(id) else { return false };
+        let (path, duration_secs) = (track.path.clone(), track.duration_secs);
+
+        let Some(file) = booth_cli::tag::lyrics::beside(&path) else {
+            // Nothing beside it, so ask. `look_up_words` says its own piece
+            // when there is no name to ask under.
+            self.look_up_words(&[id]);
+            return false;
+        };
+        let found = match booth_cli::tag::lyrics::read_beside(&file, duration_secs) {
+            Ok(found) => found,
+            Err(e) => {
+                crate::warn!("#{id}: could not read {}: {e:#}", file.display());
+                self.note(format!("could not read {}", file.display()), theme::alert());
+                return false;
+            }
+        };
+        if found.is_empty() {
+            self.note(
+                format!(
+                    "{} has nothing in it",
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                theme::amber(),
+            );
+            return false;
+        }
+
+        let took = self.take_found_words(id, &found);
+        if took {
+            if let Some(track) = self.library.get_mut(id) {
+                // `take_found_words` marks them as a server's, which is right
+                // for everything that goes through it but this.
+                track.words_from = crate::library::WordsFrom::Beside;
+            }
+            self.note(
+                format!(
+                    "{} from {}",
+                    plural(found.plain.len(), "line"),
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                theme::go(),
+            );
+        }
+        took
+    }
+
     /// Which of these tracks a lyrics server can be asked about, and with
     /// what. Starts nothing, so a test can ask what a click would send.
     ///
@@ -5960,6 +6020,25 @@ impl App {
 
             ui.add_space(14.0);
             pane_label(ui, "What it keeps saying");
+            // Here rather than only on the strip under the waveform, because
+            // this is the panel the words are read in: somebody looking at
+            // "the words have not been read" should be able to do something
+            // about it without going looking for the button that does.
+            if ui
+                .button(match track.lyrics.is_empty() {
+                    true => "Find the words",
+                    false => "Find the words again",
+                })
+                .on_hover_text(
+                    "Look for a lyric file next to the track — an .lrc or a .txt of the \
+                     same name — and failing that ask a lyrics server. Neither needs a \
+                     stem or a recogniser.",
+                )
+                .clicked()
+            {
+                self.pending.push(Pending::FindWords(track.id));
+            }
+            ui.add_space(4.0);
             // The line the room sings is what a DJ recognises a record by
             // months later, long after the file name and the artwork have gone
             // out of their head. It is already measured — the cues are placed
@@ -6002,6 +6081,9 @@ impl App {
                     crate::library::WordsFrom::Server => {
                         "Looked up on a lyrics server under this track's artist and title, and \
                          placed against its stem."
+                    }
+                    crate::library::WordsFrom::Beside => {
+                        "Read out of a lyric file sitting next to the track."
                     }
                     crate::library::WordsFrom::ByHand => {
                         "Typed or corrected here, which nothing overwrites on its own."
@@ -6330,6 +6412,9 @@ impl App {
                 // The selection where there is one, the way every other row
                 // action behaves: a menu opened on one of six marked rows acts
                 // on the six.
+                Pending::FindWords(id) => {
+                    touched |= self.find_words(id);
+                }
                 Pending::LookUpWords(id) => {
                     let wanted = match self.marked.len() > 1 && self.marked.contains(&id) {
                         true => self.marked.iter().copied().collect(),
@@ -12376,6 +12461,93 @@ mod tests {
                             .iter()
                             .any(|want| matches!(want, Pending::LookUpWords(_))),
                         "the entry did not ask for a lookup"
+                    );
+                }
+
+                #[test]
+                fn a_lyric_file_beside_the_track_is_taken_over_asking_anybody() {
+                    // The point of looking on disk first: it needs no request,
+                    // and a file somebody filed next to this file is their
+                    // answer about this record rather than an inference about
+                    // it.
+                    let (mut app, id) = read_already("beside");
+                    let track = app.library.get(id).unwrap();
+                    let lyric = track.path.with_extension("lrc");
+                    std::fs::write(
+                        &lyric,
+                        "[00:40.00] hold me closer now\n[01:40.00] and then home\n",
+                    )
+                    .unwrap();
+
+                    assert!(app.find_words(id), "the file was not taken");
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(
+                        track.lyrics.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+                        ["hold me closer now", "and then home"]
+                    );
+                    assert_eq!(track.words_from, WordsFrom::Beside);
+                }
+
+                #[test]
+                fn a_lyric_file_is_still_placed_against_the_stem() {
+                    // An .lrc is synced against whatever pressing whoever made
+                    // it had. That it was filed next to this file says the
+                    // words are right, not that the times are.
+                    let (mut app, id) = read_already("beside-times");
+                    let lyric = app.library.get(id).unwrap().path.with_extension("lrc");
+                    std::fs::write(&lyric, "[00:40.00] hold me closer now\n").unwrap();
+
+                    assert!(app.find_words(id));
+                    assert!(
+                        !app.library.get(id).unwrap().lyrics_aligned,
+                        "another pressing's times were taken as this track's"
+                    );
+                }
+
+                #[test]
+                fn a_text_file_beside_the_track_is_words_without_times() {
+                    let (mut app, id) = read_already("beside-txt");
+                    let lyric = app.library.get(id).unwrap().path.with_extension("txt");
+                    std::fs::write(&lyric, "hold me closer now\nand then home\n").unwrap();
+
+                    assert!(app.find_words(id));
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(track.lyrics.len(), 2);
+                    // Nothing to place, so nothing is sent off to be placed.
+                    assert!(track.lyrics_aligned);
+                }
+
+                #[test]
+                fn an_empty_lyric_file_leaves_the_words_that_were_there() {
+                    let (mut app, id) = read_already("beside-empty");
+                    let before = app.library.get(id).unwrap().lyrics.clone();
+                    let lyric = app.library.get(id).unwrap().path.with_extension("lrc");
+                    std::fs::write(&lyric, "\n\n").unwrap();
+
+                    assert!(!app.find_words(id));
+                    assert_eq!(app.library.get(id).unwrap().lyrics, before);
+                }
+
+                #[test]
+                fn the_panel_offers_to_find_the_words() {
+                    let (mut app, id) = read_already("find-button");
+                    app.selected = Some(id);
+                    app.waveform = Some((id, vec![0; 300]));
+
+                    let mut harness = Harness::builder()
+                        .with_size(egui::vec2(360.0, 1600.0))
+                        .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+                    harness.run();
+                    harness.get_by_label_contains("Find the words").click();
+                    harness.run();
+
+                    assert!(
+                        harness
+                            .state()
+                            .pending
+                            .iter()
+                            .any(|want| matches!(want, Pending::FindWords(_))),
+                        "the button did not ask for anything"
                     );
                 }
 

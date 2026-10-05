@@ -297,7 +297,10 @@ fn song_structure(section: &[u8]) -> Option<SongStructure> {
         let (Some(beat), Some(kind)) = (be_u16(&body, at + 2), be_u16(&body, at + 4)) else {
             break;
         };
-        phrases.push(Phrase { beat, kind });
+        // The variant flags are read past rather than decoded: what this reader
+        // is for is a file this program wrote and a player has since edited,
+        // and nothing downstream of it asks which numbered chorus a phrase was.
+        phrases.push(Phrase { beat, kind, variant: 1 });
         at += entry_len;
     }
     Some(SongStructure { mood, end_beat, bank, phrases })
@@ -353,7 +356,10 @@ mod tests {
             mood: Mood::High,
             end_beat: 16,
             bank: 0,
-            phrases: vec![Phrase { beat: 1, kind: 1 }, Phrase { beat: 9, kind: 5 }],
+            phrases: vec![
+                Phrase { beat: 1, kind: 1, ..Phrase::default() },
+                Phrase { beat: 9, kind: 5, ..Phrase::default() },
+            ],
         }
     }
 

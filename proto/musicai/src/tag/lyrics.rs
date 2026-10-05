@@ -48,6 +48,7 @@
 //! is returned here is a transcript like any other, and why nothing in this
 //! file tries to be clever about time.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -104,6 +105,60 @@ impl Found {
     pub fn apart_from(&self, duration_secs: f64) -> f64 {
         (self.duration_secs - duration_secs).abs()
     }
+}
+
+/// What a lyric file beside the track may be called, in the order they are
+/// looked for.
+///
+/// `.lrc` first because it carries times and a `.txt` does not, so where both
+/// are there the one that can place a cue wins.
+const LYRIC_FILES: [&str; 2] = ["lrc", "txt"];
+
+/// A lyric file sitting beside a track, if there is one.
+///
+/// Same folder, same name, different extension — which is where every tool
+/// that writes one puts it, and how a DJ who has collected them has them
+/// filed. Worth looking before asking anybody: a file somebody put next to
+/// *this* file is better evidence than a name-and-length match against a
+/// database, it costs no request, and it works for the white labels no
+/// database has heard of.
+pub fn beside(track: &Path) -> Option<PathBuf> {
+    let folder = track.parent()?;
+    let stem = track.file_stem()?;
+    LYRIC_FILES.iter().find_map(|extension| {
+        let named = folder.join(stem).with_extension(extension);
+        // Read back from the directory rather than trusted as spelled, so a
+        // case-insensitive volume does not hand back a path that then fails to
+        // open on a case-sensitive one.
+        named.is_file().then_some(named)
+    })
+}
+
+/// Read a lyric file off disk.
+///
+/// An `.lrc` is parsed for its times; anything else is taken as one line per
+/// line, which is what a `.txt` is. The track's own length is reported as the
+/// found length, because a file somebody filed under this name *is* about this
+/// pressing — there is no other record it could be about — and saying
+/// otherwise would send it to be asked about for no reason.
+pub fn read_beside(file: &Path, duration_secs: f64) -> Result<Found> {
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let synced = parse_lrc(&text);
+    let plain: Vec<String> = match synced.lines.is_empty() {
+        true => {
+            text.lines().map(|line| line.trim().to_string()).filter(|l| !l.is_empty()).collect()
+        }
+        false => synced.lines.iter().map(|line| line.text.clone()).collect(),
+    };
+    Ok(Found {
+        synced,
+        plain,
+        instrumental: false,
+        artist: String::new(),
+        title: file.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        duration_secs,
+    })
 }
 
 /// A rate-limited LRCLIB client.
@@ -524,6 +579,69 @@ mod tests {
             duration_secs,
             ..Found::default()
         }
+    }
+
+    /// A scratch folder of this test's own, made fresh. The crate keeps no
+    /// temp-directory dependency and makes its own, as `discover` and
+    /// `audio::encode` do.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("musicai-lyrics-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_lyric_file_is_found_beside_the_track_by_name() {
+        let dir = scratch("beside");
+        let track = dir.join("Peverelist - Roll With The Punches.wav");
+        std::fs::write(&track, b"not really a wav").unwrap();
+        assert!(beside(&track).is_none(), "nothing is there yet");
+
+        let lyric = track.with_extension("lrc");
+        std::fs::write(&lyric, "[00:10.00] hold me closer now\n").unwrap();
+        assert_eq!(beside(&track), Some(lyric));
+    }
+
+    #[test]
+    fn an_lrc_beside_the_track_wins_over_a_txt() {
+        // Both filed, and only one of them can place a cue.
+        let dir = scratch("lrc-wins");
+        let track = dir.join("track.flac");
+        std::fs::write(&track, b"not really a flac").unwrap();
+        std::fs::write(track.with_extension("txt"), "hold me closer now\n").unwrap();
+        std::fs::write(track.with_extension("lrc"), "[00:10.00] hold me closer now\n").unwrap();
+
+        assert_eq!(beside(&track), Some(track.with_extension("lrc")));
+    }
+
+    #[test]
+    fn a_lyric_file_is_read_as_this_pressing_rather_than_another() {
+        // The length reported back is the track's own. A file somebody filed
+        // under this name is about this record and no other, so sending it off
+        // to be asked about would be asking a question already answered.
+        let dir = scratch("read-lrc");
+        let file = dir.join("track.lrc");
+        std::fs::write(&file, "[00:10.00] hold me closer now\n[00:20.00] and then home\n").unwrap();
+
+        let found = read_beside(&file, 372.0).unwrap();
+        assert_eq!(found.plain, ["hold me closer now", "and then home"]);
+        assert_eq!(found.synced.lines.len(), 2);
+        assert_eq!(found.synced.lines[0].start_ms, 10_000);
+        assert_eq!(found.duration_secs, 372.0);
+        assert_eq!(verdict(&found, &Transcript::default(), None, 372.0), Verdict::Keep);
+    }
+
+    #[test]
+    fn a_plain_text_lyric_has_its_lines_and_no_times() {
+        let dir = scratch("read-txt");
+        let file = dir.join("track.txt");
+        std::fs::write(&file, "hold me closer now\n\n   and then home  \n").unwrap();
+
+        let found = read_beside(&file, 240.0).unwrap();
+        assert_eq!(found.plain, ["hold me closer now", "and then home"]);
+        assert!(found.synced.lines.is_empty(), "a .txt has no times to find");
     }
 
     #[test]
