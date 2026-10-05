@@ -1402,21 +1402,20 @@ drive played only on older hardware has a history nothing here can see.
 
 ## What it does not do yet
 
-- **One player has read a drive this writes from its own slot: a CDJ-3000X on
-  firmware 1.40.** A CDJ-1500X has played from the same drive **over DJ-Link**,
-  with the 3000X hosting it, and the cues and the added data came through
-  intact. That is worth having — it says an older player is happy with what
-  this produces once something hands it over — but it is not the same claim:
-  over link the host reads the database and serves it, so nothing there tested
-  whether a 1500X can mount the stick itself.
-- **The one refusal on record is still unexplained.** A CDJ-3000 on firmware
-  2.05 rejected the legacy `export.pdb` outright. The file parses under two
-  independent parsers, so what that player objected to is something a parser
-  tolerates and it does not. Choosing an older target in Settings changes what
-  is *checked* and what the drive *carries*, which is real and useful, but it
-  cannot make a database a player refuses acceptable to it. **Try a stick on
-  the hardware before the night**, in the slot of every deck you have not seen
-  it in.
+- **Two players read a drive this writes from their own slots:** a CDJ-3000X
+  on firmware 1.40 and a CDJ-1500X on firmware 1.10. The 1500X also plays off
+  one over DJ-Link with the 3000X hosting it, cues and all, but it does not
+  need to — it mounts the stick itself.
+- **One player refused one, and that is now the puzzle.** A CDJ-3000 on
+  firmware 2.05 rejected the legacy `export.pdb` outright. It is not a
+  generation gap: a 1500X opens the same drive, so whatever that deck objected
+  to is specific to it or to its firmware rather than to old players reading
+  new files. The file parses under two independent parsers, so it is also
+  something a parser tolerates and that player does not. Choosing an older
+  target in Settings changes what is *checked* and what the drive *carries*,
+  which is real and useful, but it cannot make a database a player refuses
+  acceptable to it. **Try a stick on the hardware before the night**, in the
+  slot of every deck you have not seen it in.
 - Phrase data and the three-band waveform have not been seen on a player. The
   colour waveform, beat grid and hot cues have; those two sit in parts of the
   analysis files nobody has reported on yet.

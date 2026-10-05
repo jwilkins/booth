@@ -44,8 +44,8 @@ with a free key.
   work on; the checks use that generation's rules, and anything it cannot open — a FLAC on a
   nexus deck, a 96 kHz file on an NXS2 — is re-encoded to a 320 kbps MP3 on the way onto the
   stick. Your library keeps its lossless copy. (The files for older players are all written; a
-  CDJ-3000X has been seen to browse a drive from here and a CDJ-1500X to play off that drive
-  over DJ-Link, while one CDJ-3000 refused one — see
+  CDJ-3000X on firmware 1.40 and a CDJ-1500X on firmware 1.10 both browse a drive from here,
+  while one CDJ-3000 on firmware 2.05 refused one — see
   [what it does not do yet](booth/README.md#what-it-does-not-do-yet).)
 - **Keeps a copy of every drive.** Databases and analysis copied, audio hard-linked, so a backup
   of a 64 GB stick costs megabytes. What a player recorded having played comes back as playlists.
