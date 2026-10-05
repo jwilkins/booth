@@ -184,7 +184,12 @@ const TOGETHER_MS: u32 = 500;
 ///
 /// Returns a memory cue at the first downbeat — which is where a player parks
 /// when the track loads — followed by up to eight hot cues in time order.
-pub fn suggest(features: &Features, beat_times: &[u32], structure: &Structure) -> Vec<Cue> {
+pub fn suggest(
+    features: &Features,
+    beat_times: &[u32],
+    structure: &Structure,
+    bar_phase: usize,
+) -> Vec<Cue> {
     if beat_times.is_empty() {
         return Vec::new();
     }
@@ -195,9 +200,8 @@ pub fn suggest(features: &Features, beat_times: &[u32], structure: &Structure) -
     }
 
     // The memory cue is where the track begins as far as a player is
-    // concerned: the first downbeat, or the first beat if the grid has no bar
-    // lines yet.
-    let start = first_downbeat(beat_times, structure).unwrap_or(beat_times[0]);
+    // concerned, and a player counts in bars from it.
+    let start = first_downbeat(beat_times, bar_phase);
     // The last beat the grid names, which is the last bar a player will let you
     // park on rather than wherever the file happens to stop.
     let end = beat_times.last().copied();
@@ -494,13 +498,23 @@ fn fold(ranked: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
     kept
 }
 
-fn first_downbeat(beat_times: &[u32], structure: &Structure) -> Option<u32> {
-    structure
-        .sections
-        .first()
-        .and_then(|s| beat_times.get(s.start_beat as usize - 1))
-        .or_else(|| beat_times.first())
-        .copied()
+/// Where a player should park when the track loads: the first bar line.
+///
+/// A beat tracker starts wherever it first found a beat, which is as likely to
+/// be the second or fourth beat of a bar as the first. Parking there puts the
+/// track's own start a part-bar out of phase with everything that counts in
+/// fours — the bar numbers in the transport, a four-bar loop taken on the
+/// first press, the grid a second deck is being matched against — and the
+/// error is inaudible to look at and obvious to mix with.
+///
+/// So the cue skips forward to the first beat the grid calls a bar line:
+/// nothing, or one, two or three beats. Forward rather than back, because the
+/// beats before it are the part bar at the head of the track and there is no
+/// bar there to park at the start of.
+fn first_downbeat(beat_times: &[u32], bar_phase: usize) -> u32 {
+    // The first beat the grid calls a bar line, which is this many beats in.
+    // Never more than three: the fourth beat of any bar is followed by one.
+    beat_times.get(bar_phase % 4).copied().unwrap_or(beat_times[0])
 }
 
 /// Where a voice arrives, in milliseconds, snapped to the grid.
@@ -647,7 +661,7 @@ mod tests {
             ],
         };
         let audio = with_voice(4.0, 10.0, 10.0);
-        let cues = suggest(&features::extract(&audio), &beats(128), &structure);
+        let cues = suggest(&features::extract(&audio), &beats(128), &structure, 0);
 
         // The first section is the memory cue rather than a hot one: the
         // player already parks at the top of the record, so a hot cue there is
@@ -672,7 +686,7 @@ mod tests {
             ],
         };
         let cues =
-            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(128), &structure);
+            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(128), &structure, 0);
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
 
         // The intro is on the memory cue, where the player parks anyway.
@@ -688,7 +702,7 @@ mod tests {
     fn the_first_cue_a_player_parks_on_is_a_memory_cue() {
         let structure = Structure { sections: vec![section(0, 8, Kind::Intro, -20.0)] };
         let cues =
-            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(64), &structure);
+            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(64), &structure, 0);
         assert!(!cues[0].is_hot());
         assert_eq!(cues[0].time_ms, 0);
         assert_eq!(cues[0].kind, CueKind::Point);
@@ -700,7 +714,7 @@ mod tests {
         let audio = with_voice(20.0, 10.0, 20.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &beats(80), &structure);
+        let cues = suggest(&f, &beats(80), &structure, 0);
 
         let vocal = cues.iter().find(|c| c.comment.as_deref() == Some("vocal"));
         let vocal = vocal.unwrap_or_else(|| panic!("no vocal cue in {cues:?}"));
@@ -713,7 +727,7 @@ mod tests {
         let audio = with_voice(20.0, 100.0, 100.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &beats(80), &structure);
+        let cues = suggest(&f, &beats(80), &structure, 0);
         assert!(cues.iter().all(|c| c.comment.as_deref() != Some("vocal")), "{cues:?}");
     }
 
@@ -722,7 +736,7 @@ mod tests {
         let audio = with_voice(20.0, 10.3, 20.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &beats(80), &structure);
+        let cues = suggest(&f, &beats(80), &structure, 0);
         for cue in &cues {
             assert_eq!(cue.time_ms % BEAT_MS, 0, "a cue at {} ms is off the grid", cue.time_ms);
         }
@@ -749,7 +763,7 @@ mod tests {
             .collect();
         let structure = Structure { sections };
         let cues =
-            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(400), &structure);
+            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(400), &structure, 0);
 
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         assert_eq!(hot.len(), 8, "a player has eight hot cues");
@@ -769,6 +783,39 @@ mod tests {
             .filter(|cue| !cue.is_hot())
             .map(|cue| cue.comment.clone().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn the_track_start_lands_on_a_bar_line_rather_than_wherever_tracking_began() {
+        // A beat tracker starts at the first beat it heard, which is as likely
+        // to be the second or fourth of a bar as the first. Parking the start
+        // cue there puts the track a part-bar out of phase with everything
+        // that counts in fours — the bar numbers in the transport, a four-bar
+        // loop taken on the first press, a second deck being matched to it.
+        let times = beats(64);
+        let features = features::extract(&with_voice(4.0, 10.0, 10.0));
+
+        // Half-second beats, so skipping one beat is 500 ms.
+        for (phase, expected) in [(0usize, 0u32), (1, 500), (2, 1_000), (3, 1_500)] {
+            let cues = suggest(&features, &times, &Structure::default(), phase);
+            let start = cues.iter().find(|cue| !cue.is_hot()).expect("no memory cue at all");
+            assert_eq!(
+                start.time_ms, expected,
+                "a grid whose bar line is {phase} beats in parked at {}",
+                start.time_ms
+            );
+        }
+    }
+
+    #[test]
+    fn the_start_never_skips_a_whole_bar_looking_for_one() {
+        // Three beats is the most it can ever be: the fourth beat of a bar is
+        // followed by the first of the next.
+        let times = beats(64);
+        let features = features::extract(&with_voice(4.0, 10.0, 10.0));
+        let cues = suggest(&features, &times, &Structure::default(), 4);
+        let start = cues.iter().find(|cue| !cue.is_hot()).unwrap();
+        assert_eq!(start.time_ms, 0, "a phase of four is a phase of none");
     }
 
     #[test]
@@ -1160,7 +1207,7 @@ mod tests {
     #[test]
     fn a_track_with_no_beats_gets_no_cues() {
         let cues =
-            suggest(&features::extract(&with_voice(4.0, 1.0, 3.0)), &[], &Structure::default());
+            suggest(&features::extract(&with_voice(4.0, 1.0, 3.0)), &[], &Structure::default(), 0);
         assert!(cues.is_empty());
     }
 }
