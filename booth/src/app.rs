@@ -337,6 +337,12 @@ pub struct App {
     wondering: Vec<Wondering>,
     /// A track's words, open for correcting. See [`App::words_sheet`].
     editing_words: Option<EditingWords>,
+    /// Whether the grid controls are showing. See [`App::grid_tools`].
+    ///
+    /// Off until asked for: they are for the few records a tracker gets wrong,
+    /// and a row of buttons under every waveform would be eight controls in
+    /// the way of the ninety per cent of tracks that need none of them.
+    editing_grid: bool,
     /// Tracks changed here and on the drive since the two last agreed, worked
     /// out when the sync sheet opens rather than every frame: it reads the
     /// stick.
@@ -427,6 +433,34 @@ struct EditingWords {
     text: String,
 }
 
+/// One correction to a beat grid, as a button asked for it.
+///
+/// Named rather than applied on the spot because the panel that draws the
+/// buttons is reading the track it would change — the same reason every
+/// other action here is a [`Pending`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum GridFix {
+    Halve,
+    Double,
+    /// Slide the whole grid by this many milliseconds.
+    Nudge(i32),
+    /// Slide the grid so a beat lands on the playhead.
+    MoveTo,
+    /// Call the beat nearest the playhead a downbeat.
+    Downbeat,
+}
+
+impl GridFix {
+    /// Whether it means nothing without somewhere to act.
+    ///
+    /// Halving a tempo is true of the whole track; putting a beat somewhere is
+    /// a question about one place in it, and the window's only answer to
+    /// "where" is the playhead.
+    fn needs_playhead(self) -> bool {
+        matches!(self, GridFix::MoveTo | GridFix::Downbeat)
+    }
+}
+
 /// Something a click asked for, to be done once the panel that drew it has
 /// finished.
 ///
@@ -480,6 +514,14 @@ enum Pending {
     LookUpWords(u32),
     /// Find words for a track: a lyric file beside it, else the server.
     FindWords(u32),
+    /// Correct a track's beat grid by hand.
+    FixGrid {
+        id: u32,
+        what: GridFix,
+        /// Where the playhead was when the button was pressed, which is what
+        /// the two positional fixes act on.
+        at: Option<u32>,
+    },
     /// Open a track's words for correcting by hand.
     EditWords(u32),
     /// Keep the words somebody typed.
@@ -765,6 +807,7 @@ impl App {
             stems_ahead: None,
             wondering: Vec::new(),
             editing_words: None,
+            editing_grid: false,
             clashes: Vec::new(),
             settled: std::collections::HashMap::new(),
             drive_now: std::collections::HashMap::new(),
@@ -864,6 +907,10 @@ impl App {
                     app.log.set_level(crate::log::Level::Debug);
                 }
                 "adopt" => app.asking = app.library.tracks.iter().map(|t| t.id).take(3).collect(),
+                "grid" => {
+                    app.editing_grid = true;
+                    app.playhead_ms = Some(40_000);
+                }
                 "stems" => {
                     let tracks: Vec<u32> =
                         app.library.tracks.iter().map(|t| t.id).take(6).collect();
@@ -4845,6 +4892,35 @@ impl App {
             {
                 self.auto_cue_showing(again);
             }
+            // The cheap half of the button before it, over a whole crate. A
+            // lookup is seconds and one request where reading the words is a
+            // separation and a recogniser pass each, so a box that has never
+            // been prepared is worth asking about before any of those minutes
+            // are spent — and what it finds is better than what a
+            // recogniser would have guessed at the same vocal.
+            //
+            // No "again": a lookup is cheap enough that asking twice costs a
+            // request, and there is nothing it would skip.
+            let named = |track: &Track| {
+                !track.artist.trim().is_empty() && !track.title.trim().is_empty()
+            };
+            let askable = self.acting_on(named).len();
+            if ui
+                .add_enabled(idle && askable > 0, egui::Button::new(format!("Lyrics {askable}")))
+                .on_hover_text(
+                    "Ask a lyrics server for the words of these, under their artist and \
+                     title. No stems and no recogniser — what comes back is taken where \
+                     it is certain and put to you where it is not.",
+                )
+                .on_disabled_hover_text(
+                    "A lyrics server is asked by artist and title, and nothing showing has \
+                     both",
+                )
+                .clicked()
+            {
+                let wanted = self.acting_on(named);
+                self.look_up_words(&wanted);
+            }
             // Reads rather than changes anything, so it sits at the end of the
             // strip after the four that do. Shift means the thorough version
             // here rather than "again", because a check is a read: it is
@@ -5263,12 +5339,38 @@ impl App {
         self.zoom = zoom;
 
         self.cue_strip(ui, &track);
+        self.grid_tools(ui, &track);
 
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
 
             measurement(ui, "grid", &grid_text(&track, self.config.length), track.has_grid);
+            // Beside the reading it corrects. Off by default: these are for
+            // the few records a tracker gets wrong, and a row of buttons under
+            // every waveform is eight controls in the way of the nine tracks
+            // in ten that need none of them.
+            if ui
+                .add_enabled(
+                    track.has_grid,
+                    egui::Button::new(match self.editing_grid {
+                        true => "done",
+                        false => "fix",
+                    })
+                    .small(),
+                )
+                .on_hover_text(match self.editing_grid {
+                    true => "Put the grid controls away",
+                    false => {
+                        "Correct this grid by hand — halve or double the tempo, slide \
+                              it onto the kicks, or say where the one is"
+                    }
+                })
+                .on_disabled_hover_text("Nothing has measured a grid on this track yet")
+                .clicked()
+            {
+                self.editing_grid = !self.editing_grid;
+            }
             measurement(
                 ui,
                 "key",
@@ -6414,6 +6516,9 @@ impl App {
                 // on the six.
                 Pending::FindWords(id) => {
                     touched |= self.find_words(id);
+                }
+                Pending::FixGrid { id, what, at } => {
+                    touched |= self.fix_grid(id, what, at);
                 }
                 Pending::LookUpWords(id) => {
                     let wanted = match self.marked.len() > 1 && self.marked.contains(&id) {
@@ -10260,6 +10365,140 @@ impl App {
         true
     }
 
+    /// Carry out one correction to a track's grid.
+    ///
+    /// Everything downstream of the grid is re-derived rather than left to
+    /// drift: the picture is drawn from the beats, the phrase strip is placed
+    /// against them and the cues were put on them, so a grid that moves and a
+    /// waveform that does not is a window telling two stories about one track.
+    ///
+    /// The cues are **not** re-placed. They are where somebody put them, and a
+    /// grid correction is a statement about the bar lines rather than about
+    /// the moments — moving them would mean a fix for a tempo quietly
+    /// throwing away the set.
+    ///
+    /// Returns whether anything changed.
+    fn fix_grid(&mut self, id: u32, what: GridFix, at: Option<u32>) -> bool {
+        let Some(track) = self.library.get_mut(id) else { return false };
+        let changed = match what {
+            GridFix::Halve => crate::grid::halve(track),
+            GridFix::Double => crate::grid::double(track),
+            GridFix::Nudge(by) => crate::grid::nudge(track, by),
+            GridFix::MoveTo => match at {
+                Some(at) => crate::grid::move_to(track, at),
+                None => false,
+            },
+            GridFix::Downbeat => match at {
+                Some(at) => crate::grid::set_downbeat(track, at),
+                None => false,
+            },
+        };
+        if !changed {
+            return false;
+        }
+        let said = match what {
+            GridFix::Halve | GridFix::Double => {
+                format!("#{id} is now {:.2} BPM", self.library.get(id).map_or(0.0, |t| t.bpm))
+            }
+            GridFix::Nudge(by) => format!("#{id} grid moved {by} ms"),
+            GridFix::MoveTo => format!("#{id} grid moved to the playhead"),
+            GridFix::Downbeat => format!("#{id} downbeat set at the playhead"),
+        };
+        crate::info!("{said}");
+        self.note(said, theme::text());
+        // The picture is drawn from the grid, so it is no longer a picture of
+        // this track.
+        self.waveform = None;
+        self.prep_changed(id);
+        true
+    }
+
+    /// The controls for correcting a beat grid by hand.
+    ///
+    /// A tracker is right about most records and wrong about a few, and the
+    /// few are not random: half-time read at double, drum and bass read at
+    /// half, and the one on the snare of anything with a backbeat. None of
+    /// that is fixed by analysing again — the same audio gives the same
+    /// answer — and all of it is a press or two for somebody looking at the
+    /// waveform. A player has had these for twenty years, and a DJ who has
+    /// used them there knows what they do here.
+    ///
+    /// They act at the playhead, because that is the only place the window
+    /// knows you are pointing at. Without one, the two that need a position
+    /// say so rather than guessing at the middle of the track.
+    fn grid_tools(&mut self, ui: &mut Ui, track: &Track) {
+        if !self.editing_grid {
+            return;
+        }
+        let at = self.playhead_ms;
+        let id = track.id;
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            pane_label(ui, "Grid");
+
+            let mut fix = |ui: &mut Ui, label: &str, hint: &str, what: GridFix| {
+                let needs_playhead = what.needs_playhead() && at.is_none();
+                let button = ui.add_enabled(!needs_playhead, egui::Button::new(label).small());
+                let clicked = match needs_playhead {
+                    true => button
+                        .on_disabled_hover_text(
+                            "Click the waveform first — this one acts where the playhead is",
+                        )
+                        .clicked(),
+                    false => button.on_hover_text(hint).clicked(),
+                };
+                if clicked {
+                    self.pending.push(Pending::FixGrid { id, what, at });
+                }
+            };
+
+            fix(
+                ui,
+                "÷2",
+                "Halve the tempo. For a record counted on its hi-hats — 174 read as 348.",
+                GridFix::Halve,
+            );
+            fix(
+                ui,
+                "×2",
+                "Double the tempo. For a half-time record — 140 read as 70, with every bar \
+                 line two beats out.",
+                GridFix::Double,
+            );
+            ui.separator();
+            fix(
+                ui,
+                "«",
+                "Shove the whole grid earlier, ten nudges at a time.",
+                GridFix::Nudge(-crate::grid::SHOVE_MS),
+            );
+            fix(ui, "‹", "Nudge the whole grid earlier.", GridFix::Nudge(-crate::grid::NUDGE_MS));
+            fix(ui, "›", "Nudge the whole grid later.", GridFix::Nudge(crate::grid::NUDGE_MS));
+            fix(
+                ui,
+                "»",
+                "Shove the whole grid later, ten nudges at a time.",
+                GridFix::Nudge(crate::grid::SHOVE_MS),
+            );
+            ui.separator();
+            fix(
+                ui,
+                "Beat here",
+                "Slide the grid until a beat lands on the playhead, keeping the tempo and \
+                 which beat of the bar it is.",
+                GridFix::MoveTo,
+            );
+            fix(
+                ui,
+                "One here",
+                "Call the beat nearest the playhead a downbeat. Moves no beat — for a grid \
+                 whose lines are right and whose bars start on the two.",
+                GridFix::Downbeat,
+            );
+        });
+    }
+
     fn adopt_sheet(&mut self, ctx: &egui::Context) {
         let waiting: Vec<(u32, String, PathBuf)> = self
             .asking
@@ -12551,6 +12790,97 @@ mod tests {
                     );
                 }
 
+                /// A gridded track showing in the panel, with a picture in
+                /// hand so the panel does not start a job on its first frame.
+                fn on_the_grid(name: &str) -> (App, u32) {
+                    let (mut app, id) = read_already(name);
+                    let track = app.library.get_mut(id).unwrap();
+                    track.bpm = 128.0;
+                    track.has_grid = true;
+                    track.downbeat_ms = Some(0);
+                    app.rebuild();
+                    app.selected = Some(id);
+                    app.waveform = Some((id, vec![0; 300]));
+                    (app, id)
+                }
+
+                fn panel(app: App) -> Harness<'static, App> {
+                    Harness::builder()
+                        .with_size(egui::vec2(900.0, 1600.0))
+                        .build_ui_state(|ui, app: &mut App| app.prep(ui), app)
+                }
+
+                #[test]
+                fn the_grid_controls_stay_out_of_the_way_until_they_are_asked_for() {
+                    // Nine tracks in ten need none of them, and a row of eight
+                    // buttons under every waveform is eight controls in the
+                    // way of the picture.
+                    let (app, _) = on_the_grid("grid-hidden");
+                    let mut harness = panel(app);
+                    harness.run();
+
+                    assert!(harness.query_by_label("×2").is_none(), "they were showing");
+                    harness.get_by_label("fix").click();
+                    harness.run();
+                    harness.get_by_label("×2");
+                }
+
+                #[test]
+                fn doubling_a_half_time_record_from_the_panel() {
+                    let (mut app, id) = on_the_grid("grid-double");
+                    app.library.get_mut(id).unwrap().bpm = 70.0;
+                    app.editing_grid = true;
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    harness.get_by_label("×2").click();
+                    harness.run();
+                    // The click records what it wants; the pass that applies
+                    // it runs on the next frame, the way every action here
+                    // does.
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+
+                    assert_eq!(harness.state().library.get(id).unwrap().bpm, 140.0);
+                }
+
+                #[test]
+                fn the_two_fixes_that_need_a_place_say_so_when_there_is_none() {
+                    // Halving a tempo is true of the whole track; putting a
+                    // beat somewhere is a question about one place in it, and
+                    // the window's only answer to "where" is the playhead.
+                    let (mut app, _) = on_the_grid("grid-no-playhead");
+                    app.editing_grid = true;
+                    app.playhead_ms = None;
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    let placed = harness.get_by_label("One here");
+                    assert!(format!("{placed:?}").contains("disabled: true"), "{placed:?}");
+                    let tempo = harness.get_by_label("×2");
+                    assert!(format!("{tempo:?}").contains("disabled: false"), "{tempo:?}");
+                }
+
+                #[test]
+                fn setting_the_one_from_the_panel_moves_the_phase_and_not_the_tempo() {
+                    let (mut app, id) = on_the_grid("grid-downbeat");
+                    app.editing_grid = true;
+                    // A beat every 468.75 ms; park on the second one.
+                    app.playhead_ms = Some(469);
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    harness.get_by_label("One here").click();
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+
+                    let track = harness.state().library.get(id).unwrap();
+                    assert_eq!(track.downbeat_ms, Some(469));
+                    assert_eq!(track.bpm, 128.0, "a phase change is not a tempo change");
+                }
+
                 #[test]
                 fn the_panel_says_where_a_track_got_its_words() {
                     // The case it is for: a cue that reads oddly. A
@@ -13515,6 +13845,46 @@ mod tests {
             // And on to a different track, where it means nothing.
             app.select(ids[1]);
             assert_eq!(app.playhead_ms, None, "a different record kept the old playhead");
+        }
+
+        #[test]
+        fn the_strip_offers_a_lyrics_lookup_over_everything_showing() {
+            // The cheap half of "Words" on a whole crate: seconds and one
+            // request a track, against a separation and a recogniser pass
+            // each. A box that has never been prepared is worth asking about
+            // before any of those minutes are spent.
+            let mut app = listing("lyrics-batch", 3);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                let track = app.library.get_mut(id).unwrap();
+                track.artist = "Falco".into();
+                track.title = "Der Kommissar".into();
+            }
+            app.rebuild();
+
+            // Wide, because the strip is the fifth button along and a
+            // default-sized harness wraps it off the end.
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(1400.0, 200.0))
+                .build_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+            harness.get_by_label("Lyrics 3");
+        }
+
+        #[test]
+        fn a_crate_with_no_names_is_not_offered_a_lookup() {
+            // Most of a box of white labels. A lyrics database is asked by
+            // artist and title, so a button that offered to ask about tracks
+            // with neither would be a button that cannot work.
+            let mut app = listing("lyrics-nameless", 3);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                app.library.get_mut(id).unwrap().artist.clear();
+            }
+            app.rebuild();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(1400.0, 200.0))
+                .build_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+            harness.get_by_label("Lyrics 0");
         }
 
         #[test]
