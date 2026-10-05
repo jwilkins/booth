@@ -654,6 +654,16 @@ pub struct Track {
     /// [`Track::beat_ms`] has the beats, since then there is nothing to phase.
     #[serde(default)]
     pub downbeat_ms: Option<u32>,
+    /// Places in the track somebody has said a beat falls, for a grid to be
+    /// fitted to.
+    ///
+    /// Guidance rather than a grid: these are what a DJ pointed at, and the
+    /// grid is what is worked out from them. They are kept so that a fit can
+    /// be argued with — one more mark and another go — rather than being a
+    /// gesture whose only trace is the answer it produced. Nothing reads them
+    /// but the fitting; none of them reaches a drive.
+    #[serde(default)]
+    pub beat_marks: Vec<u32>,
     pub phrases: Vec<Phrase>,
     pub cues: Vec<CueMark>,
     /// What is sung, and when, once the vocal stem has been through a speech
@@ -823,6 +833,7 @@ impl Track {
             beats: 0,
             beat_ms: Vec::new(),
             downbeat_ms: None,
+            beat_marks: Vec::new(),
             phrases: Vec::new(),
             cues: Vec::new(),
             lyrics: Vec::new(),

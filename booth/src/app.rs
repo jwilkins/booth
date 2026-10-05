@@ -78,6 +78,13 @@ const ORPHANS_SHOWN: usize = 40;
 /// the deleting is never scrolled away from.
 const FOOTER_HEIGHT: f32 = 46.0;
 
+/// How close a new beat mark has to be to one already placed to be taken as a
+/// correction of it rather than another beat, in milliseconds.
+///
+/// Sixty. Two beats that close would be a record at a thousand BPM, so nobody
+/// means them as a pair; what they mean is that the first one landed badly.
+const MARKS_APART_MS: u32 = 60;
+
 /// How much room to keep under the list for the prep editor, before it has
 /// ever been drawn.
 ///
@@ -558,6 +565,17 @@ enum Pending {
     },
     /// Measure this track's tempo and beats again, and change nothing else.
     Regrid(u32),
+    /// Say that a beat falls here, for a grid to be fitted through.
+    MarkBeat {
+        id: u32,
+        at_ms: u32,
+    },
+    /// Take the marks back off a track.
+    ClearMarks(u32),
+    /// Fit a grid through the marks.
+    FitGrid(u32),
+    /// Turn a grid kept beat by beat into a tempo and a downbeat.
+    Flatten(u32),
     /// Open a track's words for correcting by hand.
     EditWords(u32),
     /// Keep the words somebody typed.
@@ -953,6 +971,26 @@ impl App {
                     // them at full-track zoom shows the row of buttons and
                     // none of what pressing one is for.
                     app.zoom = wave::Zoom { start: 0.2, span: 0.06 };
+                    // A few beats marked, so the shot shows what a fit is
+                    // worked out from rather than an empty row of buttons.
+                    if let Some(id) = app.selected {
+                        if let Some(track) = app.library.get_mut(id) {
+                            // As a fraction of the track, so they land inside
+                            // the view above whatever this record's length is
+                            // — placed at a time in seconds they fell outside
+                            // it, twice, and a mark nobody can see is a shot
+                            // of the feature not working.
+                            let period = 60_000.0 / track.bpm.max(1.0);
+                            let from = track.duration_secs * 1000.0 * 0.21;
+                            track.beat_marks = (0..3)
+                                .map(|n| (from + n as f64 * period * 4.0).round() as u32)
+                                .collect();
+                        }
+                        // The panel draws from its own copy of the track, so
+                        // changing the collection without this shows a row
+                        // that has not heard about it.
+                        app.rebuild();
+                    }
                 }
                 "stems" => {
                     let tracks: Vec<u32> =
@@ -5378,6 +5416,12 @@ impl App {
             paint,
             stems: envelopes,
             zoom: self.zoom,
+            // Only while the grid is being corrected. They are scaffolding for
+            // a fit, not a thing to look at the rest of the time.
+            marks: match self.editing_grid {
+                true => &track.beat_marks,
+                false => &[],
+            },
             aligning: self.editing_grid,
         };
         // Drawn before anything below touches the collection: `waveform`
@@ -5404,6 +5448,9 @@ impl App {
             }
             Some(wave::Touched::Moved { at, time_ms }) => {
                 self.pending.push(Pending::MoveCue { id: track.id, at, time_ms })
+            }
+            Some(wave::Touched::Marked(ms)) => {
+                self.pending.push(Pending::MarkBeat { id: track.id, at_ms: ms })
             }
             None => {}
         }
@@ -6602,6 +6649,10 @@ impl App {
                     touched |= self.fix_grid(id, what, at);
                 }
                 Pending::Regrid(id) => self.regrid(id),
+                Pending::MarkBeat { id, at_ms } => touched |= self.mark_beat(id, at_ms),
+                Pending::ClearMarks(id) => touched |= self.clear_marks(id),
+                Pending::FitGrid(id) => touched |= self.fit_grid(id),
+                Pending::Flatten(id) => touched |= self.flatten_grid(id),
                 Pending::LookUpWords(id) => {
                     let wanted = match self.marked.len() > 1 && self.marked.contains(&id) {
                         true => self.marked.iter().copied().collect(),
@@ -10507,6 +10558,77 @@ impl App {
         true
     }
 
+    /// Say that a beat falls at this moment.
+    ///
+    /// Snapped to nothing: the whole point of a mark is that it disagrees with
+    /// the grid, so snapping it to the grid would be snapping it to the thing
+    /// it is there to correct. A mark close enough to one already placed
+    /// replaces it rather than making a pair, because two marks a few
+    /// milliseconds apart are a slip of the hand and would be read as a
+    /// 20,000 BPM record.
+    fn mark_beat(&mut self, id: u32, at_ms: u32) -> bool {
+        let Some(track) = self.library.get_mut(id) else { return false };
+        match track.beat_marks.iter().position(|mark| mark.abs_diff(at_ms) <= MARKS_APART_MS) {
+            Some(at) => track.beat_marks[at] = at_ms,
+            None => track.beat_marks.push(at_ms),
+        }
+        track.beat_marks.sort_unstable();
+        let count = track.beat_marks.len();
+        self.note(format!("#{id} has {}", plural(count, "beat mark")), theme::text());
+        self.prep_changed(id);
+        true
+    }
+
+    fn clear_marks(&mut self, id: u32) -> bool {
+        let Some(track) = self.library.get_mut(id) else { return false };
+        if track.beat_marks.is_empty() {
+            return false;
+        }
+        track.beat_marks.clear();
+        self.note(format!("#{id} beat marks cleared"), theme::text());
+        self.prep_changed(id);
+        true
+    }
+
+    /// Fit a grid through the marks.
+    fn fit_grid(&mut self, id: u32) -> bool {
+        let Some(track) = self.library.get_mut(id) else { return false };
+        let marks = track.beat_marks.clone();
+        if !crate::grid::fit(track, &marks) {
+            self.note("those marks do not make a grid", theme::amber());
+            return false;
+        }
+        let said = match self.library.get(id) {
+            Some(track) => format!(
+                "#{id} fitted to {:.2} BPM, {}",
+                track.bpm,
+                match crate::grid::is_dynamic(track) {
+                    true => "bending",
+                    false => "steady",
+                }
+            ),
+            None => format!("#{id} fitted"),
+        };
+        crate::info!("{said}");
+        self.note(said, theme::text());
+        self.prep_changed(id);
+        true
+    }
+
+    /// Turn a grid kept beat by beat into a tempo and a downbeat.
+    fn flatten_grid(&mut self, id: u32) -> bool {
+        let Some(track) = self.library.get_mut(id) else { return false };
+        if !crate::grid::flatten(track) {
+            self.note("that grid is already a tempo and a downbeat", theme::dim());
+            return false;
+        }
+        let said = format!("#{id} is now steady at {:.2} BPM", track.bpm);
+        crate::info!("{said}");
+        self.note(said, theme::text());
+        self.prep_changed(id);
+        true
+    }
+
     /// Measure one track's tempo and beats again, and change nothing else.
     ///
     /// Not [`App::analyze_tracks`], which is the right call for "listen to
@@ -10680,6 +10802,53 @@ impl App {
                  whose lines are right and whose bars start on the two.",
                 GridFix::Downbeat,
             );
+
+            ui.separator();
+
+            // Fitting a grid through marked beats. The marks go on with
+            // alt-click on the waveform, which is said here because a modifier
+            // nobody is told about is a feature nobody has.
+            let marks = track.beat_marks.len();
+            let fit = ui
+                .add_enabled(marks > 0, egui::Button::new(format!("fit {marks}")).small())
+                .on_hover_text(
+                    "Alt-click the waveform where beats fall, then fit a grid through them. \
+                     A plain tempo and downbeat where one explains the marks, and a grid \
+                     that bends only where none does.",
+                )
+                .on_disabled_hover_text(
+                    "Alt-click the waveform where a beat falls, and this fits a grid \
+                     through what you mark",
+                );
+            if fit.clicked() {
+                self.pending.push(Pending::FitGrid(id));
+            }
+            if ui
+                .add_enabled(marks > 0, egui::Button::new("clear").small())
+                .on_hover_text("Take the beat marks off again. The grid stays as it is.")
+                .on_disabled_hover_text("Nothing is marked")
+                .clicked()
+            {
+                self.pending.push(Pending::ClearMarks(id));
+            }
+
+            // Converting a grid that is kept beat by beat into one a tempo can
+            // say. Only offered on a track that has one, because on every
+            // other track the button would be a no-op with a confident name.
+            if ui
+                .add_enabled(
+                    crate::grid::is_dynamic(track),
+                    egui::Button::new("make steady").small(),
+                )
+                .on_hover_text(
+                    "Replace the beat-by-beat grid with the one tempo that best fits it. \
+                     For beats that were tracked untidily rather than a record that moves.",
+                )
+                .on_disabled_hover_text("This grid is already a tempo and a downbeat")
+                .clicked()
+            {
+                self.pending.push(Pending::Flatten(id));
+            }
 
             // The way out, in the row it closes. There is one in the
             // measurements line below as well, which is the one that opens
@@ -13329,6 +13498,128 @@ mod tests {
                     assert_eq!(track.cues.len(), was.cues.len(), "the cues were touched");
                     assert_eq!(track.phrases, was.phrases, "the phrases were touched");
                     assert_eq!(track.key, was.key, "the key was touched");
+                }
+
+                #[test]
+                fn a_grid_is_fitted_through_the_beats_somebody_marked() {
+                    // The case: a tracker roughly right and a DJ who can see
+                    // where the kicks actually are. Marks go on, a grid comes
+                    // out, and it is a plain one because a plain one explains
+                    // them.
+                    let (mut app, id) = on_the_grid("grid-fit");
+                    app.editing_grid = true;
+                    {
+                        let track = app.library.get_mut(id).unwrap();
+                        track.bpm = 126.0;
+                        // Eight beats of a 124 BPM record, from half a second in.
+                        let period = 60_000.0 / 124.0;
+                        track.beat_marks =
+                            (0..8).map(|n| (500.0 + n as f64 * period).round() as u32).collect();
+                    }
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    harness.get_by_label("fit 8").click();
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+
+                    let track = harness.state().library.get(id).unwrap();
+                    assert!((track.bpm - 124.0).abs() < 0.5, "fitted {:.2}", track.bpm);
+                    assert_eq!(track.downbeat_ms, Some(500));
+                    assert!(!crate::grid::is_dynamic(track), "it kept beats a tempo could say");
+                }
+
+                #[test]
+                fn the_button_counts_the_marks_and_goes_quiet_without_any() {
+                    // So that "fit" never looks like something to press on a
+                    // track nobody has marked, and so the count is the
+                    // feedback that an alt-click landed.
+                    let (mut app, id) = on_the_grid("grid-fit-count");
+                    app.editing_grid = true;
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    let none = harness.get_by_label("fit 0");
+                    assert!(format!("{none:?}").contains("disabled: true"), "{none:?}");
+
+                    harness.state_mut().library.get_mut(id).unwrap().beat_marks =
+                        vec![1_000, 2_000];
+                    harness.state_mut().rebuild();
+                    harness.run();
+                    let two = harness.get_by_label("fit 2");
+                    assert!(format!("{two:?}").contains("disabled: false"), "{two:?}");
+                }
+
+                #[test]
+                fn a_grid_kept_beat_by_beat_can_be_made_steady_from_the_panel() {
+                    let (mut app, id) = on_the_grid("grid-flatten");
+                    app.editing_grid = true;
+                    {
+                        let track = app.library.get_mut(id).unwrap();
+                        track.beat_ms =
+                            (0..64).map(|n| (n as f64 * 500.0).round() as u32).collect();
+                        track.bpm = 119.0;
+                    }
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    harness.get_by_label("make steady").click();
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+
+                    let track = harness.state().library.get(id).unwrap();
+                    assert!(!crate::grid::is_dynamic(track));
+                    assert_eq!(track.bpm, 120.0, "500 ms a beat is 120 BPM");
+                }
+
+                #[test]
+                fn making_a_steady_grid_steady_is_offered_as_nothing_to_do() {
+                    // Rather than a button with a confident name that does
+                    // nothing when pressed.
+                    let (mut app, _) = on_the_grid("grid-already-steady");
+                    app.editing_grid = true;
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    let button = harness.get_by_label("make steady");
+                    assert!(format!("{button:?}").contains("disabled: true"), "{button:?}");
+                }
+
+                #[test]
+                fn a_second_mark_on_top_of_the_first_corrects_it_rather_than_pairing_with_it() {
+                    // Two marks a few milliseconds apart are a slip of the
+                    // hand, and read as beats they would be a 20,000 BPM
+                    // record.
+                    let (mut app, id) = on_the_grid("grid-mark-slip");
+                    assert!(app.mark_beat(id, 10_000));
+                    assert!(app.mark_beat(id, 10_020));
+                    assert_eq!(app.library.get(id).unwrap().beat_marks, vec![10_020]);
+
+                    assert!(app.mark_beat(id, 12_000));
+                    assert_eq!(app.library.get(id).unwrap().beat_marks, vec![10_020, 12_000]);
+                }
+
+                #[test]
+                fn the_marks_are_only_drawn_while_the_grid_is_being_corrected() {
+                    // They are scaffolding for a fit, not a thing to look at
+                    // the rest of the time.
+                    let (mut app, id) = on_the_grid("grid-marks-hidden");
+                    app.library.get_mut(id).unwrap().beat_marks = vec![1_000, 2_000];
+                    app.editing_grid = false;
+                    app.rebuild();
+                    let mut harness = panel(app);
+                    harness.run();
+                    assert!(harness.query_by_label("clear").is_none(), "they were on show");
+
+                    harness.state_mut().editing_grid = true;
+                    harness.run();
+                    harness.get_by_label("clear");
                 }
 
                 #[test]
