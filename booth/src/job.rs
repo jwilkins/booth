@@ -195,6 +195,16 @@ pub struct Askable {
     /// What has already been heard off the stem, which may be nothing. A
     /// remix keeps the hook, so even a few lines are evidence.
     pub heard: Vec<crate::library::Lyric>,
+    /// The vocal stem to hand the recogniser if the server does not settle it.
+    ///
+    /// Carried here rather than looked up when the answer arrives, because it
+    /// is the difference between the two ways a lookup is asked for and the
+    /// window cannot tell them apart afterwards: a lookup inside the pass that
+    /// cues from the words is standing in for a recogniser pass and owes one
+    /// where it fails, and a lookup somebody asked for on its own owes
+    /// nothing. `None` either way for a track with no stem yet — the
+    /// separation already queued carries that one.
+    pub then_read: Option<PathBuf>,
 }
 
 /// Words already read, to be put back where the singing is.
@@ -306,6 +316,8 @@ pub enum Update {
         id: u32,
         found: Box<booth_cli::tag::lyrics::Found>,
         verdict: booth_cli::tag::lyrics::Verdict,
+        /// Handed back as it was given: see [`Askable::then_read`].
+        then_read: Option<PathBuf>,
     },
     /// A vocal stem has been through the recogniser. Empty lines are a real
     /// answer: it means nothing was sung, or nothing could be made out.
@@ -1445,6 +1457,23 @@ impl Reporter for Batch<'_> {
     }
 }
 
+/// The engine's stem settings as the window asks for them.
+///
+/// Overwrites what is already there, which is what a window asking for this
+/// means. The engine refuses by default and tells a command-line caller to
+/// pass `--force`, which is right for a script that might be about to spend an
+/// afternoon re-making files somebody wanted kept — but here the button says
+/// "Render stems again", and the track it is pressed on is one the window has
+/// already decided needs them. Refusing at that point is a button that does
+/// nothing and an error naming a flag there is nowhere to pass.
+fn stems_args(backend: Backend, quality: booth_cli::cli::StemQuality) -> StemsArgs {
+    let mut args = StemsArgs::defaults();
+    args.backend = backend;
+    args.quality = quality;
+    args.force = true;
+    args
+}
+
 fn separate(
     tracks: &[(u32, PathBuf)],
     stems_in: &crate::config::StemsLocation,
@@ -1452,9 +1481,7 @@ fn separate(
     quality: booth_cli::cli::StemQuality,
     reporter: &Channel,
 ) -> anyhow::Result<()> {
-    let mut args = StemsArgs::defaults();
-    args.backend = backend;
-    args.quality = quality;
+    let mut args = stems_args(backend, quality);
     crate::info!(
         "separating with {} shifts={}, writing {}{}",
         args.model(),
@@ -1559,11 +1586,12 @@ fn look_up_words(tracks: &[Askable], reporter: &Channel) -> anyhow::Result<()> {
     use booth_cli::tag::lyrics;
 
     /// Nothing came back for this track, which is an answer like any other.
-    fn nothing(id: u32, batch: &Batch, reporter: &Channel) {
+    fn nothing(track: &Askable, batch: &Batch, reporter: &Channel) {
         let _ = reporter.tx.send(Update::WordsLookedUp {
-            id,
+            id: track.id,
             found: Box::default(),
             verdict: lyrics::Verdict::No,
+            then_read: track.then_read.clone(),
         });
         batch.finished_one();
         (reporter.wake)();
@@ -1584,14 +1612,14 @@ fn look_up_words(tracks: &[Askable], reporter: &Channel) -> anyhow::Result<()> {
             Ok(Some(found)) => found,
             Ok(None) => {
                 crate::debug!("#{}: no lyrics for {} — {}", track.id, track.artist, track.title);
-                nothing(track.id, &batch, reporter);
+                nothing(track, &batch, reporter);
                 continue;
             }
             // A service being down is not a reason to stop: every track after
             // this one still has a stem that can be listened to.
             Err(e) => {
                 crate::warn!("#{}: could not look up the words: {e:#}", track.id);
-                nothing(track.id, &batch, reporter);
+                nothing(track, &batch, reporter);
                 continue;
             }
         };
@@ -1612,6 +1640,7 @@ fn look_up_words(tracks: &[Askable], reporter: &Channel) -> anyhow::Result<()> {
             id: track.id,
             found: Box::new(found),
             verdict,
+            then_read: track.then_read.clone(),
         });
         batch.finished_one();
         (reporter.wake)();
@@ -1748,6 +1777,24 @@ mod tests {
     use super::*;
     use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
     use booth_cli::audio::Audio;
+
+    #[test]
+    fn rendering_stems_again_overwrites_the_kit_that_is_already_there() {
+        // The button says "Render stems again". Before this it ran, found the
+        // files it was about to write, and failed with "already exists; pass
+        // --force to overwrite" — a flag with nowhere to pass it from a
+        // window, so re-rendering a kit was not possible at all.
+        let args = stems_args(Backend::Demucs, booth_cli::cli::StemQuality::High);
+        assert!(args.force, "a re-render would refuse itself");
+    }
+
+    #[test]
+    fn the_command_line_keeps_refusing_by_default() {
+        // The guard is still right where it is: a script told to separate a
+        // directory should not quietly spend an afternoon replacing stems
+        // somebody wanted kept.
+        assert!(!StemsArgs::defaults().force);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("booth-job-{name}-{}", std::process::id()));

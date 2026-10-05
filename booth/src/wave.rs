@@ -15,7 +15,12 @@ use crate::theme;
 /// How tall the waveform draws, in points.
 pub const HEIGHT: f32 = 132.0;
 /// The strip of phrase names under it.
-pub const STRIP_HEIGHT: f32 = 16.0;
+///
+/// Taller than the sixteen points it was when it held nothing but a label,
+/// because it now carries the shape of the music as well: at sixteen the
+/// silhouette had about eight points of swing left after the text, which is
+/// not enough to tell a build from a break.
+pub const STRIP_HEIGHT: f32 = 26.0;
 
 /// The bytes in one column of the three-band preview, as the format stores
 /// them: mid, high, low.
@@ -932,12 +937,85 @@ fn phrase_help(phrase: &Phrase, beat_ms: &[u32]) -> String {
     }
 }
 
+/// How much of the strip's height the loudest part of the record fills.
+///
+/// Not all of it: a silhouette that touches the top edge reads as clipped, and
+/// the label has to stay legible over the loud parts.
+const SILHOUETTE: f32 = 0.78;
+
+/// Below this much swing between the quiet parts and the loud ones, the
+/// picture is stretched to fill the strip.
+///
+/// A modern club master is limited to within a few decibels of itself from end
+/// to end. Drawn honestly against full scale that is a rectangle — true, and
+/// it says nothing about where the break is, which is the one thing this strip
+/// is read for. Measured on the records this was built against, a dynamic
+/// record swings by about 0.6 of full scale across its sections and a limited
+/// one by under 0.2.
+const FLAT_ENOUGH: f32 = 0.35;
+
+/// How tall the quietest part is drawn after a stretch.
+///
+/// Not zero. Stretching a flat master onto the full height makes its quietest
+/// bar nothing at all, which reads as silence — and silence is a thing the
+/// record could have had and does not. A short bar says "quieter"; no bar says
+/// something untrue.
+const STRETCHED_FLOOR: f32 = 0.18;
+
+/// The level of each pixel of the strip, and whether it had to be stretched to
+/// be worth looking at.
+///
+/// One number per pixel: the loudest column it covers, by the same weighting
+/// the drive is written with, so the silhouette here and the picture above it
+/// are made of the same measurement.
+fn silhouette(bands: &[u8], width: usize, zoom: Zoom) -> (Vec<f32>, bool) {
+    let columns = bands.len() / COLUMN;
+    if columns == 0 || width == 0 {
+        return (Vec::new(), false);
+    }
+    let column_at = |fraction: f32| {
+        ((zoom.into_track(fraction) * columns as f64) as usize).min(columns.saturating_sub(1))
+    };
+    let mut levels = Vec::with_capacity(width);
+    for pixel in 0..width {
+        let from = column_at(pixel as f32 / width as f32);
+        let to = column_at((pixel + 1) as f32 / width as f32).max(from + 1);
+        let mut peak = 0.0f32;
+        for index in from..to.min(columns) {
+            let at = index * COLUMN;
+            let byte = |offset: usize| bands.get(at + offset).copied().unwrap_or(0) as f32 / 255.0;
+            peak = peak.max(loudness(byte(2), byte(0), byte(1)));
+        }
+        levels.push(peak);
+    }
+
+    // The ends of the range taken off the fifth and ninety-fifth of the sorted
+    // levels rather than off the smallest and largest. One silent gap between
+    // tracks, or one column that happens to clip, would otherwise set the whole
+    // scale and leave everything else in the middle of it.
+    let mut sorted = levels.clone();
+    sorted.sort_by(f32::total_cmp);
+    let quiet = sorted[sorted.len() * 5 / 100];
+    let loud = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+    let swing = loud - quiet;
+    if swing >= FLAT_ENOUGH || swing <= f32::EPSILON {
+        return (levels, false);
+    }
+
+    for level in &mut levels {
+        let within = ((*level - quiet) / swing).clamp(0.0, 1.0);
+        *level = STRETCHED_FLOOR + (1.0 - STRETCHED_FLOOR) * within;
+    }
+    (levels, true)
+}
+
 pub fn phrase_strip(
     ui: &mut Ui,
     phrases: &[Phrase],
     duration_secs: f64,
     beat_ms: &[u32],
     zoom: Zoom,
+    bands: &[u8],
 ) -> Strip {
     let width = ui.available_width();
     // Draggable whatever the zoom is: there is nowhere to scroll to at full
@@ -952,6 +1030,12 @@ pub fn phrase_strip(
     if phrases.is_empty() || duration_secs <= 0.0 {
         return strip;
     }
+    // Measured once for the whole strip rather than per block, because the
+    // stretch has to be decided across the record: worked out per section, a
+    // break and a drop would each fill their own block and the strip would say
+    // they were the same loudness.
+    let (levels, stretched) = silhouette(bands, rect.width().max(0.0) as usize, zoom);
+
     let total_ms = duration_secs * 1000.0;
     // The same two mappings the waveform uses, so a boundary is drawn, grabbed
     // and dropped at the moment it belongs to whatever the view is.
@@ -978,7 +1062,39 @@ pub fn phrase_strip(
             continue;
         }
         let color = theme::phrase_color(&phrase.kind);
-        painter.rect_filled(block, 0.0, color);
+        // The block, then the shape of the music inside it. The block is dimmed
+        // so the silhouette has somewhere to stand out from and the label stays
+        // readable over both; it is still the section's own colour, because
+        // what the strip is first read for is which part this is.
+        painter.rect_filled(block, 0.0, color.gamma_multiply(0.45));
+
+        // Half a waveform rather than a mirrored one. Mirrored, the strip would
+        // have thirteen points either side of a centre line and the shape would
+        // be mush; standing on the floor it gets the whole height, and the eye
+        // reads the top edge as the tune.
+        if !levels.is_empty() {
+            let floor = block.bottom();
+            let reach = block.height() * SILHOUETTE;
+            let seen = block.intersect(rect);
+            let first = (seen.left() - rect.left()).floor().max(0.0) as usize;
+            let last = (seen.right() - rect.left()).ceil().max(0.0) as usize;
+            for (pixel, level) in levels.iter().enumerate().take(last.min(levels.len())).skip(first)
+            {
+                let x = rect.left() + pixel as f32;
+                if x < block.left() || x >= block.right() {
+                    continue;
+                }
+                let tall = level * reach;
+                if tall <= 0.0 {
+                    continue;
+                }
+                painter.rect_filled(
+                    Rect::from_min_max(egui::pos2(x, floor - tall), egui::pos2(x + 1.0, floor)),
+                    0.0,
+                    color,
+                );
+            }
+        }
 
         // What this section is and why it came out that way. Only the one the
         // pointer is over: a strip that explained all five at once would be a
@@ -1033,10 +1149,20 @@ pub fn phrase_strip(
         Some(about) => response.on_hover_text(about),
         // Still says what the strip is for when the pointer is between blocks
         // or past the end of the record.
-        None => response.on_hover_text(
-            "The arrangement, section by section. Drag a boundary to move it, or the strip \
-             itself to pan. Rest on a section to read why it is called what it is.",
-        ),
+        None => response.on_hover_text(match stretched {
+            false => "The arrangement, section by section, over the shape of the music. Drag a \
+                      boundary to move it, or the strip itself to pan. Rest on a section to \
+                      read why it is called what it is."
+                .to_string(),
+            // Said rather than left to be noticed. A stretched picture is not
+            // the same picture as the waveform above it, and somebody
+            // comparing the two deserves to know which one they are reading.
+            true => "The arrangement, section by section, over the shape of the music — \
+                     stretched, because this master runs at nearly one level from end to end \
+                     and drawn honestly it would be a rectangle. Heights here are relative to \
+                     each other, not to full scale."
+                .to_string(),
+        }),
     };
 
     // Which section the pointer is over, and which boundary — if any — it is
@@ -1192,6 +1318,100 @@ mod tests {
         columns.iter().flatten().copied().collect()
     }
 
+    /// A record whose columns all sit at `level`, except where `loud` says
+    /// otherwise. One column a pixel at the widths these tests use.
+    fn at_levels(levels: &[u8]) -> Vec<u8> {
+        bands(&levels.iter().map(|level| [*level; 3]).collect::<Vec<_>>())
+    }
+
+    mod the_shape_under_the_sections {
+        use super::*;
+
+        #[test]
+        fn a_record_that_already_swings_is_drawn_as_it_is() {
+            // A quiet intro, a loud drop. Nothing to fix: the picture is
+            // already saying where the record moves.
+            let mut levels = vec![20u8; 50];
+            levels.extend(std::iter::repeat_n(250u8, 50));
+            let (shown, stretched) = silhouette(&at_levels(&levels), 100, Zoom::default());
+
+            assert!(!stretched, "a dynamic record was stretched");
+            assert!(shown[10] < 0.4, "the quiet half came out loud: {}", shown[10]);
+            assert!(shown[90] > 0.8, "the loud half came out quiet: {}", shown[90]);
+        }
+
+        #[test]
+        fn a_master_limited_flat_is_stretched_until_it_says_something() {
+            // The case this exists for: a club record mastered to within a few
+            // decibels of itself from end to end. Drawn honestly it is a
+            // rectangle, which is true and tells nobody where the break is.
+            let mut levels = vec![200u8; 50];
+            levels.extend(std::iter::repeat_n(215u8, 50));
+            let (shown, stretched) = silhouette(&at_levels(&levels), 100, Zoom::default());
+
+            assert!(stretched, "a flat master was left as a rectangle");
+            assert!(
+                shown[90] - shown[10] > 0.5,
+                "the stretch did not separate the two halves: {} against {}",
+                shown[10],
+                shown[90]
+            );
+        }
+
+        #[test]
+        fn a_stretched_picture_never_draws_a_quiet_part_as_silence() {
+            // Mapping the quietest part to nothing would say the record has
+            // silence in it, which is a thing it could have had and does not.
+            let mut levels = vec![200u8; 50];
+            levels.extend(std::iter::repeat_n(215u8, 50));
+            let (shown, _) = silhouette(&at_levels(&levels), 100, Zoom::default());
+
+            assert!(
+                shown.iter().all(|level| *level >= STRETCHED_FLOOR - f32::EPSILON),
+                "{shown:?}"
+            );
+        }
+
+        #[test]
+        fn one_silent_gap_does_not_set_the_scale_for_the_whole_record() {
+            // The reason the ends of the range are percentiles rather than the
+            // smallest and largest. A single column of nothing — a gap between
+            // two cuts, a drop-out — would otherwise be the floor, and the
+            // quiet half and the loud half would both be squashed into the top
+            // of the strip and look alike.
+            let mut levels = vec![200u8; 50];
+            levels.extend(std::iter::repeat_n(215u8, 49));
+            levels[40] = 0;
+            let (shown, stretched) = silhouette(&at_levels(&levels), 99, Zoom::default());
+
+            assert!(stretched, "{shown:?}");
+            assert!(
+                shown[90] - shown[10] > 0.5,
+                "one silent column flattened the rest: {} against {}",
+                shown[10],
+                shown[90]
+            );
+        }
+
+        #[test]
+        fn a_record_at_one_level_from_end_to_end_is_left_alone() {
+            // Nothing to reveal. Stretching a picture with no variation in it
+            // at all would turn rounding into a shape, which is a picture of
+            // nothing presented as a picture of something.
+            let (shown, stretched) = silhouette(&at_levels(&[200u8; 99]), 99, Zoom::default());
+
+            assert!(!stretched);
+            assert!(shown.windows(2).all(|pair| pair[0] == pair[1]), "{shown:?}");
+        }
+
+        #[test]
+        fn a_track_with_no_picture_yet_draws_no_shape() {
+            let (shown, stretched) = silhouette(&[], 100, Zoom::default());
+            assert!(shown.is_empty());
+            assert!(!stretched);
+        }
+    }
+
     fn wave(bytes: &[u8]) -> Waveform<'_> {
         Waveform {
             bands: bytes,
@@ -1269,7 +1489,7 @@ mod tests {
         let asked = std::cell::RefCell::new(Strip::default());
         let view = std::cell::Cell::new(zoom);
         let mut harness = Harness::new_ui(|ui| {
-            let strip = phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), view.get());
+            let strip = phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), view.get(), &[]);
             if let Some(moved) = strip.zoom {
                 view.set(moved);
                 asked.borrow_mut().zoom = Some(moved);
@@ -1471,7 +1691,8 @@ mod tests {
         let phrases = sections(&[(0, 30_000, "intro"), (30_000, 90_000, "drop")]);
         let asked = std::cell::RefCell::new(None);
         let mut harness = Harness::new_ui(|ui| {
-            let strip = phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), Zoom::default());
+            let strip =
+                phrase_strip(ui, &phrases, 90.0, &grid(90_000, 128.0), Zoom::default(), &[]);
             if strip.edit.is_some() {
                 *asked.borrow_mut() = strip.edit.clone();
             }
