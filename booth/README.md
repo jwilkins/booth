@@ -1402,20 +1402,21 @@ drive played only on older hardware has a history nothing here can see.
 
 ## What it does not do yet
 
-- **Two players read a drive this writes from their own slots:** a CDJ-3000X
-  on firmware 1.40 and a CDJ-1500X on firmware 1.10. The 1500X also plays off
-  one over DJ-Link with the 3000X hosting it, cues and all, but it does not
-  need to — it mounts the stick itself.
-- **One player refused one, and that is now the puzzle.** A CDJ-3000 on
-  firmware 2.05 rejected the legacy `export.pdb` outright. It is not a
-  generation gap: a 1500X opens the same drive, so whatever that deck objected
-  to is specific to it or to its firmware rather than to old players reading
-  new files. The file parses under two independent parsers, so it is also
-  something a parser tolerates and that player does not. Choosing an older
-  target in Settings changes what is *checked* and what the drive *carries*,
-  which is real and useful, but it cannot make a database a player refuses
-  acceptable to it. **Try a stick on the hardware before the night**, in the
-  slot of every deck you have not seen it in.
+- **Two players read a drive this writes from their own slots, and both are
+  current:** a CDJ-3000X on firmware 1.40 and a CDJ-1500X on firmware 1.10,
+  AlphaTheta's newest. The 1500X also plays off one over DJ-Link with the
+  3000X hosting it, cues and all, but it does not need to — it mounts the
+  stick itself. Two models rather than one is worth having: what goes on the
+  stick is not shaped to a single player's quirks.
+- **No player outside that current generation has been seen to open one, and
+  one refused outright.** A CDJ-3000 on firmware 2.05 rejected the legacy
+  `export.pdb`. The file parses under two independent parsers, so what is
+  wrong is something a parser tolerates and a player does not, and it is not
+  known to be fixed. Choosing an older target in Settings changes what is
+  *checked* and what the drive *carries*, which is real and useful, but it
+  cannot make a database a player refuses acceptable to it. Everything a nexus
+  deck reads is written; whether it loads has not been demonstrated. **Try a
+  stick on the hardware before the night.**
 - Phrase data and the three-band waveform have not been seen on a player. The
   colour waveform, beat grid and hot cues have; those two sit in parts of the
   analysis files nobody has reported on yet.
