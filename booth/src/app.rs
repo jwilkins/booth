@@ -69,11 +69,6 @@ impl LogWindow {
     }
 }
 
-/// How much room under the list the prep editor needs.
-///
-/// Added up from its parts rather than guessed, because the failure is silent:
-/// a budget a few points short does not overflow, it quietly clips the last row
-/// off the bottom of the window, and the measurements line is the row it takes.
 /// How many stray files the check names before saying how many more there are.
 /// A first import into an empty library folder can turn up thousands, and a
 /// sheet listing all of them is a scrollbar rather than an answer.
@@ -83,7 +78,23 @@ const ORPHANS_SHOWN: usize = 40;
 /// the deleting is never scrolled away from.
 const FOOTER_HEIGHT: f32 = 46.0;
 
-const PREP_HEIGHT: f32 = wave::HEIGHT
+/// How much room to keep under the list for the prep editor, before it has
+/// ever been drawn.
+///
+/// Only the first frame uses it. After that the editor reports the height it
+/// actually came to and that is what is kept — see [`App::prep_height`] —
+/// because a budget added up by hand is a budget that goes stale, and the way
+/// it fails is silent: a few points short does not overflow, it quietly clips
+/// the last row off the bottom of the window.
+///
+/// Which is what the grid tools did. They are a row of their own; this sum
+/// knew nothing about them; and opening them pushed the measurements line off
+/// the bottom — the tempo, the key, the energy, and the button that puts the
+/// tools away again. With no way to close them, and the setting kept per
+/// window rather than per track, selecting another track did not bring them
+/// back either. The comment that used to sit here said the measurements line
+/// is the row this takes. It was right, and saying so was not enough.
+const PREP_HEIGHT_AT_FIRST: f32 = wave::HEIGHT
     + wave::STRIP_HEIGHT
     // the actions strip, the cue strip, and the measurements line
     + 3.0 * 24.0
@@ -360,6 +371,13 @@ pub struct App {
     playhead_ms: Option<u32>,
     /// The cue being named, and the text as typed.
     cue_entry: (Option<(u32, u8)>, String),
+    /// How tall the prep editor came to last time it was drawn.
+    ///
+    /// Kept so the list above it can reserve the right amount of room whatever
+    /// the editor is showing. Measured rather than predicted: every row added
+    /// to the editor since it was written has been a chance to forget to add
+    /// it to a sum somewhere else, and the grid tools took that chance.
+    prep_height: f32,
     /// The track whose tempo is being typed, and the text as typed.
     ///
     /// Kept rather than read back from the collection each frame so that a
@@ -830,6 +848,7 @@ impl App {
             settled: std::collections::HashMap::new(),
             drive_now: std::collections::HashMap::new(),
             playhead_ms: None,
+            prep_height: PREP_HEIGHT_AT_FIRST,
             cue_entry: (None, String::new()),
             bpm_entry: (None, String::new()),
             pending: Vec::new(),
@@ -4778,7 +4797,7 @@ impl App {
 
         // Room kept for the prep editor only when it is underneath: popped out
         // into its own window, the space it was holding belongs to the list.
-        let reserve = if sharing { PREP_HEIGHT } else { 0.0 };
+        let reserve = if sharing { self.prep_height } else { 0.0 };
         let list_height = (ui.available_height() - reserve).max(120.0);
         egui::ScrollArea::vertical()
             .max_height(list_height)
@@ -5317,12 +5336,19 @@ impl App {
 
     /// The prep editor: waveform, phrase strip, and the line of measurements.
     fn prep(&mut self, ui: &mut Ui) {
+        // Where the editor starts, so that what it came to can be measured
+        // against it rather than against the top of whatever is above it.
+        let from = ui.cursor().top();
         let track = self.selected_track().cloned();
         let Some(track) = track else {
             // Nothing to draw. In the main window that is a strip of nothing
             // under the list, which reads fine; in a window of its own it is
             // an empty window, which reads as broken.
             ui.label(RichText::new("nothing selected").color(theme::dim()));
+            // Not measured from a frame that drew one line: the list would
+            // take the room back, and selecting a track would then have the
+            // editor open at a line's height with everything below the
+            // waveform clipped away.
             return;
         };
 
@@ -5395,26 +5421,20 @@ impl App {
             // the few records a tracker gets wrong, and a row of buttons under
             // every waveform is eight controls in the way of the nine tracks
             // in ten that need none of them.
-            if ui
-                .add_enabled(
-                    track.has_grid,
-                    egui::Button::new(match self.editing_grid {
-                        true => "done",
-                        false => "fix",
-                    })
-                    .small(),
-                )
-                .on_hover_text(match self.editing_grid {
-                    true => "Put the grid controls away",
-                    false => {
+            // Only the way in. The way out is in the row it closes, so that
+            // the two are never the same control in a line that the row
+            // itself can push off the bottom of the window.
+            if !self.editing_grid
+                && ui
+                    .add_enabled(track.has_grid, egui::Button::new("fix").small())
+                    .on_hover_text(
                         "Correct this grid by hand — halve or double the tempo, slide \
-                              it onto the kicks, or say where the one is"
-                    }
-                })
-                .on_disabled_hover_text("Nothing has measured a grid on this track yet")
-                .clicked()
+                         it onto the kicks, or say where the one is",
+                    )
+                    .on_disabled_hover_text("Nothing has measured a grid on this track yet")
+                    .clicked()
             {
-                self.editing_grid = !self.editing_grid;
+                self.editing_grid = true;
             }
             measurement(
                 ui,
@@ -5623,6 +5643,22 @@ impl App {
                 None => {}
             }
         }
+
+        // What it came to, for the list above it to keep room for next frame.
+        // One frame behind, which nobody sees: the editor's height changes
+        // when a row is shown or hidden, and that is a press rather than
+        // something that happens while the eye is on it.
+        //
+        // The widgets are laid out whether or not there is room to paint them,
+        // so this is the height the editor *wanted* even on the frame it was
+        // clipped — which is what makes it correct itself rather than settle
+        // into the clipped height and stay there.
+        //
+        // With a few points of slack on top, because the sum is exact and an
+        // exact fit leaves the last line sitting on the dock's edge — and one
+        // point of rounding the other way clips it, which is the failure this
+        // is here to end.
+        self.prep_height = (ui.min_rect().bottom() - from).max(0.0) + 6.0;
     }
 
     // -- the deck ----------------------------------------------------------
@@ -10644,6 +10680,21 @@ impl App {
                  whose lines are right and whose bars start on the two.",
                 GridFix::Downbeat,
             );
+
+            // The way out, in the row it closes. There is one in the
+            // measurements line below as well, which is the one that opens
+            // these — and for a while it was the only one, so when this row
+            // pushed that line off the bottom of the window the tools could
+            // be opened and not shut. A control that opens something is not
+            // a safe place to keep the only way to shut it.
+            ui.separator();
+            if ui
+                .add(egui::Button::new("done").small())
+                .on_hover_text("Put the grid controls away")
+                .clicked()
+            {
+                self.editing_grid = false;
+            }
         });
     }
 
@@ -13111,6 +13162,61 @@ mod tests {
                     assert!(
                         harness.state().waveform.is_some(),
                         "the picture is measured from the audio, so a grid fix cannot stale it"
+                    );
+                }
+
+                #[test]
+                fn the_grid_controls_can_always_be_put_away_again() {
+                    // The trap: the way out used to live in the measurements
+                    // line, and the controls are a row of their own that
+                    // pushed that line off the bottom of the window. Opened,
+                    // they could not be shut — and the setting is per window
+                    // rather than per track, so selecting another track did
+                    // not bring the measurements back either.
+                    let (app, _) = on_the_grid("grid-closable");
+                    let mut harness = panel(app);
+                    harness.run();
+                    harness.get_by_label("fix").click();
+                    harness.run();
+                    assert!(harness.state().editing_grid);
+
+                    // Above the measurements line, not in it: that line is
+                    // what these controls push off the bottom of the window,
+                    // and a widget laid out past the bottom edge is still laid
+                    // out — it just cannot be clicked. So where the way out is
+                    // drawn is the thing worth asserting, not that it exists.
+                    let out = harness.get_by_label("done").rect();
+                    let measurements = harness.get_by_label("energy").rect();
+                    assert!(
+                        out.bottom() <= measurements.top(),
+                        "the way out is in the line these controls displace: {out:?} against \
+                         {measurements:?}"
+                    );
+
+                    harness.get_by_label("done").click();
+                    harness.run();
+                    assert!(!harness.state().editing_grid, "there was no way back");
+                    harness.get_by_label("fix");
+                }
+
+                #[test]
+                fn opening_the_grid_controls_keeps_room_for_what_is_under_them() {
+                    // Measured rather than predicted, because every row added
+                    // to this editor is a chance to forget to add it to a sum
+                    // somewhere else — and the way that fails is silent, by
+                    // clipping the measurements line away.
+                    let (app, _) = on_the_grid("grid-room");
+                    let mut harness = panel(app);
+                    harness.run();
+                    let shut = harness.state().prep_height;
+                    assert!(shut > 0.0, "the editor reported no height at all");
+
+                    harness.get_by_label("fix").click();
+                    harness.run();
+                    let open = harness.state().prep_height;
+                    assert!(
+                        open > shut,
+                        "the controls added a row and asked for no more room: {shut} then {open}"
                     );
                 }
 
