@@ -33,8 +33,7 @@
   <span class="snum">01 — What works today</span>
   <h2>Demonstrated, on hardware or in the test suite</h2>
   <ul class="plain">
-    <li><b>A CDJ-3000X on firmware 1.40 and a CDJ-1500X browse and play a drive this
-    writes</b> — playlists,
+    <li><b>A CDJ-3000X on firmware 1.40 browses and plays a drive this writes</b> — playlists,
     track list, key search, colour waveforms, beat grid and hot cues on a loaded track, with
     nothing rekordbox has touched on the stick.</li>
     <li><b>Both on-drive databases from one collection</b>, written in one pass so they cannot
@@ -75,15 +74,15 @@
       <thead><tr><th scope="col">The gap</th><th scope="col">Where that leaves you</th></tr></thead>
       <tbody>
         <tr>
-          <th scope="row">Two players are confirmed, and the gap between them is not
-          understood</th>
-          <td>A CDJ-3000X on firmware 1.40 and a CDJ-1500X both browse and play a drive this
-          writes. Between them sits the one refusal on record: a CDJ-3000 on firmware 2.05
-          rejected the legacy <code>export.pdb</code> outright. The file parses under two
-          independent parsers, so what that player objected to is something a parser tolerates
-          and it does not — and a drive an older deck opens makes that refusal stranger rather
-          than less real. <b>Try a stick on the hardware before the night</b>, on every deck you
-          have not seen it on.</td>
+          <th scope="row">One deck has mounted a drive this writes, and one refused one</th>
+          <td>Read from its own slot: a CDJ-3000X on firmware 1.40, and nothing older. A
+          CDJ-1500X has played from that drive <b>over DJ-Link</b>, with the 3000X hosting it,
+          and the cues and the added data came through — real, and a different test, since
+          over link the host reads the database and serves it. Against that sits the one refusal:
+          a CDJ-3000 on firmware 2.05 rejected the legacy <code>export.pdb</code> outright, and
+          the file parses under two independent parsers, so what it objected to is something a
+          parser tolerates and it does not. <b>Try a stick on the hardware before the night</b>,
+          in the slot of every deck you have not seen it in.</td>
         </tr>
         <tr>
           <th scope="row">Phrase data and the three-band waveform have not been seen on a
@@ -225,9 +224,9 @@
   <span class="snum">04 — What is next</span>
   <h2>In rough order of how much it matters</h2>
   <ul class="plain">
-    <li><b>Why one CDJ-3000 refused a drive two other players open.</b> This is the one that
-    matters most and the one that needs hardware rather than code — and it got stranger rather
-    than simpler when a CDJ-1500X turned out to read one. A player, a stick, and a morning.</li>
+    <li><b>An older deck with the stick in its own slot.</b> Still the one that matters most and
+    the one that needs hardware rather than code: everything known about older players so far is
+    either a refusal or a drive served to them over link. A player, a stick, and a morning.</li>
     <li><b>Correcting a bad reading by hand.</b> Landed for the words in 0.0.7; the phrase strip
     has been correctable since 0.03. What is left is the rest of the analysis.</li>
     <li><b>Archiving the drive copies.</b> The linked half of a copy cannot be zipped, but the
