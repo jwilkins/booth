@@ -208,6 +208,7 @@ impl Structure {
     /// The form the analysis files store, ready to be written into `PSSI`.
     pub fn to_song_structure(&self) -> Option<SongStructure> {
         let last = self.sections.last()?;
+        let variants = self.variants();
         Some(SongStructure {
             mood: Mood::High,
             end_beat: last.end_beat,
@@ -215,9 +216,73 @@ impl Structure {
             phrases: self
                 .sections
                 .iter()
-                .map(|s| Phrase { beat: s.start_beat, kind: s.kind.id() })
+                .zip(variants)
+                .map(|(s, variant)| Phrase { beat: s.start_beat, kind: s.kind.id(), variant })
                 .collect(),
         })
+    }
+
+    /// Which numbered variant each section is drawn as on a player.
+    ///
+    /// A record with four drops used to read "CHORUS 2" four times, which is a
+    /// strip that names the kind of every section and distinguishes none of
+    /// them — and a strip you cannot tell apart at a glance is one nobody
+    /// looks at twice in a booth. The format has the numbers for exactly this,
+    /// so they are used to say something true rather than left at the value
+    /// that happens to be zero.
+    ///
+    /// What they say is loudness, which is the one thing about a section a DJ
+    /// reads a strip for: **the big ones are 1 and the lesser ones are 2.**
+    /// Split at the middle of that kind's own range rather than at a fixed
+    /// level, because a record whose drops are all within a decibel of each
+    /// other should still have its biggest marked.
+    ///
+    /// Two exceptions, each because the number means something else there.
+    /// A down has no variants at all. And the last section of the track is
+    /// Outro 1 whatever its loudness, because the end of the record is a thing
+    /// worth finding and it is the only outro that is one.
+    fn variants(&self) -> Vec<u8> {
+        let middle = |kind: Kind| -> Option<f32> {
+            let mut of: Vec<f32> =
+                self.sections.iter().filter(|s| s.kind == kind).map(|s| s.intensity).collect();
+            if of.len() < 2 {
+                return None;
+            }
+            of.sort_by(f32::total_cmp);
+            Some((of[0] + of[of.len() - 1]) / 2.0)
+        };
+        let (choruses, ups) = (middle(Kind::Chorus), middle(Kind::Up));
+
+        let last = self.sections.len().saturating_sub(1);
+        self.sections
+            .iter()
+            .enumerate()
+            .map(|(at, section)| match section.kind {
+                // Only one of them is the end of the record.
+                Kind::Outro if at == last => 1,
+                Kind::Outro => 2,
+                // The first intro is the start; a later one is a return to it.
+                Kind::Intro => match self.sections[..at].iter().any(|s| s.kind == Kind::Intro) {
+                    true => 2,
+                    false => 1,
+                },
+                Kind::Chorus => loud_or_not(section.intensity, choruses),
+                Kind::Up => loud_or_not(section.intensity, ups),
+                Kind::Down => 1,
+            })
+            .collect()
+    }
+}
+
+/// 1 for a section at or above the middle of its kind's range, 2 below it.
+///
+/// With no middle — one section of that kind in the whole track, or none —
+/// there is nothing to be louder *than*, and the single one is the one that
+/// matters, so it is a 1.
+fn loud_or_not(intensity: f32, middle: Option<f32>) -> u8 {
+    match middle {
+        Some(middle) if intensity < middle => 2,
+        _ => 1,
     }
 }
 
@@ -475,6 +540,86 @@ mod tests {
 
         fn part(start_ms: u32, end_ms: u32, kind: &str) -> Part {
             Part { start_ms, end_ms, kind: kind.to_string() }
+        }
+
+        /// A track of sections, each with its loudness, as the detector
+        /// leaves them.
+        fn made(of: &[(Kind, f32)]) -> Structure {
+            Structure {
+                sections: of
+                    .iter()
+                    .enumerate()
+                    .map(|(at, (kind, intensity))| Section {
+                        start_beat: at as u16 * 32 + 1,
+                        end_beat: at as u16 * 32 + 33,
+                        kind: *kind,
+                        intensity: *intensity,
+                    })
+                    .collect(),
+            }
+        }
+
+        fn drawn_as(structure: &Structure) -> Vec<(u16, u8)> {
+            structure
+                .to_song_structure()
+                .unwrap()
+                .phrases
+                .iter()
+                .map(|phrase| (phrase.kind, phrase.variant))
+                .collect()
+        }
+
+        #[test]
+        fn the_big_drops_are_told_apart_from_the_lesser_ones() {
+            // What this is for, photographed on a real player: a record with
+            // four drops drew "CHORUS 2" four times. The strip named the kind
+            // of every section and distinguished none of them.
+            let structure = made(&[
+                (Kind::Intro, 0.2),
+                (Kind::Chorus, 0.9),
+                (Kind::Down, 0.3),
+                (Kind::Chorus, 0.4),
+                (Kind::Chorus, 1.0),
+                (Kind::Outro, 0.2),
+            ]);
+            let drawn = drawn_as(&structure);
+
+            assert_eq!(
+                drawn,
+                vec![(1, 1), (5, 1), (3, 1), (5, 2), (5, 1), (6, 1)],
+                "the quiet chorus should be a 2 and the loud ones 1s"
+            );
+        }
+
+        #[test]
+        fn a_track_with_one_drop_calls_it_the_first_one() {
+            // Nothing to be louder than, and the one there is matters.
+            let drawn = drawn_as(&made(&[(Kind::Intro, 0.2), (Kind::Chorus, 0.8)]));
+            assert_eq!(drawn, vec![(1, 1), (5, 1)]);
+        }
+
+        #[test]
+        fn the_end_of_the_record_is_the_outro_that_counts() {
+            // An outro in the middle of a track is the detector seeing a lull;
+            // the one at the end is the end, and it is worth finding.
+            let drawn =
+                drawn_as(&made(&[(Kind::Outro, 0.9), (Kind::Chorus, 0.9), (Kind::Outro, 0.1)]));
+            assert_eq!(drawn, vec![(6, 2), (5, 1), (6, 1)]);
+        }
+
+        #[test]
+        fn a_second_intro_is_a_return_rather_than_the_start() {
+            let drawn =
+                drawn_as(&made(&[(Kind::Intro, 0.2), (Kind::Chorus, 0.9), (Kind::Intro, 0.2)]));
+            assert_eq!(drawn, vec![(1, 1), (5, 1), (1, 2)]);
+        }
+
+        #[test]
+        fn nothing_is_ever_written_as_the_variant_that_wants_extra_beats() {
+            // "Up 3" carries beat numbers inside the phrase for lighting
+            // changes, and this writes none of them.
+            let drawn = drawn_as(&made(&[(Kind::Up, 0.1), (Kind::Up, 0.5), (Kind::Up, 0.9)]));
+            assert!(drawn.iter().all(|(_, variant)| *variant <= 2), "{drawn:?}");
         }
 
         #[test]

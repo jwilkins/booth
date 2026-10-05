@@ -361,6 +361,49 @@ pub(crate) const PSSI_MASK: [u8; 19] = [
     0xE9, 0xF4, 0xE1,
 ];
 
+/// The three flag bytes that spell out a high-mood phrase's numbered variant.
+///
+/// The number a player prints after "Chorus" or "Intro" is not in `kind`: it
+/// is carried in three flags whose meaning depends on the kind, which is the
+/// table below, published by Deep Symmetry and confirmed against a photograph
+/// of a CDJ-1500X drawing a drive written here.
+///
+/// | kind | k1 | k2 | k3 | label |
+/// | --- | --- | --- | --- | --- |
+/// | 1 Intro | 1 | | | Intro 1 |
+/// | 1 Intro | 0 | | | Intro 2 |
+/// | 2 Up | | 0 | 0 | Up 1 |
+/// | 2 Up | | 0 | 1 | Up 2 |
+/// | 2 Up | | 1 | 0 | Up 3 |
+/// | 3 Down | | | | Down |
+/// | 5 Chorus | 1 | | | Chorus 1 |
+/// | 5 Chorus | 0 | | | Chorus 2 |
+/// | 6 Outro | 1 | | | Outro 1 |
+/// | 6 Outro | 0 | | | Outro 2 |
+///
+/// Note what all-zero means: Intro **2**, Chorus **2**, Outro **2**. Writing
+/// zeroes is not writing "no variant", it is writing the second one — which is
+/// what a photograph of a real player showed, every chorus of the track
+/// reading "CHORUS 2".
+///
+/// "Up 3" is never written. The format carries extra beat numbers inside an Up
+/// 3 phrase, for lighting changes nobody here has worked out, and a phrase
+/// that claims to be one without them is a lie a player may act on.
+fn variant_flags(kind: u16, variant: u8) -> (u8, u8, u8) {
+    match kind {
+        // Intro, Chorus, Outro: one flag, and it reads the opposite way round
+        // to the number printed.
+        1 | 5 | 6 => (u8::from(variant <= 1), 0, 0),
+        2 => match variant {
+            0 | 1 => (0, 0, 0),
+            _ => (0, 0, 1),
+        },
+        // Down has no variants, and anything else is a mood this does not
+        // write, where these flags are not variant flags at all.
+        _ => (0, 0, 0),
+    }
+}
+
 /// `PSSI` — the phrase analysis the CDJ-3000 draws under its waveform.
 ///
 /// Everything from the mood onwards is XOR-masked. The mask is not encryption
@@ -378,20 +421,21 @@ pub fn song_structure(structure: &SongStructure) -> Vec<u8> {
     body.push(structure.bank);
     put_pad(&mut body, 1);
     for (i, phrase) in structure.phrases.iter().enumerate() {
+        let (k1, k2, k3) = variant_flags(phrase.kind, phrase.variant);
         put_u16(&mut body, i as u16 + 1);
         put_u16(&mut body, phrase.beat);
         put_u16(&mut body, phrase.kind);
         put_pad(&mut body, 1);
-        body.push(0); // k1
+        body.push(k1);
         put_pad(&mut body, 1);
-        body.push(0); // k2
+        body.push(k2);
         put_pad(&mut body, 1);
         body.push(0); // b: extra beat numbers, only used by "Up 3" phrases
         put_u16(&mut body, 0); // beat2
         put_u16(&mut body, 0); // beat3
         put_u16(&mut body, 0); // beat4
         put_pad(&mut body, 1);
-        body.push(0); // k3
+        body.push(k3);
         put_pad(&mut body, 1);
         body.push(0); // fill-in present
         put_u16(&mut body, 0); // beat at which the fill-in starts
@@ -680,12 +724,35 @@ mod tests {
     }
 
     #[test]
+    fn a_phrases_numbered_variant_reaches_the_flag_bytes_it_lives_in() {
+        // The number a player prints after "Chorus" is not in `kind`: it is in
+        // k1, k2 and k3. Writing them zeroed is not writing "no variant", it is
+        // writing the *second* one — which is what a photograph of a CDJ-1500X
+        // showed, every chorus of a real track reading "CHORUS 2".
+        assert_eq!(variant_flags(1, 1), (1, 0, 0), "Intro 1");
+        assert_eq!(variant_flags(1, 2), (0, 0, 0), "Intro 2");
+        assert_eq!(variant_flags(5, 1), (1, 0, 0), "Chorus 1");
+        assert_eq!(variant_flags(5, 2), (0, 0, 0), "Chorus 2");
+        assert_eq!(variant_flags(6, 1), (1, 0, 0), "Outro 1");
+        assert_eq!(variant_flags(6, 2), (0, 0, 0), "Outro 2");
+        assert_eq!(variant_flags(2, 1), (0, 0, 0), "Up 1");
+        assert_eq!(variant_flags(2, 2), (0, 0, 1), "Up 2");
+        // Down has none, and nothing asks for Up 3: the format carries extra
+        // beat numbers inside one, and this writes none of them.
+        assert_eq!(variant_flags(3, 1), (0, 0, 0), "Down");
+        assert_eq!(variant_flags(2, 3), (0, 0, 1), "never Up 3");
+    }
+
+    #[test]
     fn song_structure_is_masked_and_unmasks_to_what_went_in() {
         let structure = SongStructure {
             mood: Mood::Mid,
             end_beat: 512,
             bank: 0,
-            phrases: vec![Phrase { beat: 1, kind: 1 }, Phrase { beat: 65, kind: 9 }],
+            phrases: vec![
+                Phrase { beat: 1, kind: 1, ..Phrase::default() },
+                Phrase { beat: 65, kind: 9, ..Phrase::default() },
+            ],
         };
         let s = song_structure(&structure);
         assert_eq!(u16::from_be_bytes(s[16..18].try_into().unwrap()), 2);
@@ -722,13 +789,16 @@ mod tests {
             mood: Mood::Mid,
             end_beat: 4,
             bank: 0,
-            phrases: vec![Phrase { beat: 1, kind: 1 }],
+            phrases: vec![Phrase { beat: 1, kind: 1, ..Phrase::default() }],
         });
         let two = song_structure(&SongStructure {
             mood: Mood::Mid,
             end_beat: 4,
             bank: 0,
-            phrases: vec![Phrase { beat: 1, kind: 1 }, Phrase { beat: 5, kind: 2 }],
+            phrases: vec![
+                Phrase { beat: 1, kind: 1, ..Phrase::default() },
+                Phrase { beat: 5, kind: 2, ..Phrase::default() },
+            ],
         });
         assert_eq!(two.len() - one.len(), 24);
         assert_eq!(one.len(), 0x20 + 24);
@@ -764,7 +834,7 @@ mod tests {
             mood: Mood::Mid,
             end_beat: 6,
             bank: 0,
-            phrases: vec![Phrase { beat: 1, kind: 1 }],
+            phrases: vec![Phrase { beat: 1, kind: 1, ..Phrase::default() }],
         };
         let analysis = Analysis {
             on_drive_path: "/Contents/a.flac",

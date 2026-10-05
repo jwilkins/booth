@@ -3597,8 +3597,16 @@ mod what_the_deck_did {
             end_beat: 16,
             bank: 0,
             phrases: vec![
-                booth_cli::export::Phrase { beat: 1, kind: 1 },
-                booth_cli::export::Phrase { beat: 9, kind: 5 },
+                booth_cli::export::Phrase {
+                    beat: 1,
+                    kind: 1,
+                    ..booth_cli::export::Phrase::default()
+                },
+                booth_cli::export::Phrase {
+                    beat: 9,
+                    kind: 5,
+                    ..booth_cli::export::Phrase::default()
+                },
             ],
         };
         let mut track = a_track();
@@ -3643,9 +3651,21 @@ mod what_the_deck_did {
             end_beat: 16,
             bank: 0,
             phrases: vec![
-                booth_cli::export::Phrase { beat: 1, kind: 1 },
-                booth_cli::export::Phrase { beat: 5, kind: 9 },
-                booth_cli::export::Phrase { beat: 9, kind: 6 },
+                booth_cli::export::Phrase {
+                    beat: 1,
+                    kind: 1,
+                    ..booth_cli::export::Phrase::default()
+                },
+                booth_cli::export::Phrase {
+                    beat: 5,
+                    kind: 9,
+                    ..booth_cli::export::Phrase::default()
+                },
+                booth_cli::export::Phrase {
+                    beat: 9,
+                    kind: 6,
+                    ..booth_cli::export::Phrase::default()
+                },
             ],
         };
         let mut track = a_track();
