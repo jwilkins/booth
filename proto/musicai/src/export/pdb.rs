@@ -812,7 +812,15 @@ fn playlist_entry_row(position: u32, track_id: u32, playlist_id: u32) -> Vec<u8>
 /// `PAGE_LEN - header - used`, which underflowed, and what went on the stick
 /// was a page truncated back to 4 kB with a row cut in half inside it. Debug
 /// builds panicked on the subtraction; release builds wrote the corrupt page.
-pub(crate) const MAX_ROW_LEN: usize = PAGE_LEN - PAGE_HEADER_LEN - ROW_INDEX_LEN;
+///
+/// Rounded down to the four-byte alignment rows are placed on, which is not
+/// cosmetic: 4050 bytes of row occupy 4052 bytes of page, so the unrounded
+/// limit admitted two lengths — 4049 and 4050 — that [`pack`] then refused,
+/// and a drive failed to write on an ASCII comment of exactly 3846 bytes. The
+/// two checks now ask the same question, because a limit that is a multiple of
+/// four makes `len <= MAX_ROW_LEN` and `aligned(len) <= MAX_ROW_LEN` the same
+/// test.
+pub(crate) const MAX_ROW_LEN: usize = (PAGE_LEN - PAGE_HEADER_LEN - ROW_INDEX_LEN) / 4 * 4;
 
 /// What the index at the end of a page costs for a single row: two bytes for
 /// its offset, four for its group's flags.
@@ -843,17 +851,28 @@ fn track_row(
     label_id: u32,
     key_id: u32,
 ) -> Vec<u8> {
-    let row = track_row_exactly(track, artist_id, album_id, genre_id, label_id, key_id);
-    if row.len() <= MAX_ROW_LEN {
-        return row;
-    }
-    // How much of the comment there is room for, in bytes of encoded string.
-    // Taken off what the row came to rather than guessed at, so it is right
-    // whatever else the row is carrying.
-    let over = row.len() - MAX_ROW_LEN;
+    let mut row = track_row_exactly(track, artist_id, album_id, genre_id, label_id, key_id);
+    // Cut, re-encode, and ask the row again, rather than working a budget out
+    // once: the overflow is counted in encoded bytes and the cut is made in
+    // UTF-8 ones, and the two are not the same length in either direction. A
+    // Japanese comment is three UTF-8 bytes and two encoded bytes per
+    // character, so taking the overflow off its UTF-8 length removes two
+    // thirds of what it has to — a 2584-character comment left a 4485-byte
+    // row, and a longer one left a longer row still, without bound.
+    //
+    // Each pass asks for the overflow back and a little more so that a cut
+    // which buys less than it costs still converges, and the loop ends when
+    // there is no comment left: a row that is still too big then is one the
+    // comment was not making too big, and [`pack`] refuses it and says so.
+    let mut keep = track.comment.len();
     let mut shorter = track.clone();
-    shorter.comment = shorten(&track.comment, track.comment.len().saturating_sub(over + 8));
-    track_row_exactly(&shorter, artist_id, album_id, genre_id, label_id, key_id)
+    while row.len() > MAX_ROW_LEN && keep > 0 {
+        keep = keep.saturating_sub(row.len() - MAX_ROW_LEN + 8);
+        shorter.comment = shorten(&track.comment, keep);
+        keep = shorter.comment.len();
+        row = track_row_exactly(&shorter, artist_id, album_id, genre_id, label_id, key_id);
+    }
+    row
 }
 
 /// A string cut to at most `bytes`, on a character boundary.
@@ -1100,6 +1119,58 @@ mod tests {
             let bytes = db.to_bytes().unwrap_or_else(|e| panic!("{len}-char comment: {e:#}"));
             pages_are_sane(&bytes);
             assert_eq!(table(&bytes, Table::Tracks).rows, 1, "the track went missing at {len}");
+        }
+    }
+
+    #[test]
+    fn a_comment_of_any_length_leaves_a_row_a_page_will_take() {
+        // The fault a drive failed on: rows are placed on four-byte
+        // boundaries, so a 4049-byte row costs a page 4052 bytes, but the
+        // shortening compared the row against an unrounded 4050 and left it
+        // alone — three bytes inside the limit it asked about and one past the
+        // real one. An ASCII comment of 3846 bytes was all it took, and the
+        // write failed on a stick with a page and a half of lyrics in it.
+        for len in 3_700..4_000 {
+            let mut track = a_track(1);
+            track.comment = "x".repeat(len);
+            let row = track_row(&track, 0, 0, 0, 0, 0);
+            assert!(
+                aligned(row.len()) <= MAX_ROW_LEN,
+                "a {len}-byte comment left a {}-byte row, which costs {} bytes of page",
+                row.len(),
+                aligned(row.len())
+            );
+        }
+
+        let mut track = a_track(1);
+        track.comment = "x".repeat(3_846);
+        let mut db = Database::new();
+        db.tracks.push(track);
+        let bytes = db.to_bytes().expect("the length the drive failed on");
+        pages_are_sane(&bytes);
+    }
+
+    #[test]
+    fn a_comment_that_costs_less_encoded_than_it_does_in_utf8_is_cut_until_it_fits() {
+        // The second half of the same fault. Japanese is three UTF-8 bytes
+        // and two encoded bytes per character, so taking the overflow off the
+        // comment's UTF-8 length removes two thirds of what it has to: one
+        // pass left a 4485-byte row at 2584 characters, and a longer comment
+        // left a longer row, without bound.
+        for chars in [1_923usize, 2_584, 4_000, 20_000] {
+            let mut track = a_track(1);
+            track.comment = "\u{3042}".repeat(chars);
+            let row = track_row(&track, 0, 0, 0, 0, 0);
+            assert!(
+                aligned(row.len()) <= MAX_ROW_LEN,
+                "{chars} characters left a {}-byte row",
+                row.len()
+            );
+
+            let mut db = Database::new();
+            db.tracks.push(track);
+            let bytes = db.to_bytes().unwrap_or_else(|e| panic!("{chars} characters: {e:#}"));
+            pages_are_sane(&bytes);
         }
     }
 
