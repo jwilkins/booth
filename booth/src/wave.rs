@@ -387,6 +387,14 @@ pub struct Waveform<'a> {
     pub stems: Option<&'a StemEnvelopes>,
     /// Which part of the track is showing.
     pub zoom: Zoom,
+    /// Whether the grid is being corrected by hand.
+    ///
+    /// The marks are then drawn the full height of the panel rather than as
+    /// ticks along the bottom. A nine-point tick is enough to read a grid
+    /// against a waveform you are not arguing with, and not enough to line one
+    /// up: to see whether a line is on a kick or four milliseconds ahead of it,
+    /// the line has to cross the kick.
+    pub aligning: bool,
 }
 
 impl Waveform<'_> {
@@ -792,14 +800,31 @@ fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
             continue;
         }
         let x = rect.left() + rect.width() * across;
-        let (height, color) = match downbeat {
-            true => (9.0, DOWNBEAT.gamma_multiply(0.9)),
-            false => (4.0, OFFBEAT.gamma_multiply(0.45)),
-        };
+        let (height, color) = mark(downbeat, wave.aligning, rect.height());
         painter.line_segment(
             [egui::pos2(x, rect.bottom() - height), egui::pos2(x, rect.bottom())],
             Stroke::new(1.0_f32, color),
         );
+    }
+}
+
+/// How tall a grid mark is drawn, and in what colour.
+///
+/// Ticks along the bottom normally: tall and red on the downbeat, short and
+/// pale between. A nine-point tick is enough to read a grid against a waveform
+/// you are not arguing with, and not enough to line one up — to see whether a
+/// line is on the kick or four milliseconds ahead of it, the line has to cross
+/// the kick. So while the grid is being corrected they run the full height.
+///
+/// Dimmer for it, which is not decoration: a full-height line at the
+/// brightness of a tick is a line drawn *over* the waveform rather than
+/// against it, and the kick being compared with it disappears underneath.
+fn mark(downbeat: bool, aligning: bool, height: f32) -> (f32, Color32) {
+    match (downbeat, aligning) {
+        (true, true) => (height, DOWNBEAT.gamma_multiply(0.62)),
+        (false, true) => (height, OFFBEAT.gamma_multiply(0.3)),
+        (true, false) => (9.0, DOWNBEAT.gamma_multiply(0.9)),
+        (false, false) => (4.0, OFFBEAT.gamma_multiply(0.45)),
     }
 }
 
@@ -1429,6 +1454,7 @@ mod tests {
             paint: Paint::Bands,
             stems: None,
             zoom: Zoom::default(),
+            aligning: false,
         }
     }
 
@@ -1521,6 +1547,40 @@ mod tests {
     }
 
     #[test]
+    fn the_grid_marks_cross_the_waveform_while_it_is_being_lined_up() {
+        // A tick along the bottom is enough to read a grid against a picture
+        // nobody is arguing with. Deciding whether a line sits on the kick or
+        // four milliseconds ahead of it needs the line to cross the kick.
+        let tall = 100.0;
+        let (ticked, _) = mark(true, false, tall);
+        let (crossing, _) = mark(true, true, tall);
+        assert!(ticked < tall, "a resting downbeat mark should be a tick: {ticked}");
+        assert_eq!(crossing, tall, "an aligning downbeat mark should cross the picture");
+
+        let (offbeat_tick, _) = mark(false, false, tall);
+        let (offbeat_crossing, _) = mark(false, true, tall);
+        assert!(offbeat_tick < ticked, "the beats between are the shorter marks");
+        assert_eq!(offbeat_crossing, tall, "they cross it too");
+    }
+
+    #[test]
+    fn a_mark_that_crosses_the_picture_is_drawn_dimmer_than_a_tick() {
+        // Otherwise it is a line drawn over the waveform rather than against
+        // it, and the kick being lined up disappears underneath.
+        let (_, tick) = mark(true, false, 100.0);
+        let (_, crossing) = mark(true, true, 100.0);
+        assert!(
+            crossing.a() < tick.a(),
+            "a full-height mark at {} is no dimmer than a tick at {}",
+            crossing.a(),
+            tick.a()
+        );
+        // And the downbeat is still the one that reads first.
+        let (_, offbeat) = mark(false, true, 100.0);
+        assert!(crossing.a() > offbeat.a(), "the bar line lost its emphasis");
+    }
+
+    #[test]
     fn a_panel_with_nothing_to_draw_reports_the_view_it_was_given() {
         // The caller stores whatever comes back, so a panel that says "fitted"
         // on a frame it drew nothing has thrown somebody's view away. This is
@@ -1538,6 +1598,7 @@ mod tests {
                 paint: Default::default(),
                 stems: None,
                 zoom: close,
+                aligning: false,
             };
             reported.set(show(ui, &nothing).zoom);
         });
@@ -1989,6 +2050,7 @@ mod tests {
                 paint: Paint::Bands,
                 stems: None,
                 zoom: Zoom { start: 0.25, span: 0.25 },
+                aligning: false,
             }
         }
 

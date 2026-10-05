@@ -360,6 +360,13 @@ pub struct App {
     playhead_ms: Option<u32>,
     /// The cue being named, and the text as typed.
     cue_entry: (Option<(u32, u8)>, String),
+    /// The track whose tempo is being typed, and the text as typed.
+    ///
+    /// Kept rather than read back from the collection each frame so that a
+    /// half-typed "12" of "128" is not a tempo of twelve: the field holds what
+    /// somebody is in the middle of saying, and the collection hears it when
+    /// they are finished.
+    bpm_entry: (Option<u32>, String),
     /// What the panels asked for this frame.
     pending: Vec<Pending>,
     /// A picker a button asked for, opened after the panel has finished
@@ -438,7 +445,9 @@ struct EditingWords {
 /// Named rather than applied on the spot because the panel that draws the
 /// buttons is reading the track it would change — the same reason every
 /// other action here is a [`Pending`].
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+// No `Eq`: a tempo is a float, and a float is not equal to itself in the way
+// `Eq` promises. `PartialEq` is all the tests and the pending queue ask for.
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum GridFix {
     Halve,
     Double,
@@ -448,6 +457,13 @@ enum GridFix {
     MoveTo,
     /// Call the beat nearest the playhead a downbeat.
     Downbeat,
+    /// Set the tempo to exactly this, from the typed field or the two
+    /// tenth-of-a-BPM buttons.
+    ///
+    /// The target rather than a step, so the three controls that change a
+    /// tempo are one operation: a tenth up is "set it to what it is plus a
+    /// tenth", worked out where the button is drawn and knowing what it says.
+    Bpm(f64),
 }
 
 impl GridFix {
@@ -522,6 +538,8 @@ enum Pending {
         /// the two positional fixes act on.
         at: Option<u32>,
     },
+    /// Measure this track's tempo and beats again, and change nothing else.
+    Regrid(u32),
     /// Open a track's words for correcting by hand.
     EditWords(u32),
     /// Keep the words somebody typed.
@@ -813,6 +831,7 @@ impl App {
             drive_now: std::collections::HashMap::new(),
             playhead_ms: None,
             cue_entry: (None, String::new()),
+            bpm_entry: (None, String::new()),
             pending: Vec::new(),
             want_pick: None,
             status,
@@ -2744,6 +2763,26 @@ impl App {
                     if Some(analyzed.id) == self.selected {
                         self.waveform = Some((analyzed.id, analyzed.bands.clone()));
                     }
+                    changed = true;
+                }
+                Update::Regridded { id, bpm, grid_confidence, has_grid, beats, beat_ms } => {
+                    crate::debug!("re-measured #{id}: {bpm:.2} BPM, {beats} beats");
+                    // The six fields the measurement is allowed to touch. The
+                    // cues, the phrases and the key are deliberately not here:
+                    // see `App::regrid`.
+                    if let Some(track) = self.library.get_mut(id) {
+                        track.bpm = bpm;
+                        track.grid_confidence = grid_confidence;
+                        track.has_grid = has_grid;
+                        track.beats = beats;
+                        track.beat_ms = beat_ms;
+                        track.analyzed = true;
+                    }
+                    // So the field stops showing the tempo that was replaced.
+                    if self.bpm_entry.0 == Some(id) {
+                        self.bpm_entry = (None, String::new());
+                    }
+                    self.prep_changed(id);
                     changed = true;
                 }
                 Update::Separated { id, kit, took_secs } => {
@@ -5308,6 +5347,7 @@ impl App {
             paint,
             stems: envelopes,
             zoom: self.zoom,
+            aligning: self.editing_grid,
         };
         // Drawn before anything below touches the collection: `waveform`
         // borrows the cached picture out of the window's own state, and that
@@ -6520,6 +6560,7 @@ impl App {
                 Pending::FixGrid { id, what, at } => {
                     touched |= self.fix_grid(id, what, at);
                 }
+                Pending::Regrid(id) => self.regrid(id),
                 Pending::LookUpWords(id) => {
                     let wanted = match self.marked.len() > 1 && self.marked.contains(&id) {
                         true => self.marked.iter().copied().collect(),
@@ -10392,6 +10433,7 @@ impl App {
                 Some(at) => crate::grid::set_downbeat(track, at),
                 None => false,
             },
+            GridFix::Bpm(bpm) => crate::grid::set_bpm(track, bpm),
         };
         if !changed {
             return false;
@@ -10403,6 +10445,9 @@ impl App {
             GridFix::Nudge(by) => format!("#{id} grid moved {by} ms"),
             GridFix::MoveTo => format!("#{id} grid moved to the playhead"),
             GridFix::Downbeat => format!("#{id} downbeat set at the playhead"),
+            GridFix::Bpm(_) => {
+                format!("#{id} is now {:.2} BPM", self.library.get(id).map_or(0.0, |t| t.bpm))
+            }
         };
         crate::info!("{said}");
         self.note(said, theme::text());
@@ -10419,6 +10464,25 @@ impl App {
         // against, which is the one view it is least use to throw away.
         self.prep_changed(id);
         true
+    }
+
+    /// Measure one track's tempo and beats again, and change nothing else.
+    ///
+    /// Not [`App::analyze_tracks`], which is the right call for "listen to
+    /// this record again" and the wrong one here: it rewrites the cues, the
+    /// phrases and the key from the audio, so a DJ who had corrected a grid by
+    /// hand, decided it was worse than what was measured, and pressed this to
+    /// get the measurement back would lose every cue they had moved as the
+    /// price. The same decode either way; only what comes back is narrower.
+    fn regrid(&mut self, id: u32) {
+        let waiting = self.files_for(&[id]);
+        if waiting.is_empty() {
+            self.note("that file is not where it was", theme::amber());
+            return;
+        }
+        crate::info!("measuring the grid of #{id} again");
+        self.ensure_local(&[id]);
+        self.start(Job::Regrid(waiting));
     }
 
     /// The controls for correcting a beat grid by hand.
@@ -10445,6 +10509,62 @@ impl App {
             ui.spacing_mut().item_spacing.x = 6.0;
             pane_label(ui, "Grid");
 
+            // The tempo, where it can be read and typed over. Here rather than
+            // in the measurement row below, because a number somebody can type
+            // into should not look like one that is only reported.
+            //
+            // Held in `bpm_entry` while it is being typed: read back from the
+            // collection every frame, the "12" on the way to "128" would be a
+            // tempo of twelve.
+            if self.bpm_entry.0 != Some(id) {
+                self.bpm_entry = (Some(id), format!("{:.2}", track.bpm));
+            }
+            // The caption goes before the box and names it: without this the
+            // tempo is an unnamed text field in the accessibility tree, which
+            // is what a screen reader — and anything else reading the window
+            // through it — has to work from.
+            let caption = ui.label(RichText::new("BPM").font(theme::mono(9.5)).color(theme::dim()));
+            let typed = ui
+                .add_enabled(
+                    track.has_grid,
+                    egui::TextEdit::singleline(&mut self.bpm_entry.1)
+                        .desired_width(54.0)
+                        .font(theme::mono(10.5)),
+                )
+                .on_hover_text(
+                    "The tempo. Type one and press return — from the sleeve, from another \
+                     program, or counted by hand.",
+                );
+            typed.clone().labelled_by(caption.id);
+            // Return, or clicking away: both are somebody finishing. Not every
+            // keystroke, which would set a tempo of 1, then 12, then 128 and
+            // save the collection three times to get there.
+            //
+            // Cleared either way, so the field shows what the tempo *became*:
+            // a number outside the rails is refused, and one left sitting in
+            // the box would read as though it had been taken.
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.bpm_entry = (None, String::new());
+            } else if typed.lost_focus() {
+                if let Ok(bpm) = self.bpm_entry.1.trim().parse::<f64>() {
+                    self.pending.push(Pending::FixGrid { id, what: GridFix::Bpm(bpm), at });
+                }
+                self.bpm_entry = (None, String::new());
+            }
+
+            if ui
+                .add_enabled(!self.running(), egui::Button::new("re-measure").small())
+                .on_hover_text(
+                    "Listen to the record again and take the tempo and the beats it finds. \
+                     Leaves the cues, the phrases and the key alone — unlike re-analysing.",
+                )
+                .on_disabled_hover_text("Something else is running")
+                .clicked()
+            {
+                self.pending.push(Pending::Regrid(id));
+            }
+            ui.separator();
+
             let mut fix = |ui: &mut Ui, label: &str, hint: &str, what: GridFix| {
                 let needs_playhead = what.needs_playhead() && at.is_none();
                 let button = ui.add_enabled(!needs_playhead, egui::Button::new(label).small());
@@ -10461,6 +10581,21 @@ impl App {
                 }
             };
 
+            // A tenth of a BPM is the unit a long mix drifts by: ten minutes
+            // at 128.1 against 128.0 ends five beats apart.
+            fix(
+                ui,
+                "−0.1",
+                "Take a tenth of a BPM off the tempo.",
+                GridFix::Bpm(by_a_tenth(track.bpm, -1.0)),
+            );
+            fix(
+                ui,
+                "+0.1",
+                "Put a tenth of a BPM on the tempo.",
+                GridFix::Bpm(by_a_tenth(track.bpm, 1.0)),
+            );
+            ui.separator();
             fix(
                 ui,
                 "÷2",
@@ -11244,7 +11379,25 @@ fn grid_text(track: &Track, length: crate::config::Length) -> String {
     if !track.has_grid {
         return "none found".to_string();
     }
-    format!("{:.2} · {}", track.bpm, length.describe(track.beats))
+    // Said rather than left to be inferred from a number that cannot show it.
+    // Whether a record holds its tempo is the question behind "will this loop
+    // still be in time in eight bars", and the collection already knows the
+    // answer by what it chose to keep.
+    let shape = match crate::grid::is_dynamic(track) {
+        true => "dynamic",
+        false => "steady",
+    };
+    format!("{:.2} · {shape} · {}", track.bpm, length.describe(track.beats))
+}
+
+/// A tempo a tenth of a BPM up or down, kept to two places.
+///
+/// Rounded because the alternative accumulates: ten presses of up from 128.00
+/// in plain float arithmetic is 128.99999999999997, which reads as 129.00,
+/// compares as neither, and is a different grid from the one the readout
+/// claims.
+fn by_a_tenth(bpm: f64, direction: f64) -> f64 {
+    ((bpm + direction * 0.1) * 100.0).round() / 100.0
 }
 
 /// A track's beat times: the ones it kept, or rebuilt from its tempo and its
@@ -11603,6 +11756,66 @@ mod tests {
             assert_eq!(roughly(3_600.0 + 20.0 * 60.0), "about an hour and 20 minutes");
             assert_eq!(roughly(3.0 * 3_600.0), "about 3 hours");
             assert_eq!(roughly(2.0 * 3_600.0 + 60.0), "about 2 hours and a minute");
+        }
+    }
+
+    mod saying_what_the_grid_is {
+        use super::*;
+
+        /// A four-minute record at 128, gridded from the top.
+        fn gridded() -> Track {
+            let mut track = Track::placeholder(1);
+            track.duration_secs = 240.0;
+            track.bpm = 128.0;
+            track.beats = 512;
+            track.has_grid = true;
+            track.analyzed = true;
+            track
+        }
+
+        #[test]
+        fn the_readout_says_whether_the_tempo_moves() {
+            // The question behind "will this loop still be in time in eight
+            // bars", and one no tempo on its own can answer.
+            let steady = gridded();
+            assert_eq!(
+                grid_text(&steady, crate::config::Length::Beats),
+                "128.00 · steady · 512 beats"
+            );
+
+            let mut dynamic = gridded();
+            dynamic.beat_ms = vec![0, 469, 938];
+            assert!(
+                grid_text(&dynamic, crate::config::Length::Beats).contains("dynamic"),
+                "a track keeping its own beats is the dynamic one"
+            );
+        }
+
+        #[test]
+        fn a_track_with_nothing_measured_says_so_rather_than_claiming_a_tempo() {
+            let mut track = gridded();
+            track.analyzed = false;
+            assert_eq!(grid_text(&track, crate::config::Length::Beats), "not analysed");
+
+            let mut no_grid = gridded();
+            no_grid.has_grid = false;
+            assert_eq!(grid_text(&no_grid, crate::config::Length::Beats), "none found");
+        }
+
+        #[test]
+        fn ten_presses_of_a_tenth_land_on_a_whole_number() {
+            // In plain float arithmetic they land on 128.99999999999997, which
+            // reads as 129.00, compares as neither, and is a different grid
+            // from the one the readout claims.
+            let mut bpm = 128.0;
+            for _ in 0..10 {
+                bpm = by_a_tenth(bpm, 1.0);
+            }
+            assert_eq!(bpm, 129.0);
+            for _ in 0..10 {
+                bpm = by_a_tenth(bpm, -1.0);
+            }
+            assert_eq!(bpm, 128.0);
         }
     }
 
@@ -12893,6 +13106,117 @@ mod tests {
                         harness.state().waveform.is_some(),
                         "the picture is measured from the audio, so a grid fix cannot stale it"
                     );
+                }
+
+                #[test]
+                fn a_tempo_typed_into_the_panel_is_taken_on_return() {
+                    // From the sleeve, from another program, or counted by
+                    // hand — all of which beat a tempo this measured.
+                    let (mut app, id) = on_the_grid("grid-typed-bpm");
+                    app.editing_grid = true;
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    // Focused first, and a frame for the field to have the
+                    // keyboard: typing goes wherever the keyboard is.
+                    harness.get_by_role_and_label(accesskit::Role::TextInput, "BPM").focus();
+                    harness.run();
+                    // Over the tempo already in the box, the way somebody
+                    // replacing a number does it rather than editing its digits.
+                    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+                    harness
+                        .get_by_role_and_label(accesskit::Role::TextInput, "BPM")
+                        .type_text("127.33");
+                    harness.run();
+                    harness.key_press(egui::Key::Enter);
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+
+                    assert_eq!(harness.state().library.get(id).unwrap().bpm, 127.33);
+                }
+
+                #[test]
+                fn the_tenth_buttons_move_the_tempo_by_a_tenth_each_way() {
+                    let (mut app, id) = on_the_grid("grid-tenths");
+                    app.editing_grid = true;
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    harness.get_by_label("+0.1").click();
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+                    assert_eq!(harness.state().library.get(id).unwrap().bpm, 128.1);
+
+                    // And back, from a panel that has redrawn and so is
+                    // offering a tenth off the new tempo rather than the old.
+                    harness.run();
+                    harness.get_by_label("−0.1").click();
+                    harness.run();
+                    harness.state_mut().apply_pending(&ctx);
+                    assert_eq!(harness.state().library.get(id).unwrap().bpm, 128.0);
+                }
+
+                #[test]
+                fn changing_the_tempo_redraws_the_grid() {
+                    // The marks are drawn from the beat times, and the panel
+                    // reads those from its own copy of the track — so a tempo
+                    // the collection has taken is only a grid the DJ can see
+                    // once that copy has caught up.
+                    let (mut app, id) = on_the_grid("grid-redraw");
+                    app.editing_grid = true;
+                    app.rebuild();
+                    let before = beat_times(app.selected_track().unwrap());
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    harness.get_by_label("×2").click();
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+                    harness.run();
+
+                    let after = beat_times(harness.state().selected_track().unwrap());
+                    assert_eq!(harness.state().library.get(id).unwrap().bpm, 256.0);
+                    assert!(
+                        after.len() > before.len() * 3 / 2,
+                        "twice the tempo is about twice the beats: {} against {}",
+                        before.len(),
+                        after.len()
+                    );
+                }
+
+                #[test]
+                fn the_grid_can_be_measured_again_without_touching_anything_else() {
+                    // The case it is for: a DJ corrects a grid by hand,
+                    // decides the measurement was better, and wants it back.
+                    // Re-analysing would give it back and charge them every
+                    // cue they had moved; this does not.
+                    let (mut app, id) = on_the_grid("grid-remeasure");
+                    app.editing_grid = true;
+                    app.rebuild();
+                    let was = app.library.get(id).unwrap().clone();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    harness.get_by_label("re-measure").click();
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+
+                    assert!(harness.state().running(), "the press started nothing");
+                    // Nothing of the DJ's was spent to ask: the press reaches
+                    // for the audio and that is all it does. What comes back
+                    // cannot spend it either — `Update::Regridded` has no field
+                    // for a cue, a phrase or a key, so unlike an analysis it
+                    // could not overwrite them if it tried.
+                    let track = harness.state().library.get(id).unwrap();
+                    assert_eq!(track.cues.len(), was.cues.len(), "the cues were touched");
+                    assert_eq!(track.phrases, was.phrases, "the phrases were touched");
+                    assert_eq!(track.key, was.key, "the key was touched");
                 }
 
                 #[test]
