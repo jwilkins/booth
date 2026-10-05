@@ -300,6 +300,12 @@ pub enum WordsFrom {
     Recogniser,
     /// Looked up, under a name a fingerprint or the file's tags gave.
     Server,
+    /// Read out of a lyric file sitting beside the track.
+    ///
+    /// Above a server's, because somebody filed that file next to *this* file:
+    /// a name-and-length match against a database is a good inference, and a
+    /// file in the same folder is somebody's answer.
+    Beside,
     /// Typed or corrected by hand, which outranks both.
     ByHand,
 }
@@ -311,6 +317,7 @@ impl WordsFrom {
             WordsFrom::Unsaid => "",
             WordsFrom::Recogniser => "heard off the stem",
             WordsFrom::Server => "looked up",
+            WordsFrom::Beside => "from a lyric file",
             WordsFrom::ByHand => "corrected by hand",
         }
     }
