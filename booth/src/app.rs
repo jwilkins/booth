@@ -13165,6 +13165,145 @@ mod tests {
                     );
                 }
 
+                /// A Ui reports the height its contents came to, not the
+                /// height it was handed.
+                ///
+                /// Everything about the editor's reserve rests on this: it is
+                /// measured from `min_rect` on a frame that may already have
+                /// been too tall for its room, and if that figure were the
+                /// room rather than the contents, the reserve would settle at
+                /// the clipped height and stay there — which is the bug it was
+                /// written to end, arrived at the long way round.
+                #[test]
+                fn a_ui_reports_what_it_came_to_rather_than_what_it_was_given() {
+                    const ROOM: f32 = 40.0;
+                    let came_to = std::cell::Cell::new(0.0f32);
+                    let mut harness =
+                        Harness::builder().with_size(egui::vec2(400.0, 600.0)).build_ui(|ui| {
+                            let short =
+                                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(380.0, ROOM));
+                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(short));
+                            for n in 0..20 {
+                                let _ = child.button(format!("button {n}"));
+                            }
+                            came_to.set(child.min_rect().height());
+                        });
+                    harness.run();
+
+                    assert!(
+                        came_to.get() > ROOM * 2.0,
+                        "twenty buttons in {ROOM} points of room reported {} — that is the \
+                         room, not the contents",
+                        came_to.get()
+                    );
+                }
+
+                /// Every control the editor draws, and where its bottom edge
+                /// falls.
+                ///
+                /// Swept rather than listed, because a list of the controls to
+                /// check is the same kind of thing as the hand-added sum that
+                /// caused this: right when it is written and quietly wrong one
+                /// row later.
+                fn controls_in_the_editor(app: App) -> (f32, Vec<(String, f32)>) {
+                    let top = std::cell::Cell::new(0.0f32);
+                    let mut harness =
+                        Harness::builder().with_size(egui::vec2(1_280.0, 1_600.0)).build_ui_state(
+                            |ui, app: &mut App| {
+                                top.set(ui.cursor().top());
+                                app.prep(ui);
+                            },
+                            app,
+                        );
+                    harness.run();
+                    // The reserve is a frame behind the contents by design.
+                    harness.run();
+
+                    // `query_all`, not `get_all`: a state where the editor
+                    // shows no text field at all is a state to sweep, not a
+                    // test failure.
+                    let mut found = Vec::new();
+                    for role in [accesskit::Role::Button, accesskit::Role::TextInput] {
+                        for node in harness.query_all_by_role(role) {
+                            let name = format!("{node:?}").chars().take(70).collect::<String>();
+                            found.push((name, node.rect().bottom()));
+                        }
+                    }
+                    (top.get() + harness.state().prep_height, found)
+                }
+
+                #[test]
+                fn no_control_in_the_editor_falls_below_the_room_it_asks_for() {
+                    // The fault this is for: the grid controls are a row of
+                    // their own, the room kept for the editor was a sum added
+                    // up by hand that knew nothing about them, and the row
+                    // they pushed down — the measurements, and the only way to
+                    // shut the controls again — was clipped away in silence.
+                    //
+                    // Every state here is one where the editor shows something
+                    // it does not always show. A control below the floor is a
+                    // control that will be clipped in the window, whether or
+                    // not a test can still click it: being laid out and being
+                    // reachable are different things, which is exactly how the
+                    // first test written for this passed on the broken code.
+                    /// One state to sweep: what to call it, and how to put
+                    /// the editor into it.
+                    type State = (&'static str, Box<dyn Fn(&mut App, u32)>);
+
+                    let states: Vec<State> = vec![
+                        ("at rest", Box::new(|_: &mut App, _| {})),
+                        (
+                            "with the grid controls open",
+                            Box::new(|app: &mut App, _| app.editing_grid = true),
+                        ),
+                        (
+                            "with the grid controls open and a cue under the playhead",
+                            Box::new(|app: &mut App, _| {
+                                app.editing_grid = true;
+                                app.playhead_ms = Some(40_000);
+                            }),
+                        ),
+                        (
+                            "zoomed in, which adds the button that fits it again",
+                            Box::new(|app: &mut App, _| {
+                                app.editing_grid = true;
+                                app.zoom = wave::Zoom { start: 0.2, span: 0.3 };
+                            }),
+                        ),
+                        (
+                            "on a track with no grid to correct",
+                            Box::new(|app: &mut App, id| {
+                                app.library.get_mut(id).unwrap().has_grid = false;
+                            }),
+                        ),
+                        (
+                            "on a track nothing has listened to",
+                            Box::new(|app: &mut App, id| {
+                                let track = app.library.get_mut(id).unwrap();
+                                track.analyzed = false;
+                                track.has_grid = false;
+                            }),
+                        ),
+                    ];
+
+                    for (what, set_up) in states {
+                        let (mut app, id) = on_the_grid("editor-sweep");
+                        set_up(&mut app, id);
+                        app.rebuild();
+
+                        let (floor, controls) = controls_in_the_editor(app);
+                        for (name, bottom) in &controls {
+                            assert!(
+                                *bottom <= floor,
+                                "{what}: a control sits {:.0} points below the room the \
+                                 editor asks for — {name}",
+                                bottom - floor
+                            );
+                        }
+                        assert!(!controls.is_empty(), "{what}: the sweep found no controls");
+                    }
+                }
+
                 #[test]
                 fn the_grid_controls_can_always_be_put_away_again() {
                     // The trap: the way out used to live in the measurements
