@@ -929,6 +929,11 @@ impl App {
                 "grid" => {
                     app.editing_grid = true;
                     app.playhead_ms = Some(40_000);
+                    // Zoomed in, because that is where the grid tools are
+                    // used and where the marks cross the picture. A shot of
+                    // them at full-track zoom shows the row of buttons and
+                    // none of what pressing one is for.
+                    app.zoom = wave::Zoom { start: 0.2, span: 0.06 };
                 }
                 "stems" => {
                     let tracks: Vec<u32> =
@@ -13076,11 +13081,12 @@ mod tests {
                     let (mut app, id) = on_the_grid("grid-keeps-zoom");
                     app.library.get_mut(id).unwrap().bpm = 70.0;
                     app.editing_grid = true;
-                    // A full-width picture, because the view cannot be zoomed
-                    // in past two pixels a column and a coarse one pins it to
-                    // the whole track whatever is asked for. No playhead, so
+                    // A picture at the resolution a real one has — 150
+                    // columns a second — because the view cannot be zoomed in
+                    // past two points a column, and a coarse picture is pinned
+                    // to the whole track whatever is asked for. No playhead, so
                     // nothing pulls the view along behind it either.
-                    app.waveform = Some((id, vec![0; 3 * 1_200]));
+                    app.waveform = Some((id, vec![0; 3 * 150 * 300]));
                     app.playhead_ms = None;
                     app.rebuild();
                     // After the rebuild: a listing whose selection has gone
