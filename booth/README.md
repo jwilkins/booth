@@ -1402,15 +1402,17 @@ drive played only on older hardware has a history nothing here can see.
 
 ## What it does not do yet
 
-- **No player older than a CDJ-3000X has been seen to browse a drive this
-  writes.** The legacy `export.pdb` was refused outright by a CDJ-3000 on
-  firmware 2.05 — the file parses under two independent parsers, so what is
-  wrong is something a parser tolerates and a player does not, and it is not
-  known to be fixed. Choosing an older target in Settings changes what is
-  *checked* and what the drive *carries*, which is real and useful, but it
-  cannot make a database a player refuses acceptable to it. Everything a nexus
-  deck reads is written; whether it loads has not been demonstrated. Try a
-  stick on the hardware before the night.
+- **Two players are confirmed, and the gap between them is not understood.** A
+  CDJ-3000X on firmware 1.40 browses and plays a drive this writes, and so does
+  a CDJ-1500X. In between sits the one refusal on record: a CDJ-3000 on
+  firmware 2.05 rejected the legacy `export.pdb` outright. The file parses
+  under two independent parsers, so what that player objected to is something a
+  parser tolerates and it does not, and nothing since has explained it — a
+  drive an older deck opens makes the refusal stranger rather than less real.
+  Choosing an older target in Settings changes what is *checked* and what the
+  drive *carries*, which is real and useful, but it cannot make a database a
+  player refuses acceptable to it. **Try a stick on the hardware before the
+  night**, on every deck you have not seen it on.
 - Phrase data and the three-band waveform have not been seen on a player. The
   colour waveform, beat grid and hot cues have; those two sit in parts of the
   analysis files nobody has reported on yet.
