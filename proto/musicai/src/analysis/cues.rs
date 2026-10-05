@@ -114,6 +114,14 @@ pub struct Candidate {
     /// What to write on the cue, when there is something better to say than the
     /// reason's own name — the words of a hook, say.
     pub label: Option<String>,
+    /// How many bars the section runs for, where this is one.
+    ///
+    /// On the marker rather than only in the window, because a player's own
+    /// phrase strip cannot say it: the label there is chosen from ten fixed
+    /// strings by the phrase kind and its flag bytes, and there is no text
+    /// field in the format to put a number in. A memory cue's comment is text,
+    /// and a player shows it.
+    pub bars: Option<u16>,
     /// Whether this may only ever be a memory cue.
     ///
     /// A player has eight buttons and as many memory cues as a track needs, so
@@ -125,7 +133,7 @@ pub struct Candidate {
 
 impl Candidate {
     pub fn new(time_ms: u32, reason: Reason) -> Self {
-        Self { time_ms, reason, label: None, memory_only: false }
+        Self { time_ms, reason, label: None, bars: None, memory_only: false }
     }
 
     pub fn named(time_ms: u32, reason: Reason, label: &str) -> Self {
@@ -134,6 +142,7 @@ impl Candidate {
             time_ms,
             reason,
             label: (!label.is_empty()).then(|| label.to_string()),
+            bars: None,
             memory_only: false,
         }
     }
@@ -201,9 +210,14 @@ pub fn sections(structure: &Structure, beat_times: &[u32]) -> Vec<Candidate> {
         .sections
         .iter()
         .filter_map(|section| {
-            beat_times
-                .get(section.start_beat as usize - 1)
-                .map(|&at| Candidate::new(at, Reason::Section(section.kind)))
+            beat_times.get(section.start_beat as usize - 1).map(|&at| Candidate {
+                // Whole bars, rounded down: a boundary dragged into the middle
+                // of a bar loses that bar rather than claiming it, which is
+                // what the window's own strip counts and shows.
+                bars: Some(section.end_beat.saturating_sub(section.start_beat) / 4)
+                    .filter(|bars| *bars > 0),
+                ..Candidate::new(at, Reason::Section(section.kind))
+            })
         })
         .collect()
 }
@@ -343,7 +357,15 @@ fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) ->
                         1
                     }
                 };
-                format!("{word} {count}")
+                // "Drop 1 · 40 bars". The ordinal says which drop this is
+                // and the bars say what kind of drop it is — a 40-bar one is
+                // the record's centre and a 16-bar one is a passing lift, and
+                // on a deck you are reading the marker rather than counting
+                // bars off the waveform.
+                match candidate.bars {
+                    Some(bars) => format!("{word} {count} · {bars} bars"),
+                    None => format!("{word} {count}"),
+                }
             }
             _ => match candidate.label.as_deref() {
                 Some(text) => {
@@ -747,6 +769,35 @@ mod tests {
             .filter(|cue| !cue.is_hot())
             .map(|cue| cue.comment.clone().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn a_section_marker_says_how_long_the_section_runs() {
+        // What a player's own phrase strip cannot say. The label there comes
+        // from ten fixed strings chosen by the phrase kind and its flag bytes,
+        // and the format has no text field to put a number in — so a deck
+        // draws "CHORUS 2" for a forty-bar drop and a sixteen-bar one alike.
+        // A memory cue's comment is text, and a player shows it.
+        let structure = Structure {
+            sections: vec![
+                section(0, 16, Kind::Intro, -20.0),
+                section(16, 56, Kind::Chorus, -6.0),
+                section(56, 72, Kind::Chorus, -8.0),
+            ],
+        };
+        let marked = marks(&assemble(0, Some(200_000), sections(&structure, &beats(400))));
+
+        assert!(marked.contains(&"Drop 1 · 40 bars".to_string()), "{marked:?}");
+        assert!(marked.contains(&"Drop 2 · 16 bars".to_string()), "{marked:?}");
+    }
+
+    #[test]
+    fn a_marker_with_no_length_behind_it_is_left_as_it_was() {
+        // A moment that is not a section — a hook, a vocal coming in — has no
+        // length to report, and inventing one would be worse than the number
+        // being absent.
+        let candidates = vec![Candidate::new(30_000, Reason::Section(Kind::Chorus))];
+        assert_eq!(marks(&assemble(0, Some(200_000), candidates)), ["Start", "Drop 1", "End"]);
     }
 
     #[test]

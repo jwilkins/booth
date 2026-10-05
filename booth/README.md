@@ -868,9 +868,19 @@ flags along the top was a row with the buttons lost in it.
 A player holds eight hot cues and as many memory cues as a track needs, so every
 moment worth marking gets one of the latter whether or not it earns one of the
 former. They are named the way a DJ writes on the markers themselves: **Start**,
-then each section numbered within its own kind — Build 1, Drop 1, Break 1,
-Drop 2 — and **End** on the last bar. Numbering within the kind is the point;
-six markers all reading "drop" say nothing that looking at the waveform does not.
+then each section numbered within its own kind and measured in bars —
+`Build 1 · 16 bars`, `Drop 1 · 40 bars`, `Break 1 · 24 bars` — and **End** on
+the last bar. Numbering within the kind is the point; six markers all reading
+"drop" say nothing that looking at the waveform does not.
+
+The bars are there because **a player's own phrase strip cannot say them.** Its
+labels come from ten fixed strings chosen by the phrase kind and three flag
+bytes, with no text field in the format to put a number in, so a deck draws
+`CHORUS 2` for a forty-bar drop and a sixteen-bar one alike. A memory cue's
+comment is text and a player shows it, so that is where the length goes. A
+forty-bar drop is the centre of the record and a sixteen-bar one is a passing
+lift, and on a deck you are reading the marker rather than counting bars off the
+waveform.
 
 A sung line gets a verse number and the line itself every time it lands:
 `V1 Get Down`, then `V1 Get Down` again where it comes back. A player shows a
