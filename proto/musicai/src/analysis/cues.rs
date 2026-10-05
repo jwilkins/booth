@@ -114,6 +114,14 @@ pub struct Candidate {
     /// What to write on the cue, when there is something better to say than the
     /// reason's own name — the words of a hook, say.
     pub label: Option<String>,
+    /// How many bars the section runs for, where this is one.
+    ///
+    /// On the marker rather than only in the window, because a player's own
+    /// phrase strip cannot say it: the label there is chosen from ten fixed
+    /// strings by the phrase kind and its flag bytes, and there is no text
+    /// field in the format to put a number in. A memory cue's comment is text,
+    /// and a player shows it.
+    pub bars: Option<u16>,
     /// Whether this may only ever be a memory cue.
     ///
     /// A player has eight buttons and as many memory cues as a track needs, so
@@ -125,7 +133,7 @@ pub struct Candidate {
 
 impl Candidate {
     pub fn new(time_ms: u32, reason: Reason) -> Self {
-        Self { time_ms, reason, label: None, memory_only: false }
+        Self { time_ms, reason, label: None, bars: None, memory_only: false }
     }
 
     pub fn named(time_ms: u32, reason: Reason, label: &str) -> Self {
@@ -134,6 +142,7 @@ impl Candidate {
             time_ms,
             reason,
             label: (!label.is_empty()).then(|| label.to_string()),
+            bars: None,
             memory_only: false,
         }
     }
@@ -175,7 +184,12 @@ const TOGETHER_MS: u32 = 500;
 ///
 /// Returns a memory cue at the first downbeat — which is where a player parks
 /// when the track loads — followed by up to eight hot cues in time order.
-pub fn suggest(features: &Features, beat_times: &[u32], structure: &Structure) -> Vec<Cue> {
+pub fn suggest(
+    features: &Features,
+    beat_times: &[u32],
+    structure: &Structure,
+    bar_phase: usize,
+) -> Vec<Cue> {
     if beat_times.is_empty() {
         return Vec::new();
     }
@@ -186,9 +200,8 @@ pub fn suggest(features: &Features, beat_times: &[u32], structure: &Structure) -
     }
 
     // The memory cue is where the track begins as far as a player is
-    // concerned: the first downbeat, or the first beat if the grid has no bar
-    // lines yet.
-    let start = first_downbeat(beat_times, structure).unwrap_or(beat_times[0]);
+    // concerned, and a player counts in bars from it.
+    let start = first_downbeat(beat_times, bar_phase);
     // The last beat the grid names, which is the last bar a player will let you
     // park on rather than wherever the file happens to stop.
     let end = beat_times.last().copied();
@@ -201,9 +214,14 @@ pub fn sections(structure: &Structure, beat_times: &[u32]) -> Vec<Candidate> {
         .sections
         .iter()
         .filter_map(|section| {
-            beat_times
-                .get(section.start_beat as usize - 1)
-                .map(|&at| Candidate::new(at, Reason::Section(section.kind)))
+            beat_times.get(section.start_beat as usize - 1).map(|&at| Candidate {
+                // Whole bars, rounded down: a boundary dragged into the middle
+                // of a bar loses that bar rather than claiming it, which is
+                // what the window's own strip counts and shows.
+                bars: Some(section.end_beat.saturating_sub(section.start_beat) / 4)
+                    .filter(|bars| *bars > 0),
+                ..Candidate::new(at, Reason::Section(section.kind))
+            })
         })
         .collect()
 }
@@ -343,7 +361,15 @@ fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) ->
                         1
                     }
                 };
-                format!("{word} {count}")
+                // "Drop 1 · 40 bars". The ordinal says which drop this is
+                // and the bars say what kind of drop it is — a 40-bar one is
+                // the record's centre and a 16-bar one is a passing lift, and
+                // on a deck you are reading the marker rather than counting
+                // bars off the waveform.
+                match candidate.bars {
+                    Some(bars) => format!("{word} {count} · {bars} bars"),
+                    None => format!("{word} {count}"),
+                }
             }
             _ => match candidate.label.as_deref() {
                 Some(text) => {
@@ -472,13 +498,23 @@ fn fold(ranked: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
     kept
 }
 
-fn first_downbeat(beat_times: &[u32], structure: &Structure) -> Option<u32> {
-    structure
-        .sections
-        .first()
-        .and_then(|s| beat_times.get(s.start_beat as usize - 1))
-        .or_else(|| beat_times.first())
-        .copied()
+/// Where a player should park when the track loads: the first bar line.
+///
+/// A beat tracker starts wherever it first found a beat, which is as likely to
+/// be the second or fourth beat of a bar as the first. Parking there puts the
+/// track's own start a part-bar out of phase with everything that counts in
+/// fours — the bar numbers in the transport, a four-bar loop taken on the
+/// first press, the grid a second deck is being matched against — and the
+/// error is inaudible to look at and obvious to mix with.
+///
+/// So the cue skips forward to the first beat the grid calls a bar line:
+/// nothing, or one, two or three beats. Forward rather than back, because the
+/// beats before it are the part bar at the head of the track and there is no
+/// bar there to park at the start of.
+fn first_downbeat(beat_times: &[u32], bar_phase: usize) -> u32 {
+    // The first beat the grid calls a bar line, which is this many beats in.
+    // Never more than three: the fourth beat of any bar is followed by one.
+    beat_times.get(bar_phase % 4).copied().unwrap_or(beat_times[0])
 }
 
 /// Where a voice arrives, in milliseconds, snapped to the grid.
@@ -625,7 +661,7 @@ mod tests {
             ],
         };
         let audio = with_voice(4.0, 10.0, 10.0);
-        let cues = suggest(&features::extract(&audio), &beats(128), &structure);
+        let cues = suggest(&features::extract(&audio), &beats(128), &structure, 0);
 
         // The first section is the memory cue rather than a hot one: the
         // player already parks at the top of the record, so a hot cue there is
@@ -650,7 +686,7 @@ mod tests {
             ],
         };
         let cues =
-            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(128), &structure);
+            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(128), &structure, 0);
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
 
         // The intro is on the memory cue, where the player parks anyway.
@@ -666,7 +702,7 @@ mod tests {
     fn the_first_cue_a_player_parks_on_is_a_memory_cue() {
         let structure = Structure { sections: vec![section(0, 8, Kind::Intro, -20.0)] };
         let cues =
-            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(64), &structure);
+            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(64), &structure, 0);
         assert!(!cues[0].is_hot());
         assert_eq!(cues[0].time_ms, 0);
         assert_eq!(cues[0].kind, CueKind::Point);
@@ -678,7 +714,7 @@ mod tests {
         let audio = with_voice(20.0, 10.0, 20.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &beats(80), &structure);
+        let cues = suggest(&f, &beats(80), &structure, 0);
 
         let vocal = cues.iter().find(|c| c.comment.as_deref() == Some("vocal"));
         let vocal = vocal.unwrap_or_else(|| panic!("no vocal cue in {cues:?}"));
@@ -691,7 +727,7 @@ mod tests {
         let audio = with_voice(20.0, 100.0, 100.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &beats(80), &structure);
+        let cues = suggest(&f, &beats(80), &structure, 0);
         assert!(cues.iter().all(|c| c.comment.as_deref() != Some("vocal")), "{cues:?}");
     }
 
@@ -700,7 +736,7 @@ mod tests {
         let audio = with_voice(20.0, 10.3, 20.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &beats(80), &structure);
+        let cues = suggest(&f, &beats(80), &structure, 0);
         for cue in &cues {
             assert_eq!(cue.time_ms % BEAT_MS, 0, "a cue at {} ms is off the grid", cue.time_ms);
         }
@@ -727,7 +763,7 @@ mod tests {
             .collect();
         let structure = Structure { sections };
         let cues =
-            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(400), &structure);
+            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(400), &structure, 0);
 
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         assert_eq!(hot.len(), 8, "a player has eight hot cues");
@@ -747,6 +783,68 @@ mod tests {
             .filter(|cue| !cue.is_hot())
             .map(|cue| cue.comment.clone().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn the_track_start_lands_on_a_bar_line_rather_than_wherever_tracking_began() {
+        // A beat tracker starts at the first beat it heard, which is as likely
+        // to be the second or fourth of a bar as the first. Parking the start
+        // cue there puts the track a part-bar out of phase with everything
+        // that counts in fours — the bar numbers in the transport, a four-bar
+        // loop taken on the first press, a second deck being matched to it.
+        let times = beats(64);
+        let features = features::extract(&with_voice(4.0, 10.0, 10.0));
+
+        // Half-second beats, so skipping one beat is 500 ms.
+        for (phase, expected) in [(0usize, 0u32), (1, 500), (2, 1_000), (3, 1_500)] {
+            let cues = suggest(&features, &times, &Structure::default(), phase);
+            let start = cues.iter().find(|cue| !cue.is_hot()).expect("no memory cue at all");
+            assert_eq!(
+                start.time_ms, expected,
+                "a grid whose bar line is {phase} beats in parked at {}",
+                start.time_ms
+            );
+        }
+    }
+
+    #[test]
+    fn the_start_never_skips_a_whole_bar_looking_for_one() {
+        // Three beats is the most it can ever be: the fourth beat of a bar is
+        // followed by the first of the next.
+        let times = beats(64);
+        let features = features::extract(&with_voice(4.0, 10.0, 10.0));
+        let cues = suggest(&features, &times, &Structure::default(), 4);
+        let start = cues.iter().find(|cue| !cue.is_hot()).unwrap();
+        assert_eq!(start.time_ms, 0, "a phase of four is a phase of none");
+    }
+
+    #[test]
+    fn a_section_marker_says_how_long_the_section_runs() {
+        // What a player's own phrase strip cannot say. The label there comes
+        // from ten fixed strings chosen by the phrase kind and its flag bytes,
+        // and the format has no text field to put a number in — so a deck
+        // draws "CHORUS 2" for a forty-bar drop and a sixteen-bar one alike.
+        // A memory cue's comment is text, and a player shows it.
+        let structure = Structure {
+            sections: vec![
+                section(0, 16, Kind::Intro, -20.0),
+                section(16, 56, Kind::Chorus, -6.0),
+                section(56, 72, Kind::Chorus, -8.0),
+            ],
+        };
+        let marked = marks(&assemble(0, Some(200_000), sections(&structure, &beats(400))));
+
+        assert!(marked.contains(&"Drop 1 · 40 bars".to_string()), "{marked:?}");
+        assert!(marked.contains(&"Drop 2 · 16 bars".to_string()), "{marked:?}");
+    }
+
+    #[test]
+    fn a_marker_with_no_length_behind_it_is_left_as_it_was() {
+        // A moment that is not a section — a hook, a vocal coming in — has no
+        // length to report, and inventing one would be worse than the number
+        // being absent.
+        let candidates = vec![Candidate::new(30_000, Reason::Section(Kind::Chorus))];
+        assert_eq!(marks(&assemble(0, Some(200_000), candidates)), ["Start", "Drop 1", "End"]);
     }
 
     #[test]
@@ -1109,7 +1207,7 @@ mod tests {
     #[test]
     fn a_track_with_no_beats_gets_no_cues() {
         let cues =
-            suggest(&features::extract(&with_voice(4.0, 1.0, 3.0)), &[], &Structure::default());
+            suggest(&features::extract(&with_voice(4.0, 1.0, 3.0)), &[], &Structure::default(), 0);
         assert!(cues.is_empty());
     }
 }

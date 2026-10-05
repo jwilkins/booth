@@ -70,7 +70,11 @@ pub fn analyze_at(audio: &Audio, bpm: Option<f64>) -> TrackAnalysis {
     let beats = tempo::detect_at(&measured, bpm);
     let times: Vec<u32> = beats.grid.beats.iter().map(|b| b.time_ms).collect();
     let structure = structure::detect(&measured, &times);
-    let cues = cues::suggest(&measured, &times, &structure);
+    // Which of the tracked beats is a bar line. The tracker starts wherever it
+    // first heard one, so this is 0 to 3 beats in, and nothing downstream can
+    // work it out from the times alone.
+    let bar_phase = beats.grid.beats.iter().position(|beat| beat.number == 1).unwrap_or(0);
+    let cues = cues::suggest(&measured, &times, &structure, bar_phase);
     let key = key::detect(audio);
     let intensity = peak_intensity(&measured);
 
