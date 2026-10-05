@@ -476,6 +476,8 @@ enum Pending {
     WriteTags(u32),
     /// Take words a lyrics server offered, after somebody looked at them.
     TakeFoundWords(u32, Box<booth_cli::tag::lyrics::Found>),
+    /// Ask a lyrics server about a track, and do nothing else.
+    LookUpWords(u32),
     /// Open a track's words for correcting by hand.
     EditWords(u32),
     /// Keep the words somebody typed.
@@ -1986,6 +1988,65 @@ impl App {
 
     // -- cues from the words -----------------------------------------------
 
+    /// What a lyrics server needs to be asked about one track.
+    ///
+    /// `then_read` is the vocal stem owed to the recogniser if the server does
+    /// not settle it, and is `None` where nothing is owed — a track with no
+    /// stem yet, or a lookup somebody asked for on its own.
+    fn askable(&self, track: &Track, then_read: Option<PathBuf>) -> job::Askable {
+        job::Askable {
+            id: track.id,
+            artist: track.artist.clone(),
+            title: track.display_title(),
+            duration_secs: track.duration_secs,
+            identified_surely: track.identified_surely,
+            heard: track.lyrics.clone(),
+            then_read,
+        }
+    }
+
+    /// Ask a lyrics server about these tracks and nothing else.
+    ///
+    /// The whole of it: no separation, no recogniser, and nothing started if
+    /// the server comes back empty-handed. What somebody gets for a click is
+    /// one request a track and either the words or a note saying there were
+    /// none — which is worth having on its own, because a hit here is the
+    /// minutes of a separation and a recogniser pass not spent.
+    ///
+    /// Which of these tracks a lyrics server can be asked about, and with
+    /// what. Starts nothing, so a test can ask what a click would send.
+    ///
+    /// A companion row has no words of its own; it shows its parent's. So
+    /// asking about an acapella is asking about the record.
+    fn worth_asking(&self, ids: &[u32]) -> Vec<job::Askable> {
+        let mut wanted: Vec<u32> = ids.iter().map(|id| crate::library::family(*id)).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        wanted
+            .iter()
+            .filter_map(|id| self.library.get(*id))
+            .filter(|track| !track.artist.trim().is_empty() && !track.title.trim().is_empty())
+            .map(|track| self.askable(track, None))
+            .collect()
+    }
+
+    /// Returns whether anything could be asked about at all.
+    fn look_up_words(&mut self, ids: &[u32]) -> bool {
+        let asking = self.worth_asking(ids);
+        if asking.is_empty() {
+            // Said rather than passed over in silence: somebody asked for this
+            // one, and a lyrics database has nothing to go on without a name.
+            self.note(
+                "a lyrics server is asked by artist and title, and these have none",
+                theme::amber(),
+            );
+            return false;
+        }
+        crate::info!("asking a lyrics server about {}", plural(asking.len(), "track"));
+        self.start(Job::LookUpWords { tracks: asking });
+        true
+    }
+
     /// Where each of these tracks is in the three steps of cueing from the
     /// words, and which of them are worth asking a lyrics server about first.
     ///
@@ -2080,18 +2141,11 @@ impl App {
         // nothing of anybody.
         let asking: Vec<job::Askable> = reading
             .iter()
-            .map(|wanting| wanting.id)
-            .chain(rendering.iter().copied())
-            .filter_map(|id| self.library.get(id))
-            .filter(|track| !track.artist.trim().is_empty() && !track.title.trim().is_empty())
-            .map(|track| job::Askable {
-                id: track.id,
-                artist: track.artist.clone(),
-                title: track.display_title(),
-                duration_secs: track.duration_secs,
-                identified_surely: track.identified_surely,
-                heard: track.lyrics.clone(),
-            })
+            .map(|wanting| (wanting.id, Some(wanting.vocals.clone())))
+            .chain(rendering.iter().map(|id| (*id, None)))
+            .filter_map(|(id, stem)| self.library.get(id).map(|track| (track, stem)))
+            .filter(|(track, _)| !track.artist.trim().is_empty() && !track.title.trim().is_empty())
+            .map(|(track, then_read)| self.askable(track, then_read))
             .collect();
         // Held back rather than read alongside. A recogniser pass that runs
         // anyway would spend the minutes the lookup exists to save, and would
@@ -2353,6 +2407,8 @@ impl App {
         // Tracks whose stem landed on words they already had. See the
         // `Separated` arm below.
         let mut to_cue: Vec<u32> = Vec::new();
+        // Lookups that found nothing and had no recogniser pass behind them.
+        let mut unanswered = 0usize;
         // Whether anything timed a separation, so the settings are written
         // once at the end of the batch rather than once per track.
         let mut paced = false;
@@ -2625,7 +2681,7 @@ impl App {
                     }
                     changed = true;
                 }
-                Update::WordsLookedUp { id, found, verdict } => {
+                Update::WordsLookedUp { id, found, verdict, then_read } => {
                     use booth_cli::tag::lyrics::Verdict;
                     // The recogniser pass this track would have had was held
                     // back while the server was asked. Only a verdict that
@@ -2650,17 +2706,19 @@ impl App {
                         Verdict::Ask => self.wondering.push(Wondering { id, found: *found }),
                         Verdict::No => {}
                     }
-                    // Nothing settled it, so the slow way round after all.
-                    // Reading the stem while the question is still open is
+                    // Nothing settled it, so the slow way round after all —
+                    // but only where a recogniser pass was what this stood in
+                    // for. Reading the stem while the question is still open is
                     // deliberate: somebody who answers "not this record" wants
                     // the words that were sung, not an empty panel and another
                     // wait.
-                    if !settled {
-                        if let Some(vocals) =
-                            self.library.get(id).and_then(|track| track.stems.vocals.clone())
-                        {
-                            to_read.push(job::Transcribable { id, vocals });
-                        }
+                    match (settled, then_read) {
+                        (false, Some(vocals)) => to_read.push(job::Transcribable { id, vocals }),
+                        // Asked for on its own and nothing came of it. Counted
+                        // rather than said one at a time, because a batch of
+                        // white labels is a batch of misses.
+                        (false, None) => unanswered += 1,
+                        (true, _) => {}
                     }
                 }
                 Update::Transcribed { id, lyrics, confidence, language } => {
@@ -2793,6 +2851,15 @@ impl App {
         }
         if !to_cue.is_empty() {
             changed |= self.auto_cue_tracks(&to_cue, false);
+        }
+        if unanswered > 0 {
+            self.note(
+                format!(
+                    "no lyrics server had words for {}",
+                    crate::library::plural(unanswered, "track")
+                ),
+                theme::dim(),
+            );
         }
         if paced {
             if let Err(e) = self.config.save(&self.config_path) {
@@ -5261,6 +5328,32 @@ impl App {
             ) {
                 self.pending.push(Pending::AutoCue(track.id));
             }
+            // Its own entry rather than only a step inside the one above,
+            // because the two cost different things and somebody who knows
+            // which record this is should be able to ask for the cheap one.
+            // Seconds and one request, against minutes of separation and a
+            // recogniser pass.
+            let named = !track.artist.trim().is_empty() && !track.title.trim().is_empty();
+            let button =
+                ui.add_enabled(reason.is_none() && named, egui::Button::new("Look up the words"));
+            let asked = match (reason, named) {
+                (Some(why), _) => button.on_disabled_hover_text(why).clicked(),
+                (None, false) => button
+                    .on_disabled_hover_text(
+                        "A lyrics server is asked by artist and title, and this has none.",
+                    )
+                    .clicked(),
+                (None, true) => button
+                    .on_hover_text(
+                        "Ask a lyrics server for this track's words, under its artist and \
+                         title. No stem and no recogniser — seconds rather than minutes. \
+                         Words it is sure of are taken; anything less is put to you first.",
+                    )
+                    .clicked(),
+            };
+            if asked {
+                self.pending.push(Pending::LookUpWords(track.id));
+            }
         });
 
         // The waveform is only read when it is looked at: a collection of
@@ -6227,6 +6320,16 @@ impl App {
                 }
                 Pending::SaveWords(id) => {
                     touched |= self.save_edited_words(id);
+                }
+                // The selection where there is one, the way every other row
+                // action behaves: a menu opened on one of six marked rows acts
+                // on the six.
+                Pending::LookUpWords(id) => {
+                    let wanted = match self.marked.len() > 1 && self.marked.contains(&id) {
+                        true => self.marked.iter().copied().collect(),
+                        false => vec![id],
+                    };
+                    self.look_up_words(&wanted);
                 }
                 Pending::EditWords(id) => {
                     let text = self
@@ -12184,6 +12287,90 @@ mod tests {
                     // against this pressing, and there is nothing to place
                     // them against until the stem exists.
                     assert_eq!(plan.rendering, [id]);
+                }
+
+                #[test]
+                fn asking_for_a_lookup_on_its_own_owes_the_recogniser_nothing() {
+                    // The context-menu entry. It is the cheap half of cueing
+                    // from the words on its own — one request, seconds — so
+                    // a miss ends there rather than quietly starting the
+                    // separation and the recogniser pass somebody chose not to
+                    // ask for.
+                    let (app, id) = read_already("menu-lookup");
+                    let asking = app.worth_asking(&[id]);
+
+                    assert_eq!(asking.len(), 1);
+                    assert_eq!(asking[0].id, id);
+                    assert_eq!(asking[0].artist, "Falco");
+                    assert!(
+                        asking[0].then_read.is_none(),
+                        "a lookup asked for on its own would have started a recogniser pass"
+                    );
+                }
+
+                #[test]
+                fn a_lookup_inside_the_cueing_pass_owes_the_stem_it_stood_in_for() {
+                    let (mut app, id) = read_already("pass-lookup");
+                    let plan = app.words_plan(&[id], true);
+
+                    assert_eq!(plan.asking.len(), 1);
+                    assert!(
+                        plan.asking[0].then_read.is_some(),
+                        "the held-back recogniser pass was not carried with the request, so a \
+                         track the server could not answer for would never be read at all"
+                    );
+                }
+
+                #[test]
+                fn asking_about_an_acapella_asks_about_the_record_it_came_from() {
+                    let (app, id) = read_already("companion");
+                    let acapella = crate::library::companion_id(id, crate::library::Role::Vocals);
+
+                    let asking = app.worth_asking(&[acapella, id]);
+                    assert_eq!(
+                        asking.iter().map(|ask| ask.id).collect::<Vec<_>>(),
+                        [id],
+                        "a stem row has no words of its own, and asking twice is two requests"
+                    );
+                }
+
+                #[test]
+                fn a_track_with_no_name_has_nothing_to_ask_a_lyrics_server_under() {
+                    let (mut app, id) = read_already("nameless-lookup");
+                    app.library.get_mut(id).unwrap().artist.clear();
+                    app.rebuild();
+
+                    assert!(app.worth_asking(&[id]).is_empty());
+                }
+
+                #[test]
+                fn the_row_menu_offers_a_lookup_of_its_own() {
+                    let (mut app, id) = read_already("menu");
+                    app.selected = Some(id);
+                    // A picture already in hand. Without one the panel starts a
+                    // job to measure one on its first frame, and every action
+                    // on the strip is disabled while anything is running — so
+                    // the test would be photographing a panel mid-draw rather
+                    // than the one somebody clicks.
+                    app.waveform = Some((id, vec![0; 300]));
+
+                    // The prep panel, which is where the per-track actions
+                    // live, and tall because they sit under the waveform.
+                    let mut harness = Harness::builder()
+                        .with_size(egui::vec2(900.0, 1600.0))
+                        .build_ui_state(|ui, app: &mut App| app.prep(ui), app);
+                    harness.run();
+                    harness.get_by_label("Look up the words").click();
+                    harness.run();
+
+                    assert!(
+                        harness
+                            .state()
+                            .pending
+                            .iter()
+                            .any(|want| matches!(want, Pending::LookUpWords(_))),
+                        "the entry did not ask for a lookup"
+                    );
                 }
 
                 #[test]
