@@ -5177,8 +5177,14 @@ impl App {
         // borrows the cached picture out of the window's own state, and that
         // borrow has to be finished with before the panel changes anything.
         let shown = wave::show(ui, &waveform);
-        let strip =
-            wave::phrase_strip(ui, &track.phrases, track.duration_secs, &beat_ms, shown.zoom);
+        let strip = wave::phrase_strip(
+            ui,
+            &track.phrases,
+            track.duration_secs,
+            &beat_ms,
+            shown.zoom,
+            bands,
+        );
         let zoom = strip.zoom.unwrap_or(shown.zoom);
         if let Some(edit) = strip.edit {
             self.pending.push(Pending::EditPhrase { id: track.id, edit });
