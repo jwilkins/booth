@@ -175,6 +175,50 @@ pub fn set_downbeat(track: &mut Track, at_ms: u32) -> bool {
     true
 }
 
+/// Set the tempo to exactly `bpm`, keeping the first beat where it is.
+///
+/// What the typed field and the two tenth-of-a-BPM buttons do. A tempo a DJ
+/// has from the record sleeve, from another program, or from counting it
+/// themselves beats one this program measured, and a tenth of a BPM is the
+/// unit a long mix drifts by — ten minutes at 128.1 against 128.0 is five
+/// beats apart by the end.
+///
+/// On a grid that bends, this stretches the whole shape about its first beat
+/// rather than straightening it: the bends are a measurement of how the record
+/// actually moves, and throwing them away to honour a round number would lose
+/// the thing the list of times is kept for. So the ratio between the beats is
+/// held and the span between them scales.
+pub fn set_bpm(track: &mut Track, bpm: f64) -> bool {
+    if !track.has_grid || !bpm.is_finite() || !(LEAST_BPM..=MOST_BPM).contains(&bpm) {
+        return false;
+    }
+    if track.bpm <= 0.0 || (track.bpm - bpm).abs() < f64::EPSILON {
+        return false;
+    }
+    let factor = track.bpm / bpm;
+    track.bpm = bpm;
+    if !track.beat_ms.is_empty() {
+        let first = track.beat_ms[0] as f64;
+        for beat in &mut track.beat_ms {
+            *beat = (first + (*beat as f64 - first) * factor).round().max(0.0) as u32;
+        }
+    }
+    track.beats = count(track);
+    true
+}
+
+/// Whether this track's tempo moves.
+///
+/// The question a DJ asks before trusting a loop to stay in time across eight
+/// bars, and the one the collection answers by what it chose to keep: a grid a
+/// tempo and a downbeat could describe is not kept beat by beat, so a track
+/// holding its own beat times is one whose tempo a single number could not
+/// describe. The window rebuilds the even case from those two numbers when it
+/// draws, which is the other half of the same bargain.
+pub fn is_dynamic(track: &Track) -> bool {
+    !track.beat_ms.is_empty()
+}
+
 /// Where the grid's first beat falls, however the grid is kept.
 fn first_beat(track: &Track) -> u32 {
     track
@@ -327,6 +371,75 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_tempo_is_taken_exactly() {
+        // The case it is for: a DJ with the tempo from the sleeve, or from
+        // another program, or counted by hand, against one this measured.
+        let mut track = gridded();
+        assert!(set_bpm(&mut track, 127.33));
+        assert_eq!(track.bpm, 127.33);
+    }
+
+    #[test]
+    fn a_tempo_outside_the_rails_or_unchanged_is_refused() {
+        // The same rails doubling and halving run into, for the same reason:
+        // a grid of lines a millisecond apart is not what anybody typed on
+        // purpose. And an unchanged tempo is not an edit — the window reads
+        // the answer to tell a correction from a press that did nothing.
+        let mut track = gridded();
+        assert!(!set_bpm(&mut track, 0.0));
+        assert!(!set_bpm(&mut track, f64::NAN));
+        assert!(!set_bpm(&mut track, MOST_BPM + 1.0));
+        assert!(!set_bpm(&mut track, LEAST_BPM - 1.0));
+        assert!(!set_bpm(&mut track, 128.0), "that is the tempo it already had");
+        assert_eq!(track.bpm, 128.0, "a refused tempo left the grid alone");
+    }
+
+    #[test]
+    fn a_tenth_up_and_a_tenth_back_is_where_it_started() {
+        // Ten minutes at 128.1 against 128.0 ends five beats apart, so a tenth
+        // is the unit worth a button — and a button worth pressing is one that
+        // can be unpressed.
+        let mut track = gridded();
+        assert!(set_bpm(&mut track, 128.1));
+        assert!(set_bpm(&mut track, 128.0));
+        assert_eq!(track.bpm, 128.0);
+    }
+
+    #[test]
+    fn a_tempo_set_on_a_bent_grid_stretches_it_rather_than_straightening_it() {
+        // The bends are a measurement of how the record actually moves.
+        // Honouring a round number by throwing them away would lose the thing
+        // the list of times is kept for, so the shape is held and the span
+        // between the beats scales.
+        let mut track = bent();
+        let was = track.beat_ms.clone();
+        let gaps = |beats: &[u32]| -> Vec<i64> {
+            beats.windows(2).map(|pair| pair[1] as i64 - pair[0] as i64).collect()
+        };
+        let before = gaps(&was);
+
+        assert!(set_bpm(&mut track, 120.0 * 2.0));
+        assert_eq!(track.beat_ms[0], was[0], "the first beat is the one it turns about");
+        assert_eq!(track.beat_ms.len(), was.len(), "no beat was added or dropped");
+
+        // Twice the tempo, so every gap is half what it was — and still
+        // shrinking beat by beat the way it was measured to.
+        let after = gaps(&track.beat_ms);
+        for (was, now) in before.iter().zip(&after) {
+            assert!((was / 2 - now).abs() <= 1, "a gap of {was} became {now}");
+        }
+        assert!(after.windows(2).all(|pair| pair[1] <= pair[0]), "the shape was straightened");
+    }
+
+    #[test]
+    fn a_track_that_keeps_its_own_beats_is_the_dynamic_one() {
+        // How the collection already records the answer: a grid a tempo and a
+        // downbeat could describe is not kept beat by beat.
+        assert!(!is_dynamic(&gridded()));
+        assert!(is_dynamic(&bent()));
+    }
+
+    #[test]
     fn a_track_with_no_grid_refuses_every_one_of_them() {
         // Nothing to correct, and inventing a grid from a tempo of zero would
         // be worse than the buttons doing nothing.
@@ -337,6 +450,7 @@ mod tests {
         assert!(!nudge(&mut track, NUDGE_MS));
         assert!(!move_to(&mut track, 1_000));
         assert!(!set_downbeat(&mut track, 1_000));
+        assert!(!set_bpm(&mut track, 128.0));
     }
 
     /// A grid that bends: beats that creep, kept one by one.

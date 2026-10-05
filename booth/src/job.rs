@@ -29,6 +29,15 @@ pub enum Job {
     Import { paths: Vec<PathBuf>, recursive: bool },
     /// Listen to each track: grid, key, phrases, cues, loudness, waveform.
     Analyze(Vec<(u32, PathBuf)>),
+    /// Listen again, and keep only the tempo and the beats.
+    ///
+    /// The same measurement as [`Job::Analyze`] — one decode either way, and
+    /// the decode is the slow part — reported through an update that carries
+    /// nothing else. The point is what it cannot do: a DJ asking for the grid
+    /// to be measured again has not asked for their cues, their phrase names
+    /// or their hand-corrected key to be written over, and an update with no
+    /// field for them cannot do it by accident.
+    Regrid(Vec<(u32, PathBuf)>),
     /// Take a copy of tracks whose files are outside the library folder.
     Adopt { tracks: Vec<Adoptable>, config: Box<Config> },
     /// Write a track's artist, title and album back into the file's own tags.
@@ -130,6 +139,7 @@ impl Job {
             Job::Hash(_) => "checking for copies",
             Job::Verify { .. } => "checking the collection",
             Job::Analyze(_) => "analysing",
+            Job::Regrid(_) => "measuring the grid",
             Job::Separate { .. } => "stems",
             Job::Transcribe { .. } => "reading the words",
             Job::LookUpWords { .. } => "looking up the words",
@@ -258,6 +268,17 @@ pub enum Update {
     Imported(Box<Track>),
     /// One track, listened to.
     Analyzed(Box<Analyzed>),
+    /// A track's tempo and beats, measured again and nothing else.
+    Regridded {
+        id: u32,
+        bpm: f64,
+        grid_confidence: f32,
+        has_grid: bool,
+        beats: usize,
+        /// Empty unless the grid genuinely bends, the same way an analysis
+        /// reports it.
+        beat_ms: Vec<u32>,
+    },
     /// A track was decoded and is ready to play.
     Decoded {
         id: u32,
@@ -968,6 +989,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
     match job {
         Job::Import { paths, recursive } => import(&paths, recursive, reporter),
         Job::Analyze(tracks) => analyze_all(&tracks, reporter),
+        Job::Regrid(tracks) => regrid_all(&tracks, reporter),
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
         Job::Convert(tracks) => convert(&tracks, reporter),
         Job::Rekordbox { path, key } => {
@@ -1767,6 +1789,46 @@ fn transcribe(
             }
         }
         batch.finished_one();
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
+/// Measure each track's grid again, and report only that.
+///
+/// Serially rather than in parallel like [`analyze_all`]: this is reached by a
+/// press on one track that is being looked at, not by adding a crate, so there
+/// is nothing to spread across cores and a decode per core of nothing is worse
+/// than a decode of one.
+fn regrid_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<()> {
+    let total = tracks.len();
+    for (done, (id, path)) in tracks.iter().enumerate() {
+        if reporter.cancelled() {
+            break;
+        }
+        match analyze_file(*id, path) {
+            Ok(measured) => {
+                crate::debug!(
+                    "re-measured #{id}: {:.2} BPM, {} beats",
+                    measured.bpm,
+                    measured.beats
+                );
+                let _ = reporter.tx.send(Update::Regridded {
+                    id: *id,
+                    bpm: measured.bpm,
+                    grid_confidence: measured.grid_confidence,
+                    has_grid: measured.has_grid,
+                    beats: measured.beats,
+                    beat_ms: measured.beat_ms,
+                });
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
+            }
+        }
+        let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
         (reporter.wake)();
     }
     Ok(())

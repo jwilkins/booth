@@ -375,7 +375,9 @@ fn zoom_floor(columns: usize, pixels: f32) -> f32 {
 
 /// What the panel needs to draw one track.
 pub struct Waveform<'a> {
-    /// 1,200 columns of three bytes. Empty when the track has not been analysed.
+    /// Three bytes a column, at the player's own 150 columns a second — so a
+    /// five-minute record is forty-five thousand of them, not a fixed number
+    /// however long it is. Empty when the track has not been analysed.
     pub bands: &'a [u8],
     pub duration_secs: f64,
     pub beat_ms: &'a [u32],
@@ -387,6 +389,14 @@ pub struct Waveform<'a> {
     pub stems: Option<&'a StemEnvelopes>,
     /// Which part of the track is showing.
     pub zoom: Zoom,
+    /// Whether the grid is being corrected by hand.
+    ///
+    /// The marks are then drawn the full height of the panel rather than as
+    /// ticks along the bottom. A nine-point tick is enough to read a grid
+    /// against a waveform you are not arguing with, and not enough to line one
+    /// up: to see whether a line is on a kick or four milliseconds ahead of it,
+    /// the line has to cross the kick.
+    pub aligning: bool,
 }
 
 impl Waveform<'_> {
@@ -779,8 +789,8 @@ fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
     // bar line and only as many beats as will read as separate marks. Counted
     // against the beats that are *showing*: zoomed in, a handful of bars have
     // the whole panel to themselves and every beat has room.
-    let showing = wave.beat_ms.len() as f32 * wave.zoom.span.max(f32::EPSILON);
-    let every_beat = rect.width() / showing.max(1.0) >= 3.0;
+    let (every_beat, apart) = spacing(wave.beat_ms.len(), wave.zoom, rect.width());
+    let crossing = wave.aligning && apart >= CROSSING_APART;
 
     for (index, time) in wave.beat_ms.iter().enumerate() {
         let downbeat = index % BEATS_PER_BAR == 0;
@@ -792,14 +802,63 @@ fn beat_ticks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
             continue;
         }
         let x = rect.left() + rect.width() * across;
-        let (height, color) = match downbeat {
-            true => (9.0, DOWNBEAT.gamma_multiply(0.9)),
-            false => (4.0, OFFBEAT.gamma_multiply(0.45)),
-        };
+        let (height, color) = mark(downbeat, crossing, rect.height());
         painter.line_segment(
             [egui::pos2(x, rect.bottom() - height), egui::pos2(x, rect.bottom())],
             Stroke::new(1.0_f32, color),
         );
+    }
+}
+
+/// Which marks are drawn, and how far apart they land, in points.
+///
+/// At a normal window width there are more beats than pixels, so every bar line
+/// is drawn and only as many beats as will read as separate marks. Counted
+/// against the beats that are *showing*: zoomed in, a handful of bars have the
+/// whole panel to themselves and every beat has room.
+///
+/// The spacing is what decides whether the marks may cross the picture. Zoomed
+/// out, a bar line every nine points drawn the height of the panel is not a
+/// grid over a waveform, it is a red curtain with a waveform somewhere behind
+/// it — which is what this looked like the first time it was pointed at a real
+/// record rather than at a test that only checked the heights.
+fn spacing(beats: usize, zoom: Zoom, width: f32) -> (bool, f32) {
+    let per_beat = width / (beats as f32 * zoom.span.max(f32::EPSILON)).max(1.0);
+    let every_beat = per_beat >= 3.0;
+    let apart = match every_beat {
+        true => per_beat,
+        false => per_beat * BEATS_PER_BAR as f32,
+    };
+    (every_beat, apart)
+}
+
+/// How far apart the drawn marks have to be before they may cross the picture,
+/// in points.
+///
+/// Ten. Below this they stop reading as separate lines and start reading as a
+/// fill, and a fill over the waveform hides the thing it is there to be lined
+/// up against.
+const CROSSING_APART: f32 = 10.0;
+
+/// How tall a grid mark is drawn, and in what colour.
+///
+/// Ticks along the bottom normally: tall and red on the downbeat, short and
+/// pale between. A nine-point tick is enough to read a grid against a waveform
+/// you are not arguing with, and not enough to line one up — to see whether a
+/// line is on the kick or four milliseconds ahead of it, the line has to cross
+/// the kick. So while the grid is being corrected, and the view is close
+/// enough that the marks are lines rather than a fill, they run the full
+/// height.
+///
+/// Dimmer for it, which is not decoration: a full-height line at the
+/// brightness of a tick is a line drawn *over* the waveform rather than
+/// against it, and the kick being compared with it disappears underneath.
+fn mark(downbeat: bool, crossing: bool, height: f32) -> (f32, Color32) {
+    match (downbeat, crossing) {
+        (true, true) => (height, DOWNBEAT.gamma_multiply(0.62)),
+        (false, true) => (height, OFFBEAT.gamma_multiply(0.3)),
+        (true, false) => (9.0, DOWNBEAT.gamma_multiply(0.9)),
+        (false, false) => (4.0, OFFBEAT.gamma_multiply(0.45)),
     }
 }
 
@@ -1429,6 +1488,7 @@ mod tests {
             paint: Paint::Bands,
             stems: None,
             zoom: Zoom::default(),
+            aligning: false,
         }
     }
 
@@ -1521,6 +1581,80 @@ mod tests {
     }
 
     #[test]
+    fn the_marks_stay_ticks_at_a_view_too_wide_for_them_to_be_lines() {
+        // What a screenshot caught and the height tests could not: four
+        // minutes at 128 BPM is about 128 bars, and across a panel that is a
+        // bar line every nine points. Full height, that is a red curtain with
+        // a waveform somewhere behind it.
+        let beats = 512;
+        let (_, whole_track) = spacing(beats, Zoom::default(), 1_200.0);
+        assert!(
+            whole_track < CROSSING_APART,
+            "a whole-track view has {whole_track} points between marks"
+        );
+
+        // And zoomed in to where the tools are actually used, they have room.
+        let (every_beat, close) = spacing(beats, Zoom { start: 0.2, span: 0.06 }, 1_200.0);
+        assert!(every_beat, "every beat should be drawn this far in");
+        assert!(close >= CROSSING_APART, "a close view has only {close} points between marks");
+    }
+
+    #[test]
+    fn the_view_zooms_in_far_enough_to_line_a_grid_up_by_eye() {
+        // Four minutes at 128, and the picture the player's own resolution
+        // gives it: 150 columns a second, so 36,000 of them. The closest the
+        // view will go is three seconds of that, which is about 140 points to
+        // a beat — enough to see whether a line sits on a kick.
+        //
+        // Worth a test because it was nearly changed on the strength of a doc
+        // comment that said the picture was 1,200 columns whatever the length.
+        // It is not, and the view was never as shallow as that arithmetic made
+        // it look.
+        let columns = 240 * 150;
+        let floor = zoom_floor(columns, 900.0);
+        let (every_beat, apart) = spacing(512, Zoom { span: floor, start: 0.0 }, 900.0);
+        assert!(every_beat, "every beat is drawn at the closest view");
+        assert!(
+            apart >= CROSSING_APART,
+            "at the closest the view will go, the marks are {apart} points apart"
+        );
+    }
+
+    #[test]
+    fn the_grid_marks_cross_the_waveform_while_it_is_being_lined_up() {
+        // A tick along the bottom is enough to read a grid against a picture
+        // nobody is arguing with. Deciding whether a line sits on the kick or
+        // four milliseconds ahead of it needs the line to cross the kick.
+        let tall = 100.0;
+        let (ticked, _) = mark(true, false, tall);
+        let (crossing, _) = mark(true, true, tall);
+        assert!(ticked < tall, "a resting downbeat mark should be a tick: {ticked}");
+        assert_eq!(crossing, tall, "an aligning downbeat mark should cross the picture");
+
+        let (offbeat_tick, _) = mark(false, false, tall);
+        let (offbeat_crossing, _) = mark(false, true, tall);
+        assert!(offbeat_tick < ticked, "the beats between are the shorter marks");
+        assert_eq!(offbeat_crossing, tall, "they cross it too");
+    }
+
+    #[test]
+    fn a_mark_that_crosses_the_picture_is_drawn_dimmer_than_a_tick() {
+        // Otherwise it is a line drawn over the waveform rather than against
+        // it, and the kick being lined up disappears underneath.
+        let (_, tick) = mark(true, false, 100.0);
+        let (_, crossing) = mark(true, true, 100.0);
+        assert!(
+            crossing.a() < tick.a(),
+            "a full-height mark at {} is no dimmer than a tick at {}",
+            crossing.a(),
+            tick.a()
+        );
+        // And the downbeat is still the one that reads first.
+        let (_, offbeat) = mark(false, true, 100.0);
+        assert!(crossing.a() > offbeat.a(), "the bar line lost its emphasis");
+    }
+
+    #[test]
     fn a_panel_with_nothing_to_draw_reports_the_view_it_was_given() {
         // The caller stores whatever comes back, so a panel that says "fitted"
         // on a frame it drew nothing has thrown somebody's view away. This is
@@ -1538,6 +1672,7 @@ mod tests {
                 paint: Default::default(),
                 stems: None,
                 zoom: close,
+                aligning: false,
             };
             reported.set(show(ui, &nothing).zoom);
         });
@@ -1989,6 +2124,7 @@ mod tests {
                 paint: Paint::Bands,
                 stems: None,
                 zoom: Zoom { start: 0.25, span: 0.25 },
+                aligning: false,
             }
         }
 
