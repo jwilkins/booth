@@ -10406,9 +10406,17 @@ impl App {
         };
         crate::info!("{said}");
         self.note(said, theme::text());
-        // The picture is drawn from the grid, so it is no longer a picture of
-        // this track.
-        self.waveform = None;
+        // The picture is kept. It is three bands of loudness measured from the
+        // audio — `export::waveform::analyze` is handed samples and nothing
+        // else — so a grid correction cannot have made it wrong, and the beat
+        // ticks and bar lines drawn over it come from `beat_times` every
+        // frame, which is already reading the grid this just changed.
+        //
+        // Dropping it cost a re-decode of the whole file on every press, and
+        // the frame in between had no picture to draw, which is what reset the
+        // view: a panel with no bands reports a fitted zoom. Somebody
+        // correcting a grid is zoomed in on the kicks they are correcting it
+        // against, which is the one view it is least use to throw away.
         self.prep_changed(id);
         true
     }
@@ -12843,6 +12851,48 @@ mod tests {
                     harness.state_mut().apply_pending(&ctx);
 
                     assert_eq!(harness.state().library.get(id).unwrap().bpm, 140.0);
+                }
+
+                #[test]
+                fn a_grid_fix_leaves_the_view_where_it_was() {
+                    // Somebody correcting a grid is zoomed in on the kicks
+                    // they are correcting it against, and the fix used to drop
+                    // the picture — so the next frame had no bands, the panel
+                    // reported a fitted view for a panel it had not drawn, and
+                    // the view they were working in went with it.
+                    let (mut app, id) = on_the_grid("grid-keeps-zoom");
+                    app.library.get_mut(id).unwrap().bpm = 70.0;
+                    app.editing_grid = true;
+                    // A full-width picture, because the view cannot be zoomed
+                    // in past two pixels a column and a coarse one pins it to
+                    // the whole track whatever is asked for. No playhead, so
+                    // nothing pulls the view along behind it either.
+                    app.waveform = Some((id, vec![0; 3 * 1_200]));
+                    app.playhead_ms = None;
+                    app.rebuild();
+                    // After the rebuild: a listing whose selection has gone
+                    // fits the view on purpose, and that is not what is under
+                    // test here.
+                    let close = wave::Zoom { start: 0.25, span: 0.5 };
+                    app.zoom = close;
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    assert_eq!(harness.state().zoom, close, "the view did not survive a frame");
+
+                    harness.get_by_label("×2").click();
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+                    // The frame after the fix is the one that used to reset it.
+                    harness.run();
+
+                    assert_eq!(harness.state().library.get(id).unwrap().bpm, 140.0);
+                    assert_eq!(harness.state().zoom, close, "the view moved");
+                    assert!(
+                        harness.state().waveform.is_some(),
+                        "the picture is measured from the audio, so a grid fix cannot stale it"
+                    );
                 }
 
                 #[test]

@@ -467,7 +467,14 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
             theme::mono(theme::SMALL),
             theme::dim(),
         );
-        return Shown { touched: None, zoom: Zoom::default() };
+        // The view it was handed back, not a fitted one. A panel with nothing
+        // to draw has not been zoomed out — it has not been asked about the
+        // zoom at all — and the caller stores whatever comes back here, so
+        // saying `default` throws somebody's view away for every frame the
+        // picture happens to be missing. That is what reset the zoom on every
+        // press of a grid button: the fix dropped the picture, this frame
+        // reported a fitted view, and the next one drew it.
+        return Shown { touched: None, zoom: wave.zoom };
     }
 
     // The wheel is read before anything is drawn, so a scroll and the frame it
@@ -1511,6 +1518,32 @@ mod tests {
         act: impl Fn(&mut egui_kittest::Harness<'_>, Rect),
     ) -> Option<PhraseEdit> {
         worked_at(Zoom::default(), phrases, act).edit
+    }
+
+    #[test]
+    fn a_panel_with_nothing_to_draw_reports_the_view_it_was_given() {
+        // The caller stores whatever comes back, so a panel that says "fitted"
+        // on a frame it drew nothing has thrown somebody's view away. This is
+        // why a grid fix used to reset the zoom: it dropped the picture, and
+        // the frame in between answered for a panel it had not drawn.
+        let close = Zoom { start: 0.25, span: 0.05 };
+        let reported = std::cell::Cell::new(Zoom::default());
+        let mut harness = Harness::new_ui(|ui| {
+            let nothing = Waveform {
+                bands: &[],
+                duration_secs: 90.0,
+                beat_ms: &[],
+                cues: &[],
+                position: None,
+                paint: Default::default(),
+                stems: None,
+                zoom: close,
+            };
+            reported.set(show(ui, &nothing).zoom);
+        });
+        harness.run();
+
+        assert_eq!(reported.get(), close);
     }
 
     #[test]
