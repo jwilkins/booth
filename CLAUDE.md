@@ -1,10 +1,22 @@
 # Working on Booth
 
-## Finishing a piece of work
+## A branch per set of work
 
-**Always open a pull request when a task is done.** Not when asked to — every
-time. A branch pushed without one is work nobody has been told about, and the
-default is to propose it rather than to wait to be asked.
+**Start a new branch for each set of work, and open the pull request when that
+set is complete.** Not a branch per session and not a pull request per commit:
+one branch for the thing being asked for, however many commits that takes, and
+one pull request when it is finished.
+
+Why it is per set rather than per commit: a shared long-lived branch means
+every push lands in whatever pull request happens to be open, and a merge that
+arrives mid-set splits the work across two of them. That happened three times
+in one morning — grid tools landing in a pull request about memory cues, a
+start-cue fix missing the merge it was written for — and each time the fix was
+a new pull request for commits that should never have been separated.
+
+**Always open the pull request once the set is done.** Not when asked to. A
+branch pushed without one is work nobody has been told about, and the default
+is to propose it rather than to wait to be asked.
 
 Merging is still the owner's call unless they say otherwise.
 
