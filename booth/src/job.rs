@@ -1457,6 +1457,23 @@ impl Reporter for Batch<'_> {
     }
 }
 
+/// The engine's stem settings as the window asks for them.
+///
+/// Overwrites what is already there, which is what a window asking for this
+/// means. The engine refuses by default and tells a command-line caller to
+/// pass `--force`, which is right for a script that might be about to spend an
+/// afternoon re-making files somebody wanted kept — but here the button says
+/// "Render stems again", and the track it is pressed on is one the window has
+/// already decided needs them. Refusing at that point is a button that does
+/// nothing and an error naming a flag there is nowhere to pass.
+fn stems_args(backend: Backend, quality: booth_cli::cli::StemQuality) -> StemsArgs {
+    let mut args = StemsArgs::defaults();
+    args.backend = backend;
+    args.quality = quality;
+    args.force = true;
+    args
+}
+
 fn separate(
     tracks: &[(u32, PathBuf)],
     stems_in: &crate::config::StemsLocation,
@@ -1464,9 +1481,7 @@ fn separate(
     quality: booth_cli::cli::StemQuality,
     reporter: &Channel,
 ) -> anyhow::Result<()> {
-    let mut args = StemsArgs::defaults();
-    args.backend = backend;
-    args.quality = quality;
+    let mut args = stems_args(backend, quality);
     crate::info!(
         "separating with {} shifts={}, writing {}{}",
         args.model(),
@@ -1762,6 +1777,24 @@ mod tests {
     use super::*;
     use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
     use booth_cli::audio::Audio;
+
+    #[test]
+    fn rendering_stems_again_overwrites_the_kit_that_is_already_there() {
+        // The button says "Render stems again". Before this it ran, found the
+        // files it was about to write, and failed with "already exists; pass
+        // --force to overwrite" — a flag with nowhere to pass it from a
+        // window, so re-rendering a kit was not possible at all.
+        let args = stems_args(Backend::Demucs, booth_cli::cli::StemQuality::High);
+        assert!(args.force, "a re-render would refuse itself");
+    }
+
+    #[test]
+    fn the_command_line_keeps_refusing_by_default() {
+        // The guard is still right where it is: a script told to separate a
+        // directory should not quietly spend an afternoon replacing stems
+        // somebody wanted kept.
+        assert!(!StemsArgs::defaults().force);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("booth-job-{name}-{}", std::process::id()));
