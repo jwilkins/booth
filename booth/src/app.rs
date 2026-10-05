@@ -4845,6 +4845,35 @@ impl App {
             {
                 self.auto_cue_showing(again);
             }
+            // The cheap half of the button before it, over a whole crate. A
+            // lookup is seconds and one request where reading the words is a
+            // separation and a recogniser pass each, so a box that has never
+            // been prepared is worth asking about before any of those minutes
+            // are spent — and what it finds is better than what a
+            // recogniser would have guessed at the same vocal.
+            //
+            // No "again": a lookup is cheap enough that asking twice costs a
+            // request, and there is nothing it would skip.
+            let named = |track: &Track| {
+                !track.artist.trim().is_empty() && !track.title.trim().is_empty()
+            };
+            let askable = self.acting_on(named).len();
+            if ui
+                .add_enabled(idle && askable > 0, egui::Button::new(format!("Lyrics {askable}")))
+                .on_hover_text(
+                    "Ask a lyrics server for the words of these, under their artist and \
+                     title. No stems and no recogniser — what comes back is taken where \
+                     it is certain and put to you where it is not.",
+                )
+                .on_disabled_hover_text(
+                    "A lyrics server is asked by artist and title, and nothing showing has \
+                     both",
+                )
+                .clicked()
+            {
+                let wanted = self.acting_on(named);
+                self.look_up_words(&wanted);
+            }
             // Reads rather than changes anything, so it sits at the end of the
             // strip after the four that do. Shift means the thorough version
             // here rather than "again", because a check is a read: it is
@@ -13515,6 +13544,46 @@ mod tests {
             // And on to a different track, where it means nothing.
             app.select(ids[1]);
             assert_eq!(app.playhead_ms, None, "a different record kept the old playhead");
+        }
+
+        #[test]
+        fn the_strip_offers_a_lyrics_lookup_over_everything_showing() {
+            // The cheap half of "Words" on a whole crate: seconds and one
+            // request a track, against a separation and a recogniser pass
+            // each. A box that has never been prepared is worth asking about
+            // before any of those minutes are spent.
+            let mut app = listing("lyrics-batch", 3);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                let track = app.library.get_mut(id).unwrap();
+                track.artist = "Falco".into();
+                track.title = "Der Kommissar".into();
+            }
+            app.rebuild();
+
+            // Wide, because the strip is the fifth button along and a
+            // default-sized harness wraps it off the end.
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(1400.0, 200.0))
+                .build_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+            harness.get_by_label("Lyrics 3");
+        }
+
+        #[test]
+        fn a_crate_with_no_names_is_not_offered_a_lookup() {
+            // Most of a box of white labels. A lyrics database is asked by
+            // artist and title, so a button that offered to ask about tracks
+            // with neither would be a button that cannot work.
+            let mut app = listing("lyrics-nameless", 3);
+            for id in app.library.tracks.iter().map(|t| t.id).collect::<Vec<_>>() {
+                app.library.get_mut(id).unwrap().artist.clear();
+            }
+            app.rebuild();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(1400.0, 200.0))
+                .build_ui_state(|ui, app: &mut App| app.actions(ui), app);
+            harness.run();
+            harness.get_by_label("Lyrics 0");
         }
 
         #[test]
