@@ -16,6 +16,7 @@ pub mod app;
 pub mod backup;
 pub mod clock;
 pub mod config;
+pub mod grid;
 pub mod guess;
 pub mod history;
 pub mod identify;

@@ -607,6 +607,35 @@ they are stored in, and **no drift at all** over five minutes, where there used
 to be 28 to 36 ms. A record that speeds up from 124 to 127 is still written
 speeding up, beat for beat.
 
+### Correcting a grid by hand
+
+A tracker is right about most records and wrong about a few, and the few are
+not random. It reads a half-time record at double, a drum-and-bass record at
+half, and it puts the one on the snare of anything with a strong backbeat. None
+of that is fixed by analysing again — the same audio gives the same answer —
+and all of it is a press or two for somebody looking at the waveform.
+
+**fix**, beside the grid reading, opens the controls:
+
+| | |
+|---|---|
+| `÷2` `×2` | Halve or double the tempo. 174 read as 348, or 140 read as 70. |
+| `«` `‹` `›` `»` | Slide the whole grid earlier or later — four milliseconds a nudge, forty a shove. |
+| **Beat here** | Slide the grid until a beat lands on the playhead, keeping the tempo and which beat of the bar it is. |
+| **One here** | Call the beat nearest the playhead a downbeat. Moves no beat at all. |
+
+The last two are two different corrections and they are deliberately separate.
+Sliding the grid is for lines that are not on the kicks; setting the one is for
+lines that are, under bars that start in the wrong place. Doing both at once is
+how a grid that was nearly right comes out a beat off, so the buttons that need
+a position are disabled until there is a playhead to act on rather than
+guessing at the middle of the track.
+
+**The cues are not moved.** A grid correction is a statement about the bar
+lines, not about the moments: a fix for a tempo that quietly threw away the cue
+set would be a fix nobody could afford to press. Re-cue from the words or the
+arrangement afterwards if the moments moved too.
+
 ### What the collection keeps of a grid
 
 An even grid is a tempo and a downbeat, and that is all the collection stores
