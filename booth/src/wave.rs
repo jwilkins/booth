@@ -374,6 +374,11 @@ fn zoom_floor(columns: usize, pixels: f32) -> f32 {
 }
 
 /// What the panel needs to draw one track.
+///
+/// `Copy` so that [`show`] can hand everything below it a view corrected for
+/// the wheel and the playhead rather than the one it was called with. See the
+/// note there.
+#[derive(Clone, Copy)]
 pub struct Waveform<'a> {
     /// Three bytes a column, at the player's own 150 columns a second — so a
     /// five-minute record is forty-five thousand of them, not a fixed number
@@ -389,6 +394,8 @@ pub struct Waveform<'a> {
     pub stems: Option<&'a StemEnvelopes>,
     /// Which part of the track is showing.
     pub zoom: Zoom,
+    /// Places somebody has said a beat falls, for a grid to be fitted through.
+    pub marks: &'a [u32],
     /// Whether the grid is being corrected by hand.
     ///
     /// The marks are then drawn the full height of the panel rather than as
@@ -432,6 +439,13 @@ impl Waveform<'_> {
 pub enum Touched {
     /// The playhead was moved here, in milliseconds.
     Scrubbed(u32),
+    /// A beat was marked here, for a grid to be fitted through.
+    ///
+    /// Only while the grid is being corrected, and only on a click held with
+    /// alt: a plain click on the waveform scrubs, and taking that away from
+    /// somebody the moment they open the grid controls would mean the one
+    /// panel behaved differently depending on a setting three rows below it.
+    Marked(u32),
     /// A cue was dragged to here.
     ///
     /// `at` indexes the cues the panel was drawn from, not the cue's letter.
@@ -491,6 +505,20 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
     // scrolled in show the same view — reading it afterwards leaves the picture
     // one frame behind the pointer, which feels like lag rather than like zoom.
     let zoom = wheeled(ui, &response, rect, wave);
+
+    // And everything below is told about it. The waveform was drawn from this
+    // settled view while the grid, the cue flags and the mapping from a click
+    // to a moment were drawn from the view handed in — so on any frame where
+    // the panel corrected the view, all three sat somewhere the music was not.
+    //
+    // Three things correct it: the wheel, the playhead leaving the view, and
+    // the floor pulling back a view closer than the picture has detail for.
+    // Each lasts one frame, because the window stores what comes back and
+    // hands it in next time — which is why this survived: a wheel scroll is a
+    // grid that lags the music while the wheel is turning and catches up when
+    // it stops, and a follow is one misplaced frame. Not permanent, and not
+    // nothing.
+    let wave = &Waveform { zoom, ..*wave };
 
     // The centre line sits slightly above the middle, leaving room under the
     // wave for the beat ticks without them overlapping it.
@@ -576,6 +604,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
     }
 
     beat_ticks(&painter, rect, wave);
+    beat_marks(&painter, rect, wave);
     let held = dragged_cue(ui, &response, rect, wave);
     cue_flags(&painter, rect, wave, held);
 
@@ -617,14 +646,10 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
         None => response,
     };
 
+    let marking = wave.aligning && ui.input(|input| input.modifiers.alt);
     let touched = response.interact_pointer_pos().and_then(|at| {
         let time_ms = time_at(rect, wave, at.x);
-        match held {
-            Some(at) => Some(Touched::Moved { at, time_ms }),
-            // A drag that started on empty space is a scrub, not a cue move.
-            None if response.dragged() || response.clicked() => Some(Touched::Scrubbed(time_ms)),
-            None => None,
-        }
+        what_was_touched(held, marking, response.clicked(), response.dragged(), time_ms)
     });
     Shown { touched, zoom }
 }
@@ -861,6 +886,66 @@ fn mark(downbeat: bool, crossing: bool, height: f32) -> (f32, Color32) {
         (false, false) => (4.0, OFFBEAT.gamma_multiply(0.45)),
     }
 }
+
+/// What a press on the waveform meant.
+///
+/// Pulled out of [`show`] so the table can be read and tested on its own: the
+/// gesture it decides — alt-click to mark a beat — cannot be driven through
+/// the test harness, which resets the held modifiers within the frame it
+/// queues them in, so the frame never sees alt down.
+///
+/// A plain click goes on scrubbing whether or not the grid is being corrected.
+/// Taking that away the moment somebody opens the grid controls would mean one
+/// panel behaving two ways depending on a setting three rows below it.
+fn what_was_touched(
+    held: Option<usize>,
+    marking: bool,
+    clicked: bool,
+    dragged: bool,
+    time_ms: u32,
+) -> Option<Touched> {
+    match held {
+        // A press that took hold of a cue is moving that cue, whatever else
+        // is held down.
+        Some(at) => Some(Touched::Moved { at, time_ms }),
+        None if marking && clicked => Some(Touched::Marked(time_ms)),
+        // A drag that started on empty space is a scrub, not a cue move.
+        None if dragged || clicked => Some(Touched::Scrubbed(time_ms)),
+        None => None,
+    }
+}
+
+/// The places somebody has said a beat falls.
+///
+/// Drawn in a colour nothing else on the panel uses, and the full height
+/// whatever the zoom, because these are not a grid — they are what a grid is
+/// about to be fitted through, and the point of looking at them is to see
+/// whether they landed where they were meant to.
+fn beat_marks(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>) {
+    if wave.marks.is_empty() || wave.duration_secs <= 0.0 {
+        return;
+    }
+    let total_ms = wave.duration_secs * 1000.0;
+    for mark in wave.marks {
+        let across = wave.zoom.across((*mark as f64 / total_ms).clamp(0.0, 1.0));
+        if !(0.0..=1.0).contains(&across) {
+            continue;
+        }
+        let x = rect.left() + rect.width() * across;
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            Stroke::new(1.0_f32, MARKED),
+        );
+        // A cap at each end, so a mark is still findable where it happens to
+        // sit under a bar line.
+        for y in [rect.top() + 2.0, rect.bottom() - 2.0] {
+            painter.circle_filled(egui::pos2(x, y), 2.0, MARKED);
+        }
+    }
+}
+
+/// The colour of a placed beat mark. Nothing else on the panel is this.
+const MARKED: Color32 = Color32::from_rgb(0x4F, 0xD1, 0xC5);
 
 /// A line and a flag per cue, with its letter. The one being dragged is drawn
 /// brighter, so it is clear which one moved.
@@ -1488,6 +1573,7 @@ mod tests {
             paint: Paint::Bands,
             stems: None,
             zoom: Zoom::default(),
+            marks: &[],
             aligning: false,
         }
     }
@@ -1655,6 +1741,158 @@ mod tests {
     }
 
     #[test]
+    fn the_grid_is_drawn_against_the_view_the_music_is_drawn_against() {
+        // The waveform is drawn from the view the panel settles on after the
+        // wheel and the floor have had their say. The grid, the cue flags and
+        // the mapping from a click to a moment were drawn from the view handed
+        // in — so on any frame where the panel corrects the view, they all sat
+        // somewhere the music was not.
+        //
+        // Read through the click mapping, which is the one place the
+        // disagreement is a number rather than a picture. The correction here
+        // is the zoom floor: a view asking to go closer than the picture has
+        // detail for is pulled back, and before this the click mapping went on
+        // answering for the view that was refused.
+        let levels = at_levels(&[128u8; 120 * 150]);
+        let beats = grid(120_000, 120.0);
+        let out = std::cell::Cell::new(None);
+        let settled = std::cell::Cell::new(Zoom::default());
+        // Far closer than 150 columns a second can show, and off to one side,
+        // so the floor has to widen it and the two views disagree by a lot.
+        let asked = Zoom { start: 0.5, span: 0.000_01 };
+
+        let mut harness = Harness::new_ui(|ui| {
+            let wave = Waveform {
+                bands: &levels,
+                duration_secs: 120.0,
+                beat_ms: &beats,
+                cues: &[],
+                position: None,
+                paint: Paint::Bands,
+                stems: None,
+                zoom: asked,
+                marks: &[],
+                aligning: false,
+            };
+            let shown = show(ui, &wave);
+            settled.set(shown.zoom);
+            if let Some(touched) = shown.touched {
+                out.set(Some(touched));
+            }
+        });
+        harness.run();
+        assert!(
+            settled.get().span > asked.span * 2.0,
+            "the floor did not widen the view, so this proves nothing: {:?}",
+            settled.get()
+        );
+
+        let screen = harness.ctx.content_rect();
+        let at = egui::pos2(screen.left() + screen.width() / 2.0, screen.top() + HEIGHT / 2.0);
+        harness.event(egui::Event::PointerMoved(at));
+        harness.run();
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+        }
+
+        let Some(Touched::Scrubbed(ms)) = out.get() else {
+            panic!("the click was not reported as a scrub: {:?}", out.get())
+        };
+        // The middle of the panel, read against the view the panel says it is
+        // showing. Answering for the view it was handed instead puts this
+        // wherever that view's middle was.
+        let view = settled.get();
+        let want = ((view.start + view.span / 2.0) as f64 * 120_000.0) as u32;
+        assert!(
+            ms.abs_diff(want) < 1_000,
+            "a click in the middle read as {ms} ms, and the middle of the view the panel \
+             reports showing is {want} ms"
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_waveform_means_what_the_table_says_it_means() {
+        // The gesture that marks a beat is alt-click, and it cannot be driven
+        // end to end here: the harness queues held modifiers and resets them
+        // inside the same frame, so the frame never sees alt down and the
+        // click arrives plain. The table it decides is tested instead, and the
+        // plain click below goes through the real panel.
+        let marked = what_was_touched(None, true, true, false, 5_000);
+        assert!(matches!(marked, Some(Touched::Marked(5_000))), "{marked:?}");
+
+        // A plain click keeps scrubbing while the controls are open.
+        let scrubbed = what_was_touched(None, false, true, false, 5_000);
+        assert!(matches!(scrubbed, Some(Touched::Scrubbed(5_000))), "{scrubbed:?}");
+
+        // And alt over a cue still moves the cue: a press that took hold of
+        // something is about that thing, whatever is held down.
+        let moved = what_was_touched(Some(2), true, true, false, 5_000);
+        assert!(matches!(moved, Some(Touched::Moved { at: 2, .. })), "{moved:?}");
+
+        // A drag on empty space is a scrub; a press that is neither is nothing.
+        assert!(matches!(
+            what_was_touched(None, false, false, true, 5_000),
+            Some(Touched::Scrubbed(5_000))
+        ));
+        assert!(what_was_touched(None, true, false, false, 5_000).is_none());
+    }
+
+    #[test]
+    fn a_plain_click_on_the_waveform_still_scrubs_while_the_grid_is_being_corrected() {
+        // Through the real panel, because this is the half the harness can
+        // drive and the half a DJ would notice first if it broke.
+        let out = std::cell::Cell::new(None);
+        let levels = at_levels(&[128u8; 600]);
+        let beats = grid(60_000, 120.0);
+        let mut harness = Harness::new_ui(|ui| {
+            let wave = Waveform {
+                bands: &levels,
+                duration_secs: 60.0,
+                beat_ms: &beats,
+                cues: &[],
+                position: None,
+                paint: Paint::Bands,
+                stems: None,
+                zoom: Zoom::default(),
+                marks: &[],
+                aligning: true,
+            };
+            // Kept rather than overwritten: `Harness::run` steps frames until
+            // the window settles, and the quiet frame after a click reports
+            // nothing — which is not the same as the click reporting nothing.
+            if let Some(touched) = show(ui, &wave).touched {
+                out.set(Some(touched));
+            }
+        });
+        harness.run();
+        let screen = harness.ctx.content_rect();
+        let at = egui::pos2(screen.left() + screen.width() / 2.0, screen.top() + HEIGHT / 2.0);
+        harness.event(egui::Event::PointerMoved(at));
+        harness.run();
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+        }
+
+        assert!(
+            matches!(out.get(), Some(Touched::Scrubbed(_))),
+            "a plain click stopped scrubbing once the controls were open: {:?}",
+            out.get()
+        );
+    }
+
+    #[test]
     fn a_panel_with_nothing_to_draw_reports_the_view_it_was_given() {
         // The caller stores whatever comes back, so a panel that says "fitted"
         // on a frame it drew nothing has thrown somebody's view away. This is
@@ -1672,6 +1910,7 @@ mod tests {
                 paint: Default::default(),
                 stems: None,
                 zoom: close,
+                marks: &[],
                 aligning: false,
             };
             reported.set(show(ui, &nothing).zoom);
@@ -2124,6 +2363,7 @@ mod tests {
                 paint: Paint::Bands,
                 stems: None,
                 zoom: Zoom { start: 0.25, span: 0.25 },
+                marks: &[],
                 aligning: false,
             }
         }
