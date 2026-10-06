@@ -378,6 +378,9 @@ pub struct App {
     playhead_ms: Option<u32>,
     /// The cue being named, and the text as typed.
     cue_entry: (Option<(u32, u8)>, String),
+    /// The same, for the field in a cue's right-click menu. Its own, because
+    /// the two are open at once and typing in one is not typing in the other.
+    cue_menu: (Option<(u32, u8)>, String),
     /// How tall the prep editor came to last time it was drawn.
     ///
     /// Kept so the list above it can reserve the right amount of room whatever
@@ -640,6 +643,25 @@ enum Pending {
         letter: u8,
         label: String,
     },
+    /// Repaint a cue. The colour goes on the drive, so this is what a player
+    /// lights its button with rather than a choice about this window.
+    RecolorCue {
+        id: u32,
+        letter: u8,
+        color: [u8; 3],
+    },
+    /// Turn a hot cue into a memory cue or back.
+    ///
+    /// Two different things on a player: eight buttons against as many marks
+    /// as a track needs, and only the hot ones can be dropped into. Which a
+    /// mark should be is a judgement about how the track gets played, so it is
+    /// somebody's to change rather than the cueing pass's to settle.
+    RecastCue {
+        id: u32,
+        letter: u8,
+        /// Where it is going: a letter 1–8, or 0 for a memory cue.
+        into: u8,
+    },
     /// Listen to one track, whether or not it has been listened to before.
     Analyze(u32),
     /// Ask the fingerprint services about one track.
@@ -868,6 +890,7 @@ impl App {
             playhead_ms: None,
             prep_height: PREP_HEIGHT_AT_FIRST,
             cue_entry: (None, String::new()),
+            cue_menu: (None, String::new()),
             bpm_entry: (None, String::new()),
             pending: Vec::new(),
             want_pick: None,
@@ -5422,6 +5445,7 @@ impl App {
                 true => &track.beat_marks,
                 false => &[],
             },
+            words: &track.lyrics,
             aligning: self.editing_grid,
         };
         // Drawn before anything below touches the collection: `waveform`
@@ -5933,6 +5957,177 @@ impl App {
                         ),
                         None => "click to put a cue at the playhead".to_string(),
                     });
+
+                // Right-click: everything about a cue that is not where it
+                // is. Where it is is a drag on the waveform, which is already
+                // the better gesture for it.
+                if let Some(cue) = cue {
+                    let letter = cue.letter;
+                    let id = track.id;
+                    response.context_menu(|ui| {
+                        ui.set_min_width(220.0);
+                        ui.label(
+                            RichText::new(format!("{} \u{2014} {}", name, time_text(cue.time_ms)))
+                                .font(theme::mono(10.0))
+                                .color(theme::dim()),
+                        );
+
+                        // What it is called. The one thing a player shows
+                        // under the cue, and the thing a DJ finds it by.
+                        if self.cue_menu.0 != Some((id, letter)) {
+                            self.cue_menu = (Some((id, letter)), cue.label.clone());
+                        }
+                        let typed = ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.cue_menu.1)
+                                    .desired_width(f32::INFINITY)
+                                    .font(theme::mono(10.5))
+                                    .hint_text(
+                                        RichText::new("what is sung here")
+                                            .monospace()
+                                            .color(theme::dim()),
+                                    ),
+                            )
+                            .on_hover_text(
+                                "What this cue is called. A player shows it under the cue, \
+                                 and it goes on the drive with it.",
+                            );
+                        if typed.changed() || typed.lost_focus() {
+                            self.pending.push(Pending::RenameCue {
+                                id,
+                                letter,
+                                label: self.cue_menu.1.clone(),
+                            });
+                        }
+                        // The line the track sings there, for a cue that has
+                        // not been named: it is almost always what somebody
+                        // would have typed.
+                        if let Some(sung) = crate::library::sung_at(&track.lyrics, cue.time_ms) {
+                            if sung != cue.label.trim()
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(format!("\u{201c}{sung}\u{201d}"))
+                                                .size(theme::SMALL)
+                                                .color(theme::text()),
+                                        )
+                                        .fill(theme::booth_2()),
+                                    )
+                                    .on_hover_text("Name it after the line sung here")
+                                    .clicked()
+                            {
+                                self.cue_menu = (None, String::new());
+                                self.pending.push(Pending::RenameCue {
+                                    id,
+                                    letter,
+                                    label: sung.to_string(),
+                                });
+                                ui.close();
+                            }
+                        }
+
+                        ui.separator();
+                        ui.label(
+                            RichText::new(theme::label_text("Colour"))
+                                .size(theme::LABEL)
+                                .color(theme::dim())
+                                .strong(),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            for swatch in theme::CUE_COLORS {
+                                let rgb = [swatch.r(), swatch.g(), swatch.b()];
+                                let mine = rgb == cue.color;
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(match mine {
+                                                true => theme::TICK,
+                                                false => " ",
+                                            })
+                                            .font(theme::mono(9.0))
+                                            .color(theme::booth()),
+                                        )
+                                        .fill(swatch)
+                                        .min_size(egui::vec2(20.0, 16.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.pending.push(Pending::RecolorCue {
+                                        id,
+                                        letter,
+                                        color: rgb,
+                                    });
+                                    ui.close();
+                                }
+                            }
+                        });
+
+                        ui.separator();
+                        match letter {
+                            // A memory cue has no button to press, so making
+                            // it a hot one means choosing which button.
+                            0 => {
+                                ui.label(
+                                    RichText::new(theme::label_text("Make it a hot cue"))
+                                        .size(theme::LABEL)
+                                        .color(theme::dim())
+                                        .strong(),
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 3.0;
+                                    for into in 1..=8u8 {
+                                        let free = !track.cues.iter().any(|cue| cue.letter == into);
+                                        if ui
+                                            .add_enabled(
+                                                free,
+                                                egui::Button::new(
+                                                    RichText::new(char::from(b'A' + into - 1))
+                                                        .font(theme::mono(10.0)),
+                                                )
+                                                .min_size(egui::vec2(20.0, 16.0)),
+                                            )
+                                            .on_disabled_hover_text("Already in use")
+                                            .clicked()
+                                        {
+                                            self.pending.push(Pending::RecastCue {
+                                                id,
+                                                letter,
+                                                into,
+                                            });
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
+                            _ => {
+                                if ui
+                                    .button("Make it a memory cue")
+                                    .on_hover_text(
+                                        "Keeps the mark and gives up the button. A player \
+                                         shows memory cues as marks on the waveform and \
+                                         cannot drop into them.",
+                                    )
+                                    .clicked()
+                                {
+                                    self.pending.push(Pending::RecastCue { id, letter, into: 0 });
+                                    ui.close();
+                                }
+                            }
+                        }
+                        if ui
+                            .button("Clear this cue")
+                            .on_hover_text(
+                                "Take the mark off the track. Shift-clicking the button does \
+                                 the same.",
+                            )
+                            .clicked()
+                        {
+                            self.pending.push(Pending::RemoveCue { id, letter });
+                            ui.close();
+                        }
+                    });
+                }
 
                 let shift = ui.input(|i| i.modifiers.shift);
                 if response.clicked() {
@@ -6838,6 +7033,18 @@ impl App {
                     self.prep_changed(id);
                     touched = true;
                 }
+                Pending::RecolorCue { id, letter, color } => {
+                    if let Some(track) = self.library.get_mut(id) {
+                        if let Some(cue) = track.cues.iter_mut().find(|c| c.letter == letter) {
+                            cue.color = color;
+                        }
+                    }
+                    self.prep_changed(id);
+                    touched = true;
+                }
+                Pending::RecastCue { id, letter, into } => {
+                    touched |= self.recast_cue(id, letter, into)
+                }
             }
         }
 
@@ -7164,6 +7371,38 @@ impl App {
         cue.time_ms = snapped;
         track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
         self.prep_changed(id);
+    }
+
+    /// Turn a hot cue into a memory cue, or a memory cue into a hot one.
+    ///
+    /// The colour follows the letter, because that is what lights the button
+    /// on a player and a cue moved to B that stays the colour of A is a row of
+    /// buttons that disagrees with itself. A name somebody typed does not
+    /// follow it anywhere — that is theirs.
+    ///
+    /// Taking a hot cue's letter that is already in use is refused rather than
+    /// resolved: silently bumping the cue already there would lose whichever
+    /// of the two somebody cared about, and there is no way to ask which.
+    fn recast_cue(&mut self, id: u32, letter: u8, into: u8) -> bool {
+        if letter == into {
+            return false;
+        }
+        let Some(track) = self.library.get_mut(id) else { return false };
+        if into != 0 && track.cues.iter().any(|cue| cue.letter == into) {
+            let taken = char::from(b'A' + (into - 1).min(7));
+            self.note(format!("hot cue {taken} is already in use"), theme::amber());
+            return false;
+        }
+        let Some(cue) = track.cues.iter_mut().find(|cue| cue.letter == letter) else {
+            return false;
+        };
+        cue.letter = into;
+        if into != 0 {
+            cue.color = crate::job::cue_color(into);
+        }
+        track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
+        self.prep_changed(id);
+        true
     }
 
     fn place_cue(&mut self, id: u32, letter: u8, time_ms: u32) {
@@ -13267,6 +13506,117 @@ mod tests {
                     Harness::builder()
                         .with_size(egui::vec2(900.0, 1600.0))
                         .build_ui_state(|ui, app: &mut App| app.prep(ui), app)
+                }
+
+                /// A track with a hot cue on B and a memory cue, and words.
+                fn cued(name: &str) -> (App, u32) {
+                    let (mut app, id) = on_the_grid(name);
+                    let track = app.library.get_mut(id).unwrap();
+                    track.cues = vec![
+                        crate::library::CueMark {
+                            letter: 0,
+                            time_ms: 1_000,
+                            label: String::new(),
+                            color: [0x98, 0xA4, 0xAE],
+                        },
+                        crate::library::CueMark {
+                            letter: 2,
+                            time_ms: 62_500,
+                            label: "Vocal".into(),
+                            color: crate::job::cue_color(2),
+                        },
+                    ];
+                    track.lyrics = vec![crate::library::Lyric {
+                        start_ms: 62_000,
+                        end_ms: 64_000,
+                        text: "hold me closer now".into(),
+                    }];
+                    app.rebuild();
+                    (app, id)
+                }
+
+                #[test]
+                fn a_cue_can_be_repainted_from_its_own_menu() {
+                    // The colour goes on the drive, so it is what a player
+                    // lights its button with rather than a choice about this
+                    // window.
+                    let (mut app, id) = cued("cue-colour");
+                    let want = theme::CUE_COLORS[4];
+                    app.pending.push(Pending::RecolorCue {
+                        id,
+                        letter: 2,
+                        color: [want.r(), want.g(), want.b()],
+                    });
+                    let ctx = egui::Context::default();
+                    app.apply_pending(&ctx);
+
+                    let cue = app
+                        .library
+                        .get(id)
+                        .unwrap()
+                        .cues
+                        .iter()
+                        .find(|cue| cue.letter == 2)
+                        .expect("the cue went missing");
+                    assert_eq!(cue.color, [want.r(), want.g(), want.b()]);
+                }
+
+                #[test]
+                fn a_hot_cue_can_be_made_a_memory_cue_and_back() {
+                    // Two different things on a player: eight buttons against
+                    // as many marks as a track needs. Which one a mark should
+                    // be is a judgement about how the track gets played.
+                    let (mut app, id) = cued("cue-recast");
+                    let ctx = egui::Context::default();
+
+                    assert!(app.recast_cue(id, 2, 0), "B did not become a memory cue");
+                    let track = app.library.get(id).unwrap();
+                    assert!(!track.cues.iter().any(|cue| cue.letter == 2));
+                    assert_eq!(track.cues.iter().filter(|cue| cue.letter == 0).count(), 2);
+
+                    // And back onto a free button, which repaints it to match:
+                    // a cue on D that stays the colour of B is a row of
+                    // buttons that disagrees with itself.
+                    app.pending.push(Pending::RecastCue { id, letter: 0, into: 4 });
+                    app.apply_pending(&ctx);
+                    let moved = app
+                        .library
+                        .get(id)
+                        .unwrap()
+                        .cues
+                        .iter()
+                        .find(|cue| cue.letter == 4)
+                        .expect("nothing landed on D");
+                    assert_eq!(moved.color, crate::job::cue_color(4));
+                }
+
+                #[test]
+                fn taking_a_letter_that_is_in_use_is_refused_rather_than_resolved() {
+                    // Bumping the cue already there would lose whichever of
+                    // the two somebody cared about, and there is no way to ask
+                    // which.
+                    let (mut app, id) = cued("cue-taken");
+                    assert!(!app.recast_cue(id, 0, 2), "it took a letter already in use");
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(
+                        track.cues.iter().find(|cue| cue.letter == 2).map(|cue| cue.label.as_str()),
+                        Some("Vocal"),
+                        "the cue that was already on B did not survive"
+                    );
+                    assert_eq!(track.cues.iter().filter(|cue| cue.letter == 0).count(), 1);
+                }
+
+                #[test]
+                fn a_cue_named_for_nothing_is_offered_the_line_it_lands_on() {
+                    // Which is almost always what somebody would have typed.
+                    let (app, id) = cued("cue-offer");
+                    let track = app.library.get(id).unwrap();
+                    let cue = track.cues.iter().find(|cue| cue.letter == 2).unwrap();
+                    assert_eq!(
+                        crate::library::sung_at(&track.lyrics, cue.time_ms),
+                        Some("hold me closer now")
+                    );
                 }
 
                 #[test]
