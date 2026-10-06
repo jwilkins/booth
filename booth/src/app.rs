@@ -377,10 +377,10 @@ pub struct App {
     /// nothing here makes a sound.
     playhead_ms: Option<u32>,
     /// The cue being named, and the text as typed.
-    cue_entry: (Option<(u32, u8)>, String),
+    cue_entry: (Option<(u32, usize)>, String),
     /// The same, for the field in a cue's right-click menu. Its own, because
     /// the two are open at once and typing in one is not typing in the other.
-    cue_menu: (Option<(u32, u8)>, String),
+    cue_menu: (Option<(u32, usize)>, String),
     /// How tall the prep editor came to last time it was drawn.
     ///
     /// Kept so the list above it can reserve the right amount of room whatever
@@ -502,6 +502,51 @@ impl GridFix {
     /// "where" is the playhead.
     fn needs_playhead(self) -> bool {
         matches!(self, GridFix::MoveTo | GridFix::Downbeat)
+    }
+}
+
+/// Which cue an action is about.
+///
+/// A letter is not a name for one. Every memory cue carries zero, so "the cue
+/// with letter 0" is whichever one happens to come first in the list — and
+/// naming the memory cue under the playhead renamed a different one the moment
+/// a track had two of them. Where it sits in the list is the name it has.
+///
+/// What it was is carried as well, and not for show: an action in the same
+/// pass can re-sort the list — turning a hot cue into a memory cue does — and
+/// an index taken before that points at a different cue afterwards. So the
+/// index is checked before it is used, and a cue that has moved is found again
+/// by what it is.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct WhichCue {
+    at: usize,
+    letter: u8,
+    time_ms: u32,
+}
+
+impl WhichCue {
+    fn of(at: usize, cue: &crate::library::CueMark) -> Self {
+        Self { at, letter: cue.letter, time_ms: cue.time_ms }
+    }
+
+    /// Where it sits now, or `None` where it has gone.
+    ///
+    /// The index first, and when that no longer holds, the moment. Not the
+    /// letter: an action in the same pass may have changed it — that is what
+    /// turning a hot cue into a memory cue does — and a cue looked for by the
+    /// letter it used to carry is a cue that cannot be found at all, so the
+    /// rename queued behind the recast would be dropped.
+    ///
+    /// Two cues at the same millisecond would be told apart only by the index,
+    /// which is the case this cannot answer. It takes a drag to land one on
+    /// another to the millisecond, and the worse of the two outcomes — acting
+    /// on the wrong one of a pair sitting in the same place — is the one that
+    /// matters least.
+    fn find(self, cues: &[crate::library::CueMark]) -> Option<usize> {
+        match cues.get(self.at) {
+            Some(cue) if cue.letter == self.letter && cue.time_ms == self.time_ms => Some(self.at),
+            _ => cues.iter().position(|cue| cue.time_ms == self.time_ms),
+        }
     }
 }
 
@@ -636,18 +681,18 @@ enum Pending {
     },
     RemoveCue {
         id: u32,
-        letter: u8,
+        which: WhichCue,
     },
     RenameCue {
         id: u32,
-        letter: u8,
+        which: WhichCue,
         label: String,
     },
     /// Repaint a cue. The colour goes on the drive, so this is what a player
     /// lights its button with rather than a choice about this window.
     RecolorCue {
         id: u32,
-        letter: u8,
+        which: WhichCue,
         color: [u8; 3],
     },
     /// Turn a hot cue into a memory cue or back.
@@ -658,7 +703,7 @@ enum Pending {
     /// somebody's to change rather than the cueing pass's to settle.
     RecastCue {
         id: u32,
-        letter: u8,
+        which: WhichCue,
         /// Where it is going: a letter 1–8, or 0 for a memory cue.
         into: u8,
     },
@@ -5924,8 +5969,23 @@ impl App {
             );
 
             let at = self.playhead_ms;
+            let under = self.playhead_cue(track).map(|(at, _)| at);
+            let memory = track.cues.iter().filter(|cue| cue.letter == 0).count();
             for letter in 0..=8u8 {
-                let cue = track.cues.iter().find(|cue| cue.letter == letter);
+                // One MEM button, and a track can have as many memory cues as
+                // it needs. The one under the playhead is the one being looked
+                // at, so that is the one the button is about — which is what
+                // makes every memory cue reachable from a single button rather
+                // than only whichever sorts first.
+                let found = match letter {
+                    0 => under
+                        .filter(|at| track.cues.get(*at).is_some_and(|cue| cue.letter == 0))
+                        .map(|at| (at, &track.cues[at]))
+                        .or_else(|| track.cues.iter().enumerate().find(|(_, cue)| cue.letter == 0)),
+                    _ => track.cues.iter().enumerate().find(|(_, cue)| cue.letter == letter),
+                };
+                let cue = found.map(|(_, cue)| cue);
+                let which = found.map(|(at, cue)| WhichCue::of(at, cue));
                 let name = match letter {
                     0 => "MEM".to_string(),
                     n => char::from(b'A' + n - 1).to_string(),
@@ -5950,10 +6010,22 @@ impl App {
                     )
                     .on_hover_text(match cue {
                         Some(cue) => format!(
-                            "{} — {}{}",
+                            "{} — {}{}{}",
                             time_text(cue.time_ms),
                             if cue.label.is_empty() { "no name" } else { &cue.label },
-                            "\nclick to jump, shift-click to clear, or drag it on the waveform"
+                            // Said only when there is more than one, so that a
+                            // button acting on one of several says so rather
+                            // than looking like it is the only one.
+                            match letter == 0 && memory > 1 {
+                                true => format!(
+                                    "\n{} on this track — park the playhead on one to work \
+                                     with it",
+                                    plural(memory, "memory cue")
+                                ),
+                                false => String::new(),
+                            },
+                            "\nclick to jump, shift-click to clear, right-click for more, \
+                             or drag it on the waveform"
                         ),
                         None => "click to put a cue at the playhead".to_string(),
                     });
@@ -5961,7 +6033,7 @@ impl App {
                 // Right-click: everything about a cue that is not where it
                 // is. Where it is is a drag on the waveform, which is already
                 // the better gesture for it.
-                if let Some(cue) = cue {
+                if let (Some(cue), Some(which)) = (cue, which) {
                     let letter = cue.letter;
                     let id = track.id;
                     response.context_menu(|ui| {
@@ -5974,8 +6046,8 @@ impl App {
 
                         // What it is called. The one thing a player shows
                         // under the cue, and the thing a DJ finds it by.
-                        if self.cue_menu.0 != Some((id, letter)) {
-                            self.cue_menu = (Some((id, letter)), cue.label.clone());
+                        if self.cue_menu.0 != Some((id, which.at)) {
+                            self.cue_menu = (Some((id, which.at)), cue.label.clone());
                         }
                         let typed = ui
                             .add(
@@ -5995,7 +6067,7 @@ impl App {
                         if typed.changed() || typed.lost_focus() {
                             self.pending.push(Pending::RenameCue {
                                 id,
-                                letter,
+                                which,
                                 label: self.cue_menu.1.clone(),
                             });
                         }
@@ -6019,7 +6091,7 @@ impl App {
                                 self.cue_menu = (None, String::new());
                                 self.pending.push(Pending::RenameCue {
                                     id,
-                                    letter,
+                                    which,
                                     label: sung.to_string(),
                                 });
                                 ui.close();
@@ -6055,7 +6127,7 @@ impl App {
                                 {
                                     self.pending.push(Pending::RecolorCue {
                                         id,
-                                        letter,
+                                        which,
                                         color: rgb,
                                     });
                                     ui.close();
@@ -6092,7 +6164,7 @@ impl App {
                                         {
                                             self.pending.push(Pending::RecastCue {
                                                 id,
-                                                letter,
+                                                which,
                                                 into,
                                             });
                                             ui.close();
@@ -6110,7 +6182,7 @@ impl App {
                                     )
                                     .clicked()
                                 {
-                                    self.pending.push(Pending::RecastCue { id, letter, into: 0 });
+                                    self.pending.push(Pending::RecastCue { id, which, into: 0 });
                                     ui.close();
                                 }
                             }
@@ -6123,7 +6195,7 @@ impl App {
                             )
                             .clicked()
                         {
-                            self.pending.push(Pending::RemoveCue { id, letter });
+                            self.pending.push(Pending::RemoveCue { id, which });
                             ui.close();
                         }
                     });
@@ -6133,7 +6205,9 @@ impl App {
                 if response.clicked() {
                     match (cue, shift) {
                         (Some(_), true) => {
-                            self.pending.push(Pending::RemoveCue { id: track.id, letter })
+                            if let Some(which) = which {
+                                self.pending.push(Pending::RemoveCue { id: track.id, which });
+                            }
                         }
                         // Jumping to a cue takes the deck with it, so an ear
                         // can check a cue rather than only an eye.
@@ -6224,10 +6298,10 @@ impl App {
 
             // Naming the cue under the playhead, which is the one just placed
             // or just jumped to.
-            if let Some(cue) = self.playhead_cue(track) {
-                let letter = cue.letter;
-                if self.cue_entry.0 != Some((track.id, letter)) {
-                    self.cue_entry = (Some((track.id, letter)), cue.label.clone());
+            if let Some((at, cue)) = self.playhead_cue(track) {
+                let which = WhichCue::of(at, cue);
+                if self.cue_entry.0 != Some((track.id, at)) {
+                    self.cue_entry = (Some((track.id, at)), cue.label.clone());
                 }
                 let response = ui
                     .add(
@@ -6244,7 +6318,7 @@ impl App {
                 if response.changed() || response.lost_focus() {
                     self.pending.push(Pending::RenameCue {
                         id: track.id,
-                        letter,
+                        which,
                         label: self.cue_entry.1.clone(),
                     });
                 }
@@ -6253,13 +6327,17 @@ impl App {
     }
 
     /// The cue the playhead is sitting on, within half a beat.
-    fn playhead_cue<'a>(&self, track: &'a Track) -> Option<&'a crate::library::CueMark> {
+    fn playhead_cue<'a>(&self, track: &'a Track) -> Option<(usize, &'a crate::library::CueMark)> {
         let at = self.playhead_ms?;
         let tolerance = match track.bpm > 0.0 {
             true => (30_000.0 / track.bpm) as u32,
             false => 250,
         };
-        track.cues.iter().find(|cue| cue.time_ms.abs_diff(at) <= tolerance)
+        // With its place in the list, because that is the only name a memory
+        // cue has: they all carry letter zero, so acting on "the cue with
+        // letter 0" acted on whichever came first however carefully somebody
+        // had parked on a different one.
+        track.cues.iter().enumerate().find(|(_, cue)| cue.time_ms.abs_diff(at) <= tolerance)
     }
 
     fn inspector(&mut self, ui: &mut Ui) {
@@ -7017,33 +7095,39 @@ impl App {
                         }
                     }
                 }
-                Pending::RemoveCue { id, letter } => {
+                Pending::RemoveCue { id, which } => {
                     if let Some(track) = self.library.get_mut(id) {
-                        track.cues.retain(|cue| cue.letter != letter);
+                        if let Some(at) = which.find(&track.cues) {
+                            track.cues.remove(at);
+                        }
                     }
                     self.prep_changed(id);
                     touched = true;
                 }
-                Pending::RenameCue { id, letter, label } => {
+                Pending::RenameCue { id, which, label } => {
                     if let Some(track) = self.library.get_mut(id) {
-                        if let Some(cue) = track.cues.iter_mut().find(|c| c.letter == letter) {
+                        if let Some(cue) =
+                            which.find(&track.cues).and_then(|at| track.cues.get_mut(at))
+                        {
                             cue.label = label;
                         }
                     }
                     self.prep_changed(id);
                     touched = true;
                 }
-                Pending::RecolorCue { id, letter, color } => {
+                Pending::RecolorCue { id, which, color } => {
                     if let Some(track) = self.library.get_mut(id) {
-                        if let Some(cue) = track.cues.iter_mut().find(|c| c.letter == letter) {
+                        if let Some(cue) =
+                            which.find(&track.cues).and_then(|at| track.cues.get_mut(at))
+                        {
                             cue.color = color;
                         }
                     }
                     self.prep_changed(id);
                     touched = true;
                 }
-                Pending::RecastCue { id, letter, into } => {
-                    touched |= self.recast_cue(id, letter, into)
+                Pending::RecastCue { id, which, into } => {
+                    touched |= self.recast_cue(id, which, into)
                 }
             }
         }
@@ -7383,8 +7467,8 @@ impl App {
     /// Taking a hot cue's letter that is already in use is refused rather than
     /// resolved: silently bumping the cue already there would lose whichever
     /// of the two somebody cared about, and there is no way to ask which.
-    fn recast_cue(&mut self, id: u32, letter: u8, into: u8) -> bool {
-        if letter == into {
+    fn recast_cue(&mut self, id: u32, which: WhichCue, into: u8) -> bool {
+        if which.letter == into {
             return false;
         }
         let Some(track) = self.library.get_mut(id) else { return false };
@@ -7393,7 +7477,7 @@ impl App {
             self.note(format!("hot cue {taken} is already in use"), theme::amber());
             return false;
         }
-        let Some(cue) = track.cues.iter_mut().find(|cue| cue.letter == letter) else {
+        let Some(cue) = which.find(&track.cues).and_then(|at| track.cues.get_mut(at)) else {
             return false;
         };
         cue.letter = into;
@@ -13508,6 +13592,21 @@ mod tests {
                         .build_ui_state(|ui, app: &mut App| app.prep(ui), app)
                 }
 
+                /// Which cue, by the letter it currently carries.
+                fn which_cue(app: &App, id: u32, letter: u8) -> WhichCue {
+                    let cues = &app.library.get(id).unwrap().cues;
+                    let at = cues.iter().position(|cue| cue.letter == letter).expect("no such cue");
+                    WhichCue::of(at, &cues[at])
+                }
+
+                /// Which cue, by where it sits in the track.
+                fn which_cue_at(app: &App, id: u32, time_ms: u32) -> WhichCue {
+                    let cues = &app.library.get(id).unwrap().cues;
+                    let at =
+                        cues.iter().position(|cue| cue.time_ms == time_ms).expect("no such cue");
+                    WhichCue::of(at, &cues[at])
+                }
+
                 /// A track with a hot cue on B and a memory cue, and words.
                 fn cued(name: &str) -> (App, u32) {
                     let (mut app, id) = on_the_grid(name);
@@ -13535,6 +13634,103 @@ mod tests {
                     (app, id)
                 }
 
+                /// Three memory cues, so that "the one with letter 0" is a
+                /// question rather than an answer.
+                fn several_memory_cues(name: &str) -> (App, u32) {
+                    let (mut app, id) = on_the_grid(name);
+                    let track = app.library.get_mut(id).unwrap();
+                    track.cues = [20_000u32, 60_000, 100_000]
+                        .into_iter()
+                        .map(|time_ms| crate::library::CueMark {
+                            letter: 0,
+                            time_ms,
+                            label: String::new(),
+                            color: [0x98, 0xA4, 0xAE],
+                        })
+                        .collect();
+                    app.rebuild();
+                    (app, id)
+                }
+
+                #[test]
+                fn naming_the_memory_cue_under_the_playhead_names_that_one() {
+                    // The fault: every memory cue carries letter zero, so
+                    // acting on "the cue with letter 0" acted on whichever
+                    // sorted first however carefully somebody had parked on a
+                    // different one. Typing a name on the third memory cue put
+                    // it on the first.
+                    let (mut app, id) = several_memory_cues("cue-third");
+                    app.playhead_ms = Some(100_000);
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    // Focused first, and a frame for the field to have the
+                    // keyboard: typing goes wherever the keyboard is.
+                    harness.get_by_role(accesskit::Role::TextInput).focus();
+                    harness.run();
+                    harness.get_by_role(accesskit::Role::TextInput).type_text("the one at the end");
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+
+                    let cues = &harness.state().library.get(id).unwrap().cues;
+                    let named: Vec<(u32, &str)> = cues
+                        .iter()
+                        .filter(|cue| !cue.label.is_empty())
+                        .map(|cue| (cue.time_ms, cue.label.as_str()))
+                        .collect();
+                    assert_eq!(
+                        named,
+                        vec![(100_000, "the one at the end")],
+                        "the name landed on the wrong memory cue"
+                    );
+                }
+
+                #[test]
+                fn clearing_a_memory_cue_takes_one_rather_than_all_of_them() {
+                    // The same fault with worse consequences: removing "every
+                    // cue with letter 0" removed every memory cue on the
+                    // track, which is somebody's whole arrangement.
+                    let (mut app, id) = several_memory_cues("cue-clear-one");
+                    let which = which_cue_at(&app, id, 60_000);
+                    app.pending.push(Pending::RemoveCue { id, which });
+                    let ctx = egui::Context::default();
+                    app.apply_pending(&ctx);
+
+                    let left: Vec<u32> =
+                        app.library.get(id).unwrap().cues.iter().map(|cue| cue.time_ms).collect();
+                    assert_eq!(left, vec![20_000, 100_000]);
+                }
+
+                #[test]
+                fn an_action_queued_before_the_list_moves_still_finds_its_cue() {
+                    // Closing the menu after turning a hot cue into a memory
+                    // cue makes the name field give up the keyboard, so the
+                    // rename is queued behind a recast that re-sorts the list
+                    // and changes the letter the cue carries. Looked for by
+                    // where it was it is a different cue; looked for by the
+                    // letter it had it cannot be found at all.
+                    let (mut app, id) = cued("cue-reorder");
+                    let hot = which_cue(&app, id, 2);
+                    app.pending.push(Pending::RecastCue { id, which: hot, into: 0 });
+                    app.pending.push(Pending::RenameCue {
+                        id,
+                        which: hot,
+                        label: "still the same cue".into(),
+                    });
+                    let ctx = egui::Context::default();
+                    app.apply_pending(&ctx);
+
+                    let cues = &app.library.get(id).unwrap().cues;
+                    let named = cues.iter().find(|cue| cue.label == "still the same cue");
+                    assert_eq!(
+                        named.map(|cue| (cue.letter, cue.time_ms)),
+                        Some((0, 62_500)),
+                        "the rename did not follow the cue it was about: {cues:#?}"
+                    );
+                }
+
                 #[test]
                 fn a_cue_can_be_repainted_from_its_own_menu() {
                     // The colour goes on the drive, so it is what a player
@@ -13542,9 +13738,10 @@ mod tests {
                     // window.
                     let (mut app, id) = cued("cue-colour");
                     let want = theme::CUE_COLORS[4];
+                    let which = which_cue(&app, id, 2);
                     app.pending.push(Pending::RecolorCue {
                         id,
-                        letter: 2,
+                        which,
                         color: [want.r(), want.g(), want.b()],
                     });
                     let ctx = egui::Context::default();
@@ -13569,7 +13766,8 @@ mod tests {
                     let (mut app, id) = cued("cue-recast");
                     let ctx = egui::Context::default();
 
-                    assert!(app.recast_cue(id, 2, 0), "B did not become a memory cue");
+                    let b = which_cue(&app, id, 2);
+                    assert!(app.recast_cue(id, b, 0), "B did not become a memory cue");
                     let track = app.library.get(id).unwrap();
                     assert!(!track.cues.iter().any(|cue| cue.letter == 2));
                     assert_eq!(track.cues.iter().filter(|cue| cue.letter == 0).count(), 2);
@@ -13577,7 +13775,8 @@ mod tests {
                     // And back onto a free button, which repaints it to match:
                     // a cue on D that stays the colour of B is a row of
                     // buttons that disagrees with itself.
-                    app.pending.push(Pending::RecastCue { id, letter: 0, into: 4 });
+                    let moved = which_cue_at(&app, id, 62_500);
+                    app.pending.push(Pending::RecastCue { id, which: moved, into: 4 });
                     app.apply_pending(&ctx);
                     let moved = app
                         .library
@@ -13596,7 +13795,8 @@ mod tests {
                     // the two somebody cared about, and there is no way to ask
                     // which.
                     let (mut app, id) = cued("cue-taken");
-                    assert!(!app.recast_cue(id, 0, 2), "it took a letter already in use");
+                    let mem = which_cue(&app, id, 0);
+                    assert!(!app.recast_cue(id, mem, 2), "it took a letter already in use");
 
                     let track = app.library.get(id).unwrap();
                     assert_eq!(
