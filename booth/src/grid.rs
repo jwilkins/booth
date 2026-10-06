@@ -321,36 +321,68 @@ pub fn fit(track: &mut Track, marks: &[u32]) -> bool {
 
 /// The beat period that explains every mark, or `None` where none does.
 ///
-/// Each mark is some whole number of beats from the first. The gap between the
-/// first two says what that number might be — it is one beat, or two, or any
-/// count up to [`MOST_BEATS_BETWEEN_MARKS`] — and each guess gives a period to
-/// try. The guess closest to the tempo the track already carries is tried
-/// first, so a record already read at about the right speed is not re-read at
-/// half of it on a tie.
+/// Each mark is some whole number of beats from the first, and the marks need
+/// not be evenly spaced or next to each other: four in a row at the top of a
+/// record and one in the last chorus is a good way to use this, and a better
+/// one than four in a row, because the span between the far pair is what
+/// measures the tempo finely.
+///
+/// Two families of guess at what the beat is. The tightest pair of marks,
+/// divided by one beat, two, and so on up to
+/// [`MOST_BEATS_BETWEEN_MARKS`] — which covers marks placed close together.
+/// And the tempo the track already carries, which is what makes marks far
+/// apart work at all: no division of a six-minute gap lands near the beat, but
+/// counting that gap off the current tempo does, and the arithmetic then has
+/// hundreds of beats to measure against.
+///
+/// The guess closest to the tempo already there is tried first, so the tie
+/// between a reading and half of it goes to the one nobody has to correct
+/// again.
 fn even_period(marks: &[u32], now_bpm: f64) -> Option<f64> {
     let first = marks[0] as f64;
-    let gap = marks[1] as f64 - first;
-    if gap <= 0.0 {
-        return None;
-    }
-    let now_period = match now_bpm > 0.0 {
-        true => 60_000.0 / now_bpm,
-        false => gap,
-    };
+    let now_period = (now_bpm > 0.0).then(|| 60_000.0 / now_bpm);
 
-    let mut guesses: Vec<f64> =
-        (1..=MOST_BEATS_BETWEEN_MARKS).map(|beats| gap / beats as f64).collect();
+    // The tightest pair, not the first two: marks do not have to be spaced
+    // regularly, and the closest pair is the one most likely to be a small
+    // whole number of beats apart. Marking four kicks in a row near the top of
+    // a record and one more in the last chorus is a perfectly good way to use
+    // this, and the gap to that last one says nothing useful about the beat.
+    let tightest = marks
+        .windows(2)
+        .map(|pair| pair[1] as f64 - pair[0] as f64)
+        .filter(|gap| *gap > 0.0)
+        .fold(f64::INFINITY, f64::min);
+
+    // What the closest pair of marks says, which is something somebody
+    // pointed at rather than something this program decided earlier.
+    let mut guesses: Vec<f64> = match tightest.is_finite() {
+        true => (1..=MOST_BEATS_BETWEEN_MARKS).map(|beats| tightest / beats as f64).collect(),
+        false => Vec::new(),
+    };
     // Nearest the tempo already there first, so the tie between a reading and
     // half of it goes to the one nobody has to correct again.
+    let near = now_period.unwrap_or(tightest);
     guesses.sort_by(|a, b| {
-        (a - now_period)
-            .abs()
-            .partial_cmp(&(b - now_period).abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
+        (a - near).abs().partial_cmp(&(b - near).abs()).unwrap_or(std::cmp::Ordering::Equal)
     });
+    // And last, the tempo already there, for marks so far apart that no
+    // division of the gap between them lands anywhere near a beat.
+    //
+    // Last on purpose, and this was learnt the hard way: counting a long gap
+    // off the current tempo needs that tempo right to within half a beat
+    // across the whole span, which for six hundred beats is about a tenth of
+    // one percent. A tempo further out than that counts the gap wrong, and
+    // least squares then fits a tidy grid to the wrong count — no residual to
+    // notice, no complaint, just a confidently wrong answer. What the closest
+    // pair says is measured over a gap short enough to count, so it is
+    // believed first wherever it explains everything.
+    guesses.extend(now_period);
+    if guesses.is_empty() {
+        return None;
+    }
 
     for guess in guesses {
-        if guess <= 0.0 {
+        if guess <= 0.0 || !guess.is_finite() {
             continue;
         }
         let Some(period) = settle(marks, guess) else { continue };
@@ -807,6 +839,83 @@ mod tests {
         assert!(fit(&mut other, &untidy));
         assert_eq!(track.bpm, other.bpm);
         assert_eq!(track.downbeat_ms, other.downbeat_ms);
+    }
+
+    #[test]
+    fn marks_do_not_have_to_be_next_to_each_other_or_evenly_spaced() {
+        // How somebody actually marks a record: a few kicks near the top where
+        // the grid is plainly wrong, and one more wherever else they happened
+        // to look. Nothing says the gaps between them are equal, and the fit
+        // reads each mark as its own whole number of beats from the first.
+        let period = 60_000.0 / 124.0;
+        let at = |beat: f64| (3_000.0 + beat * period).round() as u32;
+        // Beats 0, 1, 2, then 9, then 37: two tight pairs and two long jumps.
+        let marks = vec![at(0.0), at(1.0), at(2.0), at(9.0), at(37.0)];
+
+        let mut track = gridded();
+        track.bpm = 120.0;
+        assert!(fit(&mut track, &marks));
+        assert!((track.bpm - 124.0).abs() < 0.2, "fitted {:.2}", track.bpm);
+        assert!(!is_dynamic(&track), "irregular spacing was read as a bending record");
+    }
+
+    /// A run of four marks near the top of a record and one more `far` beats
+    /// along, all with a few milliseconds of human aim on them.
+    fn a_run_and_one_far_off(truth: f64, far: f64) -> Vec<u32> {
+        let period = 60_000.0 / truth;
+        let slips = [0.0f64, 6.0, -5.0, 4.0, -7.0];
+        let at =
+            |beat: f64, n: usize| (2_000.0 + beat * period + slips[n % slips.len()]).round() as u32;
+        vec![at(0.0, 0), at(1.0, 1), at(2.0, 2), at(3.0, 3), at(far, 4)]
+    }
+
+    fn fitted_from(marks: &[u32], from_bpm: f64) -> f64 {
+        let mut track = gridded();
+        track.bpm = from_bpm;
+        assert!(fit(&mut track, marks));
+        track.bpm
+    }
+
+    #[test]
+    fn a_mark_further_off_sharpens_the_tempo() {
+        // Why marks are allowed anywhere rather than only in a run: the error
+        // in a tempo is the error in the pointing divided by the span it is
+        // measured over, so one mark a long way from the rest is worth more
+        // than another one beside them.
+        //
+        // Measured, with a few milliseconds of aim on every mark: a run plus
+        // one mark eight beats out lands about 0.17 BPM off; the same run plus
+        // one 128 beats out lands about 0.01 off.
+        let truth = 124.37;
+        let near = (fitted_from(&a_run_and_one_far_off(truth, 8.0), 124.0) - truth).abs();
+        let far = (fitted_from(&a_run_and_one_far_off(truth, 128.0), 124.0) - truth).abs();
+        assert!(
+            far < near / 5.0,
+            "eight beats out gave {near:.3} off and 128 beats out gave {far:.3}"
+        );
+        assert!(far < 0.05, "the far mark should pin it: {far:.3} off");
+    }
+
+    #[test]
+    fn a_mark_much_further_off_than_the_rest_is_counted_onto_the_wrong_beat() {
+        // And the limit of it, worth knowing because the answer is wrong
+        // without looking wrong. How many beats lie in a gap is worked out
+        // from what the closest pair says the beat is, and that estimate
+        // carries the aim error of two clicks. Across enough beats the drift
+        // passes half a beat, the gap is counted off by one, and least squares
+        // then fits a tidy grid to the wrong count — no residual to notice and
+        // no complaint.
+        //
+        // With a run of four and a few milliseconds of aim it holds to about
+        // 128 beats — thirty-two bars — and is a quarter of a BPM out at 256.
+        // The answer is more marks between, not better arithmetic: one
+        // halfway bridges the gap and each count is then short enough to be
+        // sure of.
+        let truth = 124.37;
+        let held = (fitted_from(&a_run_and_one_far_off(truth, 128.0), 124.0) - truth).abs();
+        let lost = (fitted_from(&a_run_and_one_far_off(truth, 256.0), 124.0) - truth).abs();
+        assert!(held < 0.05, "128 beats out should still be right: {held:.3} off");
+        assert!(lost > 0.2, "256 beats out is where this was measured to break: {lost:.3} off");
     }
 
     #[test]
