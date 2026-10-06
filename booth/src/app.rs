@@ -2555,13 +2555,18 @@ impl App {
         let end = beats.last().copied();
         let placed = crate::job::cue_marks(&cues::assemble(start, end, candidates));
         let hot = placed.iter().filter(|cue| cue.letter != 0).count();
+        let decided = what_the_words_decided(&words, &before, &placed);
         crate::info!("cueing #{id} {name} from {}", plural(lines, "line"));
-        for line in what_the_words_decided(&words, &before, &placed) {
+        for line in &decided {
             crate::info!("  {line}");
         }
 
         if let Some(track) = self.library.get_mut(id) {
             track.cues = placed;
+            // Kept as well as logged. The log is where this went and only
+            // went, so the account of why a track's cues are where they are
+            // lasted until the next thing was logged.
+            track.words_decided = decided;
         }
         self.prep_changed(id);
         hot
@@ -3978,6 +3983,15 @@ const POORLY_HEARD: f32 = 0.7;
 /// Enough to recognise a record by and not enough to become the lyric sheet:
 /// past the third, what a line is repeated is no longer what the track is.
 const SAYINGS: usize = 4;
+
+/// How tall the lyric sheet and the cueing account are allowed to get in the
+/// inspector, in points.
+///
+/// Both are as long as the record, and a panel that grows with the track is a
+/// panel where everything under it moves depending on which row is selected.
+/// Scrolled inside a fixed height instead, so the things below them — the tags
+/// and the file — stay where somebody left them.
+const WORDS_HEIGHT: f32 = 180.0;
 
 fn sheet_height(ctx: &egui::Context) -> f32 {
     (ctx.content_rect().height() - 72.0).max(240.0)
@@ -6386,6 +6400,81 @@ impl App {
                     .font(theme::mono(9.5))
                     .color(theme::dim()),
                 );
+            }
+
+            // The words themselves, which until now were kept and never
+            // shown: a line count, a provenance and four repeated lines, and
+            // the lyric they were all drawn from nowhere on screen. What
+            // reaches a player is a comment shortened to fit a four-kilobyte
+            // row, so the collection is the only place the whole thing is.
+            if !track.lyrics.is_empty() {
+                ui.add_space(14.0);
+                pane_label(ui, "The words");
+                egui::ScrollArea::vertical()
+                    .id_salt("the-words")
+                    .max_height(WORDS_HEIGHT)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for line in &track.lyrics {
+                            let said = line.text.trim();
+                            if said.is_empty() {
+                                continue;
+                            }
+                            ui.horizontal_top(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                // The time is the control, not the line: a
+                                // lyric sheet whose every line is a button is
+                                // a lyric sheet nobody can select text in.
+                                if ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(time_text(line.start_ms))
+                                                .font(theme::mono(9.5))
+                                                .color(theme::dim()),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    )
+                                    .on_hover_text("Go to this line")
+                                    .clicked()
+                                {
+                                    self.playhead_ms = Some(line.start_ms);
+                                    self.pending.push(Pending::SeekDeck {
+                                        id: track.id,
+                                        time_ms: line.start_ms,
+                                    });
+                                }
+                                ui.label(
+                                    RichText::new(said).color(theme::text()).size(theme::SMALL),
+                                );
+                            });
+                        }
+                    });
+            }
+
+            // And why the cues are where they are. The pass that places them
+            // says all this as it goes and used to say it only to the log,
+            // which is a record that lasts until the next thing is logged.
+            if !track.words_decided.is_empty() {
+                ui.add_space(14.0);
+                pane_label(ui, "What the words decided");
+                egui::ScrollArea::vertical()
+                    .id_salt("what-the-words-decided")
+                    .max_height(WORDS_HEIGHT)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for line in &track.words_decided {
+                            ui.label(
+                                RichText::new(line)
+                                    .font(theme::mono(9.5))
+                                    // The indented lines are the ranking under
+                                    // a heading; the rest are what it did.
+                                    .color(match line.starts_with("  ") {
+                                        true => theme::dim(),
+                                        false => theme::text(),
+                                    }),
+                            );
+                        }
+                    });
             }
 
             ui.add_space(14.0);
@@ -13817,6 +13906,94 @@ mod tests {
             app
         }
 
+        /// A track with words and an account of what cueing from them did.
+        fn with_words(name: &str) -> (App, u32) {
+            let mut app = inspecting(name, "/music/02 Tension.m4a");
+            let id = app.selected.unwrap();
+            let track = app.library.get_mut(id).unwrap();
+            track.lyrics = vec![
+                crate::library::Lyric {
+                    start_ms: 40_000,
+                    end_ms: 42_000,
+                    text: "hold me closer now".into(),
+                },
+                crate::library::Lyric {
+                    start_ms: 44_000,
+                    end_ms: 46_000,
+                    text: "nothing here but us".into(),
+                },
+            ];
+            track.words_decided =
+                vec!["hook: \u{201c}hold me closer now\u{201d}, sung 3 times".into()];
+            app.rebuild();
+            (app, id)
+        }
+
+        #[test]
+        fn the_panel_shows_the_words_themselves_and_not_only_a_count_of_them() {
+            // What was missing: a line count, where they came from and four
+            // repeated lines, with the lyric all of that was drawn from
+            // nowhere on screen. The whole of it is only in the collection —
+            // what reaches a player is a comment shortened to fit a
+            // four-kilobyte row.
+            let (app, _) = with_words("words-shown");
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(420.0, 1_400.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+
+            // `query_all`, because the hook line is quoted in the account of
+            // what the cueing decided as well as being in the lyric — which
+            // is the point of showing both, not a clash.
+            assert!(
+                harness.query_all_by_label_contains("hold me closer now").count() > 0,
+                "the first line is not on screen"
+            );
+            harness.get_by_label_contains("nothing here but us");
+            // And each line says when it lands, which is what makes it worth
+            // reading next to a waveform.
+            harness.get_by_label_contains("0:40.00");
+        }
+
+        #[test]
+        fn clicking_the_time_beside_a_line_goes_to_it() {
+            let (app, _) = with_words("words-seek");
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(420.0, 1_400.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+            harness.get_by_label_contains("0:44.00").click();
+            harness.run();
+
+            assert_eq!(harness.state().playhead_ms, Some(44_000));
+        }
+
+        #[test]
+        fn the_panel_says_why_the_cues_are_where_they_are() {
+            // The pass that places cues says all this as it goes, and used to
+            // say it only to the log — a record that lasts until the next
+            // thing is logged.
+            let (app, _) = with_words("words-decided");
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(420.0, 1_400.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+
+            harness.get_by_label_contains("hook:");
+        }
+
+        #[test]
+        fn a_track_with_no_words_is_not_given_empty_panels_about_them() {
+            let app = inspecting("words-none", "/music/02 Tension.m4a");
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(420.0, 1_400.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+
+            assert!(harness.query_by_label("The words").is_none());
+            assert!(harness.query_by_label("What the words decided").is_none());
+        }
+
         #[test]
         fn a_lookup_reaches_the_panel_that_is_showing_the_track() {
             // The panel keeps its own copy of the names so that typing is not
@@ -14804,11 +14981,21 @@ mod tests {
 
             let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.inspector(ui), app);
             harness.run();
-            harness.get_by_label_contains("hold me closer now");
+            // `query_all` for the line and the time: the lyric sheet below
+            // this panel shows the same words and the same moments, which is
+            // the point of having both and not a clash. What is unique to
+            // this panel is the count.
+            assert!(
+                harness.query_all_by_label_contains("hold me closer now").count() > 0,
+                "the line that comes round is not on screen"
+            );
             // How many times, which is the whole of the analysis.
             harness.get_by_label_contains("3\u{d7}");
             // And where, so a line half remembered can be gone to.
-            harness.get_by_label_contains("0:40.00");
+            assert!(
+                harness.query_all_by_label_contains("0:40.00").count() > 0,
+                "where it lands is not on screen"
+            );
         }
 
         #[test]

@@ -720,6 +720,20 @@ pub struct Track {
     /// like `en`. Empty where nothing has said.
     #[serde(default)]
     pub language: String,
+    /// What cueing from the words decided, in the order it decided it.
+    ///
+    /// Which lines come round and where they land, which one was taken as the
+    /// hook, and every cue the pass set, moved or cleared. It used to go to
+    /// the log and nowhere else, which meant the one account of why a track's
+    /// cues are where they are lasted until the next thing was logged — and a
+    /// DJ looking at a cue that reads oddly had no way back to the reasoning
+    /// that put it there.
+    ///
+    /// Kept here rather than read back off a drive: what reaches a player is
+    /// the words as a comment, shortened to fit a four-kilobyte row, and a
+    /// shortened copy on a stick is not a record of anything.
+    #[serde(default)]
+    pub words_decided: Vec<String>,
     pub loudness_lufs: Option<f64>,
     pub peak_dbtp: Option<f64>,
 
@@ -834,6 +848,7 @@ impl Track {
             beat_ms: Vec::new(),
             downbeat_ms: None,
             beat_marks: Vec::new(),
+            words_decided: Vec::new(),
             phrases: Vec::new(),
             cues: Vec::new(),
             lyrics: Vec::new(),
@@ -3367,6 +3382,74 @@ mod tests {
         let mut read = read;
         let next = read.add(Path::new("/music/b.flac"));
         assert_ne!(next, id);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_words_and_what_they_decided_are_kept_in_the_collection() {
+        // What reaches a player is the words as a comment, shortened to fit a
+        // four-kilobyte database row. The collection is the only place the
+        // whole lyric is, and the only place the account of why a track's cues
+        // are where they are is at all — that used to go to the log and
+        // nowhere else, so it lasted until the next thing was logged.
+        let dir = scratch("library-words");
+        let path = dir.join("library.json");
+
+        let mut library = Library::new();
+        let id = library.add(Path::new("/music/a.flac"));
+        {
+            let track = library.get_mut(id).unwrap();
+            track.lyrics =
+                vec![Lyric { start_ms: 40_000, end_ms: 42_000, text: "hold me closer now".into() }];
+            track.words_decided = vec![
+                "lines by how often they come round:".into(),
+                "hook: \u{201c}hold me closer now\u{201d}, sung 3 times, first at 0:40.00".into(),
+            ];
+        }
+        library.save(&path).unwrap();
+
+        let read = Library::load(&path).unwrap();
+        let track = read.get(id).unwrap();
+        assert_eq!(track.lyrics.len(), 1);
+        assert_eq!(track.lyrics[0].text, "hold me closer now");
+        assert_eq!(track.words_decided.len(), 2);
+        assert!(track.words_decided[1].contains("hook:"), "{:?}", track.words_decided);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_collection_written_before_this_existed_still_opens() {
+        // The field is new, and a collection saved by any earlier build has no
+        // key for it. Without a default that is not a missing account, it is a
+        // collection that will not open at all.
+        //
+        // Made by saving one and taking the keys out again, rather than by
+        // writing an older record by hand: a hand-written one has to be kept
+        // up to date with every other field or it stops testing this and
+        // starts failing for its own reasons.
+        let dir = scratch("library-older");
+        let path = dir.join("library.json");
+
+        let mut library = Library::new();
+        let id = library.add(Path::new("/music/a.flac"));
+        library.get_mut(id).unwrap().words_decided = vec!["something".into()];
+        library.save(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut saved: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for track in saved["tracks"].as_array_mut().unwrap() {
+            let fields = track.as_object_mut().unwrap();
+            fields.remove("words_decided");
+            fields.remove("lyrics");
+        }
+        std::fs::write(&path, serde_json::to_string(&saved).unwrap()).unwrap();
+
+        let read = Library::load(&path).unwrap();
+        let track = read.get(id).expect("the track did not survive");
+        assert!(track.words_decided.is_empty());
+        assert!(track.lyrics.is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
