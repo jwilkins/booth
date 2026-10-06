@@ -10805,21 +10805,34 @@ impl App {
 
             ui.separator();
 
-            // Fitting a grid through marked beats. The marks go on with
-            // alt-click on the waveform, which is said here because a modifier
-            // nobody is told about is a feature nobody has.
+            // Fitting a grid through marked beats. One goes on wherever the
+            // playhead is, or anywhere at all with alt-click on the waveform —
+            // which is said on the button, because a modifier nobody is told
+            // about is a feature nobody has.
             let marks = track.beat_marks.len();
+            let mark = ui
+                .add_enabled(at.is_some(), egui::Button::new("mark").small())
+                .on_hover_text(
+                    "Say a beat falls at the playhead. Alt-click the waveform to put one \
+                     anywhere instead. They need not be next to each other: a run of them \
+                     where the grid is plainly wrong, and one more further along, measures \
+                     the tempo more finely than a run alone.",
+                )
+                .on_disabled_hover_text(
+                    "Click the waveform first — this one marks where the playhead is",
+                );
+            if mark.clicked() {
+                if let Some(at) = at {
+                    self.pending.push(Pending::MarkBeat { id, at_ms: at });
+                }
+            }
             let fit = ui
                 .add_enabled(marks > 0, egui::Button::new(format!("fit {marks}")).small())
                 .on_hover_text(
-                    "Alt-click the waveform where beats fall, then fit a grid through them. \
-                     A plain tempo and downbeat where one explains the marks, and a grid \
-                     that bends only where none does.",
+                    "Fit a grid through the marked beats. A plain tempo and downbeat where \
+                     one explains them, and a grid that bends only where none does.",
                 )
-                .on_disabled_hover_text(
-                    "Alt-click the waveform where a beat falls, and this fits a grid \
-                     through what you mark",
-                );
+                .on_disabled_hover_text("Mark where a beat falls first");
             if fit.clicked() {
                 self.pending.push(Pending::FitGrid(id));
             }
@@ -13529,6 +13542,46 @@ mod tests {
                     assert!((track.bpm - 124.0).abs() < 0.5, "fitted {:.2}", track.bpm);
                     assert_eq!(track.downbeat_ms, Some(500));
                     assert!(!crate::grid::is_dynamic(track), "it kept beats a tempo could say");
+                }
+
+                #[test]
+                fn the_mark_button_puts_a_beat_mark_at_the_playhead() {
+                    // The discoverable half of placing marks. Alt-click puts
+                    // one anywhere; this one is visible, which matters because
+                    // a modifier nobody is told about is a feature nobody has.
+                    let (mut app, id) = on_the_grid("grid-mark-button");
+                    app.editing_grid = true;
+                    app.playhead_ms = Some(12_345);
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    harness.get_by_label("mark").click();
+                    harness.run();
+                    let ctx = harness.ctx.clone();
+                    harness.state_mut().apply_pending(&ctx);
+
+                    assert_eq!(
+                        harness.state().library.get(id).unwrap().beat_marks,
+                        vec![12_345],
+                        "the mark did not land where the playhead was"
+                    );
+                }
+
+                #[test]
+                fn marking_says_so_when_there_is_nowhere_to_mark() {
+                    // The same rule the two positional fixes follow: without a
+                    // playhead there is no answer to "where", and guessing at
+                    // the middle of the track would be worse than saying so.
+                    let (mut app, _) = on_the_grid("grid-mark-nowhere");
+                    app.editing_grid = true;
+                    app.playhead_ms = None;
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    let button = harness.get_by_label("mark");
+                    assert!(format!("{button:?}").contains("disabled: true"), "{button:?}");
                 }
 
                 #[test]
