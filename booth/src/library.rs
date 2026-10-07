@@ -290,6 +290,30 @@ pub struct Lyric {
     pub text: String,
 }
 
+/// The line sung at a moment, for a cue to be read by.
+///
+/// The line covering it, or failing that one starting just after — because a
+/// cue for a vocal entry is snapped back to the beat before the singing, so
+/// the moment it marks usually sits in the silence in front of the line rather
+/// than inside it.
+pub fn sung_at(lyrics: &[Lyric], at_ms: u32) -> Option<&str> {
+    /// How far ahead of a line a cue for it may sit. Two seconds is about a
+    /// bar at the tempos this is used at, and a cue further from a line than
+    /// that is a cue about something else.
+    const REACH_MS: u32 = 2_000;
+
+    let covering = lyrics
+        .iter()
+        .find(|line| at_ms >= line.start_ms && at_ms <= line.end_ms.max(line.start_ms));
+    let coming = || {
+        lyrics
+            .iter()
+            .filter(|line| line.start_ms >= at_ms && line.start_ms - at_ms <= REACH_MS)
+            .min_by_key(|line| line.start_ms - at_ms)
+    };
+    covering.or_else(coming).map(|line| line.text.trim()).filter(|said| !said.is_empty())
+}
+
 /// Where a track's words came from.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WordsFrom {

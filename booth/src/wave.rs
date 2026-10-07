@@ -396,6 +396,8 @@ pub struct Waveform<'a> {
     pub zoom: Zoom,
     /// Places somebody has said a beat falls, for a grid to be fitted through.
     pub marks: &'a [u32],
+    /// What the track sings, so a cue can be read by the line it lands on.
+    pub words: &'a [crate::library::Lyric],
     /// Whether the grid is being corrected by hand.
     ///
     /// The marks are then drawn the full height of the panel rather than as
@@ -642,7 +644,7 @@ pub fn show(ui: &mut Ui, wave: &Waveform<'_>) -> Shown {
     // help would sit over the thing being placed.
     let response = match hovering_a_cue.filter(|_| held.is_none()).and_then(|at| wave.cues.get(at))
     {
-        Some(cue) => response.on_hover_text(cue_help(cue)),
+        Some(cue) => response.on_hover_text(cue_help(cue, wave.words)),
         None => response,
     };
 
@@ -1024,15 +1026,46 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
 /// so: it hangs off the bottom edge where a hot cue hangs off the top, and it
 /// carries a dot where a hot cue carries its letter. A hot cue's letter is
 /// repeated because that is the button that gets pressed.
-fn cue_help(cue: &CueMark) -> String {
+fn cue_help(cue: &CueMark, words: &[crate::library::Lyric]) -> String {
     let at = crate::app::time_text(cue.time_ms);
     let label = cue.label.trim();
-    match (label.is_empty(), cue.letter) {
-        // Nothing else to go on, so what it is is all there is to say.
-        (true, 0) => format!("memory cue \u{2014} {at}"),
-        (true, _) => format!("hot cue {} \u{2014} {at}", cue.name()),
-        (false, 0) => format!("{label} \u{2014} {at}"),
-        (false, _) => format!("{label} \u{2014} hot cue {}, {at}", cue.name()),
+    // A cue placed from the words already carries its line as its label. One
+    // placed from the arrangement carries a section name, and the line sung
+    // where it lands is worth saying as well — so both appear when they
+    // differ, and neither is repeated when they do not.
+    let sung = crate::library::sung_at(words, cue.time_ms).filter(|sung| *sung != label);
+    let also = match sung {
+        Some(sung) => format!("\n\u{201c}{sung}\u{201d}"),
+        None => String::new(),
+    };
+
+    match cue.letter {
+        // A memory cue is not told it is a memory cue: the marker says so
+        // already, hanging off the bottom edge and carrying a dot where a hot
+        // cue hangs off the top and carries its letter. And it has no button,
+        // so there is nothing to name.
+        0 => match label.is_empty() {
+            true => match sung {
+                Some(sung) => format!("\u{201c}{sung}\u{201d}\n{at}"),
+                None => format!("memory cue \u{2014} {at}"),
+            },
+            false => format!("{label}{also}\n{at}"),
+        },
+        // A hot cue leads with its button, because that is what gets pressed,
+        // and then with what is sung there, because that is what it is
+        // recognised by. Eight cues all reading "Vocal" are eight cues named
+        // the same; eight reading the lines they land on are eight places in a
+        // record somebody can find in a booth.
+        _ => {
+            let name = format!("Hot cue {}", cue.name());
+            match label.is_empty() {
+                true => match sung {
+                    Some(sung) => format!("{name} \u{2014} \u{201c}{sung}\u{201d}\n{at}"),
+                    None => format!("{name}\n{at}"),
+                },
+                false => format!("{name} \u{2014} {label}{also}\n{at}"),
+            }
+        }
     }
 }
 
@@ -1574,6 +1607,7 @@ mod tests {
             stems: None,
             zoom: Zoom::default(),
             marks: &[],
+            words: &[],
             aligning: false,
         }
     }
@@ -1772,6 +1806,7 @@ mod tests {
                 stems: None,
                 zoom: asked,
                 marks: &[],
+                words: &[],
                 aligning: false,
             };
             let shown = show(ui, &wave);
@@ -1861,6 +1896,7 @@ mod tests {
                 stems: None,
                 zoom: Zoom::default(),
                 marks: &[],
+                words: &[],
                 aligning: true,
             };
             // Kept rather than overwritten: `Harness::run` steps frames until
@@ -1911,6 +1947,7 @@ mod tests {
                 stems: None,
                 zoom: close,
                 marks: &[],
+                words: &[],
                 aligning: false,
             };
             reported.set(show(ui, &nothing).zoom);
@@ -2034,23 +2071,77 @@ mod tests {
     fn what_resting_on_a_cue_says_is_what_the_marker_has_no_room_for() {
         // The marker is a letter or a dot. "V1 Get Down" is the thing worth
         // reading and the one thing it cannot show.
-        let hook = cue_help(&marked(0, 62_500, "V1 Get Down"));
-        assert_eq!(hook, "V1 Get Down \u{2014} 1:02.50");
+        let hook = cue_help(&marked(0, 62_500, "V1 Get Down"), &[]);
+        assert_eq!(hook, "V1 Get Down\n1:02.50");
 
-        // A hot cue says which button it is, since that is what gets pressed.
-        let hot = cue_help(&marked(2, 1_000, "Drop 1"));
-        assert!(hot.contains("hot cue B"), "{hot}");
+        // A hot cue leads with its button, since that is what gets pressed.
+        let hot = cue_help(&marked(2, 1_000, "Drop 1"), &[]);
+        assert!(hot.starts_with("Hot cue B \u{2014} Drop 1"), "{hot}");
 
         // And one nobody named still says what it is rather than nothing.
-        let bare = cue_help(&marked(0, 0, "   "));
+        let bare = cue_help(&marked(0, 0, "   "), &[]);
         assert!(bare.starts_with("memory cue"), "{bare}");
+    }
+
+    #[test]
+    fn a_hot_cue_is_read_by_the_line_it_lands_on() {
+        // The case: eight cues placed from the words, all of them called
+        // "Vocal", which is eight cues named the same thing. In a booth a cue
+        // is found by what is sung there.
+        let words = [
+            crate::library::Lyric {
+                start_ms: 62_000,
+                end_ms: 64_000,
+                text: "hold me closer now".into(),
+            },
+            crate::library::Lyric {
+                start_ms: 90_000,
+                end_ms: 92_000,
+                text: "nothing here but us".into(),
+            },
+        ];
+
+        // A cue with no name of its own takes the line it lands on.
+        let bare = cue_help(&marked(1, 62_500, ""), &words);
+        assert!(bare.starts_with("Hot cue A \u{2014} \u{201c}hold me closer now"), "{bare}");
+
+        // One named for the arrangement keeps its name and says the line too:
+        // they are different facts about the same moment.
+        let section = cue_help(&marked(2, 90_000, "Drop 1"), &words);
+        assert!(section.starts_with("Hot cue B \u{2014} Drop 1"), "{section}");
+        assert!(section.contains("nothing here but us"), "{section}");
+
+        // And a line is never said twice when the cue is already named for it.
+        let same = cue_help(&marked(3, 62_500, "hold me closer now"), &words);
+        assert_eq!(same.matches("hold me closer now").count(), 1, "{same}");
+    }
+
+    #[test]
+    fn a_cue_in_the_silence_before_a_line_still_finds_it() {
+        // Cues for a vocal entry are snapped back to the beat before the
+        // singing, so the moment they mark is in front of the line rather than
+        // inside it. Reading only the line covering the cue found nothing for
+        // exactly the cues this is most for.
+        let words = [crate::library::Lyric {
+            start_ms: 62_000,
+            end_ms: 64_000,
+            text: "hold me closer now".into(),
+        }];
+        let ahead = cue_help(&marked(1, 61_200, ""), &words);
+        assert!(ahead.contains("hold me closer now"), "{ahead}");
+
+        // But not a cue a long way in front of one, which is a cue about
+        // something else.
+        let elsewhere = cue_help(&marked(1, 30_000, ""), &words);
+        assert!(!elsewhere.contains("hold me closer now"), "{elsewhere}");
+        assert!(elsewhere.starts_with("Hot cue A"), "{elsewhere}");
     }
 
     #[test]
     fn a_memory_cue_is_not_told_it_is_a_memory_cue() {
         // The marker already says so: it hangs off the bottom edge and carries
         // a dot, where a hot cue hangs off the top and carries its letter.
-        let named = cue_help(&marked(0, 100_000, "V1 everybody in the room"));
+        let named = cue_help(&marked(0, 100_000, "V1 everybody in the room"), &[]);
         assert!(!named.contains("memory cue"), "{named}");
         assert!(named.starts_with("V1 everybody in the room"), "{named}");
         assert!(named.contains("1:40.00"), "{named}");
@@ -2364,6 +2455,7 @@ mod tests {
                 stems: None,
                 zoom: Zoom { start: 0.25, span: 0.25 },
                 marks: &[],
+                words: &[],
                 aligning: false,
             }
         }
