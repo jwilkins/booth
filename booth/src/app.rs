@@ -3978,19 +3978,13 @@ fn roughly(secs: f64) -> String {
 /// only decides when to say so.
 const POORLY_HEARD: f32 = 0.7;
 
-/// How many of a track's repeated lines the inspector shows.
-///
-/// Enough to recognise a record by and not enough to become the lyric sheet:
-/// past the third, what a line is repeated is no longer what the track is.
-const SAYINGS: usize = 4;
-
-/// How tall the lyric sheet and the cueing account are allowed to get in the
+/// How tall the panels about a track's words are allowed to get in the
 /// inspector, in points.
 ///
-/// Both are as long as the record, and a panel that grows with the track is a
-/// panel where everything under it moves depending on which row is selected.
-/// Scrolled inside a fixed height instead, so the things below them — the tags
-/// and the file — stay where somebody left them.
+/// All three are as long as the record, and a panel that grows with the track
+/// is a panel where everything under it moves depending on which row is
+/// selected. Scrolled inside a fixed height instead, so the things below them
+/// — the tags and the file — stay where somebody left them.
 const WORDS_HEIGHT: f32 = 180.0;
 
 fn sheet_height(ctx: &egui::Context) -> f32 {
@@ -6356,7 +6350,19 @@ impl App {
                      like one.",
                 );
             }
-            for refrain in track.refrains.iter().take(SAYINGS) {
+            // Every line it comes back to, scrolled rather than the first four.
+            // The cap was there because the panel grew with the track and
+            // because four of them is not a lyric sheet — and there is a lyric
+            // sheet below now, so the second reason has somewhere better to
+            // live and the first is what a scroll area is for. The order is
+            // still how often, so the lines worth seeing are the ones in view
+            // without scrolling at all.
+            egui::ScrollArea::vertical()
+                .id_salt("what-it-keeps-saying")
+                .max_height(WORDS_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+            for refrain in &track.refrains {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(
@@ -6401,6 +6407,7 @@ impl App {
                     .color(theme::dim()),
                 );
             }
+                });
 
             // The words themselves, which until now were kept and never
             // shown: a line count, a provenance and four repeated lines, and
@@ -13927,6 +13934,74 @@ mod tests {
                 vec!["hook: \u{201c}hold me closer now\u{201d}, sung 3 times".into()];
             app.rebuild();
             (app, id)
+        }
+
+        #[test]
+        fn every_line_the_track_comes_back_to_is_reachable() {
+            // It showed the first four and stopped. A record whose fifth most
+            // repeated line is the one somebody recognises it by had no way to
+            // that line at all — and the cap was there because the panel grew
+            // with the track, which is what a scroll area is for.
+            let mut app = inspecting("sayings-all", "/music/02 Tension.m4a");
+            let id = app.selected.unwrap();
+            // Seven lines, each sung one time fewer than the last, so the
+            // order is unambiguous and the seventh is well past the old cap.
+            //
+            // Plainly different from each other, because lines that share most
+            // of their words are counted as the same line — seven readings of
+            // "line number N" came back as one refrain heard twenty-nine
+            // times, which is the grouping working and the fixture not. And
+            // spread well apart, because repeats closer together than a few
+            // seconds are one hearing.
+            const LINES: [&str; 7] = [
+                "hold me closer now",
+                "the city will not sleep",
+                "everybody in the room",
+                "nothing here but us",
+                "waiting for the sun",
+                "let the record spin",
+                "come back when it ends",
+            ];
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.lyrics = LINES
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(line, text)| {
+                        (0..(8 - line as u32)).map(move |n| {
+                            let at = 10_000 * line as u32 + 90_000 * n;
+                            crate::library::Lyric {
+                                start_ms: at,
+                                end_ms: at + 2_000,
+                                text: (*text).to_string(),
+                            }
+                        })
+                    })
+                    .collect();
+                track.refrains = crate::library::refrains_from(&track.lyrics.clone());
+            }
+            app.rebuild();
+            assert!(
+                app.library.get(id).unwrap().refrains.len() >= 7,
+                "the fixture does not have enough repeated lines to test the cap"
+            );
+
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(420.0, 1_600.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+
+            // By the count beside each line, not by the line: the lyric
+            // sheet below this panel lists every line of the track, so
+            // looking for the words found them whether or not this panel had
+            // drawn them. The first version of this test passed with the cap
+            // still in place for exactly that reason.
+            for (line, times) in LINES.iter().zip((2..=8).rev()) {
+                assert!(
+                    harness.query_all_by_label_contains(&format!("{times}\u{d7}")).count() > 0,
+                    "{line:?}, sung {times} times, is not in the panel"
+                );
+            }
         }
 
         #[test]
