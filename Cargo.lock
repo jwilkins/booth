@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "booth"
-version = "0.1.0"
+version = "0.0.8"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "booth-cli"
-version = "0.1.0"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "booth-gui"
-version = "0.1.0"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "async-std",

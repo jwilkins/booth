@@ -1,6 +1,6 @@
 [package]
 name = "booth-gui"
-version = "0.1.0"
+version = "0.0.8"
 edition = "2021"
 rust-version = "1.88"
 description = "Booth's batch window: loudness normalization, stem separation and tagging"

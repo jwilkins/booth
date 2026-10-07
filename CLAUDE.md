@@ -33,6 +33,25 @@ The environment variables are unset deliberately. A developer's machine exports
 that reads it passes here and fails there — which has happened, for four pushes
 running. See `config::Whisper::chosen`.
 
+## When a tag turns up
+
+A tag is not the whole of a release. Two things follow it, and neither happens
+on its own, so do both as soon as a new tag is seen — in the commit the tag
+points at where that is still possible, and immediately after where it is not.
+
+**The crate versions.** All three manifests carry the same number and it should
+be the tag's. The disk image is already right whatever they say: the macOS
+workflow hands the tag to `scripts/package-macos.sh`, which prefers it over the
+manifest. What is wrong without this is everything else the manifest feeds —
+the line every run writes to the log, and the User-Agent `booth-cli` sends to
+AcoustID and MusicBrainz. A bug report that opens `booth 0.1.0 starting` names
+no release at all, and the version a service sees is the one it rate-limits by.
+
+**The changelog.** The new release goes at the top of `CHANGELOG.md`, written
+from what is between the two tags rather than from memory. A changelog that has
+gone stale is worse than none, because whatever is newest in it reads as the
+newest there is.
+
 ## What a pull request body says
 
 What changed and **why it is right**, not a list of files. Where a decision
