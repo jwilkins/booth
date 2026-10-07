@@ -75,6 +75,7 @@ them, out of editors and one of this program's own.
 | [`proto/musicai/`](proto/musicai/README.md) | `booth-cli`: the engine — analysis, loudness, stems, tagging, the drive writer — and the command of the same name around it. It came first, which is all `proto/` and the directory's old name mean. |
 | [`gui/`](gui) | `booth-gui`, the older batch window: pick files, pick a task, run it. |
 | [`docs/`](docs) | The [spec](docs/rekordbox-replacement-spec.md) this is built to, and [what is known](docs/onelibrary.md) about the format the newer players read. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Every release, newest first, from the tags. |
 
 ```sh
 cargo build --release              # Booth
