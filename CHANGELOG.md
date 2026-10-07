@@ -6,13 +6,10 @@ Dates are the day the tagged commit was made, by the clock of the machine that
 made it. Two of them disagree with the website's release list by a day, where
 that page took the date in UTC instead; the tags are what this follows.
 
-Two releases carry a second tag under the older naming: `0.01` is the same
-commit as `0.0.1`, and `0.03` the same as `0.0.3`. They are listed once, under
-the name the rest of the releases use.
-
-The crates all say `version = "0.1.0"` in their `Cargo.toml` and always have.
-That number is not the release number and has never been bumped; the tags are
-the release history.
+The first and third releases were tagged `0.01` and `0.03` and renamed to
+`0.0.1` and `0.0.3`, which is the naming the other six use and the naming used
+here. Both old tags are still in the repository, pointing at the same two
+commits as their new names.
 
 ## 0.0.8 — 7 October 2026
 
