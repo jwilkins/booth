@@ -722,6 +722,8 @@ enum Pending {
     FitWave,
     /// Re-encode these into something a player opens.
     Convert(Vec<u32>),
+    /// Bring these to the loudness target, however Settings says to.
+    Level(Vec<u32>),
 }
 
 /// The four names the inspector lets you edit.
@@ -2073,6 +2075,32 @@ impl App {
     }
 
     /// Re-encode these into a format the hardware opens.
+    /// Bring these tracks to the loudness target.
+    ///
+    /// Nothing happens with the setting off, and the control that reaches here
+    /// is not offered then — but the check is here as well, because a job that
+    /// rewrites files is not one to leave guarded only by a button.
+    fn level_tracks(&mut self, ids: &[u32]) {
+        let how = self.config.normalize;
+        if how == crate::config::Normalize::Off {
+            self.note("loudness levelling is off in Settings", theme::dim());
+            return;
+        }
+        let waiting: Vec<job::Convertible> = self
+            .files_for(ids)
+            .into_iter()
+            .map(|(id, path)| job::Convertible { id, path })
+            .collect();
+        if waiting.is_empty() {
+            self.note("nothing to level", theme::dim());
+            return;
+        }
+        crate::info!("levelling {} as {}", plural(waiting.len(), "track"), how.label());
+        let ids: Vec<u32> = waiting.iter().map(|track| track.id).collect();
+        self.ensure_local(&ids);
+        self.start(Job::Normalize { tracks: waiting, how });
+    }
+
     fn convert_tracks(&mut self, ids: &[u32]) {
         let waiting: Vec<job::Convertible> = self
             .files_for(ids)
@@ -2650,6 +2678,44 @@ impl App {
         self.auto_cue_tracks(&waiting, again);
     }
 
+    /// What a levelled track becomes. Split out of `collect` because the two
+    /// halves differ in what they invalidate, and the difference is the whole
+    /// point of the setting — a test can say so without a running job.
+    fn levelled(&mut self, id: u32, to: Option<PathBuf>) {
+        match to {
+            // Re-encoded: the record follows the new file, the same as a
+            // conversion, and the original stays where it was. Everything
+            // measured came off the old samples and the new ones are quieter
+            // or louder, so the loudness, the picture and the waveform are
+            // all measured again rather than assumed to carry over.
+            Some(to) => {
+                crate::info!("#{id} levelled into {}", to.display());
+                if let Some(track) = self.library.get_mut(id) {
+                    track.path = to.clone();
+                    track.format = "flac".into();
+                    track.float_samples = false;
+                    track.bytes = std::fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
+                    track.analyzed = false;
+                }
+                self.remeasured.remove(&id);
+                self.waveform = None;
+            }
+            // Tagged: the same file, a few bytes longer. Nothing about the
+            // audio changed, so nothing measured off it has to be measured
+            // again — but the size did, and the check compares a drive's
+            // files against that number.
+            None => {
+                crate::info!("#{id} tagged with its gain");
+                if let Some(track) = self.library.get_mut(id) {
+                    let path = track.path.clone();
+                    track.bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    track.file_hash.clear();
+                }
+            }
+        }
+        self.prep_changed(id);
+    }
+
     fn collect(&mut self) {
         let Some(runner) = &self.runner else { return };
         let updates = runner.drain();
@@ -2835,6 +2901,10 @@ impl App {
                 Update::Rekordbox(collection) => {
                     let brought = self.merge_rekordbox(&collection);
                     self.note(brought, theme::go());
+                    changed = true;
+                }
+                Update::Levelled { id, to } => {
+                    self.levelled(id, to);
                     changed = true;
                 }
                 Update::Converted { id, to } => {
@@ -5098,6 +5168,34 @@ impl App {
                 let wanted = self.acting_on(named);
                 self.look_up_words(&wanted);
             }
+            // Only with the setting on, the same as the per-track button:
+            // with levelling off this is a control whose whole message is
+            // that it does nothing, in a strip where every other button acts.
+            if self.config.normalize != crate::config::Normalize::Off {
+                let how = self.config.normalize;
+                if ui
+                    .add_enabled(
+                        idle && showing > 0,
+                        egui::Button::new(format!("Level {showing}")),
+                    )
+                    .on_hover_text(match how {
+                        crate::config::Normalize::Tags => {
+                            "Write ReplayGain tags on all of these from what each measures. \
+                             The audio is not touched, no CDJ reads them, and a wav cannot \
+                             carry them at all."
+                        }
+                        _ => {
+                            "Re-encode all of these at the target level. Each one becomes a \
+                             new file beside the old, and the collection follows it."
+                        }
+                    })
+                    .on_disabled_hover_text("Nothing is showing")
+                    .clicked()
+                {
+                    let wanted = self.acting_on(|_| true);
+                    self.pending.push(Pending::Level(wanted));
+                }
+            }
             // Reads rather than changes anything, so it sits at the end of the
             // strip after the four that do. Shift means the thorough version
             // here rather than "again", because a check is a read: it is
@@ -5672,6 +5770,27 @@ impl App {
                 "Separate it into vocals, melody and drums. Minutes, not seconds.",
             ) {
                 self.pending.push(Pending::Separate(track.id));
+            }
+            // Only with the setting on. A button that explains it is off is a
+            // button in the way of the nine tracks in ten that will never be
+            // levelled, and Settings is where the answer to "why not" is.
+            if self.config.normalize != crate::config::Normalize::Off
+                && offer(
+                    ui,
+                    "Level",
+                    match self.config.normalize {
+                        crate::config::Normalize::Tags => {
+                            "Write ReplayGain tags from what it measures. The audio is not \
+                             touched, no CDJ reads them, and a wav cannot carry them at all."
+                        }
+                        _ => {
+                            "Re-encode it at the target level. Makes a new file beside this \
+                             one and follows it; what was here stays where it is."
+                        }
+                    },
+                )
+            {
+                self.pending.push(Pending::Level(vec![track.id]));
             }
             if offer(
                 ui,
@@ -6998,6 +7117,7 @@ impl App {
                 Pending::Adopt(id) => self.adopt(&[id]),
                 Pending::FitWave => self.zoom = wave::Zoom::default(),
                 Pending::Convert(ids) => self.convert_tracks(&ids),
+                Pending::Level(ids) => self.level_tracks(&ids),
                 Pending::Analyze(id) => self.analyze_tracks(&[id]),
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
@@ -9771,6 +9891,31 @@ impl App {
                         );
                         ui.add_space(4.0);
                     }
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Loudness");
+                    for how in crate::config::Normalize::ALL {
+                        if ui
+                            .radio_value(&mut self.config.normalize, how, how.label())
+                            .on_hover_text(how.blurb())
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(
+                            RichText::new(how.blurb()).color(theme::dim()).size(theme::SMALL),
+                        );
+                        ui.add_space(4.0);
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Off by default, because both of the others rewrite a file you \
+                             already have. With one of them chosen, a Level button appears \
+                             beside Re-analyse on a track and on a batch.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
 
                     ui.add_space(14.0);
                     pane_label(ui, "Stem quality");
@@ -13913,6 +14058,83 @@ mod tests {
                         crate::library::sung_at(&track.lyrics, cue.time_ms),
                         Some("hold me closer now")
                     );
+                }
+
+                #[test]
+                fn levelling_is_not_offered_until_it_is_turned_on() {
+                    // Off by default, because both of the other two rewrite a
+                    // file somebody already has. A button whose whole message
+                    // is that it does nothing is a button in the way of the
+                    // nine tracks in ten that will never be levelled.
+                    let (mut app, _) = on_the_grid("level-off");
+                    assert_eq!(app.config.normalize, crate::config::Normalize::Off);
+                    app.rebuild();
+
+                    let mut harness = panel(app);
+                    harness.run();
+                    assert!(harness.query_by_label("Level").is_none(), "it was on show");
+
+                    harness.state_mut().config.normalize = crate::config::Normalize::Reencode;
+                    harness.run();
+                    harness.get_by_label("Level");
+                }
+
+                #[test]
+                fn levelling_with_it_off_does_nothing_rather_than_guessing_a_mode() {
+                    // The button is not offered with the setting off, so this
+                    // is only reachable by a stale press or by something else
+                    // queueing it — and a job that rewrites files is not one
+                    // to leave guarded by a button alone.
+                    let (mut app, id) = on_the_grid("level-guard");
+                    app.config.normalize = crate::config::Normalize::Off;
+                    app.level_tracks(&[id]);
+                    assert!(!app.running(), "it started a job with levelling off");
+                }
+
+                #[test]
+                fn a_levelled_track_follows_the_new_file_and_is_measured_again() {
+                    // The same shape a conversion takes. Everything measured
+                    // came off the old samples and the new ones are quieter or
+                    // louder, so none of it carries over — and the file that
+                    // was there stays where it was, because a levelling that
+                    // turns out wrong should leave the original behind.
+                    let (mut app, id) = on_the_grid("level-landed");
+                    let was = app.library.get(id).unwrap().path.clone();
+                    let to = was.with_extension("levelled.flac");
+                    std::fs::write(&to, b"not really a flac").unwrap();
+
+                    app.levelled(id, Some(to.clone()));
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(track.path, to);
+                    assert_eq!(track.format, "flac");
+                    assert!(!track.analyzed, "it kept measurements made off the old samples");
+                    assert!(was.exists(), "the file it was made from was not left behind");
+                }
+
+                #[test]
+                fn a_tagged_track_keeps_its_measurements_and_takes_its_new_size() {
+                    // Tags change the file's length and nothing about its
+                    // audio. Measuring it all again would be minutes spent to
+                    // arrive back where it started — but the size did move,
+                    // and the drive check compares a file against that number.
+                    let (mut app, id) = on_the_grid("level-tagged");
+                    let path = app.library.get(id).unwrap().path.clone();
+                    std::fs::write(&path, b"a longer file than it was before").unwrap();
+                    {
+                        let track = app.library.get_mut(id).unwrap();
+                        track.analyzed = true;
+                        track.bytes = 1;
+                        track.file_hash = "stale".into();
+                    }
+
+                    app.levelled(id, None);
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(track.path, path, "the record moved when nothing was written");
+                    assert!(track.analyzed, "it threw away measurements the tags did not change");
+                    assert_eq!(track.bytes, 32, "the size did not follow the file");
+                    assert!(track.file_hash.is_empty(), "the hash still describes the old bytes");
                 }
 
                 #[test]
