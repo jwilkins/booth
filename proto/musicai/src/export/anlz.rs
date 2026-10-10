@@ -642,6 +642,96 @@ pub fn inspect(bytes: &[u8]) -> Result<Vec<SectionInfo>> {
     Ok(found)
 }
 
+/// Whether a player will survive this file.
+///
+/// [`inspect`] asks whether the bytes are an analysis file. This asks the
+/// harder question, which is the one a booth cares about: a file can walk
+/// cleanly section by section and still hold something no player has an answer
+/// to.
+///
+/// Both faults below were found on a stick a CDJ-3000 crashed on, in the same
+/// file — the analysis of one stem of one track out of 165. Neither is
+/// something this program writes; both are what a drive comes back with after
+/// something else has been at it, which is why reading a file back is not the
+/// same as having written it.
+///
+/// Deliberately not a check that the file is *ours*. A player is allowed to
+/// write to a drive, and a `PQT2` where this writes nothing is a player having
+/// saved a grid edit, not damage. Only what no reader can make sense of is
+/// refused here, because everything refused is something a sync will overwrite.
+/// Longer than any track anybody loads onto a deck, and far shorter than the
+/// 49 days an unsigned beat time before the start of a track comes to.
+const LONGEST_TRACK_MS: u32 = 24 * 60 * 60 * 1000;
+
+pub fn check(bytes: &[u8]) -> Result<()> {
+    let sections = inspect(bytes)?;
+
+    // A section more often than the format has a use for. A reader taking the
+    // first and a reader taking the last disagree about what the track looks
+    // like, and nothing says which one a given firmware is.
+    //
+    // The cue lists are the exception and not an accident: `PCOB` and `PCO2`
+    // are written once for the memory cues and once for the hot cues, which
+    // is rekordbox's own layout. Two is the shape; three is damage.
+    for fourcc in sections.iter().map(|s| s.fourcc.as_str()) {
+        let allowed = match fourcc {
+            "PCOB" | "PCO2" => 2,
+            _ => 1,
+        };
+        let seen = sections.iter().filter(|s| s.fourcc == fourcc).count();
+        if seen > allowed {
+            bail!("section {fourcc} appears {seen} times, where a player expects {allowed}");
+        }
+    }
+
+    // A beat grid that goes backwards. The times are unsigned, so a beat
+    // before the start of the track does not read as negative — it reads as
+    // 4294966813 ms, which is 49 days, and a grid that runs from there to
+    // 379 ms is one a player has to draw.
+    let be32 = |at: usize| -> u32 {
+        u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    };
+    let mut at = be32(4) as usize;
+    while at + 12 <= bytes.len() {
+        let sec_len = be32(at + 8) as usize;
+        if &bytes[at..at + 4] == b"PQTZ" {
+            let beats = be32(at + 20) as usize;
+            let first = at + 24;
+            if first + beats * 8 > bytes.len() {
+                bail!("a beat grid of {beats} beats does not fit the section holding it");
+            }
+            let mut last: Option<u32> = None;
+            for i in 0..beats {
+                let time = be32(first + i * 8 + 4);
+                // Nothing is a day long. This is the same fault as the one
+                // below seen from the other side: a beat 483 ms before the
+                // start of the track is written as 4294966813, and a grid
+                // that is wholly before the start ascends the whole way and
+                // would otherwise pass.
+                if time > LONGEST_TRACK_MS {
+                    bail!(
+                        "beat {} of {beats} is at {time} ms, which is longer than any track \
+                         \u{2014} a beat before the start of one, written unsigned",
+                        i + 1
+                    );
+                }
+                if let Some(before) = last {
+                    if time <= before {
+                        bail!(
+                            "beat {} of {beats} is at {time} ms, which is not after the {before} \
+                             ms of the beat before it",
+                            i + 1
+                        );
+                    }
+                }
+                last = Some(time);
+            }
+        }
+        at += sec_len;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,6 +1021,121 @@ mod tests {
             assert!(u32::from_str_radix(hash, 16).unwrap() < 200_003, "{dir}");
             assert_eq!(bucket.len(), 3);
             assert_eq!(hash.len(), 8);
+        }
+    }
+
+    /// A `.DAT` of the shape the writer makes, for the checks below to damage.
+    fn a_dat() -> Vec<u8> {
+        let grid = BeatGrid::constant(128.0, 0, 3_000);
+        let waveforms = WaveformData::silent(3.0);
+        Analysis {
+            on_drive_path: "/Contents/a.flac",
+            grid: &grid,
+            cues: &[],
+            waveforms: &waveforms,
+            structure: None,
+            vbr: None,
+        }
+        .dat()
+    }
+
+    #[test]
+    fn what_the_writer_writes_is_what_the_check_accepts() {
+        check(&a_dat()).unwrap();
+    }
+
+    #[test]
+    fn a_beat_grid_that_goes_backwards_is_refused() {
+        // The fault a CDJ-3000 crashed on. The file on the stick had its first
+        // two beats at 4294966813 and 4294967244 ms — 483 and 52 milliseconds
+        // before the start of the track, written into an unsigned field — and
+        // its third at 379 ms, where the grid turns round and comes back.
+        let mut dat = a_dat();
+        let grid = find(&dat, b"PQTZ");
+        let third = grid + 24 + 2 * 8 + 4;
+        dat[third..third + 4].copy_from_slice(&379u32.to_be_bytes());
+        let why = check(&dat).unwrap_err().to_string();
+        assert!(why.contains("not after"), "{why}");
+    }
+
+    #[test]
+    fn a_beat_before_the_start_of_a_track_is_refused_even_when_the_rest_follows_it() {
+        // The same fault from the other side: a grid lying entirely before
+        // zero ascends all the way along and would pass a monotonic test,
+        // while still being a grid 49 days out.
+        let mut dat = a_dat();
+        let grid = find(&dat, b"PQTZ");
+        let first = grid + 24 + 4;
+        dat[first..first + 4].copy_from_slice(&4_294_966_813u32.to_be_bytes());
+        let why = check(&dat).unwrap_err().to_string();
+        assert!(why.contains("longer than any track"), "{why}");
+    }
+
+    #[test]
+    fn the_same_section_twice_over_is_refused() {
+        // What a drive comes back with when something has appended to a file
+        // rather than replacing it: the stick that crashed had a second
+        // PWAV and PWV2 after the cue lists, and nothing says which of the
+        // two a given firmware reads.
+        let dat = a_dat();
+        let preview = find(&dat, b"PWAV");
+        let len = u32::from_be_bytes(dat[preview + 8..preview + 12].try_into().unwrap()) as usize;
+        let mut twice = dat.clone();
+        twice.extend_from_slice(&dat[preview..preview + len]);
+        let total = twice.len() as u32;
+        twice[8..12].copy_from_slice(&total.to_be_bytes());
+        let why = check(&twice).unwrap_err().to_string();
+        assert!(why.contains("PWAV appears 2 times"), "{why}");
+    }
+
+    #[test]
+    fn the_two_cue_lists_are_the_shape_of_the_file_and_not_a_duplicate() {
+        // Every .DAT has a PCOB for the memory cues and a PCOB for the hot
+        // ones, and every .EXT has that pair twice over in two formats. A
+        // check that called a repeated fourcc damage would refuse every file
+        // this program has ever written.
+        let grid = BeatGrid::constant(128.0, 0, 3_000);
+        let waveforms = WaveformData::silent(3.0);
+        let cue_list = [Cue::memory(0), Cue::hot(1, 1_000)];
+        let analysis = Analysis {
+            on_drive_path: "/Contents/a.flac",
+            grid: &grid,
+            cues: &cue_list,
+            waveforms: &waveforms,
+            structure: None,
+            vbr: None,
+        };
+        check(&analysis.dat()).unwrap();
+        check(&analysis.ext()).unwrap();
+        check(&analysis.two_ex()).unwrap();
+    }
+
+    #[test]
+    fn a_grid_edit_a_player_saved_is_not_damage() {
+        // A deck writes its own sections into a file it has been edited on —
+        // a PQT2 where this writes nothing. That is somebody's work and a
+        // question for the sync sheet, not a file to be overwritten without
+        // being asked, so the check has no opinion about it.
+        let dat = a_dat();
+        let mut theirs = dat.clone();
+        let mut section = b"PQT2".to_vec();
+        section.extend_from_slice(&20u32.to_be_bytes());
+        section.extend_from_slice(&24u32.to_be_bytes());
+        section.extend_from_slice(&[0; 12]);
+        theirs.extend_from_slice(&section);
+        let total = theirs.len() as u32;
+        theirs[8..12].copy_from_slice(&total.to_be_bytes());
+        check(&theirs).unwrap();
+    }
+
+    /// Where a section begins in a file, for a test that wants to damage one.
+    fn find(bytes: &[u8], fourcc: &[u8; 4]) -> usize {
+        let mut at = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        loop {
+            if &bytes[at..at + 4] == fourcc {
+                return at;
+            }
+            at += u32::from_be_bytes(bytes[at + 8..at + 12].try_into().unwrap()) as usize;
         }
     }
 

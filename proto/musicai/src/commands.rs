@@ -599,7 +599,11 @@ impl Prepared {
             // Read back through a parser that shares no code with the writer,
             // here rather than at the end, so a drive that cannot hold what was
             // just put on it says so on the file it failed.
-            anlz::inspect(&destination.read(at)?)
+            //
+            // Checked rather than merely parsed: a file can walk cleanly and
+            // still hold a grid no player can draw, and the one place to find
+            // that out is here rather than in a booth.
+            anlz::check(&destination.read(at)?)
                 .with_context(|| format!("{at} did not read back off the drive"))?;
             written += bytes.len();
         }
