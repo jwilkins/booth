@@ -213,6 +213,85 @@ pub(crate) const COLUMNS: [(u16, &str); 27] = [
     (0x00aa, "MATCHING"),
 ];
 
+/// The browse categories: which of the menu items in [`COLUMNS`] a player
+/// offers when you turn the encoder, in what order, and which start visible.
+///
+/// Copied out of a real rekordbox drive rather than derived, because the four
+/// fields are not all understood. The first is the category's own id and the
+/// second is the menu item it shows, in [`COLUMNS`]' own numbering — the same
+/// numbering the `Columns` table this writes uses, which is what makes
+/// borrowed rows safe to borrow. The third carries the position among the
+/// visible ones in its low byte, with 0x63 standing for "not shown", and
+/// something in its high byte that is not known. The fourth counts rows.
+///
+/// Checked against two unrelated rekordbox-written drives: the same 22
+/// categories, the same menu items, and 21 of the 22 third fields identical —
+/// the odd one out is category 10, which differs between the two and so is a
+/// preference rather than part of the format.
+///
+/// This table was empty in every drive this program wrote before now, which
+/// is one of the two named suspects in `docs/onelibrary.md` §9 for a CDJ-3000
+/// refusing the whole library.
+const CATEGORIES: [(u16, u16, u16, u16); 22] = [
+    (0x0008, 0x0009, 0x0163, 0x0000),
+    (0x000a, 0x000b, 0x0163, 0x0000),
+    (0x000d, 0x000f, 0x0163, 0x0000),
+    (0x000f, 0x0014, 0x0106, 0x0000),
+    (0x0002, 0x0002, 0x0002, 0x0001),
+    (0x0003, 0x0003, 0x0003, 0x0002),
+    (0x0004, 0x0004, 0x0001, 0x0003),
+    (0x000b, 0x000c, 0x0063, 0x0004),
+    (0x0011, 0x0005, 0x0063, 0x0005),
+    (0x0013, 0x0016, 0x0063, 0x0006),
+    (0x0014, 0x0012, 0x0063, 0x0007),
+    (0x001b, 0x001a, 0x0263, 0x0008),
+    (0x0018, 0x0011, 0x0063, 0x0009),
+    (0x0005, 0x0006, 0x0005, 0x000b),
+    (0x000e, 0x0013, 0x0004, 0x000c),
+    (0x0010, 0x0015, 0x0063, 0x000d),
+    (0x0009, 0x000a, 0x0063, 0x000e),
+    (0x0016, 0x001b, 0x0563, 0x000e),
+    (0x0001, 0x0001, 0x0063, 0x000f),
+    (0x0012, 0x0017, 0x0063, 0x0010),
+    (0x0006, 0x0007, 0x0063, 0x0011),
+    (0x0007, 0x0008, 0x0063, 0x0012),
+];
+
+/// The sort columns, in the same four-field shape and copied the same way.
+///
+/// Here the fields are understood, because they line up exactly with what the
+/// OneLibrary writer already knows: the first is a row in [`COLUMNS`] and the
+/// second is the sort's own id, and all seventeen pairs agree with
+/// `onelibrary::SORTS` — the seven visible sorts take positions one to seven
+/// in the high byte of the third field, and the rest are hidden.
+const SORTS: [(u16, u16, u16, u16); 17] = [
+    (0x0015, 0x0007, 0x0001, 0x0000),
+    (0x0008, 0x0009, 0x0001, 0x0000),
+    (0x000a, 0x000b, 0x0001, 0x0000),
+    (0x000f, 0x000d, 0x0001, 0x0000),
+    (0x0017, 0x0010, 0x0001, 0x0000),
+    (0x0019, 0x0000, 0x0100, 0x0000),
+    (0x001a, 0x0001, 0x0200, 0x0000),
+    (0x0002, 0x0002, 0x0300, 0x0000),
+    (0x0003, 0x0003, 0x0400, 0x0000),
+    (0x0005, 0x0004, 0x0502, 0x0000),
+    (0x0006, 0x0005, 0x0600, 0x0000),
+    (0x000b, 0x000c, 0x0700, 0x0000),
+    (0x0016, 0x0011, 0x0800, 0x0000),
+    (0x0009, 0x000a, 0x0900, 0x0000),
+    (0x000e, 0x0008, 0x0a00, 0x0000),
+    (0x000d, 0x000f, 0x0b00, 0x0000),
+    (0x0001, 0x0006, 0x0c00, 0x0000),
+];
+
+/// The date the one history row carries.
+///
+/// A constant rather than today, because a database that differs by the day
+/// it was written is one that marks every track as changed at midnight, and
+/// the date on a history session nobody played is cosmetic either way. The
+/// two real drives read for this carry the date rekordbox last wrote them.
+const HISTORY_DATE: &str = "2026-01-01";
+
 /// Everything that goes on a drive.
 #[derive(Clone, Debug, Default)]
 pub struct Database {
@@ -281,6 +360,19 @@ impl Database {
                 .map(|(i, (menu, name))| RowData::plain(column_row(i as u16 + 1, *menu, name)))
                 .collect(),
         );
+        // The three tables every drive this wrote left empty and every drive
+        // rekordbox writes fills. A player builds its browse screen from the
+        // first two and they refer to the menu items just written, which is
+        // what makes rows borrowed from someone else's drive safe here.
+        rows.insert(
+            Table::Unknown17 as u8,
+            CATEGORIES.iter().map(|row| RowData::plain(four_field_row(*row))).collect(),
+        );
+        rows.insert(
+            Table::Unknown18 as u8,
+            SORTS.iter().map(|row| RowData::plain(four_field_row(*row))).collect(),
+        );
+        rows.insert(Table::History as u8, vec![history_row(1, HISTORY_DATE, "")]);
 
         let mut tree = Vec::new();
         let mut entries = Vec::new();
@@ -772,6 +864,42 @@ fn color_row(id: u16, name: &str) -> Vec<u8> {
     row.push(0);
     row.extend_from_slice(&string(name));
     row
+}
+
+/// A row of [`CATEGORIES`] or [`SORTS`]: four little-endian sixteen-bit
+/// fields and nothing else, which is the whole of both rows on a real drive.
+fn four_field_row((a, b, c, d): (u16, u16, u16, u16)) -> Vec<u8> {
+    let mut row = Vec::with_capacity(8);
+    for field in [a, b, c, d] {
+        put_u16(&mut row, field);
+    }
+    row
+}
+
+/// The single history row every rekordbox drive carries.
+///
+/// Both real drives read for this hold exactly one, and the only parts that
+/// differ between them are the id, a word whose purpose is unknown, the date
+/// and the session's name. The two bytes between the date and `"1000"` are
+/// identical on both and are written back as they were found; what they mean
+/// is not known, and inventing a reading for them would be worse than saying
+/// so.
+///
+/// Why write one at all: a CDJ-3000 refuses a library this program writes,
+/// `export.pdb` parses under two independent parsers, and an empty history is
+/// the suspect `docs/onelibrary.md` §9 names. It is a guess, but it is a
+/// guess shaped exactly like what rekordbox does.
+fn history_row(id: u32, on: &str, name: &str) -> RowData {
+    let mut row = Vec::new();
+    put_u16(&mut row, 0x0280);
+    put_u16(&mut row, 0); // index_shift
+    put_u32(&mut row, id);
+    put_u32(&mut row, 0);
+    row.extend_from_slice(&string(on));
+    row.extend_from_slice(&[0x19, 0x1e]);
+    row.extend_from_slice(&string("1000"));
+    row.extend_from_slice(&string(name));
+    RowData { bytes: row, index_shift_at: Some(2) }
 }
 
 fn column_row(id: u16, menu: u16, name: &str) -> Vec<u8> {
@@ -1377,9 +1505,64 @@ mod tests {
         let bytes = Database::new().to_bytes().unwrap();
         let tables = inspect(&bytes).unwrap();
         assert_eq!(tables.len(), 20);
-        assert!(tables.iter().all(|t| t.rows == 0 || t.table == "Colors" || t.table == "Columns"));
+        // The five that are the player's furniture rather than the library's
+        // contents: a drive with no tracks on it still has a browse screen.
+        let furniture = ["Colors", "Columns", "Unknown17", "Unknown18", "History"];
+        assert!(tables.iter().all(|t| t.rows == 0 || furniture.contains(&t.table.as_str())));
         assert_eq!(table(&bytes, Table::Colors).rows, 8);
         assert_eq!(table(&bytes, Table::Columns).rows, 27);
+    }
+
+    #[test]
+    fn the_browse_screen_is_written_as_rekordbox_writes_it() {
+        // Counted off two unrelated rekordbox-written drives, which agree:
+        // 22 categories, 17 sorts, one history row. Every drive this program
+        // wrote before now had none of them, and a CDJ-3000 refused the lot
+        // with "no rekordbox library found".
+        let bytes = Database::new().to_bytes().unwrap();
+        assert_eq!(table(&bytes, Table::Unknown17).rows, 22);
+        assert_eq!(table(&bytes, Table::Unknown18).rows, 17);
+        assert_eq!(table(&bytes, Table::History).rows, 1);
+    }
+
+    #[test]
+    fn a_category_and_a_sort_name_a_menu_item_that_is_there() {
+        // The two tables are only worth borrowing because they refer to the
+        // menu items by the same numbering this writer uses for them: a row
+        // pointing past the end of the `Columns` table would be a browse
+        // screen with a hole in it.
+        for (_, menu, _, _) in CATEGORIES {
+            assert!(
+                (1..=COLUMNS.len() as u16).contains(&menu),
+                "a category names menu item {menu}, and there are {} of them",
+                COLUMNS.len()
+            );
+        }
+        for (column, _, _, _) in SORTS {
+            assert!(
+                (1..=COLUMNS.len() as u16).contains(&column),
+                "a sort names column {column}, and there are {} of them",
+                COLUMNS.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_history_row_is_the_shape_both_real_drives_hold() {
+        // `80 02`, the index shift, an id, a word, the date, two bytes nobody
+        // has read, "1000", and a name. Asserted against the bytes rather
+        // than the builder, because the point of it is to match a file
+        // written by something else.
+        let row = history_row(1, "2026-01-01", "").bytes;
+        assert_eq!(&row[0..2], &[0x80, 0x02]);
+        assert_eq!(u32::from_le_bytes(row[4..8].try_into().unwrap()), 1);
+        assert_eq!(row[12], 0x17, "a ten-character date is a 0x17 string");
+        assert_eq!(&row[13..23], b"2026-01-01");
+        assert_eq!(&row[23..25], &[0x19, 0x1e]);
+        assert_eq!(row[25], 0x0b, "a four-character string is a 0x0b one");
+        assert_eq!(&row[26..30], b"1000");
+        assert_eq!(row[30], 0x03, "an empty name is a bare 0x03");
+        assert_eq!(row.len(), 31);
     }
 
     #[test]

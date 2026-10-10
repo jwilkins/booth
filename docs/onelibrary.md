@@ -528,9 +528,42 @@ Against §2 to §5 what is left is:
   independent parsers, so what is wrong is something a parser tolerates and a
   player does not; fourfour's notes list several candidates found the same way,
   and the page headers have since been rewritten to match all of them that are
-  published. The remaining named suspect is that the history tables must not be
-  empty, which every export this writes leaves empty and which cannot be
+  published. The remaining named suspect was that the history tables must not
+  be empty, which every export this writes left empty and which could not be
   satisfied without knowing what a valid history row looks like.
+
+  **It is now known, and it was not only the history.** Two rekordbox-written
+  drives were read side by side with one of ours, and three tables are
+  populated on both of theirs and empty on every one of ours:
+
+  | table | rekordbox | this project, before | what it holds |
+  |---|---|---|---|
+  | 17 | 22 rows | 0 | the browse categories — which menu items the encoder offers |
+  | 18 | 17 rows | 0 | the sort columns |
+  | 19 (history) | 1 row | 0 | one session, with a date and a name |
+
+  Both are eight-byte rows of four little-endian sixteen-bit fields. For
+  table 17 the two drives agree on all 22 categories, on the menu item each
+  names, and on 21 of the 22 third fields — the odd one out is category 10,
+  so that field carries a preference. For table 18 all seventeen rows line up
+  exactly with the `sort` rows this project already writes into OneLibrary:
+  the first field is a row of the `Columns` table and the second is the
+  sort's own id, with the seven visible sorts taking positions one to seven.
+  Since the `Columns` table this writes is already byte-identical to
+  rekordbox's — same 27 items, same ids, same order — rows copied from
+  someone else's drive refer to menu items that are really there.
+
+  The history row is `80 02`, the index shift, an id, a word that is zero on
+  one drive and `0x0700` on the other, the date as `YYYY-MM-DD`, two bytes
+  (`19 1e`) that are identical on both drives and that nobody has read,
+  `"1000"`, and the session name, which is empty on one of them. One row is
+  what both carry; history *playlists* are not required, since the drive with
+  only one history row has none.
+
+  All three are now written, and tables 17 and 18 come out byte-identical to
+  the drive they were copied from. **Whether that is what the CDJ-3000 was
+  refusing is untested on hardware** — it is the suspect this section named,
+  now acted on, not a confirmed cause.
 - No `exportExt.pdb`. rekordbox writes it; whether any player needs it is not
   established (dj-usb-tkit and FableGear omit it and passed).
 - The `.2EX` now carries `PWV6`, `PWV7` and a `PWVC` whose three values are a
