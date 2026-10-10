@@ -298,8 +298,14 @@ pub fn wave_detail(data: &[u8]) -> Vec<u8> {
 }
 
 /// `PWV4` — the 1,200-column colour preview, six bytes per column.
+///
+/// The third header word is zero here, where `PWV3`, `PWV5` and `PWV7` all
+/// carry `0x00960000`. Not a guess at a pattern: both real exports read
+/// `0x00000000` on this section and this wrote `0x00960000` for three
+/// releases, which is a wrong value in the one section a browse column would
+/// draw from.
 pub fn wave_color_preview(data: &[u8]) -> Vec<u8> {
-    entry_section(b"PWV4", 6, data, Some(0x0096_0000))
+    entry_section(b"PWV4", 6, data, Some(0))
 }
 
 /// `PWV5` — the scrolling colour waveform, two bytes per half-frame.
@@ -537,13 +543,18 @@ impl Analysis<'_> {
     /// The `.2EX` file: the CDJ-3000's three-band waveforms, and the summary
     /// that closes one.
     ///
-    /// Preview before detail, which is the order a real export writes them in
-    /// and the opposite of what this used to do.
+    /// Detail before preview — `PWV7`, then `PWV6`. Read out of two real
+    /// rekordbox exports rather than reasoned about, because this was the
+    /// other way round for three releases on the strength of a note that said
+    /// "preview before detail, which is the order a real export writes them
+    /// in". Both fixtures say otherwise, and a CDJ-3000X fed the reversed file
+    /// drew a monochrome preview in the browse column while the deck's colour
+    /// waveform, which lives in the `.EXT`, was fine.
     pub fn two_ex(&self) -> Vec<u8> {
         file(&[
             path(self.on_drive_path),
-            wave_3band_preview(&self.waveforms.band_preview),
             wave_3band_detail(&self.waveforms.band_detail),
+            wave_3band_preview(&self.waveforms.band_preview),
             wave_3band_summary(&self.waveforms.band_preview),
         ])
     }
@@ -845,11 +856,15 @@ mod tests {
             vbr: None,
         };
 
-        // Measured across some seven hundred tracks of two real rekordbox
-        // exports, and worth holding to exactly: a section in the wrong file,
-        // or in the wrong place in the right file, is not something a player
-        // reports. It draws what it managed to read and says nothing about the
-        // rest.
+        // Worth holding to exactly: a section in the wrong file, or in the
+        // wrong place in the right file, is not something a player reports. It
+        // draws what it managed to read and says nothing about the rest.
+        //
+        // The `.DAT` and `.EXT` rows are a survey of some seven hundred tracks
+        // of two real exports. The `.2EX` row is not: that survey says `PWV6`,
+        // `PWV7` and the two rekordcrate fixtures read `PWV7`, `PWV6`, so this
+        // follows the files it can open and `docs/onelibrary.md` §5 carries
+        // the disagreement.
         assert_eq!(
             codes(&inspect(&analysis.dat()).unwrap()),
             ["PPTH", "PVBR", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"]
@@ -860,7 +875,7 @@ mod tests {
             "rekordbox has a PQT2 between the cues and the colour waveforms; \
              nothing goes there until its layout is known, and never a PQTZ"
         );
-        assert_eq!(codes(&inspect(&analysis.two_ex()).unwrap()), ["PPTH", "PWV6", "PWV7", "PWVC"]);
+        assert_eq!(codes(&inspect(&analysis.two_ex()).unwrap()), ["PPTH", "PWV7", "PWV6", "PWVC"]);
     }
 
     #[test]

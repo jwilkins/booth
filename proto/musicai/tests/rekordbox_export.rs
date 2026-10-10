@@ -303,18 +303,112 @@ fn a_2ex_file_frames_the_three_band_waveforms() {
     // rekordcrate 0.3 predates the CDJ-3000's three-band sections, so it reads
     // them as unknown — which is exactly the check that matters here: the
     // section framing is right even to a parser that has never heard of them.
-    // Preview, then detail, then the twenty-byte summary — the order a real
-    // export uses.
+    //
+    // Detail, then preview, then the twenty-byte summary. This test asserted
+    // the opposite for three releases, on a comment rather than a file; see
+    // `the_section_order_is_the_one_two_real_exports_use` for where the order
+    // now comes from.
     assert_eq!(file.sections.len(), 4);
     assert_eq!(file.sections[0].header.kind, ContentKind::Path);
-    assert_eq!(file.sections[1].header.kind, ContentKind::Unknown(*b"PWV6"));
-    assert_eq!(file.sections[2].header.kind, ContentKind::Unknown(*b"PWV7"));
+    assert_eq!(file.sections[1].header.kind, ContentKind::Unknown(*b"PWV7"));
+    assert_eq!(file.sections[2].header.kind, ContentKind::Unknown(*b"PWV6"));
     assert_eq!(file.sections[3].header.kind, ContentKind::Unknown(*b"PWVC"));
 
     // And our own reader, which does know about them, agrees on the sizes.
     let ours = anlz::inspect(&bytes).unwrap();
-    assert_eq!(ours[1].summary, "1200 entries of 3 bytes");
-    assert_eq!(ours[2].summary, format!("{} entries of 3 bytes", 8 * 150));
+    assert_eq!(ours[1].summary, format!("{} entries of 3 bytes", 8 * 150));
+    assert_eq!(ours[2].summary, "1200 entries of 3 bytes");
+}
+
+/// Every section's four-character code and header words, against the two real
+/// rekordbox exports in `rekordcrate`'s `data/complete_export`.
+///
+/// Read out of those files with a twenty-line script rather than taken from
+/// anybody's documentation, because two of the numbers below had been wrong
+/// since they were first written and no amount of reading the format notes was
+/// going to say so. The fixtures are not reachable from here — they live in
+/// the registry copy of a dependency, at a path that is this machine's — so
+/// what they said is transcribed, and the transcription is what this pins.
+///
+/// What a header word means is still unknown. That it differs from a real
+/// export is the whole of the claim.
+#[test]
+fn the_section_order_is_the_one_two_real_exports_use() {
+    let fixture = Fixture::new();
+
+    // `(fourcc, len_header, [words after fourcc/len_header/len_tag])`. The
+    // entry counts and `len_tag`s are the track's own and are not compared;
+    // everything else here is byte-for-byte what both fixtures carry.
+    let expected: [(&[u8], &[&str], u32); 3] = [
+        (b"DAT", &["PPTH", "PVBR", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"], 0),
+        (
+            b"EXT",
+            // No `PQT2`, which both fixtures have between the cue lists and
+            // `PWV5`. Leaving it out is deliberate — its layout is a 0x38
+            // header of eleven words that nobody has published — and the
+            // CDJ-3000X result says a section simply missing is skipped,
+            // where a wrong one costs everything behind it.
+            &["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PWV5", "PWV4", "PSSI"],
+            0,
+        ),
+        (b"2EX", &["PPTH", "PWV7", "PWV6", "PWVC"], 0),
+    ];
+
+    let analysis = fixture.analysis();
+    for (which, fourccs, _) in expected {
+        let bytes = match which {
+            b"DAT" => analysis.dat(),
+            b"EXT" => analysis.ext(),
+            _ => analysis.two_ex(),
+        };
+        let found: Vec<String> = sections(&bytes).into_iter().map(|(code, ..)| code).collect();
+        let want: Vec<String> = fourccs.iter().map(|s| s.to_string()).collect();
+        assert_eq!(found, want, "{} section order", String::from_utf8_lossy(which));
+    }
+
+    // The header words that differ between sections, and the two that were
+    // wrong. `PWV6` alone has no third word at all, so its header is 0x14
+    // where the other scrolling and preview sections are 0x18; `PWV4`'s third
+    // word is zero where `PWV3`, `PWV5` and `PWV7` carry 0x00960000.
+    let ext = sections(&analysis.ext());
+    let pwv3 = ext.iter().find(|(code, ..)| code == "PWV3").unwrap();
+    let pwv4 = ext.iter().find(|(code, ..)| code == "PWV4").unwrap();
+    let pwv5 = ext.iter().find(|(code, ..)| code == "PWV5").unwrap();
+    assert_eq!((pwv3.1, pwv3.2[0], pwv3.2[2]), (0x18, 1, 0x0096_0000));
+    assert_eq!((pwv4.1, pwv4.2[0], pwv4.2[2]), (0x18, 6, 0x0000_0000), "PWV4's third word");
+    assert_eq!((pwv5.1, pwv5.2[0], pwv5.2[2]), (0x18, 2, 0x0096_0305));
+
+    let two_ex = sections(&analysis.two_ex());
+    let pwv6 = two_ex.iter().find(|(code, ..)| code == "PWV6").unwrap();
+    let pwv7 = two_ex.iter().find(|(code, ..)| code == "PWV7").unwrap();
+    assert_eq!((pwv6.1, pwv6.2.len()), (0x14, 2), "PWV6 carries no third word");
+    assert_eq!((pwv7.1, pwv7.2[2]), (0x18, 0x0096_0000));
+    let pwvc = two_ex.iter().find(|(code, ..)| code == "PWVC").unwrap();
+    assert_eq!((pwvc.1, pwvc.0.len()), (0x0e, 4), "PWVC is a 0x0e header and twenty bytes");
+}
+
+/// Every section of an analysis file as `(fourcc, len_header, header words)`.
+///
+/// Deliberately not `anlz::inspect`: that reads a section's payload and says
+/// what it holds, and what is wanted here is the framing a player walks, down
+/// to the words whose meaning nobody knows.
+fn sections(bytes: &[u8]) -> Vec<(String, u32, Vec<u32>)> {
+    let be32 = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+    let mut out = Vec::new();
+    let mut at = be32(4) as usize;
+    while at + 12 <= bytes.len() {
+        let code = String::from_utf8_lossy(&bytes[at..at + 4]).into_owned();
+        let len_header = be32(at + 4);
+        let len_tag = be32(at + 8) as usize;
+        let words =
+            (12..len_header as usize).step_by(4).map(|off| be32(at + off)).collect::<Vec<_>>();
+        out.push((code, len_header, words));
+        if len_tag == 0 {
+            break;
+        }
+        at += len_tag;
+    }
+    out
 }
 
 #[test]

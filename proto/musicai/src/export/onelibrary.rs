@@ -50,15 +50,16 @@
 //! the key search all came up. That is the database — the part this module is
 //! responsible for — and it is the first evidence any of it is right.
 //!
-//! It is not the whole drive. Whether the player *used* the analysis files or
-//! quietly measured its own is a separate question, and the one most likely to
-//! have a different answer: it turns on whether the player recomputes the
-//! analysis directory name from the audio path rather than trusting
-//! `analysisDataFilePath`, which `docs/onelibrary.md` §5.1 sets out and which
-//! this program's directory naming does not currently follow. A player that
-//! browses perfectly and re-analyses every track on load looks like success
-//! from the browse screen. Until somebody has watched a waveform come up
-//! instantly, that part is unproven.
+//! It is not the whole drive, but it is more of it than it was. **The
+//! waveforms come up instantly**, which was the open question here and is now
+//! answered: a player that had measured its own would have paused to do it, so
+//! the analysis files are being read rather than recomputed. That also settles
+//! the directory naming — the hash in `docs/onelibrary.md` §5.1 is the name
+//! the player looks under, and `analysisDataFilePath` is decoration.
+//!
+//! What is still wrong is narrower. The browse column's preview is monochrome
+//! where a rekordbox drive's is not, and a CDJ-3000 reboots when it loads a
+//! track off one of these. See §6 of that document for both.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
