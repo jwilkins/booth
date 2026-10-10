@@ -287,7 +287,17 @@ pub fn wave_tiny(data: &[u8]) -> Vec<u8> {
 fn fixed_preview(fourcc: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let mut out = start(fourcc, 0x14);
     put_u32(&mut out, data.len() as u32);
-    put_u32(&mut out, 0x0010_0000); // constant, purpose unknown
+    // Counted off real drives rather than reasoned about. Of the rekordbox-
+    // written sticks to hand, every `PWAV` puts 0x00010000 here — 1087 of them
+    // on one, 190 on another, not one with anything else — and so does the tag
+    // a CDJ-3000 wrote into a file of ours when it saved an edit over it. This
+    // wrote 0x00100000, the same digits one place over, and that is what every
+    // analysis file this program has ever made carries.
+    //
+    // What the word is for is still unknown; Deep Symmetry's schema calls it
+    // unknown too. Writing what rekordbox writes is the position to be in
+    // about a field nobody can read.
+    put_u32(&mut out, 0x0001_0000);
     out.extend_from_slice(data);
     finish(out)
 }
@@ -1136,6 +1146,21 @@ mod tests {
                 return at;
             }
             at += u32::from_be_bytes(bytes[at + 8..at + 12].try_into().unwrap()) as usize;
+        }
+    }
+
+    #[test]
+    fn a_preview_waveform_says_what_rekordbox_says_in_the_word_it_will_not_explain() {
+        // Counted off the drives to hand: 1087 PWAV sections on one
+        // rekordbox-written stick and 190 on another, every one of them
+        // 0x00010000, and not one with anything else. This wrote 0x00100000 —
+        // the same digits one place over — on every file it ever made, and a
+        // CDJ-3000 that rewrote one of ours put 0x00010000 back.
+        let dat = a_dat();
+        for fourcc in [b"PWAV", b"PWV2"] {
+            let at = find(&dat, fourcc);
+            let word = u32::from_be_bytes(dat[at + 16..at + 20].try_into().unwrap());
+            assert_eq!(word, 0x0001_0000, "{} carries {word:#x}", String::from_utf8_lossy(fourcc));
         }
     }
 
