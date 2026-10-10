@@ -294,7 +294,17 @@ one, all 354 track directories of a 412-track capture on the other:
 |---|---|
 | `.DAT` | `PPTH`, `PVBR`, `PQTZ`, `PWAV`, `PWV2`, `PCOB` ×2 |
 | `.EXT` | `PPTH`, `PWV3`, `PCOB` ×2, `PCO2` ×2, `PQT2`, `PWV5`, `PWV4`, `PSSI` |
-| `.2EX` | `PPTH`, `PWV6`, `PWV7`, `PWVC` |
+| `.2EX` | `PPTH`, `PWV6`, `PWV7`, `PWVC` — **disputed, see below** |
+
+The `.2EX` row is the one measurement here that something else contradicts.
+Both `complete_export` fixtures shipped with rekordcrate read `PPTH`, `PWV7`,
+`PWV6`, `PWVC` — detail before preview — read out of the files themselves
+rather than from notes. FableGear's survey covers far more tracks and says the
+opposite, so this is unresolved: a transcription slip, a rekordbox version
+difference, or both orders occurring. What this program writes follows the
+fixtures, because the drive written the other way drew a monochrome browse
+column on a CDJ-3000X (§6); that is a symptom agreeing with the change, not a
+hardware test of it.
 
 Two corrections to folklore. The phrase data (`PSSI`) is in the `.EXT`, not
 the `.2EX`; the `.2EX` holds only the three-band waveforms and a 20-byte
@@ -533,9 +543,13 @@ Against §2 to §5 what is left is:
   satisfied without knowing what a valid history row looks like.
 - No `exportExt.pdb`. rekordbox writes it; whether any player needs it is not
   established (dj-usb-tkit and FableGear omit it and passed).
-- The `.2EX` now carries `PWV6`, `PWV7` and a `PWVC` whose three values are a
-  guess at what a real one holds — a per-band average, which is the shape of
-  the numbers a capture reported.
+- The `.2EX` now carries `PWV7`, `PWV6` — the order both rekordcrate fixtures
+  use, against the §5 table, which is why §5 now marks that row disputed — and
+  a `PWVC` whose three values are a guess at what a real one holds, a per-band
+  average, which is the shape of the numbers a capture reported.
+- `PWV4` carries `0x00000000` in its third header word, which is what both
+  fixtures carry. It held `0x00960000` by analogy with `PWV3`, `PWV5` and
+  `PWV7` until the fixtures were read.
 - The `.EXT` carries no extended beat grid at all, where rekordbox writes
   `PQT2`; see §5.
 - `analysedBits` is 105 on every row, and settable with `--analysed-bits` or

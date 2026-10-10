@@ -241,7 +241,15 @@ the ANLZ files. Measured across ~700 tracks of two real rekordbox exports:
 |---|---|
 | `.DAT` | `PPTH`, `PVBR`, `PQTZ`, `PWAV`, `PWV2`, `PCOB`×2 |
 | `.EXT` | `PPTH`, `PWV3`, `PCOB`×2, `PCO2`×2, `PQT2`, `PWV5`, `PWV4`, `PSSI` |
-| `.2EX` | `PPTH`, `PWV6`, `PWV7`, `PWVC` |
+| `.2EX` | `PPTH`, `PWV7`, `PWV6`, `PWVC` † |
+
+† **The `.2EX` order is disputed.** The two `complete_export` fixtures that
+ship with rekordcrate both read `PPTH`, `PWV7`, `PWV6`, `PWVC` — detail before
+preview — which is what the row above now says and what this writes. The
+FableGear survey in `docs/onelibrary.md` §5, over far more tracks, records the
+other order. Unresolved: it could be a transcription slip, a rekordbox version
+difference, or both orders occurring. The deck is the arbiter and §6 has the
+one result there is.
 
 Two corrections to things often repeated: **`PSSI` (phrase/lighting data) is in
 the `.EXT`, not the `.2EX`**, and the `.2EX` holds only the three-band
@@ -339,8 +347,10 @@ from the older, simpler section in the other file.
 If you are writing these files, match a real export's section list and order
 exactly, per file, and treat "I can see a waveform" as insufficient evidence.
 Fixed by dropping the wrong tag (not by inventing a `PQT2`), reordering the
-`.2EX` to `PWV6`, `PWV7`, `PWVC`, and writing `PVBR` in the `.DAT` even for
-lossless files, as real exports do.
+`.2EX`, and writing `PVBR` in the `.DAT` even for lossless files, as real
+exports do. The `.2EX` was reordered to `PWV6`, `PWV7`, `PWVC` on the strength
+of a note rather than a file, and both fixtures say that is backwards; see the
+last entry in this section.
 
 **With that, the `.EXT` reads through: load a track and its colour waveform and
 its hot cues are both there** — the cues on the deck, where before the fix
@@ -397,6 +407,51 @@ acceptance, and they're the best available checklist:
 I've implemented all of those except the last and it is still untested. If
 someone with a CDJ-3000 and a byte-diff against a real stick wants to finish
 this off, that's the open one.
+
+### CDJ-3000X, later firmware — instant waveforms, a monochrome browse column, and a CDJ-3000 that reboots
+
+Three results from the same drive, and the first one closes the question §6
+opened.
+
+**The waveforms come up instantly.** A player that had measured its own would
+have paused to do it, so the analysis files are being read rather than
+recomputed. That is the first positive evidence that hand-written ANLZ files
+are *used* and not merely tolerated, and it retires the warning above that a
+drive which browses beautifully proves nothing: load a track, and now the
+waveform arrives with no pause.
+
+**The preview in the track list is still monochrome.** The deck's colour
+waveform works — that was the `.EXT` fix — so this is the browse column
+specifically, and the browse column on a 3000-series is three-band. Reading
+both rekordcrate fixtures byte for byte turned up two differences from what
+this was writing, in exactly those sections:
+
+- the `.2EX` order is `PWV7`, `PWV6` in both fixtures, where this wrote `PWV6`,
+  `PWV7` — so the first waveform section a player met was the 3,620-byte
+  preview where a real file has the ~60–80 kB detail, and by the rule above
+  everything from there on is lost;
+- `PWV4`'s third header word is `0x00000000` in both fixtures, where this wrote
+  `0x00960000` by analogy with `PWV3`, `PWV5` and `PWV7`. `PWV4` is the
+  1,200-column colour preview.
+
+Both are now what the fixtures say, and a test pins the framing of all three
+files against them. Whether either was the cause is **untested on hardware** —
+and the `.2EX` change contradicts the FableGear order, so if the browse column
+is still monochrome, that is the thing to put back first.
+
+**A CDJ-3000 reboots when it loads a track.** On firmware 2.05 the same player
+did not see the library at all; it now browses and crashes on load, which is
+movement rather than progress. Load is when the ANLZ files are read, and the
+3000's headline feature is the three-band waveform out of the `.2EX` — the file
+whose section order was wrong. That makes the `.2EX` fix the first thing to
+re-test, and it is a hypothesis and not a diagnosis: a reboot is a firmware
+fault with no error text, and nothing here has been narrowed by bisection. The
+`.DAT`/`.EXT`-only drive is the obvious next experiment, since a 3000 that
+plays without a `.2EX` names the file.
+
+Still open from before, and still the most likely alternative: the history
+tables are empty, which is the one item on fourfour's CDJ-3000 checklist this
+has never satisfied.
 
 ## 7. Still unknown
 
