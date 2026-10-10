@@ -3,14 +3,15 @@
 # What this repository needs from the machine it is built on, fetched once
 # per container.
 #
-# Three tiers, and they are deliberately different about failure. The build
+# Four tiers, and they are deliberately different about failure. The build
 # dependencies are not optional: without ALSA's headers `alsa-sys` does not
 # compile and nothing in the workspace builds, so those are installed first
-# and loudly. The speech recogniser is optional — only cueing a track from its
-# words needs it, every test around that runs off fixtures — so it is fetched
-# best-effort and a session where the download failed is a session that still
-# works, minus one feature. The stem separator is not fetched at all; see
-# below.
+# and loudly. rust-analyzer is for reading the code rather than building it,
+# so it is added quietly and nothing cares if it fails. The speech recogniser
+# is optional — only cueing a track from its words needs it, every test around
+# that runs off fixtures — so it is fetched best-effort and a session where the
+# download failed is a session that still works, minus one feature. The stem
+# separator is not fetched at all; see below.
 #
 # Nothing lands in the working tree. The recogniser and its weights go to a
 # cache directory, and where they went is written into the session's
@@ -50,6 +51,38 @@ else
     # itself later.
     say "WARNING: could not install libasound2-dev — cargo will fail on alsa-sys"
   fi
+fi
+
+# -- rust-analyzer, for reading the workspace rather than building it -------
+
+# `rust-analyzer diagnostics .` is a whole-workspace semantic pass, which is
+# the one view `cargo check` does not give: every file at once, without
+# `cfg(test)`, from a type-checker that is not rustc.
+#
+# A second opinion and not an authority, which is the point of saying so here.
+# Measured on this workspace: 122 seconds, 2.7 GB peak RSS, 95 files. Of what
+# it found, about ninety were `inactive-code` weak warnings — one per
+# `#[cfg(test)]` module, so noise — and the two real-looking ones were
+# `unused_variables` on the `at` and `middle` closures in
+# `analysis/structure.rs`, which are used, and which `cargo clippy -p
+# booth-cli --lib` does not report. That is rust-analyzer losing a closure
+# binding, not two dead locals. clippy stays the gate.
+#
+# Before the recogniser because the section below exits early on
+# BOOTH_SKIP_WHISPER=1, and a session that skips a hundred-megabyte download
+# still wants a binary that comes down in seconds.
+#
+# Not what Claude Code's own LSP client would use: a cloud session does not
+# start plugin language servers, so `rust-analyzer-lsp@claude-plugins-official`
+# is inert here and the batch command is all the binary buys. On a developer's
+# own machine that plugin is the better route, which is the other reason this
+# sits below the CLAUDE_CODE_REMOTE guard.
+if rustup component list --installed 2>/dev/null | grep -q '^rust-analyzer'; then
+  say "rust-analyzer already here"
+elif rustup component add rust-analyzer >/dev/null 2>&1; then
+  say "added rust-analyzer"
+else
+  say "WARNING: could not add rust-analyzer — the whole-workspace check will be unavailable"
 fi
 
 # -- the speech recogniser, for cueing a track from its words --------------
