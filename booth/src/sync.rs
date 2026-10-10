@@ -98,6 +98,22 @@ pub fn wanted(library: &Library, drive: &Drive) -> Vec<u32> {
 /// wanted set is a union that keeps first-seen order: the same file copied
 /// twice would be two rows on the player and twice the space.
 pub fn plan(library: &Library, drive: &Drive) -> Plan {
+    plan_also_rewriting(library, drive, &[])
+}
+
+/// The same, told about tracks the drive's own copy of is broken.
+///
+/// The prep fingerprint answers "has anything changed here since this went
+/// on", which is the whole question only while the drive is holding what was
+/// put on it. A file something else has damaged is a track whose prep has not
+/// changed and whose copy on the stick is still wrong, and a comparison of
+/// fingerprints will go on saying there is nothing to do for ever. So the
+/// reasons to rewrite are two: the collection moved, or the drive did.
+///
+/// `broken` is from [`unreadable`], and is separate because [`plan`] is a
+/// function of the collection and the drive's record, which a test can build,
+/// and reading the stick is not.
+pub fn plan_also_rewriting(library: &Library, drive: &Drive, broken: &[u32]) -> Plan {
     let wanted = wanted(library, drive);
 
     let mut plan = Plan::default();
@@ -112,6 +128,9 @@ pub fn plan(library: &Library, drive: &Drive) -> Plan {
                 let now = fingerprint(track);
                 if now != written.prep {
                     plan.update.push((*id, changed_text(track)));
+                } else if broken.contains(id) {
+                    plan.update
+                        .push((*id, "the drive's copy is not one a player can read".to_string()));
                 }
             }
         }
@@ -358,6 +377,52 @@ pub fn analysis_files(analyze_path: &str) -> [String; 3] {
     [format!("{stem}.DAT"), format!("{stem}.EXT"), format!("{stem}.2EX")]
 }
 
+/// Every analysis file one written track owns on a drive: its own three, then
+/// three for each stem that went on with it.
+///
+/// Each group of three comes back together so a caller that cares which track
+/// a file belongs to still can; [`on_the_drive`] flattens them.
+pub fn analysis_paths(written: &crate::library::Written) -> Vec<[String; 3]> {
+    written
+        .row
+        .iter()
+        .map(|row| &row.analyze_path)
+        .chain(written.stems.iter().map(|(_, row)| &row.analyze_path))
+        .map(|path| analysis_files(path))
+        .collect()
+}
+
+/// The tracks whose analysis files on the drive are ones a player cannot read.
+///
+/// Not "files this program did not write". A player is allowed to write to a
+/// stick — that is what [`on_the_drive`] exists to notice — and a file with a
+/// deck's grid edit in it is work to be asked about, not damage to be
+/// overwritten. This is the narrower question of whether the bytes still
+/// describe a track at all, which is asked by
+/// [`booth_cli::export::anlz::check`] and answered the same way for a file
+/// this wrote badly and a file something else corrupted.
+///
+/// Only the `.DAT` is opened. It is the small one — ten kilobytes against a
+/// hundred and fifty — and it is the one holding the beat grid, which is what
+/// a player is reading when it dies. Opening all three of 165 tracks every
+/// time the sheet opens would be fifty megabytes for the sake of the two.
+///
+/// Returns the reason as well as the id, because "the drive is holding
+/// something broken" is only actionable if it says what.
+pub fn unreadable(root: &Path, drive: &Drive) -> Vec<(u32, String)> {
+    let mut broken = Vec::new();
+    for written in &drive.written {
+        for names in analysis_paths(written) {
+            let at = root.join(&names[0]);
+            let Ok(bytes) = std::fs::read(&at) else { continue };
+            if let Err(why) = booth_cli::export::anlz::check(&bytes) {
+                broken.push((written.id, format!("{}: {why:#}", names[0])));
+            }
+        }
+    }
+    broken
+}
+
 /// What the drive is holding for each of the tracks written to it.
 ///
 /// Read fresh off the stick: the files as they are now, and the edit counters
@@ -367,13 +432,21 @@ pub fn analysis_files(analyze_path: &str) -> [String; 3] {
 ///
 /// One walk and one query for the whole drive, because this runs every time the
 /// sync sheet is opened and a drive holds thousands of files.
+///
+/// **A track's stems are stamped with it.** A stem has its own row and its own
+/// analysis files, and for a long time only the parent's were looked at — so a
+/// stem's files on a drive were never compared against anything, never
+/// reported as changed, and never rewritten. A CDJ-3000 crashed on one stem of
+/// one track for five days through four syncs, because the damage was in a
+/// file nothing here was looking at. Everything a track owns on the drive goes
+/// in one stamp.
 pub fn on_the_drive(root: &Path, drive: &Drive, key: Option<&str>) -> HashMap<u32, Stamp> {
     let counters = onelibrary_counters(root, key);
     let mut found = HashMap::new();
 
     for written in &drive.written {
         let Some(row) = &written.row else { continue };
-        let names = analysis_files(&row.analyze_path);
+        let names: Vec<String> = analysis_paths(written).into_iter().flatten().collect();
 
         let mut files = Vec::new();
         let mut newest: Option<u64> = None;
@@ -1205,6 +1278,117 @@ mod tests {
             let drive = drive_holding(&library, ids[0], None);
             let found = on_the_drive(Path::new("/nowhere-at-all"), &drive, None);
             assert!(found.is_empty(), "{found:?}");
+        }
+
+        /// The path a stem's analysis files sit at, which is nowhere near its
+        /// parent's: the directory is hashed from the audio path.
+        const STEM_DAT: &str = "/PIONEER/USBANLZ/P030/00006710/ANLZ0000.DAT";
+
+        /// The same drive, with a stem on it as well.
+        fn drive_holding_a_stem(library: &Library, id: u32) -> Drive {
+            let mut drive = drive_holding(library, id, None);
+            drive.written[0].stems = vec![(
+                PathBuf::from("/music/a-drums.mp3"),
+                pdb::Track { analyze_path: STEM_DAT.into(), ..pdb::Track::default() },
+            )];
+            drive
+        }
+
+        #[test]
+        fn a_stems_analysis_files_are_stamped_with_its_parents() {
+            // They were not, for a long time, and a CDJ-3000 crashed on a
+            // stem for five days through four syncs because of it: the file
+            // was damaged, nothing here was looking at it, and every
+            // comparison of what the drive held went on saying there was
+            // nothing to do. A stem has its own row, its own directory and
+            // its own three files, and all of it belongs to the track.
+            let root =
+                std::env::temp_dir().join(format!("booth-stem-stamp-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for dat in ["PIONEER/USBANLZ/P016/0000c1b2", "PIONEER/USBANLZ/P030/00006710"] {
+                std::fs::create_dir_all(root.join(dat)).unwrap();
+                std::fs::write(root.join(dat).join("ANLZ0000.DAT"), b"a grid and cues").unwrap();
+            }
+
+            let (library, ids) = library_with(1);
+            let drive = drive_holding_a_stem(&library, ids[0]);
+            let found = on_the_drive(&root, &drive, None);
+            let before = found.get(&ids[0]).expect("nothing found for a track that is there");
+            assert_eq!(before.files.len(), 2, "the stem's file is not in the stamp: {before:?}");
+
+            // The thing that was invisible: the stem's file changes and the
+            // parent's does not.
+            std::fs::write(
+                root.join("PIONEER/USBANLZ/P030/00006710/ANLZ0000.DAT"),
+                b"a grid the deck rewrote",
+            )
+            .unwrap();
+            let after = on_the_drive(&root, &drive, None);
+            assert_ne!(
+                after.get(&ids[0]),
+                Some(before),
+                "a stem's analysis file changed underneath and read as unchanged"
+            );
+
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn a_file_a_player_cannot_read_is_written_again_without_being_asked() {
+            // A damaged file is not a conflict. There is nothing on the drive
+            // worth keeping, the collection's copy is the only good one, and
+            // the prep fingerprint — which only ever answers "has anything
+            // changed here" — will say there is nothing to do for ever.
+            let root =
+                std::env::temp_dir().join(format!("booth-unreadable-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let folder = root.join("PIONEER/USBANLZ/P030/00006710");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("ANLZ0000.DAT"), b"not an analysis file at all").unwrap();
+
+            let (library, ids) = library_with(1);
+            let drive = drive_holding_a_stem(&library, ids[0]);
+
+            let broken = unreadable(&root, &drive);
+            assert_eq!(broken.len(), 1, "{broken:?}");
+            assert_eq!(broken[0].0, ids[0]);
+            assert!(broken[0].1.contains("ANLZ0000.DAT"), "{}", broken[0].1);
+
+            // Nothing has changed in the collection, so the plan on its own
+            // has nothing to say — which is exactly the state the stick was
+            // stuck in.
+            assert!(plan(&library, &drive).update.is_empty());
+            let told = plan_also_rewriting(&library, &drive, &[ids[0]]);
+            assert_eq!(told.update.len(), 1, "{told:?}");
+
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn a_drive_holding_what_was_written_to_it_has_nothing_to_rewrite() {
+            let root = std::env::temp_dir().join(format!("booth-readable-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let folder = root.join("PIONEER/USBANLZ/P016/0000c1b2");
+            std::fs::create_dir_all(&folder).unwrap();
+
+            let grid = booth_cli::export::BeatGrid::constant(128.0, 0, 3_000);
+            let waveforms = booth_cli::export::waveform::WaveformData::silent(3.0);
+            let dat = booth_cli::export::anlz::Analysis {
+                on_drive_path: "/Contents/a.flac",
+                grid: &grid,
+                cues: &[],
+                waveforms: &waveforms,
+                structure: None,
+                vbr: None,
+            }
+            .dat();
+            std::fs::write(folder.join("ANLZ0000.DAT"), &dat).unwrap();
+
+            let (library, ids) = library_with(1);
+            let drive = drive_holding(&library, ids[0], None);
+            assert!(unreadable(&root, &drive).is_empty());
+
+            std::fs::remove_dir_all(&root).unwrap();
         }
     }
 

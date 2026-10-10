@@ -372,6 +372,10 @@ pub struct App {
     /// left as the player left it can have that recorded as agreed rather than
     /// being asked about again on every sync.
     drive_now: std::collections::HashMap<u32, crate::library::Stamp>,
+    /// Tracks whose analysis files on the drive are not ones a player can
+    /// read, with what is wrong with them. Worked out alongside `drive_now`,
+    /// for the same reason: it reads the stick.
+    drive_broken: Vec<(u32, String)>,
     /// Where the playhead sits in the selected track, in milliseconds. It is
     /// where a new cue goes, so it is a position rather than a playing thing —
     /// nothing here makes a sound.
@@ -934,6 +938,7 @@ impl App {
             clashes: Vec::new(),
             settled: std::collections::HashMap::new(),
             drive_now: std::collections::HashMap::new(),
+            drive_broken: Vec::new(),
             playhead_ms: None,
             prep_height: PREP_HEIGHT_AT_FIRST,
             cue_entry: (None, String::new()),
@@ -1457,8 +1462,9 @@ impl App {
     }
 
     fn replan(&mut self) {
+        let broken: Vec<u32> = self.drive_broken.iter().map(|(id, _)| *id).collect();
         self.plan = match self.library.drives.get(self.drive) {
-            Some(drive) => sync::plan(&self.library, drive),
+            Some(drive) => sync::plan_also_rewriting(&self.library, drive, &broken),
             None => Plan::default(),
         };
     }
@@ -1479,6 +1485,7 @@ impl App {
         self.clashes.clear();
         self.settled.clear();
         self.drive_now.clear();
+        self.drive_broken.clear();
         let Some(drive) = self.library.drives.get(self.drive).cloned() else { return };
         if drive.is_image || !drive.path.exists() {
             return;
@@ -1487,6 +1494,21 @@ impl App {
         let found = sync::on_the_drive(&drive.path, &drive, self.config.onelibrary_key());
         self.clashes = sync::conflicts(&self.library, &drive, &found);
         self.drive_now = found;
+        // What the drive is holding that a player cannot read. Not a conflict:
+        // there is nothing on the drive worth keeping, so it is written again
+        // without being asked about, and the plan is made afresh now that
+        // there is something more to do.
+        self.drive_broken = sync::unreadable(&drive.path, &drive);
+        for (id, why) in &self.drive_broken {
+            crate::info!(
+                "{} on {} is not one a player can read and will be written again — {why}",
+                self.library.get(*id).map(|t| t.title.clone()).unwrap_or_else(|| id.to_string()),
+                drive.label
+            );
+        }
+        if !self.drive_broken.is_empty() {
+            self.replan();
+        }
         for clash in &self.clashes {
             self.settled.insert(clash.id, clash.default_side());
         }
