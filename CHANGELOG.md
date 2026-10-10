@@ -11,6 +11,40 @@ The first and third releases were tagged `0.01` and `0.03` and renamed to
 here. Both old tags are still in the repository, pointing at the same two
 commits as their new names.
 
+## 0.0.9 — unreleased
+
+The manifests already say 0.0.9, so this is what is in them; the date goes in
+when the tag does.
+
+**Loudness**
+
+- A **Loudness** setting, off by default, with three answers: leave files as
+  they are, write ReplayGain tags, or re-encode at the target. Booth had the
+  levelling code and no way to ask for it.
+- **re-encode** brings a file to -14 LUFS with a -1 dBTP ceiling and writes a
+  new FLAC beside the original, carrying its tags across. The collection follows
+  the new file and the old one stays where it was — the same shape a conversion
+  takes, so a levelling that turns out wrong leaves behind the thing it was made
+  from. This is the only one of the two a CDJ hears, because the level is then in
+  the audio.
+- **tags only** writes ReplayGain tags against the -18 LUFS reference and leaves
+  the audio alone. No generation loss, nothing to undo, and no player AlphaTheta
+  makes reads them. FLAC and MP3 only: a wav has no standard ReplayGain tag, and
+  asked for one the levelling says so per file instead of writing something no
+  reader would find.
+- A **Level** button on a track and a **Level N** for everything showing,
+  neither offered while the setting is off.
+- A re-encoded track is measured again, because the loudness, the picture and
+  the waveform all came off samples that have changed. A tagged track keeps all
+  of it and takes only its new size, which is what the drive check compares
+  against.
+
+**The project**
+
+- `CHANGELOG.md`, written from the tags.
+- A note in `CLAUDE.md` on what a new tag needs: the three manifests and the
+  changelog, neither of which happens on its own.
+
 ## 0.0.8 — 7 October 2026
 
 Correcting a beat grid by hand, and putting the words a track sings where they

@@ -280,6 +280,61 @@ impl Quality {
     }
 }
 
+/// Whether Booth levels a track's loudness, and how.
+///
+/// Off by default, and that is not timidity: both of the other two rewrite a
+/// file somebody already has, and a library tool that quietly changes the
+/// audio it was handed has taken a decision that is not its to take. Turning
+/// it on is saying the level matters more than the bytes.
+///
+/// The target is `booth_cli`'s own — the level most streaming services
+/// normalise to for the re-encode, and the ReplayGain 2.0 reference for the
+/// tags — so a track levelled here and one levelled by `booth-cli normalize`
+/// come out at the same place.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Normalize {
+    /// Nothing is levelled. A file goes to a drive exactly as it arrived.
+    #[default]
+    Off,
+    /// ReplayGain tags, with the audio untouched.
+    ///
+    /// No generation loss and nothing to undo — but no player AlphaTheta makes
+    /// reads them, so this changes what other software does with the file and
+    /// nothing at all about what comes out of a CDJ. Only FLAC and MP3 can
+    /// carry the tag at all: asked for a wav, the levelling says so per file
+    /// rather than writing something no reader would find.
+    Tags,
+    /// The samples themselves, re-encoded at the target.
+    ///
+    /// The only one of the two a player hears, because the level is then in
+    /// the audio. The file this makes is a new file beside the old one and the
+    /// collection follows it, the same way a conversion does: what was there
+    /// before stays where it was.
+    Reencode,
+}
+
+impl Normalize {
+    pub fn label(self) -> &'static str {
+        match self {
+            Normalize::Off => "off",
+            Normalize::Tags => "tags only",
+            Normalize::Reencode => "re-encode",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Normalize::Off => "Files keep the level they came with",
+            Normalize::Tags => {
+                "ReplayGain tags on FLAC and MP3; the audio is untouched, and no CDJ reads them"
+            }
+            Normalize::Reencode => "New files at the target level; what a player actually hears",
+        }
+    }
+
+    pub const ALL: [Normalize; 3] = [Normalize::Off, Normalize::Tags, Normalize::Reencode];
+}
+
 /// Where a rendered stem kit is kept.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StemsIn {
@@ -383,6 +438,9 @@ pub struct Config {
     pub counting: Counting,
     /// How much work a separation is worth.
     pub stem_quality: Quality,
+    /// Whether Booth levels a track's loudness, and how. See [`Normalize`].
+    #[serde(default)]
+    pub normalize: Normalize,
     /// Whether a batch of separations says what it will cost before it starts.
     ///
     /// On, because the expensive job is also the one asked for by accident:
@@ -714,6 +772,7 @@ impl Default for Config {
             length: Length::default(),
             counting: Counting::default(),
             stem_quality: Quality::default(),
+            normalize: Normalize::default(),
             warn_before_stems: true,
             stem_pace: None,
             identify: true,

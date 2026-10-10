@@ -44,6 +44,8 @@ pub enum Job {
     Retag(Vec<Retag>),
     /// Re-encode files a player will not open into ones it will.
     Convert(Vec<Convertible>),
+    /// Bring tracks to the loudness target, however the settings say to.
+    Normalize { tracks: Vec<Convertible>, how: crate::config::Normalize },
     /// Read a rekordbox library and bring it across.
     Rekordbox { path: PathBuf, key: String },
     /// Render stem kits.
@@ -139,6 +141,7 @@ impl Job {
             Job::Hash(_) => "checking for copies",
             Job::Verify { .. } => "checking the collection",
             Job::Analyze(_) => "analysing",
+            Job::Normalize { .. } => "levelling",
             Job::Regrid(_) => "measuring the grid",
             Job::Separate { .. } => "stems",
             Job::Transcribe { .. } => "reading the words",
@@ -278,6 +281,12 @@ pub enum Update {
         /// Empty unless the grid genuinely bends, the same way an analysis
         /// reports it.
         beat_ms: Vec<u32>,
+    },
+    /// A track was levelled. `to` is the new file where the samples were
+    /// re-encoded, and `None` where only tags were written.
+    Levelled {
+        id: u32,
+        to: Option<PathBuf>,
     },
     /// A track was decoded and is ready to play.
     Decoded {
@@ -992,6 +1001,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Regrid(tracks) => regrid_all(&tracks, reporter),
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
         Job::Convert(tracks) => convert(&tracks, reporter),
+        Job::Normalize { tracks, how } => normalize(&tracks, how, reporter),
         Job::Rekordbox { path, key } => {
             let connection = booth_cli::rekordbox::open(&path, &key)?;
             let collection = booth_cli::rekordbox::master::read(&connection)?;
@@ -1327,6 +1337,96 @@ fn adopt(tracks: &[Adoptable], config: &Config, reporter: &Channel) -> anyhow::R
 /// The original is never touched. What comes back is a second file, and the
 /// collection is repointed at it; if the conversion turns out to be wrong, the
 /// thing it was made from is still there.
+/// Bring each track to the loudness target.
+///
+/// Two paths, and they end in different places. The tags path writes
+/// ReplayGain into the file that is already there: no new file, no generation
+/// loss, and nothing for the collection to follow. The re-encode path writes a
+/// new file beside the old one and hands it back, the same shape a conversion
+/// takes — because changing the samples means everything measured off the old
+/// ones has to be measured again, and the safest way to say that is to make it
+/// a different file.
+///
+/// Serially rather than in parallel: this decodes and re-encodes whole tracks,
+/// so the disk is the limit rather than the cores, and a batch that saturates
+/// both leaves nothing for the window to stay responsive with.
+fn normalize(
+    tracks: &[Convertible],
+    how: crate::config::Normalize,
+    reporter: &Channel,
+) -> anyhow::Result<()> {
+    use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+    use booth_cli::normalize::replaygain::{write_tags, ReplayGain};
+    use booth_cli::normalize::{self, Settings, REPLAYGAIN_REFERENCE_LUFS};
+
+    let total = tracks.len();
+    for (done, track) in tracks.iter().enumerate() {
+        if reporter.cancelled() {
+            break;
+        }
+        let result = (|| -> anyhow::Result<Option<PathBuf>> {
+            match how {
+                // Nothing to do, and the window does not queue this — but a
+                // job that silently did something else if it were queued is
+                // worse than one that says it did nothing. Decided before the
+                // decode, which is the minutes this job is made of.
+                crate::config::Normalize::Off => Ok(None),
+                crate::config::Normalize::Tags => {
+                    let audio = decode_file(&track.path)?;
+                    let measured = booth_cli::loudness::measure(&audio)?;
+                    let figures = ReplayGain::for_track(&measured, REPLAYGAIN_REFERENCE_LUFS);
+                    write_tags(&track.path, &figures)?;
+                    crate::info!(
+                        "tagged {} at {:+.2} dB",
+                        track.path.display(),
+                        figures.track_gain_db
+                    );
+                    Ok(None)
+                }
+                crate::config::Normalize::Reencode => {
+                    let mut audio = decode_file(&track.path)?;
+                    let report = normalize::apply(&mut audio, &Settings::default())?;
+                    let to = unused_path(&track.path.with_extension("flac"));
+                    crate::info!(
+                        "levelled {} to {} at {:+.2} dB ({:.1} LUFS)",
+                        track.path.display(),
+                        to.display(),
+                        report.gain_db,
+                        report.after.integrated_lufs
+                    );
+                    write_file(&to, &audio, Codec::Flac, &EncodeOptions::default())?;
+
+                    // The names come with it, the same as a conversion: a
+                    // levelled file that arrives untitled would look like a
+                    // different record sitting next to the original.
+                    let metadata = booth_cli::tag::read_metadata(&track.path).unwrap_or_default();
+                    let _ = booth_cli::tag::write_tags(
+                        &to,
+                        &metadata,
+                        booth_cli::tag::OnExisting::Overwrite,
+                        None,
+                    );
+                    Ok(Some(to))
+                }
+            }
+        })();
+
+        match result {
+            Ok(to) => {
+                let _ = reporter.tx.send(Update::Levelled { id: track.id, to });
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: track.path.clone(), message: format!("{e:#}") });
+            }
+        }
+        let _ = reporter.tx.send(Update::Progress { done: done + 1, total });
+        (reporter.wake)();
+    }
+    Ok(())
+}
+
 fn convert(tracks: &[Convertible], reporter: &Channel) -> anyhow::Result<()> {
     use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
 
@@ -1892,13 +1992,19 @@ mod tests {
     /// A tone, for when what matters is which file the audio came from rather
     /// than what is in it.
     fn write_tone(path: &Path, hz: f32, gain: f32) {
+        write_tone_as(path, hz, gain, Codec::Wav);
+    }
+
+    /// The same tone in a chosen format, for the tests that are about what a
+    /// format can carry rather than about the audio.
+    fn write_tone_as(path: &Path, hz: f32, gain: f32, codec: Codec) {
         let rate = 44_100usize;
         let plane: Vec<f32> = (0..rate)
             .map(|i| gain * (std::f32::consts::TAU * hz * i as f32 / rate as f32).sin())
             .collect();
         let audio = Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        write_file(path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
+        write_file(path, &audio, codec, &EncodeOptions::default()).unwrap();
     }
 
     #[test]
@@ -2207,6 +2313,155 @@ mod tests {
         ids.sort_unstable();
         assert_eq!(ids, vec![1, 2]);
         assert!(matches!(updates.last(), Some(Update::Done(Ok(())))));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn levelling_off_touches_nothing_and_still_reports_the_track() {
+        // Reachable only by a stale press, so what matters is that it is inert
+        // rather than that it never runs: the same bytes, and an update that
+        // says no file was written.
+        let dir = scratch("level-off-job");
+        let quiet = dir.join("quiet.wav");
+        write_tone(&quiet, 440.0, 0.02);
+        let was = std::fs::read(&quiet).unwrap();
+
+        let mut runner = Runner::start(
+            Job::Normalize {
+                tracks: vec![Convertible { id: 1, path: quiet.clone() }],
+                how: crate::config::Normalize::Off,
+            },
+            Arc::new(|| {}),
+        );
+        runner.join();
+
+        let updates = runner.drain();
+        assert!(updates.iter().any(|u| matches!(u, Update::Levelled { id: 1, to: None })));
+        assert!(!updates.iter().any(|u| matches!(u, Update::Failed { .. })));
+        assert_eq!(std::fs::read(&quiet).unwrap(), was, "it rewrote the file anyway");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tagging_leaves_the_audio_alone_and_writes_the_gain_it_measured() {
+        // The tag is read back out of the file's own bytes rather than from
+        // the figure the job logged, because the figure being right and the
+        // file carrying it are two different claims.
+        let dir = scratch("level-tags-job");
+        let quiet = dir.join("quiet.flac");
+        write_tone_as(&quiet, 440.0, 0.02, Codec::Flac);
+        let before = decode_file(&quiet).unwrap();
+
+        let mut runner = Runner::start(
+            Job::Normalize {
+                tracks: vec![Convertible { id: 1, path: quiet.clone() }],
+                how: crate::config::Normalize::Tags,
+            },
+            Arc::new(|| {}),
+        );
+        runner.join();
+
+        let updates = runner.drain();
+        assert!(
+            updates.iter().any(|u| matches!(u, Update::Levelled { id: 1, to: None })),
+            "it reported a new file for a job that only writes tags"
+        );
+        assert!(!updates.iter().any(|u| matches!(u, Update::Failed { .. })), "it failed");
+
+        let after = decode_file(&quiet).unwrap();
+        assert_eq!(after.planes[0].len(), before.planes[0].len(), "the audio was re-encoded");
+
+        // Vorbis comments are stored as plain `KEY=value`, so the written tag
+        // is findable in the bytes without a tag reader.
+        let bytes = std::fs::read(&quiet).unwrap();
+        let key = b"REPLAYGAIN_TRACK_GAIN=";
+        let at = bytes
+            .windows(key.len())
+            .position(|w| w == key)
+            .unwrap_or_else(|| panic!("no track gain was written"));
+        let value = String::from_utf8_lossy(&bytes[at + key.len()..at + key.len() + 8]);
+        let gain: f64 = value
+            .split_whitespace()
+            .next()
+            .and_then(|db| db.parse().ok())
+            .unwrap_or_else(|| panic!("the gain is not a number: {value}"));
+        // Measured, not reasoned: this tone comes out at +16.66 dB against the
+        // -18 LUFS reference. The window is wide because the figure is the
+        // measurer's and would move if it changed; the sign is the claim.
+        assert!(gain > 10.0, "a tone this quiet should be lifted well clear of 0: {gain}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tagging_a_wav_says_so_rather_than_reporting_a_track_it_did_not_tag() {
+        // There is no standard ReplayGain tag for wav, and a library full of
+        // them is the normal case. Asked anyway, the job fails that file with
+        // the reason — which is how the window comes to show it.
+        let dir = scratch("level-tags-wav");
+        let quiet = dir.join("quiet.wav");
+        write_tone(&quiet, 440.0, 0.02);
+
+        let mut runner = Runner::start(
+            Job::Normalize {
+                tracks: vec![Convertible { id: 1, path: quiet.clone() }],
+                how: crate::config::Normalize::Tags,
+            },
+            Arc::new(|| {}),
+        );
+        runner.join();
+
+        let updates = runner.drain();
+        assert!(!updates.iter().any(|u| matches!(u, Update::Levelled { .. })), "it claimed a tag");
+        let said = updates
+            .iter()
+            .find_map(|u| match u {
+                Update::Failed { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("it neither tagged the file nor said why not"));
+        assert!(said.contains("wav"), "the reason does not name the format: {said}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn re_encoding_writes_a_new_file_at_the_target_and_leaves_the_old_one() {
+        // The target is what a player hears, so the measurement has to land on
+        // it. The tolerance is the limiter's: a sine is the worst case for a
+        // ceiling of -1 dBTP, because its peak is its whole shape.
+        let dir = scratch("level-reencode-job");
+        let quiet = dir.join("quiet.wav");
+        write_tone(&quiet, 440.0, 0.02);
+
+        let mut runner = Runner::start(
+            Job::Normalize {
+                tracks: vec![Convertible { id: 1, path: quiet.clone() }],
+                how: crate::config::Normalize::Reencode,
+            },
+            Arc::new(|| {}),
+        );
+        runner.join();
+
+        let updates = runner.drain();
+        let to = updates
+            .iter()
+            .find_map(|u| match u {
+                Update::Levelled { id: 1, to: Some(to) } => Some(to.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no levelled file was reported"));
+        assert!(to.exists(), "the reported file is not there");
+        assert!(quiet.exists(), "the file it was made from was not left behind");
+
+        let levelled = booth_cli::loudness::measure(&decode_file(&to).unwrap()).unwrap();
+        assert!(
+            (levelled.integrated_lufs - booth_cli::normalize::STREAMING_TARGET_LUFS).abs() < 1.5,
+            "levelled to {:.2} LUFS, not the target",
+            levelled.integrated_lufs
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
