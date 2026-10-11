@@ -30,13 +30,13 @@
 //!   rekordcrate's pull request), and agrees with two independent writers.
 //! - The **browse menu** is the same twenty-seven entries, with the same kind
 //!   codes and the same order, as the legacy database's own menu table — so it
-//!   is generated from [`super::pdb::COLUMNS`] rather than written out twice.
+//!   is generated from [`super::menu::COLUMNS`] rather than written out twice.
 //!   That the two formats agree here was checked against a third party's copy
 //!   of a real export, item for item.
-//! - The **category and sort rows** are the counts and the visible set a real
-//!   export has, as recorded by the one project whose hand-written drives are
-//!   reported to play on a CDJ-3000X. They are the least attested thing in the
-//!   file: they decide what the browse screen offers, not whether it opens.
+//! - The **category and sort rows** come from [`super::menu`] as well, and are
+//!   the legacy database's tables 17 and 18 in another shape: the same ids,
+//!   columns, visible set and order, which both real exports carry and both
+//!   working writers reproduce. They decide what the browse screen offers.
 //! - The **`cue` table is left empty**, because rekordbox leaves it empty. The
 //!   cues a player shows come from the analysis files, exactly as they do on a
 //!   legacy drive.
@@ -67,7 +67,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 
-use super::pdb::{Database, Track, COLUMNS};
+use super::menu::{CATEGORIES, COLUMNS, SORTS};
+use super::pdb::{Database, Track};
 
 /// Where the database goes on the drive.
 pub const DRIVE_PATH: &str = "/PIONEER/rekordbox/exportLibrary.db";
@@ -178,56 +179,6 @@ const CAMELOT: [(&str, i64); 24] = [
     ("11B", 10),
     ("12A", 14),
     ("12B", 4),
-];
-
-/// The browse categories: which menu items the player offers, in what order,
-/// and which of them start visible. The first field is the row's own id, whose
-/// gaps are a real export's; the second is a position in [`COLUMNS`].
-const CATEGORIES: [(i64, usize, i64, i64); 22] = [
-    (1, 0, 0, 0),    // GENRE
-    (2, 1, 1, 1),    // ARTIST
-    (3, 2, 2, 1),    // ALBUM
-    (4, 3, 3, 1),    // TRACK
-    (5, 16, 5, 1),   // PLAYLIST
-    (6, 4, 0, 0),    // BPM
-    (7, 5, 0, 0),    // RATING
-    (8, 6, 0, 0),    // YEAR
-    (9, 7, 0, 0),    // REMIXER
-    (10, 8, 0, 0),   // LABEL
-    (11, 9, 0, 0),   // ORIGINAL ARTIST
-    (12, 10, 4, 1),  // KEY
-    (15, 12, 0, 0),  // COLOR
-    (17, 23, 9, 1),  // FOLDER
-    (18, 19, 7, 1),  // SEARCH
-    (19, 13, 0, 0),  // TIME
-    (20, 14, 0, 0),  // BITRATE
-    (21, 15, 0, 0),  // FILE NAME
-    (22, 18, 6, 1),  // HISTORY
-    (23, 17, 0, 0),  // HOT CUE BANK
-    (26, 26, 8, 1),  // MATCHING
-    (27, 21, 10, 1), // DATE ADDED
-];
-
-/// The sort columns, in the same shape: row id, position in [`COLUMNS`],
-/// order, visible, and whether it doubles as the second line of a browse row.
-const SORTS: [(i64, usize, i64, i64, i64); 17] = [
-    (0, 24, 1, 1, 0),  // DEFAULT
-    (1, 25, 2, 1, 0),  // ALPHABET
-    (2, 1, 3, 1, 0),   // ARTIST
-    (3, 2, 4, 1, 0),   // ALBUM
-    (4, 4, 5, 1, 0),   // BPM
-    (5, 5, 6, 1, 0),   // RATING
-    (6, 0, 0, 0, 0),   // GENRE
-    (7, 20, 0, 0, 0),  // COMMENTS
-    (8, 13, 0, 0, 0),  // TIME
-    (9, 7, 0, 0, 0),   // REMIXER
-    (10, 8, 0, 0, 0),  // LABEL
-    (11, 9, 0, 0, 0),  // ORIGINAL ARTIST
-    (12, 10, 7, 1, 0), // KEY
-    (13, 14, 0, 0, 0), // BITRATE
-    (15, 12, 0, 0, 0), // COLOR
-    (16, 22, 0, 0, 0), // DJ PLAY COUNT
-    (17, 21, 0, 0, 0), // DATE ADDED
 ];
 
 /// rekordbox's own four My Tag groups, and nothing under them.
@@ -512,18 +463,18 @@ fn seed(connection: &Connection) -> Result<()> {
             params![i as i64 + 1, kind, format!("\u{fffa}{name}\u{fffb}")],
         )?;
     }
-    for (id, item, order, visible) in CATEGORIES {
+    for category in CATEGORIES {
         connection.execute(
             "INSERT INTO category (category_id, menuItem_id, sequenceNo, isVisible) \
              VALUES (?1, ?2, ?3, ?4)",
-            params![id, item as i64 + 1, order, visible],
+            params![category.id, category.column as i64 + 1, category.position, category.visible],
         )?;
     }
-    for (id, item, order, visible, sub) in SORTS {
+    for sort in SORTS {
         connection.execute(
             "INSERT INTO sort (sort_id, menuItem_id, sequenceNo, isVisible, \
              isSelectedAsSubColumn) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, item as i64 + 1, order, visible, sub],
+            params![sort.id, sort.column as i64 + 1, sort.position, sort.visible, sort.sub_column],
         )?;
     }
     for (id, name) in MY_TAG_GROUPS {

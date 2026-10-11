@@ -244,10 +244,11 @@ fn an_empty_database_is_still_a_valid_one() {
     assert!(rows_of(&all, PageType::Tracks).is_empty());
     assert!(rows_of(&all, PageType::PlaylistTree).is_empty());
     // The file header, a header page per table, a data page for each of the
-    // three tables that have rows on an empty drive (colours, the browse menu,
-    // the one history row), and an all-zero spare per table at the end — the
-    // empty candidate the file header's directory names for it.
-    assert_eq!(bytes.len(), 4_096 * (1 + 20 + 3 + 20));
+    // five tables that have rows on an empty drive (colours, the three tables
+    // of the browse menu, the one history row), and an all-zero spare per
+    // table at the end — the empty candidate the file header's directory
+    // names for it.
+    assert_eq!(bytes.len(), 4_096 * (1 + 20 + 5 + 20));
 }
 
 #[test]

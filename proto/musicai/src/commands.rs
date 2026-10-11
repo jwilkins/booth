@@ -479,7 +479,14 @@ pub fn export(
         // are built from the one `database` above, so the two files on the
         // drive cannot disagree about what is on it — which is the failure
         // that firmware 3.30 turned into a room full of DJs with no playlists.
-        lines.extend(write_onelibrary(args, &database, destination.as_ref(), reporter)?);
+        if args.no_onelibrary {
+            lines.push(format!(
+                "left {} off the drive, as asked: only the legacy database is on it",
+                crate::export::onelibrary::DRIVE_PATH
+            ));
+        } else {
+            lines.extend(write_onelibrary(args, &database, destination.as_ref(), reporter)?);
+        }
     }
 
     if let Some(destination) = destination {
@@ -1043,6 +1050,16 @@ fn prepare(
             None => audio.sample_rate,
         },
         sample_depth: 16,
+        // The figure a player prints next to the format. A real export gives a
+        // lossless file the rate of its samples and a lossy one its own, and
+        // this gave every file 0.
+        bitrate: match &carried {
+            Some(_) => crate::compat::Player::MP3_KBPS,
+            None if matches!(&*extension, "mp3" | "aac" | "m4a" | "ogg" | "opus") => {
+                pdb::average_kbps(u64::from(file_size), audio.duration_secs())
+            }
+            None => pdb::pcm_kbps(audio.sample_rate, 16, audio.channels() as u32),
+        },
         file_size,
         track_number: metadata.track_number.unwrap_or(0),
         disc_number: metadata.disc_number.unwrap_or(0) as u16,

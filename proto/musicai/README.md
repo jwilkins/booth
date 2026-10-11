@@ -471,6 +471,12 @@ to change what a player does with the analysis files: told a track is analysed, 
 not re-measure it and shows nothing where an analysis it will not read would have gone.
 `BOOTH_ANALYSED_BITS` does the same for the window.
 
+`--no-onelibrary` writes `export.pdb` alone and leaves `exportLibrary.db` off the drive.
+Every player reads the first, and the newer ones read the second instead when it is
+there, so a drive carrying both says nothing about which of the two a player that hangs
+on it is choking on, and a drive carrying only the first does. It is for finding that
+out, not for a drive that has to play in an unknown booth, which needs both.
+
 **What is missing before this plays in a club:** none of it has been tried on real
 hardware. It has been checked against an independent parser, which is not the same thing.
 
