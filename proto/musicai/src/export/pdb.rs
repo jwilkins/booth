@@ -605,15 +605,26 @@ fn data_page(table: Table, index: u32, next: u32, so_far: usize, rows: &[&RowDat
 
     let used = heap.len();
     let free = PAGE_LEN - PAGE_HEADER_LEN - used - index_size(rows.len());
-    // The browse menu's pages describe themselves differently from every other
-    // table's, and getting it the ordinary way round is one of the things a
-    // player refuses the whole database over.
-    let columns = matches!(table, Table::Columns);
+    // Some tables describe their own pages differently, and getting it the
+    // ordinary way round is one of the things a player refuses the whole
+    // database over: they put the row count in `unknown5` and leave
+    // `num_rows_large` at zero, where every other table says 1 and
+    // `rows - 1`.
+    //
+    // The browse menu was the known one. Colours are the same, in both real
+    // exports — eight rows, `unknown5` 8, `num_rows_large` 0 — and this wrote
+    // 1 and 7 for them. Tables 17 and 18 are in that family too, and this
+    // writes neither, so they cost nothing to leave alone.
+    //
+    // What the family has in common is unknown. All three are fixed lists that
+    // are identical on every drive, which is a guess at the reason and not a
+    // rule to extend to a table nobody has measured.
+    let fixed = matches!(table, Table::Columns | Table::Colors);
     let mut page = page_header(Fields {
         table,
         index,
         next,
-        sequence: match columns {
+        sequence: match matches!(table, Table::Columns) {
             true => sequence_base(table),
             false => sequence_base(table) + (so_far.max(1) as u32 - 1) * 5,
         },
@@ -621,11 +632,11 @@ fn data_page(table: Table, index: u32, next: u32, so_far: usize, rows: &[&RowDat
         free,
         used,
         flags: 0x24, // an ordinary data page with nothing deleted from it
-        unknown5: match columns {
+        unknown5: match fixed {
             true => rows.len() as u16,
             false => 1,
         },
-        rows_large: match columns {
+        rows_large: match fixed {
             true => 0,
             false => rows.len().max(1) as u16 - 1,
         },
@@ -685,11 +696,21 @@ fn page_header(f: Fields) -> Vec<u8> {
     // Whatever this is, it is the row count modulo eight in the top three
     // bits.
     page.push(((f.rows % 8) * 0x20) as u8);
-    // How many groups the index at the end of the page holds — one per sixteen
-    // rows. The browse menu counts one more than it has.
-    page.push(
-        (f.rows.div_ceil(ROWS_PER_GROUP) + usize::from(matches!(f.table, Table::Columns))) as u8,
-    );
+    // The row count divided by eight, which is not the group count and was
+    // written as one for a long time.
+    //
+    // Measured against the data pages of two real exports: `rows >> 3` is what
+    // every page of both carries, and `rows.div_ceil(16)` disagreed with 158 of
+    // the 720 pages of one of them. The browse menu is the evidence that the
+    // old formula was wrong rather than merely different — it needed a
+    // hand-added `+ 1` to be accepted, and `27 >> 3` is 3 where
+    // `27.div_ceil(16)` is 2, so that `+ 1` was the residual of this bug on the
+    // one table somebody had checked against hardware.
+    //
+    // Only the `0x24` pages of a real export are evidence here. A `0x34` page
+    // is mid-transaction and its `0x18` and `0x19` disagree about how many rows
+    // it has, so it says nothing about what a fresh write should look like.
+    page.push((f.rows >> 3) as u8);
     page.push(f.flags);
     put_u16(&mut page, f.free as u16);
     put_u16(&mut page, f.used as u16);
@@ -1360,7 +1381,7 @@ mod tests {
             .expect("the tracks have a data page");
         assert_eq!(page[0x18], 3);
         assert_eq!(page[0x19], 3 * 0x20, "the row count modulo eight, in the top bits");
-        assert_eq!(page[0x1a], 1, "one group of sixteen holds three rows");
+        assert_eq!(page[0x1a], 0, "three rows shifted down by three");
         assert_eq!(u16::from_le_bytes(page[0x20..0x22].try_into().unwrap()), 1);
         assert_eq!(u16::from_le_bytes(page[0x22..0x24].try_into().unwrap()), 2, "rows less one");
         assert_eq!(
@@ -1505,6 +1526,100 @@ mod tests {
         // land inside the row.
         let last = u16::from_le_bytes(row[0x5e + 40..0x5e + 42].try_into().unwrap()) as usize;
         assert!(last < row.len(), "the file path offset points past the end of the row");
+    }
+
+    /// Each written table's data page, against the one real export whose pages
+    /// are all `0x24`.
+    ///
+    /// `(table, rows, 0x19, 0x1a, unknown5, num_rows_large)` read out of
+    /// rekordcrate's `complete_export` fixture. Its `0x34` pages are left out
+    /// on purpose: a page carrying that flag is mid-transaction, its `0x18` and
+    /// `0x19` disagree about how many rows it holds, and it is therefore no
+    /// evidence about what writing a page fresh should produce.
+    ///
+    /// Tables 17 and 18 are in the row rekordbox writes but not in the row this
+    /// writes, so they are listed for the record and not asserted.
+    #[test]
+    fn a_data_page_describes_itself_the_way_a_real_export_does() {
+        // table 4 (labels) and 5 (keys) are ordinary; 6 (colours) and 16 (the
+        // browse menu) are the fixed-list family.
+        let measured: [(Table, usize, u8, u8, u16, u16); 4] = [
+            (Table::Labels, 1, 0x20, 0, 1, 0),
+            (Table::Keys, 5, 0xa0, 0, 1, 4),
+            (Table::Colors, 8, 0x00, 1, 8, 0),
+            (Table::Columns, 27, 0x60, 3, 27, 0),
+        ];
+
+        for (table, rows, want_19, want_1a, want_u5, want_nrl) in measured {
+            let page = page_header(Fields {
+                table,
+                index: 1,
+                next: 2,
+                sequence: sequence_base(table),
+                rows,
+                free: 0,
+                used: 0,
+                flags: 0x24,
+                unknown5: match matches!(table, Table::Columns | Table::Colors) {
+                    true => rows as u16,
+                    false => 1,
+                },
+                rows_large: match matches!(table, Table::Columns | Table::Colors) {
+                    true => 0,
+                    false => rows.max(1) as u16 - 1,
+                },
+                unknown6: 0,
+                unknown7: 0,
+            });
+            let got = (
+                page[0x18],
+                page[0x19],
+                page[0x1a],
+                u16::from_le_bytes(page[0x20..0x22].try_into().unwrap()),
+                u16::from_le_bytes(page[0x22..0x24].try_into().unwrap()),
+            );
+            assert_eq!(
+                got,
+                (rows as u8, want_19, want_1a, want_u5, want_nrl),
+                "{table:?} with {rows} rows"
+            );
+        }
+    }
+
+    /// The whole file, so the fields the writer fills in for itself are checked
+    /// too rather than only the header function.
+    #[test]
+    fn the_colours_page_says_eight_rows_where_it_used_to_say_one() {
+        let bytes = Database::new().to_bytes().unwrap();
+        let page = colors_data_page(&bytes);
+        assert_eq!(u16::from_le_bytes(page[0x20..0x22].try_into().unwrap()), 8, "unknown5");
+        assert_eq!(u16::from_le_bytes(page[0x22..0x24].try_into().unwrap()), 0, "num_rows_large");
+        assert_eq!(page[0x1a], 1, "8 >> 3");
+    }
+
+    /// The browse menu's page, which needed a hand-added `+ 1` to be accepted
+    /// by a player and now gets its 3 from the formula instead.
+    #[test]
+    fn the_browse_menu_still_says_three_without_being_told_to() {
+        let bytes = Database::new().to_bytes().unwrap();
+        let page = table_data_page(&bytes, Table::Columns);
+        assert_eq!(page[0x1a], 3, "27 >> 3");
+        assert_eq!(page[0x18], 27);
+    }
+
+    fn colors_data_page(bytes: &[u8]) -> &[u8] {
+        table_data_page(bytes, Table::Colors)
+    }
+
+    /// The first data page of a table — the one after its header page.
+    fn table_data_page(bytes: &[u8], want: Table) -> &[u8] {
+        for page in bytes.chunks_exact(PAGE_LEN).skip(1) {
+            let table = u32::from_le_bytes(page[8..12].try_into().unwrap());
+            if table == want as u32 && page[0x1b] == 0x24 && page[0x18] > 0 {
+                return page;
+            }
+        }
+        panic!("no populated data page for {want:?}");
     }
 
     #[test]
