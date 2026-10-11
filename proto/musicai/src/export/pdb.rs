@@ -573,16 +573,49 @@ fn header_page(table: Table, index: u32, next: u32) -> Vec<u8> {
         unknown7: u16::from(special),
     });
     page.resize(PAGE_LEN, 0);
-    let marker: u32 = 0x1fff_0000 | u32::from(special);
-    page[0x38..0x3c].copy_from_slice(&marker.to_le_bytes());
-    let after: u32 = match table {
-        Table::Tracks => 0x10,
-        Table::History => 0x140,
-        _ => 0,
-    };
-    page[0x3c..0x40].copy_from_slice(&after.to_le_bytes());
+
+    // The body, which was written as zeroes and is where a player goes looking
+    // for the table's rows.
+    //
+    // Both real exports and baken write the same five words here: this page's
+    // own index, the index of the table's first data page, `0x03ffffff`, a
+    // zero, and the marker. The second of those is the one that matters —
+    // without it a player has a header page that parses and no way to reach
+    // what it leads to, which is a drive that browses as an empty library.
+    // baken's own comment on the equivalent code says exactly that: "Without
+    // this content the CDJ accepts the sentinel page but can't locate the data
+    // pages it leads to."
+    //
+    // This is why a CDJ-3000 on official firmware 3.22 found no database on a
+    // drive a CDJ-3000X read perfectly: the 3000X reads `exportLibrary.db` and
+    // never opens this file.
+    let mut word = |at: usize, v: u32| page[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    word(0x28, index);
+    word(0x2c, next);
+    word(0x30, NONE_PAGE);
+    word(0x34, 0);
+    word(0x38, 0x1fff_0000 | u32::from(special));
+
+    // And then either a count, for the two tables that carry one, or the
+    // free-slot fill. 1004 words of it, which is 0x3c up to the twenty zero
+    // bytes every header page ends with.
+    match table {
+        Table::Tracks => word(0x3c, 0x10),
+        Table::History => word(0x3c, 0x140),
+        _ => {
+            for at in (0x3c..PAGE_LEN - 20).step_by(4) {
+                word(at, FREE_SLOT);
+            }
+        }
+    }
     page
 }
+
+/// What a page index is when it points at nothing.
+const NONE_PAGE: u32 = 0x03ff_ffff;
+
+/// The word a header page's unused heap is filled with, 1004 times.
+const FREE_SLOT: u32 = 0x1fff_fff8;
 
 /// A page of rows, with its index built backwards from the end.
 ///
@@ -1389,6 +1422,61 @@ mod tests {
             10 + 2 * 5,
             "the tracks' sequence base, plus five a row after the first"
         );
+    }
+
+    /// A header page's body, against the bytes a real export carries.
+    ///
+    /// Transcribed from the `complete_export` fixture, whose table layout this
+    /// happens to reproduce exactly, so the page indices are comparable too:
+    ///
+    /// ```text
+    /// tracks   00000001 00000002 03ffffff 00000000 1fff0001 00000010
+    /// colours  0000000d 0000000e 03ffffff 00000000 1fff0000 1ffffff8 x1004
+    /// history  00000027 00000028 03ffffff 00000000 1fff0001 00000140
+    /// ```
+    ///
+    /// The second word is the one this was missing, on every table. Everything
+    /// from `0x28` to the end was zeroes, so a player had a header page that
+    /// parsed and nothing saying where the rows were.
+    #[test]
+    fn a_header_page_points_at_the_first_data_page_of_its_table() {
+        let bytes = Database::new().to_bytes().unwrap();
+        let word =
+            |page: &[u8], at: usize| u32::from_le_bytes(page[at..at + 4].try_into().unwrap());
+
+        for table in Table::ALL {
+            let page = header_page_of(&bytes, table);
+            let index = word(page, 0x04);
+            assert_eq!(word(page, 0x28), index, "{table:?}: its own index");
+            assert_eq!(word(page, 0x2c), index + 1, "{table:?}: the first data page");
+            assert_eq!(word(page, 0x30), NONE_PAGE, "{table:?}");
+            assert_eq!(word(page, 0x34), 0, "{table:?}");
+            assert!(page[PAGE_LEN - 20..].iter().all(|&b| b == 0), "{table:?}: the last twenty");
+
+            // Two tables put a number where the rest put the free-slot fill.
+            match table {
+                Table::Tracks => assert_eq!(word(page, 0x3c), 0x10),
+                Table::History => assert_eq!(word(page, 0x3c), 0x140),
+                _ => {
+                    let fill = (0x3c..PAGE_LEN - 20)
+                        .step_by(4)
+                        .filter(|&at| word(page, at) == FREE_SLOT)
+                        .count();
+                    assert_eq!(fill, 1004, "{table:?}: free-slot words");
+                }
+            }
+        }
+    }
+
+    fn header_page_of(bytes: &[u8], want: Table) -> &[u8] {
+        bytes
+            .chunks_exact(PAGE_LEN)
+            .skip(1)
+            .find(|page| {
+                u32::from_le_bytes(page[8..12].try_into().unwrap()) == want as u32
+                    && page[0x1b] == 0x64
+            })
+            .unwrap_or_else(|| panic!("no header page for {want:?}"))
     }
 
     #[test]
