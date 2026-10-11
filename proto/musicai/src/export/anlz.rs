@@ -171,6 +171,27 @@ pub fn beat_grid(grid: &BeatGrid) -> Vec<u8> {
 /// It carries no colours and no comments; those arrived with [`cues_extended`].
 /// Both are written, because an older player reads this one and ignores the
 /// other.
+/// `PQT2` — the second beat grid rekordbox writes into the `.EXT`, here with
+/// nothing in it.
+///
+/// Its layout past the header is unpublished ("two bytes a beat" is all anyone
+/// has said), so this writes none of it: a 0x38-byte header carrying the one
+/// word every real one carries, `0x01000002`, and no beats. That is what baken
+/// writes, and baken's sticks play on a CDJ-3000 on firmware 3.22.
+///
+/// Why write an empty section rather than leave the tag out, which is what
+/// this did until now: the player that reads the `.EXT` and crashes on track
+/// load is a CDJ-3000, and the only evidence that a *missing* `PQT2` is
+/// skipped harmlessly came off a CDJ-3000X. An empty one is the form a
+/// working writer uses on the firmware in question.
+pub fn beat_grid_2_empty() -> Vec<u8> {
+    let mut out = start(b"PQT2", 0x38);
+    put_u32(&mut out, 0);
+    put_u32(&mut out, 0x0100_0002);
+    out.resize(0x38, 0);
+    finish(out)
+}
+
 pub fn cues(list: &[Cue], hot: bool) -> Vec<u8> {
     let chosen: Vec<&Cue> = list.iter().filter(|c| c.is_hot() == hot).collect();
     let mut out = start(b"PCOB", 0x18);
@@ -524,16 +545,13 @@ impl Analysis<'_> {
     /// ones, so a player that reads `.EXT` but predates the nexus 2 cue format
     /// still finds cues.
     pub fn ext(&self) -> Vec<u8> {
-        // No beat grid here. rekordbox writes one — `PQT2`, a second, terser
-        // encoding of the same beats — and this used to write a copy of the
-        // `.DAT`'s `PQTZ` in its place, which is a section that does not belong
-        // in this file. A CDJ-3000X handed one drew the monochrome preview from
-        // the `.DAT` and none of the colour: everything after the wrong tag,
-        // which is exactly the colour waveforms and the phrases, went unread.
-        //
-        // `PQT2`'s layout is not published beyond "two bytes a beat", so
-        // nothing is written in its place rather than something invented. The
-        // grid the player uses is the `.DAT`'s, which it already reads.
+        // The second beat grid, `PQT2`, goes where rekordbox puts it but with
+        // no beats in it; see `beat_grid_2_empty`. This once wrote a copy of
+        // the `.DAT`'s `PQTZ` there instead — a tag that does not belong in
+        // this file — and a CDJ-3000X drew the monochrome preview from the
+        // `.DAT` and none of the colour: everything after the wrong tag went
+        // unread. Then it wrote nothing there at all, which the 3000X skipped
+        // over. The grid a player uses is still the `.DAT`'s.
         let mut sections = vec![
             path(self.on_drive_path),
             wave_detail(&self.waveforms.detail),
@@ -541,6 +559,7 @@ impl Analysis<'_> {
             cues(self.cues, true),
             cues_extended(self.cues, false),
             cues_extended(self.cues, true),
+            beat_grid_2_empty(),
             wave_color_detail(&self.waveforms.color_detail),
             wave_color_preview(&self.waveforms.color_preview),
         ];
@@ -971,9 +990,9 @@ mod tests {
         );
         assert_eq!(
             codes(&inspect(&analysis.ext()).unwrap()),
-            ["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PWV5", "PWV4", "PSSI"],
+            ["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PQT2", "PWV5", "PWV4", "PSSI"],
             "rekordbox has a PQT2 between the cues and the colour waveforms; \
-             nothing goes there until its layout is known, and never a PQTZ"
+             an empty one goes there, as baken writes, and never a PQTZ"
         );
         assert_eq!(codes(&inspect(&analysis.two_ex()).unwrap()), ["PPTH", "PWV7", "PWV6", "PWVC"]);
     }

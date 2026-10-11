@@ -365,45 +365,66 @@ impl Database {
             .map(|table| Ok((*table, pack(rows.get(&(*table as u8)).unwrap_or(&empty))?)))
             .collect::<Result<_>>()?;
 
-        // Every table costs its header page plus its data pages, and an empty
-        // table still costs two, so the page count is known before anything is
-        // written — which matters because the pages have to point past the end
-        // of the file to say "no more of this table".
-        let past_end: u32 =
-            1 + packed.iter().map(|(_, groups)| 1 + groups.len().max(1) as u32).sum::<u32>();
+        // Every table costs its header page, its data pages, and one more: an
+        // all-zero spare at the end of the file that is its "empty candidate",
+        // the page the file header names as where the table would grow into.
+        // So the page count is known before anything is written.
+        //
+        // The spare is what this got wrong for five rounds against a
+        // CDJ-3000. Every table named the same candidate, and the one it named
+        // was `next_unused` — a page that did not exist. In both real exports
+        // and in baken (which plays on a CDJ-3000 on 3.22) every table has its
+        // own, every one is below `next_unused`, a populated table's last data
+        // page points `next` at it, and an empty table's header does. A player
+        // reads this directory before it reads any table, so twenty tables
+        // sharing a page past the end of the file is refused as no database at
+        // all, while a parser that never follows the pointer sees nothing wrong.
+        let table_count = Table::ALL.len() as u32;
+        let data_pages: u32 = packed.iter().map(|(_, groups)| groups.len() as u32).sum();
+        let first_spare = 1 + table_count + data_pages;
+        let past_end = first_spare + table_count;
 
         let mut pages: Vec<Vec<u8>> = Vec::with_capacity(past_end as usize);
         let mut table_refs = Vec::new();
         let mut next_index = 1u32;
 
-        for (table, groups) in &packed {
+        for (i, (table, groups)) in packed.iter().enumerate() {
+            let empty = first_spare + i as u32;
             let first_page = next_index;
-            pages.push(header_page(*table, first_page, first_page + 1));
-            next_index += 1;
 
             if groups.is_empty() {
-                // A table with nothing in it still gets a page, and that page
-                // still has to be a page: written as zeroes it is not one, and
-                // a drive is refused whole rather than a table at a time. The
-                // header page remains the table's last, so a reader that
-                // follows the chain stops before reaching this.
-                pages.push(data_page(*table, next_index, past_end, 0, &[]));
+                // Nothing to point at but the spare. The header stays the
+                // table's last page, and its first-data word says there is
+                // none, which is what a real export writes for an empty table
+                // — not the index after it, which this wrote until the fixture
+                // was read for exactly this case.
+                pages.push(header_page(*table, first_page, empty, None));
                 next_index += 1;
-                table_refs.push((*table, first_page, first_page));
+                table_refs.push((*table, empty, first_page, first_page));
                 continue;
             }
 
+            pages.push(header_page(*table, first_page, first_page + 1, Some(first_page + 1)));
+            next_index += 1;
+
             let mut so_far = 0usize;
-            for (i, group) in groups.iter().enumerate() {
-                let last = i + 1 == groups.len();
-                let next = if last { past_end } else { next_index + 1 };
+            for (k, group) in groups.iter().enumerate() {
+                let last = k + 1 == groups.len();
+                let next = if last { empty } else { next_index + 1 };
                 so_far += group.len();
                 pages.push(data_page(*table, next_index, next, so_far, group));
                 next_index += 1;
             }
-            table_refs.push((*table, first_page, next_index - 1));
+            table_refs.push((*table, empty, first_page, next_index - 1));
         }
-        debug_assert_eq!(next_index, past_end);
+        debug_assert_eq!(next_index, first_spare);
+
+        // The spares. All zeros — which both real exports and baken write, and
+        // which an earlier comment here said a player would refuse. It does
+        // not; what it refused was the directory above.
+        for _ in 0..table_count {
+            pages.push(vec![0u8; PAGE_LEN]);
+        }
 
         let mut header = Vec::with_capacity(PAGE_LEN);
         put_u32(&mut header, 0);
@@ -422,9 +443,9 @@ impl Database {
             .unwrap_or(0);
         put_u32(&mut header, highest + 1);
         put_u32(&mut header, 0);
-        for (table, first, last) in &table_refs {
+        for (table, empty, first, last) in &table_refs {
             put_u32(&mut header, *table as u32);
-            put_u32(&mut header, past_end); // empty candidate
+            put_u32(&mut header, *empty);
             put_u32(&mut header, *first);
             put_u32(&mut header, *last);
         }
@@ -556,7 +577,7 @@ fn sequence_base(table: Table) -> u32 {
 /// history — carry different values again, in a body that is otherwise empty:
 /// the reason is unknown, and a player that does not find them there refuses
 /// the whole database rather than the table.
-fn header_page(table: Table, index: u32, next: u32) -> Vec<u8> {
+fn header_page(table: Table, index: u32, next: u32, first_data: Option<u32>) -> Vec<u8> {
     let special = matches!(table, Table::Tracks | Table::History);
     let mut page = page_header(Fields {
         table,
@@ -591,7 +612,9 @@ fn header_page(table: Table, index: u32, next: u32) -> Vec<u8> {
     // never opens this file.
     let mut word = |at: usize, v: u32| page[at..at + 4].copy_from_slice(&v.to_le_bytes());
     word(0x28, index);
-    word(0x2c, next);
+    // The first data page, or NONE for a table with no rows — where `next`
+    // above still points somewhere, at the table's empty spare.
+    word(0x2c, first_data.unwrap_or(NONE_PAGE));
     word(0x30, NONE_PAGE);
     word(0x34, 0);
     word(0x38, 0x1fff_0000 | u32::from(special));
@@ -1364,12 +1387,16 @@ mod tests {
     }
 
     #[test]
-    fn a_table_with_no_rows_still_gets_a_page_that_is_a_page() {
-        // Written as zeroes it is not one: no page index, no table, no flags —
-        // and a player refuses the whole database over it rather than skipping
-        // the table.
+    fn every_table_ends_in_an_all_zero_spare_and_every_other_page_is_a_page() {
+        // This test used to claim the opposite — that a page written as zeroes
+        // "is not one" and a player refuses the database over it. Both real
+        // exports and baken write exactly that for every table's empty
+        // candidate. What the player refused was the directory naming a page
+        // past the end of the file for all twenty tables at once.
         let bytes = Database::new().to_bytes().unwrap();
-        for (n, page) in pages(&bytes).iter().enumerate() {
+        let all = pages(&bytes);
+        let (real, spares) = all.split_at(all.len() - Table::ALL.len());
+        for (n, page) in real.iter().enumerate() {
             let index = u32::from_le_bytes(page[0x04..0x08].try_into().unwrap());
             let flags = page[0x1b];
             assert_eq!(index as usize, n + 1, "page {n} does not know its own index");
@@ -1377,6 +1404,10 @@ mod tests {
                 flags == 0x24 || flags == 0x64,
                 "page {n} is neither a header page nor a data page: {flags:#04x}"
             );
+        }
+        assert_eq!(spares.len(), Table::ALL.len(), "one spare per table");
+        for (n, page) in spares.iter().enumerate() {
+            assert!(page.iter().all(|&b| b == 0), "spare {n} is not all zeros");
         }
     }
 
@@ -1448,7 +1479,11 @@ mod tests {
             let page = header_page_of(&bytes, table);
             let index = word(page, 0x04);
             assert_eq!(word(page, 0x28), index, "{table:?}: its own index");
-            assert_eq!(word(page, 0x2c), index + 1, "{table:?}: the first data page");
+            // The first data page — or NONE for a table with no rows, which is
+            // what a real export writes and what this got wrong for a round.
+            let (_, _, first, last) = directory_entry(&bytes, table);
+            let want_first = if first != last { index + 1 } else { NONE_PAGE };
+            assert_eq!(word(page, 0x2c), want_first, "{table:?}: the first data page");
             assert_eq!(word(page, 0x30), NONE_PAGE, "{table:?}");
             assert_eq!(word(page, 0x34), 0, "{table:?}");
             assert!(page[PAGE_LEN - 20..].iter().all(|&b| b == 0), "{table:?}: the last twenty");
@@ -1466,6 +1501,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The file header's table directory, which a player reads before it reads
+    /// any table — and which five rounds of comparing tables could not have
+    /// faulted.
+    ///
+    /// Every property here is one both real exports and baken share and this
+    /// did not: a distinct empty candidate per table, every one below
+    /// `next_unused`, every one an all-zero page that exists, a populated
+    /// table's last data page pointing at it, and an empty table's header
+    /// pointing at it with no first-data page.
+    #[test]
+    fn every_table_has_its_own_empty_page_and_the_chains_end_there() {
+        let database = Database {
+            tracks: vec![a_track(1), a_track(2)],
+            playlists: vec![Playlist::new(1, "set", vec![1, 2])],
+            ..Default::default()
+        };
+        let bytes = database.to_bytes().unwrap();
+        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let page = |i: u32| &bytes[i as usize * PAGE_LEN..(i as usize + 1) * PAGE_LEN];
+        let next_unused = word(12);
+        assert_eq!(next_unused as usize, bytes.len() / PAGE_LEN, "next_unused is the page count");
+
+        let mut candidates = std::collections::BTreeSet::new();
+        for table in Table::ALL {
+            let (_, empty, first, last) = directory_entry(&bytes, table);
+            assert!(empty < next_unused, "{table:?}: candidate {empty} not below {next_unused}");
+            assert!(candidates.insert(empty), "{table:?}: candidate {empty} is shared");
+            assert!(page(empty).iter().all(|&b| b == 0), "{table:?}: candidate is not zeros");
+            if first == last {
+                assert_eq!(word(first as usize * PAGE_LEN + 0x0c), empty, "{table:?}: header.next");
+                assert_eq!(word(first as usize * PAGE_LEN + 0x2c), NONE_PAGE, "{table:?}: no data");
+            } else {
+                assert_eq!(word(last as usize * PAGE_LEN + 0x0c), empty, "{table:?}: last.next");
+            }
+        }
+        assert_eq!(candidates.len(), Table::ALL.len());
+    }
+
+    /// `(kind, empty candidate, first page, last page)` for one table, out of
+    /// the file header's directory.
+    fn directory_entry(bytes: &[u8], want: Table) -> (u32, u32, u32, u32) {
+        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        for i in 0..word(8) as usize {
+            let at = 0x1c + i * 16;
+            if word(at) == want as u32 {
+                return (word(at), word(at + 4), word(at + 8), word(at + 12));
+            }
+        }
+        panic!("no directory entry for {want:?}");
     }
 
     fn header_page_of(bytes: &[u8], want: Table) -> &[u8] {
