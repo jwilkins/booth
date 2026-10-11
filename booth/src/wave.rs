@@ -1511,7 +1511,8 @@ mod tests {
     }
 
     /// A record whose columns all sit at `level`, except where `loud` says
-    /// otherwise. One column a pixel at the widths these tests use.
+    /// otherwise. One column a pixel at the widths these tests use, on the
+    /// drive's scale: 127 is full, and nothing above it occurs.
     fn at_levels(levels: &[u8]) -> Vec<u8> {
         bands(&levels.iter().map(|level| [*level; 3]).collect::<Vec<_>>())
     }
@@ -1523,8 +1524,8 @@ mod tests {
         fn a_record_that_already_swings_is_drawn_as_it_is() {
             // A quiet intro, a loud drop. Nothing to fix: the picture is
             // already saying where the record moves.
-            let mut levels = vec![20u8; 50];
-            levels.extend(std::iter::repeat_n(250u8, 50));
+            let mut levels = vec![10u8; 50];
+            levels.extend(std::iter::repeat_n(125u8, 50));
             let (shown, stretched) = silhouette(&at_levels(&levels), 100, Zoom::default());
 
             assert!(!stretched, "a dynamic record was stretched");
@@ -1537,8 +1538,8 @@ mod tests {
             // The case this exists for: a club record mastered to within a few
             // decibels of itself from end to end. Drawn honestly it is a
             // rectangle, which is true and tells nobody where the break is.
-            let mut levels = vec![200u8; 50];
-            levels.extend(std::iter::repeat_n(215u8, 50));
+            let mut levels = vec![100u8; 50];
+            levels.extend(std::iter::repeat_n(108u8, 50));
             let (shown, stretched) = silhouette(&at_levels(&levels), 100, Zoom::default());
 
             assert!(stretched, "a flat master was left as a rectangle");
@@ -1554,8 +1555,8 @@ mod tests {
         fn a_stretched_picture_never_draws_a_quiet_part_as_silence() {
             // Mapping the quietest part to nothing would say the record has
             // silence in it, which is a thing it could have had and does not.
-            let mut levels = vec![200u8; 50];
-            levels.extend(std::iter::repeat_n(215u8, 50));
+            let mut levels = vec![100u8; 50];
+            levels.extend(std::iter::repeat_n(108u8, 50));
             let (shown, _) = silhouette(&at_levels(&levels), 100, Zoom::default());
 
             assert!(
@@ -1571,8 +1572,8 @@ mod tests {
             // two cuts, a drop-out — would otherwise be the floor, and the
             // quiet half and the loud half would both be squashed into the top
             // of the strip and look alike.
-            let mut levels = vec![200u8; 50];
-            levels.extend(std::iter::repeat_n(215u8, 49));
+            let mut levels = vec![100u8; 50];
+            levels.extend(std::iter::repeat_n(108u8, 49));
             levels[40] = 0;
             let (shown, stretched) = silhouette(&at_levels(&levels), 99, Zoom::default());
 
@@ -1590,7 +1591,7 @@ mod tests {
             // Nothing to reveal. Stretching a picture with no variation in it
             // at all would turn rounding into a shape, which is a picture of
             // nothing presented as a picture of something.
-            let (shown, stretched) = silhouette(&at_levels(&[200u8; 99]), 99, Zoom::default());
+            let (shown, stretched) = silhouette(&at_levels(&[100u8; 99]), 99, Zoom::default());
 
             assert!(!stretched);
             assert!(shown.windows(2).all(|pair| pair[0] == pair[1]), "{shown:?}");
