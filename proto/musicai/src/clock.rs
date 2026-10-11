@@ -74,6 +74,12 @@ pub fn stamp(seconds: u64) -> String {
     )
 }
 
+/// `2026-09-04` — the date alone, which is what a pdb history row carries.
+pub fn day(seconds: u64) -> String {
+    let at = parts(seconds);
+    format!("{:04}-{:02}-{:02}", at.year, at.month, at.day)
+}
+
 /// `2026-09-04 211403` — a folder name for a moment: sortable, and readable
 /// without a tool.
 pub fn folder(seconds: u64) -> String {
