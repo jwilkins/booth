@@ -528,9 +528,11 @@ Against §2 to §5 what is left is:
   it (§5). With *that* fixed it reads the `.EXT` through: **colour waveforms
   and hot cues both come up on a loaded track**, which is the whole of what the
   analysis files are for and the first confirmation that this project's
-  `PCOB`/`PCO2` cues are written the way a player expects. Phrases (`PSSI`,
-  last in the file) and the three-band waveform out of the `.2EX` are the two
-  things not yet reported either way.
+  `PCOB`/`PCO2` cues are written the way a player expects. **Phrases come up
+  too**, reported later from the same player — so the `.EXT` is read to its
+  end and the masked `PSSI` is right. The three-band waveform out of the `.2EX`
+  is the one picture the 3000X never drew from these drives, and a CDJ-3000
+  hung on it; see the gist, §6.
 - **A CDJ-3000 on firmware 2.05 does not see the library at all**, which is the
   legacy `export.pdb` being refused rather than anything about OneLibrary — the
   3000 never reads that database. This is the first time the legacy writer has

@@ -597,6 +597,12 @@ indexed by. The CDJ-3000X's monochrome browse column — reported earlier and
 read as cosmetic — is the same bytes refused by a player that falls back
 instead of hanging. It never showed the three-band picture from this drive.
 
+Reported with this round, and narrowing it further: **the CDJ-3000X shows
+phrases** from these drives. `PSSI` is the last section of the `.EXT`, so the
+3000X reads that file to its end and the masked phrase data is right — which
+leaves the `.2EX`, the one file the 3000X was never seen to draw from, as the
+file in question.
+
 All four are now written as the real files have them, with the band scaling
 following baken's fitted rules (MIT, attributed in the code): each band's peak
 with a release, scaled so its loudest column lands on a fixed target, capped at
