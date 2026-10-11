@@ -21,6 +21,8 @@ use std::collections::BTreeMap;
 
 use anyhow::{bail, Result};
 
+use super::menu;
+
 /// Page size. rekordbox uses 4 kB and the players expect to be told, so this
 /// could vary — but there is no reason to differ.
 const PAGE_LEN: usize = 4_096;
@@ -37,6 +39,11 @@ const MAX_ROWS_PER_PAGE: usize = 255;
 /// The tables a rekordbox export contains, in the order it writes them. Most
 /// are empty in anything we produce, but the header lists all twenty and a
 /// player expects to find them.
+///
+/// Four never vary from one drive to the next: the colours, and the three the
+/// browse menu is made of — its column names, the categories it offers and the
+/// orders it sorts by. The last two were written empty here until a CDJ-3000
+/// hung loading a drive; see [`super::menu`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Table {
     Tracks = 0,
@@ -56,8 +63,8 @@ pub enum Table {
     Unknown14 = 14,
     Unknown15 = 15,
     Columns = 16,
-    Unknown17 = 17,
-    Unknown18 = 18,
+    Categories = 17,
+    Sorts = 18,
     History = 19,
 }
 
@@ -80,8 +87,8 @@ impl Table {
         Table::Unknown14,
         Table::Unknown15,
         Table::Columns,
-        Table::Unknown17,
-        Table::Unknown18,
+        Table::Categories,
+        Table::Sorts,
         Table::History,
     ];
 }
@@ -180,39 +187,6 @@ impl Playlist {
 /// when nothing is coloured.
 const COLORS: [&str; 8] = ["Pink", "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple"];
 
-/// The browse menu, as rekordbox writes it: the categories a player offers when
-/// you turn the encoder. The second value of each pair identifies the menu item
-/// to the player and is not simply the row number — the gaps are rekordbox's.
-pub(crate) const COLUMNS: [(u16, &str); 27] = [
-    (0x0080, "GENRE"),
-    (0x0081, "ARTIST"),
-    (0x0082, "ALBUM"),
-    (0x0083, "TRACK"),
-    (0x0085, "BPM"),
-    (0x0086, "RATING"),
-    (0x0087, "YEAR"),
-    (0x0088, "REMIXER"),
-    (0x0089, "LABEL"),
-    (0x008a, "ORIGINAL ARTIST"),
-    (0x008b, "KEY"),
-    (0x008d, "CUE"),
-    (0x008e, "COLOR"),
-    (0x0092, "TIME"),
-    (0x0093, "BITRATE"),
-    (0x0094, "FILE NAME"),
-    (0x0084, "PLAYLIST"),
-    (0x0098, "HOT CUE BANK"),
-    (0x0095, "HISTORY"),
-    (0x0091, "SEARCH"),
-    (0x0096, "COMMENTS"),
-    (0x008c, "DATE ADDED"),
-    (0x0097, "DJ PLAY COUNT"),
-    (0x0090, "FOLDER"),
-    (0x00a1, "DEFAULT"),
-    (0x00a2, "ALPHABET"),
-    (0x00aa, "MATCHING"),
-];
-
 /// Everything that goes on a drive.
 #[derive(Clone, Debug, Default)]
 pub struct Database {
@@ -241,6 +215,12 @@ impl Database {
         let mut labels = Interner::new();
         let mut keys = Interner::new();
 
+        // Two of a track's fields are dates, and a real export leaves neither
+        // empty: the day the track joined the collection and the day it was
+        // analysed. The collection does not keep the first, and the second is
+        // the day this runs — the analysis is made alongside the row — so a
+        // track that arrives without either is dated the day it is written.
+        let written_on = crate::clock::day(crate::clock::now());
         let mut track_rows = Vec::new();
         for track in &self.tracks {
             let artist_id = artists.intern(&track.artist);
@@ -253,6 +233,7 @@ impl Database {
                     genres.intern(&track.genre),
                     labels.intern(&track.label),
                     keys.intern(&track.key),
+                    &written_on,
                 ),
                 index_shift_at: Some(2),
             });
@@ -278,11 +259,25 @@ impl Database {
         );
         rows.insert(
             Table::Columns as u8,
-            COLUMNS
+            menu::COLUMNS
                 .iter()
                 .enumerate()
-                .map(|(i, (menu, name))| RowData::plain(column_row(i as u16 + 1, *menu, name)))
+                .map(|(i, (code, name))| RowData::plain(column_row(i as u16 + 1, *code, name)))
                 .collect(),
+        );
+        // The menu's other two tables, in rekordbox's own row order. Both real
+        // exports and both working writers carry exactly these rows; every
+        // drive this wrote before had the two tables empty.
+        rows.insert(
+            Table::Categories as u8,
+            menu::categories_as_written()
+                .into_iter()
+                .map(|c| RowData::plain(category_row(c)))
+                .collect(),
+        );
+        rows.insert(
+            Table::Sorts as u8,
+            menu::sorts_as_written().into_iter().map(|s| RowData::plain(sort_row(s))).collect(),
         );
 
         // One row, as a real export has. Dated at write time: the field is the
@@ -560,12 +555,17 @@ fn sequence_base(table: Table) -> u32 {
         Table::Tracks => 10,
         Table::Artists => 7,
         Table::Albums => 9,
-        Table::Colors => 8,
         Table::PlaylistTree => 6,
         Table::PlaylistEntries => 11,
-        // Not a formula at all: the browse menu is the same 27 rows on every
-        // drive, and its pages always say 3.
+        // Not a formula at all. The four fixed lists are written once, when
+        // rekordbox creates the file, and their pages carry the number of the
+        // transaction that did it: 2, 3, 4 and 5 in both real exports, colours
+        // first. The colours said 8 here, from the bisection above, until the
+        // two files were read.
+        Table::Colors => 2,
         Table::Columns => 3,
+        Table::Categories => 4,
+        Table::Sorts => 5,
         _ => 1,
     }
 }
@@ -574,16 +574,21 @@ fn sequence_base(table: Table) -> u32 {
 ///
 /// Marked 0x64, with both row-count fields saturated and a constant nobody has
 /// explained in the last field but one. Two tables — the tracks and the
-/// history — carry different values again, in a body that is otherwise empty:
-/// the reason is unknown, and a player that does not find them there refuses
-/// the whole database rather than the table.
+/// history — carry a count of their own in a body that is otherwise the
+/// free-slot fill: the reason is unknown, and a player that does not find them
+/// there refuses the whole database rather than the table.
 fn header_page(table: Table, index: u32, next: u32, first_data: Option<u32>) -> Vec<u8> {
     let special = matches!(table, Table::Tracks | Table::History);
     let mut page = page_header(Fields {
         table,
         index,
         next,
-        sequence: sequence_base(table),
+        // The fixed lists' header pages say 1 in both real exports, whatever
+        // their data pages say; the rest take their table's base, as before.
+        sequence: match is_fixed_list(table) {
+            true => 1,
+            false => sequence_base(table),
+        },
         rows: 0,
         free: 0,
         used: 0,
@@ -607,9 +612,10 @@ fn header_page(table: Table, index: u32, next: u32, first_data: Option<u32>) -> 
     // this content the CDJ accepts the sentinel page but can't locate the data
     // pages it leads to."
     //
-    // This is why a CDJ-3000 on official firmware 3.22 found no database on a
-    // drive a CDJ-3000X read perfectly: the 3000X reads `exportLibrary.db` and
-    // never opens this file.
+    // This was one of the candidates for why a CDJ-3000 on official firmware
+    // 3.22 found no database on a drive a CDJ-3000X read perfectly. It was not
+    // the fault — the file header's directory was, see `lay_out` — but it
+    // stays, because it is what every working file has.
     let mut word = |at: usize, v: u32| page[at..at + 4].copy_from_slice(&v.to_le_bytes());
     word(0x28, index);
     // The first data page, or NONE for a table with no rows — where `next`
@@ -619,17 +625,18 @@ fn header_page(table: Table, index: u32, next: u32, first_data: Option<u32>) -> 
     word(0x34, 0);
     word(0x38, 0x1fff_0000 | u32::from(special));
 
-    // And then either a count, for the two tables that carry one, or the
-    // free-slot fill. 1004 words of it, which is 0x3c up to the twenty zero
-    // bytes every header page ends with.
+    // And then the free-slot fill: 1004 words of it, which is 0x3c up to the
+    // twenty zero bytes every header page ends with. The two tables that carry
+    // a count put it in the first slot and the fill runs on after it. This
+    // left the rest of their pages as zeroes, having read the real one only as
+    // far as the count.
+    for at in (0x3c..PAGE_LEN - 20).step_by(4) {
+        word(at, FREE_SLOT);
+    }
     match table {
         Table::Tracks => word(0x3c, 0x10),
         Table::History => word(0x3c, 0x140),
-        _ => {
-            for at in (0x3c..PAGE_LEN - 20).step_by(4) {
-                word(at, FREE_SLOT);
-            }
-        }
+        _ => {}
     }
     page
 }
@@ -661,26 +668,19 @@ fn data_page(table: Table, index: u32, next: u32, so_far: usize, rows: &[&RowDat
 
     let used = heap.len();
     let free = PAGE_LEN - PAGE_HEADER_LEN - used - index_size(rows.len());
-    // Some tables describe their own pages differently, and getting it the
+    // The fixed lists describe their own pages differently, and getting it the
     // ordinary way round is one of the things a player refuses the whole
     // database over: they put the row count in `unknown5` and leave
     // `num_rows_large` at zero, where every other table says 1 and
-    // `rows - 1`.
-    //
-    // The browse menu was the known one. Colours are the same, in both real
-    // exports — eight rows, `unknown5` 8, `num_rows_large` 0 — and this wrote
-    // 1 and 7 for them. Tables 17 and 18 are in that family too, and this
-    // writes neither, so they cost nothing to leave alone.
-    //
-    // What the family has in common is unknown. All three are fixed lists that
-    // are identical on every drive, which is a guess at the reason and not a
-    // rule to extend to a table nobody has measured.
-    let fixed = matches!(table, Table::Columns | Table::Colors);
+    // `rows - 1`. The browse menu was the known one; the colours were found
+    // the same way in both real exports, and then the categories and sort
+    // orders when this started writing them.
+    let fixed = is_fixed_list(table);
     let mut page = page_header(Fields {
         table,
         index,
         next,
-        sequence: match matches!(table, Table::Columns) {
+        sequence: match fixed {
             true => sequence_base(table),
             false => sequence_base(table) + (so_far.max(1) as u32 - 1) * 5,
         },
@@ -716,6 +716,14 @@ fn data_page(table: Table, index: u32, next: u32, so_far: usize, rows: &[&RowDat
         page[base - 2..base].copy_from_slice(&present.to_le_bytes());
     }
     page
+}
+
+/// The tables that are the same on every drive — the colours, and the three the
+/// browse menu is made of — whose pages rekordbox describes differently from
+/// every other table's: the row count in `unknown5`, zero in `num_rows_large`
+/// and a fixed sequence number. Measured on all four in both real exports.
+fn is_fixed_list(table: Table) -> bool {
+    matches!(table, Table::Colors | Table::Columns | Table::Categories | Table::Sorts)
 }
 
 /// Everything a page says about itself before its rows.
@@ -997,8 +1005,10 @@ fn track_row(
     genre_id: u32,
     label_id: u32,
     key_id: u32,
+    written_on: &str,
 ) -> Vec<u8> {
-    let mut row = track_row_exactly(track, artist_id, album_id, genre_id, label_id, key_id);
+    let mut row =
+        track_row_exactly(track, artist_id, album_id, genre_id, label_id, key_id, written_on);
     // Cut, re-encode, and ask the row again, rather than working a budget out
     // once: the overflow is counted in encoded bytes and the cut is made in
     // UTF-8 ones, and the two are not the same length in either direction. A
@@ -1017,7 +1027,9 @@ fn track_row(
         keep = keep.saturating_sub(row.len() - MAX_ROW_LEN + 8);
         shorter.comment = shorten(&track.comment, keep);
         keep = shorter.comment.len();
-        row = track_row_exactly(&shorter, artist_id, album_id, genre_id, label_id, key_id);
+        row = track_row_exactly(
+            &shorter, artist_id, album_id, genre_id, label_id, key_id, written_on,
+        );
     }
     row
 }
@@ -1044,6 +1056,7 @@ fn track_row_exactly(
     genre_id: u32,
     label_id: u32,
     key_id: u32,
+    written_on: &str,
 ) -> Vec<u8> {
     let mut row = Vec::with_capacity(TRACK_FIXED_LEN + 256);
     put_u16(&mut row, 0x0024);
@@ -1052,7 +1065,11 @@ fn track_row_exactly(
     put_u32(&mut row, track.sample_rate);
     put_u32(&mut row, 0); // composer
     put_u32(&mut row, track.file_size);
-    put_u32(&mut row, 0); // an id of some kind, purpose unknown
+    // Unique to the row in every real export — a large number that looks like
+    // rekordbox's own id for the track. vynull takes it for a lookup key and
+    // writes the track id; baken writes the id plus twenty. Zero, which this
+    // wrote, is the one value no working file has.
+    put_u32(&mut row, track.id);
     put_u16(&mut row, 0xfa80); // two more constants nobody has explained
     put_u16(&mut row, 0x05e7);
     put_u32(&mut row, 0); // artwork
@@ -1080,6 +1097,14 @@ fn track_row_exactly(
     debug_assert_eq!(row.len(), 0x5e);
 
     let filename = track.file_path.rsplit('/').next().unwrap_or_default();
+    let date_added = match track.date_added.is_empty() {
+        true => written_on,
+        false => track.date_added.as_str(),
+    };
+    let analyze_date = match track.analyze_date.is_empty() {
+        true => written_on,
+        false => track.analyze_date.as_str(),
+    };
     // The order is the format's, not ours. Six of these have no established
     // meaning; the values are what a real export was seen to hold.
     let strings: [Vec<u8>; TRACK_STRINGS] = [
@@ -1093,12 +1118,12 @@ fn track_row_exactly(
         string("ON"), // auto-load hot cues
         string(""),
         string(""),
-        string(&track.date_added),
+        string(date_added),
         string(""), // release date
         string(""), // mix name
         string(""),
         string(&track.analyze_path),
-        string(&track.analyze_date),
+        string(analyze_date),
         string(&track.comment),
         string(&track.title),
         string(""),
@@ -1116,6 +1141,50 @@ fn track_row_exactly(
         row.extend_from_slice(text);
     }
     row
+}
+
+/// A row of the categories table: eight bytes, `(column, id, kind, flags,
+/// position)`, where the flags byte is 1 for hidden and 2 for MATCHING's mark.
+fn category_row(category: &menu::Category) -> Vec<u8> {
+    let mut row = Vec::with_capacity(8);
+    put_u16(&mut row, category.column as u16 + 1);
+    put_u16(&mut row, category.id);
+    row.push(category.kind);
+    row.push(u8::from(!category.visible) | (u8::from(category.special) << 1));
+    put_u16(&mut row, category.position);
+    row
+}
+
+/// A row of the sort orders table: eight bytes, `(column, id, hidden, position,
+/// sub-column)` — the fields the OneLibrary `sort` table has, a byte each for
+/// the two flags and the position.
+fn sort_row(sort: &menu::Sort) -> Vec<u8> {
+    let mut row = Vec::with_capacity(8);
+    put_u16(&mut row, sort.column as u16 + 1);
+    put_u16(&mut row, sort.id);
+    row.push(u8::from(!sort.visible));
+    row.push(sort.position);
+    put_u16(&mut row, u16::from(sort.sub_column));
+    row
+}
+
+/// The bitrate a player prints for a lossless file, in kbps: the rate of its
+/// samples. A real export's 16-bit 44.1 kHz stereo WAV says 1411 and its
+/// 24-bit one 2116, both `rate × depth × channels ÷ 1000` rounded down; this
+/// wrote 0 for every such file.
+pub fn pcm_kbps(sample_rate: u32, sample_depth: u16, channels: u32) -> u32 {
+    sample_rate * u32::from(sample_depth) * channels / 1000
+}
+
+/// The bitrate a player prints for a lossy file this did not make, in kbps:
+/// its size over its length, which is the figure on the tin for a
+/// constant-rate file and the average for a variable-rate one. A real export's
+/// 320 kbps MP3 says 320, and its 6 899 624 bytes over 172 s come to 320.
+pub fn average_kbps(file_size: u64, duration_secs: f64) -> u32 {
+    if duration_secs <= 0.0 {
+        return 0;
+    }
+    (file_size as f64 * 8.0 / duration_secs / 1000.0) as u32
 }
 
 /// What a reader found in one table of a database.
@@ -1280,7 +1349,7 @@ mod tests {
         for len in 3_700..4_000 {
             let mut track = a_track(1);
             track.comment = "x".repeat(len);
-            let row = track_row(&track, 0, 0, 0, 0, 0);
+            let row = track_row(&track, 0, 0, 0, 0, 0, "2026-10-11");
             assert!(
                 aligned(row.len()) <= MAX_ROW_LEN,
                 "a {len}-byte comment left a {}-byte row, which costs {} bytes of page",
@@ -1307,7 +1376,7 @@ mod tests {
         for chars in [1_923usize, 2_584, 4_000, 20_000] {
             let mut track = a_track(1);
             track.comment = "\u{3042}".repeat(chars);
-            let row = track_row(&track, 0, 0, 0, 0, 0);
+            let row = track_row(&track, 0, 0, 0, 0, 0, "2026-10-11");
             assert!(
                 aligned(row.len()) <= MAX_ROW_LEN,
                 "{chars} characters left a {}-byte row",
@@ -1584,6 +1653,18 @@ mod tests {
                 after,
                 "{table:?}"
             );
+            // The count takes the first slot of the fill, not the place of it:
+            // the real page runs on with free slots from 0x40 to the end.
+            assert_eq!(
+                u32::from_le_bytes(page[0x40..0x44].try_into().unwrap()),
+                FREE_SLOT,
+                "{table:?}"
+            );
+            assert_eq!(
+                u32::from_le_bytes(page[PAGE_LEN - 24..PAGE_LEN - 20].try_into().unwrap()),
+                FREE_SLOT,
+                "{table:?}"
+            );
         }
         // And every other table's header page does not.
         let page = pages(&bytes)
@@ -1691,7 +1772,7 @@ mod tests {
 
     #[test]
     fn a_track_row_puts_its_strings_after_a_fixed_part_of_a_known_size() {
-        let row = track_row(&a_track(1), 1, 0, 0, 0, 0);
+        let row = track_row(&a_track(1), 1, 0, 0, 0, 0, "2026-10-11");
         assert_eq!(
             u16::from_le_bytes(row[0x5e..0x60].try_into().unwrap()) as usize,
             TRACK_FIXED_LEN
@@ -1711,17 +1792,20 @@ mod tests {
     /// `0x19` disagree about how many rows it holds, and it is therefore no
     /// evidence about what writing a page fresh should produce.
     ///
-    /// Tables 17 and 18 are in the row rekordbox writes but not in the row this
-    /// writes, so they are listed for the record and not asserted.
+    /// Tables 17 and 18 — the categories and the sort orders — are in the
+    /// fixed-list family too, and the fixture's pages say so: 22 rows with
+    /// `unknown5` 22, 17 rows with `unknown5` 17, `num_rows_large` 0 on both.
     #[test]
     fn a_data_page_describes_itself_the_way_a_real_export_does() {
-        // table 4 (labels) and 5 (keys) are ordinary; 6 (colours) and 16 (the
-        // browse menu) are the fixed-list family.
-        let measured: [(Table, usize, u8, u8, u16, u16); 4] = [
+        // table 4 (labels) and 5 (keys) are ordinary; 6 (colours), 16 (the
+        // browse menu), 17 and 18 are the fixed-list family.
+        let measured: [(Table, usize, u8, u8, u16, u16); 6] = [
             (Table::Labels, 1, 0x20, 0, 1, 0),
             (Table::Keys, 5, 0xa0, 0, 1, 4),
             (Table::Colors, 8, 0x00, 1, 8, 0),
             (Table::Columns, 27, 0x60, 3, 27, 0),
+            (Table::Categories, 22, 0xc0, 2, 22, 0),
+            (Table::Sorts, 17, 0x20, 2, 17, 0),
         ];
 
         for (table, rows, want_19, want_1a, want_u5, want_nrl) in measured {
@@ -1734,11 +1818,11 @@ mod tests {
                 free: 0,
                 used: 0,
                 flags: 0x24,
-                unknown5: match matches!(table, Table::Columns | Table::Colors) {
+                unknown5: match is_fixed_list(table) {
                     true => rows as u16,
                     false => 1,
                 },
-                rows_large: match matches!(table, Table::Columns | Table::Colors) {
+                rows_large: match is_fixed_list(table) {
                     true => 0,
                     false => rows.max(1) as u16 - 1,
                 },
@@ -1802,15 +1886,119 @@ mod tests {
         let tables = inspect(&bytes).unwrap();
         assert_eq!(tables.len(), 20);
 
-        // Three tables have rows on a drive with no music at all: the eight
-        // colours and the twenty-seven browse categories, which are the same
+        // Five tables have rows on a drive with no music at all: the eight
+        // colours and the three tables of the browse menu, which are the same
         // on every export, and the one history row, which a CDJ-3000 wants
         // there whether or not anything has been played.
-        let furnished = ["Colors", "Columns", "History"];
+        let furnished = ["Colors", "Columns", "Categories", "Sorts", "History"];
         assert!(tables.iter().all(|t| t.rows == 0 || furnished.contains(&t.table.as_str())));
         assert_eq!(table(&bytes, Table::Colors).rows, 8);
         assert_eq!(table(&bytes, Table::Columns).rows, 27);
+        assert_eq!(table(&bytes, Table::Categories).rows, 22);
+        assert_eq!(table(&bytes, Table::Sorts).rows, 17);
         assert_eq!(table(&bytes, Table::History).rows, 1);
+    }
+
+    /// The two tables, against the bytes a real export carries.
+    ///
+    /// Transcribed from rekordcrate's `complete_export` fixture, a rekordbox 6
+    /// export with the browse preferences at their defaults; baken writes the
+    /// same bytes. Row order included: the hidden rows first, by id, then the
+    /// shown ones down the menu.
+    #[test]
+    fn the_categories_and_sort_orders_are_the_rows_a_real_export_carries() {
+        let bytes = Database::new().to_bytes().unwrap();
+        let heap = |table: Table, rows: usize| {
+            let page = table_data_page(&bytes, table);
+            assert_eq!(page[0x18] as usize, rows, "{table:?}");
+            page[PAGE_HEADER_LEN..PAGE_HEADER_LEN + rows * 8].to_vec()
+        };
+        let categories = "\
+            0100010063010000 0500060005010000 0600070063010000 0700080063010000 \
+            0800090063010000 09000a0063010000 0a000b0063010000 0d000f0063010000 \
+            0e00130004010000 0f00140006010000 1000150063010000 1200170063010000 \
+            0200020002000100 0300030003000200 0400040001000300 0b000c0063000400 \
+            1100050063000500 1300160063000600 1400120063000700 1b001a0063020800 \
+            1800110063000900 16001b0063000a00";
+        let sorts = "\
+            0100060001000000 1500070001000000 0e00080001000000 0800090001000000 \
+            09000a0001000000 0a000b0001000000 0f000d0001000000 0d000f0001000000 \
+            1700100001000000 1600110001000000 1900000000010000 1a00010000020000 \
+            0200020000030000 0300030000040000 0500040000050000 0600050000060000 \
+            0b000c0000070000";
+        let packed = |text: &str| text.split_whitespace().collect::<String>();
+        assert_eq!(hex_of(&heap(Table::Categories, 22)), packed(categories));
+        assert_eq!(hex_of(&heap(Table::Sorts, 17)), packed(sorts));
+    }
+
+    fn hex_of(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// `2, 3, 4, 5`, in both real exports, on the pages of the four tables that
+    /// never change; their header pages say 1 like everyone else's.
+    #[test]
+    fn the_fixed_lists_carry_the_sequence_numbers_rekordbox_gave_them() {
+        let bytes = Database::new().to_bytes().unwrap();
+        let sequence = |page: &[u8]| u32::from_le_bytes(page[0x10..0x14].try_into().unwrap());
+        for (table, want) in
+            [(Table::Colors, 2), (Table::Columns, 3), (Table::Categories, 4), (Table::Sorts, 5)]
+        {
+            assert_eq!(sequence(table_data_page(&bytes, table)), want, "{table:?}");
+            assert_eq!(sequence(header_page_of(&bytes, table)), 1, "{table:?} header");
+        }
+    }
+
+    /// The eleventh and sixteenth strings of a track row — the date it was
+    /// added and the date it was analysed — which a real export never leaves
+    /// empty.
+    fn dates_of(row: &[u8]) -> (String, String) {
+        let string_at = |n: usize| {
+            let at = u16::from_le_bytes(row[0x5e + 2 * n..0x5e + 2 * n + 2].try_into().unwrap())
+                as usize;
+            // Short ASCII: the length byte is `(len + 1) << 1 | 1`.
+            let len = (row[at] >> 1) as usize - 1;
+            String::from_utf8(row[at + 1..at + 1 + len].to_vec()).unwrap()
+        };
+        (string_at(10), string_at(15))
+    }
+
+    #[test]
+    fn a_track_without_dates_is_dated_the_day_it_is_written() {
+        let row = track_row(&a_track(1), 1, 0, 0, 0, 0, "2026-10-11");
+        assert_eq!(dates_of(&row), ("2026-10-11".to_string(), "2026-10-11".to_string()));
+
+        let dated = Track {
+            date_added: "2018-05-25".to_string(),
+            analyze_date: "2022-02-02".to_string(),
+            ..a_track(1)
+        };
+        let row = track_row(&dated, 1, 0, 0, 0, 0, "2026-10-11");
+        assert_eq!(dates_of(&row), ("2018-05-25".to_string(), "2022-02-02".to_string()));
+
+        // And the whole file dates them today, rather than leaving the choice
+        // to a caller that has no date to give.
+        let bytes = Database { tracks: vec![a_track(7)], ..Default::default() }.to_bytes().unwrap();
+        let page = table_data_page(&bytes, Table::Tracks);
+        let at = u16::from_le_bytes(page[PAGE_LEN - 6..PAGE_LEN - 4].try_into().unwrap()) as usize;
+        let today = crate::clock::day(crate::clock::now());
+        assert_eq!(dates_of(&page[PAGE_HEADER_LEN + at..]), (today.clone(), today));
+    }
+
+    #[test]
+    fn a_track_row_carries_its_own_id_where_every_working_writer_puts_something_unique() {
+        let row = track_row(&a_track(42), 1, 0, 0, 0, 0, "2026-10-11");
+        assert_eq!(u32::from_le_bytes(row[0x14..0x18].try_into().unwrap()), 42);
+    }
+
+    /// Three rows of two real exports: a 320 kbps MP3, a 16-bit WAV and a
+    /// 24-bit one.
+    #[test]
+    fn a_bitrate_is_the_one_a_real_export_prints() {
+        assert_eq!(average_kbps(6_899_624, 172.0), 320);
+        assert_eq!(pcm_kbps(44_100, 16, 2), 1411);
+        assert_eq!(pcm_kbps(44_100, 24, 2), 2116);
+        assert_eq!(average_kbps(1, 0.0), 0, "a file with no length has no rate");
     }
 
     #[test]

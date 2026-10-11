@@ -500,6 +500,17 @@ pub struct ExportArgs {
     #[arg(long, value_name = "N")]
     pub analysed_bits: Option<i64>,
 
+    /// Write `export.pdb` alone and leave `exportLibrary.db` off the drive.
+    ///
+    /// Every player reads the first; the newer ones read the second instead
+    /// when it is there, and a CDJ-3000 on firmware 3.22 says it does not read
+    /// it at all. A drive carrying both says nothing about which of the two a
+    /// player that hangs on it is choking on, and a drive carrying only the
+    /// first does. For finding that out — not for a drive that has to play in
+    /// an unknown booth, which needs both.
+    #[arg(long)]
+    pub no_onelibrary: bool,
+
     /// Files that are stems of another track, as (stem, parent) pairs.
     ///
     /// A stem is the same audio with parts removed, so it has the same tempo,

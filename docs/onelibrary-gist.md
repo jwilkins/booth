@@ -498,8 +498,62 @@ Also from the same diff: baken writes an empty `PQT2` in the `.EXT` where this
 wrote nothing (see §5), and no `exportExt.pdb` at all — so that file is not
 required.
 
-**Untested on hardware as of this writing.** It is the first candidate with a
-stated mechanism that a parser cannot see, matched by two working writers.
+**Tested: the player sees the database.** With the directory fixed, the
+Sources screen named the drive, counted its two playlists correctly and showed
+the drive's details — the first time a CDJ-3000 had read anything off a drive
+this program wrote. Selecting the drive then hung on loading, which is the next
+entry.
+
+### CDJ-3000, 3.22, with the directory fixed — sees the database, hangs loading it
+
+Direct USB: the Sources screen shows the drive, its two playlists and its
+details, all correct. Select it and the player hangs on loading. Over Pro DJ
+Link it still crashes on track load, which is the analysis files' problem and a
+separate one.
+
+So the file header and the directory are now read, and something past them is
+not. The diff this time was a 40-track set — enough tracks to spread every
+populated table over several pages, which no earlier comparison had done — put
+through this program and through baken, plus the two real exports rekordcrate
+carries. Whole files, every table, every row.
+
+The page chains are fine: header, data pages, spare, in both writers, link for
+link. What differs is content, and all of it is content a player would read
+while loading a library:
+
+- **Tables 17 and 18 were empty.** Every working file has 22 rows in one and
+  17 in the other — the same rows, byte for byte, in both real exports (bar
+  the visible set and order) and in baken. They are the browse menu's
+  **categories** and **sort orders**: which of the twenty-seven column names
+  the encoder offers, in what order, and which it can sort by. The same two
+  sets are the `category` and `sort` tables of `exportLibrary.db`, which this
+  program was already seeding; the two files now come from the one definition.
+  vynull's reading of the pair is that a player has nothing to build its menu
+  from without them. A player asked to load a library whose menu has no entries
+  is the best mechanism on the table for a hang that starts when the drive is
+  selected.
+- **Two dates empty on every track row.** `date_added` and `analyze_date` are
+  filled on every row of every real export and on baken's; this wrote both
+  empty. A row with no dates is now dated the day it is written.
+- **Bitrate 0 on every lossless file.** A real export's WAV says 1411 (16-bit
+  44.1 kHz stereo) or 2116 (24-bit) — the rate of the samples — and its MP3 320.
+- **The id-like word at `0x14` of a track row was 0.** Real rows carry a large
+  unique number there, which looks like rekordbox's own id for the track; vynull
+  writes the track id, baken the id plus twenty. Now the track id.
+- **The tracks' and history's header pages stopped after their count.** The real
+  page carries the count in the first slot and the free-slot fill after it; this
+  left the rest as zeroes.
+- **The fixed tables' sequence numbers.** Colours, columns, categories and sort
+  orders say 2, 3, 4 and 5 in both real exports; colours said 8 here, and the
+  fixed-list page style now covers all four.
+
+Everything is in one change because every item is what every working file has,
+and the next drive should carry all of it. Alongside it, `--no-onelibrary`
+writes a drive with `export.pdb` alone: if the player still hangs, a drive
+without `exportLibrary.db` says whether the second database is any part of it,
+which a drive carrying both cannot.
+
+**Untested on hardware as of this writing.**
 
 ## 7. Still unknown
 
@@ -512,6 +566,9 @@ stated mechanism that a parser cannot see, matched by two working writers.
   officially cannot happen.)
 - What `myTagMasterDBID` is for.
 - Whether the empty-history-tables rule is really what refuses a pdb.
+- Whether a browse menu with no categories — tables 17 and 18 empty — is what
+  hangs a CDJ-3000 loading a drive, or one of the smaller differences fixed
+  alongside it was.
 
 ## 8. Claims worth not repeating
 

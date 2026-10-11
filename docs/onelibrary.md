@@ -560,6 +560,15 @@ Against §2 to §5 what is left is:
   table's page chain ends there. Until this was measured against baken's
   output, all twenty tables named `next_unused` itself — a page that did not
   exist — and a CDJ-3000 on 3.22 found no database. See the gist, §6.
+- Tables 17 and 18 of `export.pdb` — the browse menu's categories and sort
+  orders, 22 and 17 rows that every real export and both working writers carry
+  — are written from the same definition as this database's `category` and
+  `sort` tables. They were empty until a CDJ-3000 on 3.22, with the directory
+  fixed, saw the database and hung loading it. Fixed alongside, because every
+  working file has them: dates on every track row, a bitrate on every lossless
+  file, the track's id in the id-like word at `0x14`, the free-slot fill after
+  the tracks' and history's header counts, and sequence numbers 2 to 5 on the
+  four fixed tables. See the gist, §6.
 - `analysedBits` is 105 on every row, and settable with `--analysed-bits` or
   `BOOTH_ANALYSED_BITS` so a value can be tried on a deck without a rebuild. A
   CDJ-3000X that draws the colour waveform and no phrase strip has read the

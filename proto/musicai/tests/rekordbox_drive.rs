@@ -100,6 +100,7 @@ fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         dry_run: false,
         onelibrary_key: None,
         analysed_bits: None,
+        no_onelibrary: false,
         companions: Vec::new(),
         already: Vec::new(),
         prepared: Vec::new(),
