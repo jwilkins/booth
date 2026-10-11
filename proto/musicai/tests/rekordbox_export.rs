@@ -399,8 +399,11 @@ fn the_section_order_is_the_one_two_real_exports_use() {
             "{which} header"
         );
     }
-    for (which, bytes) in [("DAT", analysis.dat()), ("EXT", analysis.ext())] {
-        for code in ["PCOB", "PCO2"] {
+    // The `.DAT` has the old-style lists alone; the `.EXT` has both kinds.
+    let lists: [(&str, Vec<u8>, &[&str]); 2] =
+        [("DAT", analysis.dat(), &["PCOB"]), ("EXT", analysis.ext(), &["PCOB", "PCO2"])];
+    for (which, bytes, codes) in lists {
+        for code in codes {
             let types: Vec<u32> = sections(&bytes)
                 .into_iter()
                 .filter(|(found, ..)| found == code)
