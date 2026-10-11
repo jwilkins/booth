@@ -153,7 +153,7 @@ mod tests {
             })
             .collect();
         let bytes = onelibrary::to_bytes(
-            &Database { tracks, playlists: Vec::new() },
+            &Database { tracks, playlists: Vec::new(), ..Default::default() },
             key,
             "TESTSTICK",
             onelibrary::analysed_bits(None),

@@ -95,6 +95,7 @@ fn demo() -> Database {
             Playlist::new(2, "warm", vec![3]).in_folder(1),
             Playlist::new(3, "peak", vec![1, 2, 3]).in_folder(1),
         ],
+        ..Default::default()
     }
 }
 
@@ -251,7 +252,11 @@ fn a_library_too_big_for_one_page_spills_onto_the_next() {
     let tracks: Vec<Track> =
         (1..=250).map(|i| track(i, &format!("Track {i}"), &format!("Artist {i}"))).collect();
     let ids: Vec<u32> = tracks.iter().map(|t| t.id).collect();
-    let database = Database { tracks, playlists: vec![Playlist::new(1, "everything", ids)] };
+    let database = Database {
+        tracks,
+        playlists: vec![Playlist::new(1, "everything", ids)],
+        ..Default::default()
+    };
 
     let bytes = database.to_bytes().unwrap();
     let all = read_all(&bytes);

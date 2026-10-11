@@ -719,6 +719,7 @@ mod tests {
                 a_track(2, "Undulate", "Peverelist"),
             ],
             playlists: vec![Playlist::new(1, "A night", vec![1, 2])],
+            ..Default::default()
         }
     }
 
@@ -911,6 +912,7 @@ mod tests {
                     track_ids: vec![1],
                 },
             ],
+            ..Default::default()
         };
         let bytes = to_bytes(&database, KEY, "TESTSTICK", ANALYSED).unwrap();
         let scratch = Scratch::new().unwrap();

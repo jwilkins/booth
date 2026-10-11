@@ -426,7 +426,12 @@ pub fn export(
             }
             false => playlist_tree(&args.playlists, &ids_by_path),
         };
-        let database = pdb::Database { tracks, playlists };
+        // The history row names the drive. `--label` is what an image is
+        // formatted with and defaults to REKORDBOX, which is also what a
+        // rekordbox-written stick is called, so it is the right answer for an
+        // image and a harmless one for a drive that is already named
+        // something else: nothing reads this field back.
+        let database = pdb::Database { tracks, playlists, device_name: args.label.clone() };
         let building = std::time::Instant::now();
         let bytes = database.to_bytes()?;
         report::detail(

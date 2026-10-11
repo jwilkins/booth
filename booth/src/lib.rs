@@ -14,7 +14,10 @@
 
 pub mod app;
 pub mod backup;
-pub mod clock;
+// Lives in booth-cli: its own comment refuses a second copy of a
+// civil-calendar conversion, and the database writer there needs the same
+// arithmetic for a history row's export date.
+pub use booth_cli::clock;
 pub mod config;
 pub mod grid;
 pub mod guess;

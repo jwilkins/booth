@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod audio;
 pub mod cli;
+pub mod clock;
 pub mod commands;
 pub mod compat;
 pub mod discover;

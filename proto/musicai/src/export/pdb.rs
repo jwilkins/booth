@@ -218,6 +218,9 @@ pub(crate) const COLUMNS: [(u16, &str); 27] = [
 pub struct Database {
     pub tracks: Vec<Track>,
     pub playlists: Vec<Playlist>,
+    /// The drive's own name, for the history row. Empty is valid — baken's
+    /// fixture row has it empty — so nothing here needs it set.
+    pub device_name: String,
 }
 
 impl Database {
@@ -280,6 +283,17 @@ impl Database {
                 .enumerate()
                 .map(|(i, (menu, name))| RowData::plain(column_row(i as u16 + 1, *menu, name)))
                 .collect(),
+        );
+
+        // One row, as a real export has. Dated at write time: the field is the
+        // day the stick was made and nothing reads it back.
+        rows.insert(
+            Table::History as u8,
+            vec![RowData::plain(history_row(
+                self.tracks.len() as u32,
+                &crate::clock::day(crate::clock::now()),
+                &self.device_name,
+            ))],
         );
 
         let mut tree = Vec::new();
@@ -723,6 +737,62 @@ pub fn string(text: &str) -> Vec<u8> {
     out.extend_from_slice(&encoded);
     out
 }
+
+/// The one row the history table (0x13) carries in a real export.
+///
+/// `0x0280`, the track count, a zero, the export date, `0x19 0x1e`, the string
+/// `"1000"`, and the device name, zero-padded to forty bytes. The count is
+/// what a CDJ-3000 shows as Songs.
+///
+/// Every byte of that is from baken's `pdb::rows::history_property`
+/// (<https://github.com/M-Igashi/baken>, MIT, Copyright 2025 Masanari Higashi),
+/// which read it off a real rekordbox 7 export and whose sticks play on a
+/// CDJ-3000 on firmware 3.22. Reimplemented here against Booth's own string
+/// encoder rather than copied, and pinned to baken's own fixture bytes in
+/// `the_history_row_is_the_forty_bytes_a_real_export_carries`.
+///
+/// vynull (<https://github.com/vynulldev/vynull>, GPL-3.0 — read for what it
+/// knows about the format, no code taken) writes the same row and agrees on
+/// every field: `0x0280`, a `0x20`-per-slot index shift sharing those four
+/// bytes, the count at 0x04, a zero word at 0x08, then the strings inline. It
+/// stops at thirty-two bytes where baken pads to forty, and forty is right:
+/// a real export's history pages report `heap_used` 40 for one row and 480 for
+/// twelve. vynull also records that a count of zero makes a deck treat the
+/// stick as "no real export" and suppress features, which is a reason to send
+/// the real number rather than a placeholder.
+///
+/// Why it matters: this table was written empty, and an empty history table is
+/// the last item on fourfour's list of what a CDJ-3000 checks before accepting
+/// a database. A drive this program wrote was refused outright by a CDJ-3000
+/// while a CDJ-3000X read the same stick, which is the shape of a fault in the
+/// legacy database rather than in the analysis beside it.
+fn history_row(track_count: u32, export_date: &str, device_name: &str) -> Vec<u8> {
+    let mut row = Vec::new();
+    put_u32(&mut row, 0x0280);
+    put_u32(&mut row, track_count);
+    put_u32(&mut row, 0);
+    row.extend_from_slice(&string(export_date));
+    row.extend_from_slice(&[0x19, 0x1e]);
+    row.extend_from_slice(&string("1000"));
+
+    // rekordbox packs an ASCII string where it falls and starts a UTF-16 one
+    // on a four-byte boundary of the row. A volume label is the one field here
+    // that can be either, and baken records a CDJ-2000NXS2 freezing on a stick
+    // whose strings were unaligned.
+    let name = string(device_name);
+    if name.first() == Some(&0x90) {
+        row.resize(aligned(row.len()), 0);
+    }
+    row.extend_from_slice(&name);
+
+    if row.len() < HISTORY_ROW_LEN {
+        row.resize(HISTORY_ROW_LEN, 0);
+    }
+    row
+}
+
+/// What a history row is padded out to, whatever its strings came to.
+const HISTORY_ROW_LEN: usize = 40;
 
 /// Artist rows, and anything else shaped like them: a subtype, an id, and a
 /// one-byte offset to the name.
@@ -1329,6 +1399,71 @@ mod tests {
         assert_eq!(u32::from_le_bytes(page[0x38..0x3c].try_into().unwrap()), 0x1fff_0000);
     }
 
+    /// The forty bytes a real export's history table carries.
+    ///
+    /// The two vectors are baken's own, from its `rows.rs` tests, which read
+    /// them off a real rekordbox 7 export: one empty drive and the 587-track
+    /// reference. Transcribed rather than derived, because the point of them is
+    /// that they came off a file and not out of a formula.
+    ///
+    /// The forty is measured here rather than taken on trust, because the two
+    /// implementations that write this row disagree about it: the history pages
+    /// of rekordcrate's `complete_export` fixture report `heap_used` 40 for a
+    /// page of one row and 480 for a page of twelve, so every row in a real
+    /// export is forty bytes.
+    #[test]
+    fn the_history_row_is_the_forty_bytes_a_real_export_carries() {
+        let row = history_row(0, "2024-11-16", "");
+        assert_eq!(row.len(), 40, "a history row is padded to forty bytes");
+        let want = [
+            0x80, 0x02, 0x00, 0x00, // 0x0280
+            0x00, 0x00, 0x00, 0x00, // no tracks
+            0x00, 0x00, 0x00, 0x00, // and a zero nobody has explained
+            0x17, b'2', b'0', b'2', b'4', b'-', b'1', b'1', b'-', b'1', b'6', // the date
+            0x19, 0x1e, // two more unexplained bytes
+            0x0b, b'1', b'0', b'0', b'0', // the string "1000"
+            0x03, // an empty device name
+        ];
+        assert_eq!(&row[..want.len()], &want);
+        assert!(row[want.len()..].iter().all(|&b| b == 0), "the padding is not zeroes");
+
+        // The count is what a CDJ-3000 shows as Songs, so it is the one field
+        // here whose value a person could notice being wrong.
+        let reference = history_row(587, "2025-04-11", "");
+        assert_eq!(&reference[..8], &[0x80, 0x02, 0x00, 0x00, 0x4b, 0x02, 0x00, 0x00]);
+    }
+
+    /// A UTF-16 device name starts on a four-byte boundary of the row.
+    ///
+    /// baken records a CDJ-2000NXS2 freezing on a stick whose strings were
+    /// packed without this, which is a harder failure than the one this change
+    /// is chasing and worth not reintroducing.
+    #[test]
+    fn a_device_name_that_is_not_ascii_is_aligned_within_the_row() {
+        let row = history_row(1, "2026-10-11", "Ünlaut");
+        let at = row.iter().position(|&b| b == 0x90).expect("no utf-16 string in the row");
+        assert_eq!(at % 4, 0, "the name starts at {at}, which is not a four-byte boundary");
+        assert!(row.len() >= 40);
+    }
+
+    /// The table a CDJ-3000 refuses a whole database over is no longer empty.
+    #[test]
+    fn the_history_table_carries_its_one_row() {
+        let database = Database {
+            tracks: vec![a_track(1), a_track(2)],
+            playlists: Vec::new(),
+            device_name: "OVERCUE".into(),
+        };
+        let bytes = database.to_bytes().unwrap();
+        let history = table(&bytes, Table::History);
+        assert_eq!(history.rows, 1, "the history table is empty again");
+
+        // And the count it reports is the collection's, which is the number a
+        // player puts on the screen.
+        let found = bytes.windows(8).any(|w| w == [0x80, 0x02, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]);
+        assert!(found, "no history row naming two tracks is in the file");
+    }
+
     #[test]
     fn an_empty_string_is_the_three_the_format_docs_mention() {
         assert_eq!(string(""), vec![0x03]);
@@ -1377,9 +1512,16 @@ mod tests {
         let bytes = Database::new().to_bytes().unwrap();
         let tables = inspect(&bytes).unwrap();
         assert_eq!(tables.len(), 20);
-        assert!(tables.iter().all(|t| t.rows == 0 || t.table == "Colors" || t.table == "Columns"));
+
+        // Three tables have rows on a drive with no music at all: the eight
+        // colours and the twenty-seven browse categories, which are the same
+        // on every export, and the one history row, which a CDJ-3000 wants
+        // there whether or not anything has been played.
+        let furnished = ["Colors", "Columns", "History"];
+        assert!(tables.iter().all(|t| t.rows == 0 || furnished.contains(&t.table.as_str())));
         assert_eq!(table(&bytes, Table::Colors).rows, 8);
         assert_eq!(table(&bytes, Table::Columns).rows, 27);
+        assert_eq!(table(&bytes, Table::History).rows, 1);
     }
 
     #[test]
@@ -1387,6 +1529,7 @@ mod tests {
         let database = Database {
             tracks: (1..=5).map(a_track).collect(),
             playlists: vec![Playlist::new(1, "set", vec![1, 2, 3, 4, 5])],
+            ..Default::default()
         };
         let bytes = database.to_bytes().unwrap();
         assert_eq!(table(&bytes, Table::Tracks).rows, 5);
@@ -1398,7 +1541,11 @@ mod tests {
 
     #[test]
     fn a_table_that_outgrows_a_page_gets_another_one() {
-        let database = Database { tracks: (1..=60).map(a_track).collect(), playlists: Vec::new() };
+        let database = Database {
+            tracks: (1..=60).map(a_track).collect(),
+            playlists: Vec::new(),
+            ..Default::default()
+        };
         let bytes = database.to_bytes().unwrap();
         let tracks = table(&bytes, Table::Tracks);
         assert!(tracks.pages > 2, "60 track rows should not fit on one page");
@@ -1407,9 +1554,13 @@ mod tests {
 
     #[test]
     fn the_file_is_a_whole_number_of_pages() {
-        let bytes = Database { tracks: (1..=60).map(a_track).collect(), playlists: Vec::new() }
-            .to_bytes()
-            .unwrap();
+        let bytes = Database {
+            tracks: (1..=60).map(a_track).collect(),
+            playlists: Vec::new(),
+            ..Default::default()
+        }
+        .to_bytes()
+        .unwrap();
         assert_eq!(bytes.len() % PAGE_LEN, 0);
         assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, PAGE_LEN);
         // The header says where the unused pages start, which is the end.
@@ -1431,9 +1582,13 @@ mod tests {
         // missing: the trailing pages of an empty table are referenced by
         // nothing, so losing those is invisible here and is caught by checking
         // the file's length instead.
-        let mut bytes = Database { tracks: (1..=5).map(a_track).collect(), playlists: Vec::new() }
-            .to_bytes()
-            .unwrap();
+        let mut bytes = Database {
+            tracks: (1..=5).map(a_track).collect(),
+            playlists: Vec::new(),
+            ..Default::default()
+        }
+        .to_bytes()
+        .unwrap();
         bytes.truncate(PAGE_LEN * 2);
         let message = inspect(&bytes).unwrap_err().to_string();
         assert!(message.contains("past the end of the file"), "{message}");
