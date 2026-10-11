@@ -187,10 +187,12 @@ fn an_ext_file_carries_the_colour_waveforms_and_the_named_cues() {
             ContentKind::CueList,
             ContentKind::ExtendedCueList,
             ContentKind::ExtendedCueList,
-            // No beat grid: rekordbox puts a PQT2 here, whose layout is not
-            // published, and a copy of the .DAT's PQTZ in its place cost a
-            // CDJ-3000X everything after it — the colour waveforms and the
-            // phrases.
+            // The second beat grid, empty: rekordbox puts a PQT2 here, whose
+            // layout is not published. A copy of the .DAT's PQTZ in its place
+            // once cost a CDJ-3000X everything after it, and leaving the tag
+            // out entirely is the form a CDJ-3000 was handed when it crashed.
+            // rekordcrate 0.3 predates the tag, so it reads as unknown.
+            ContentKind::Unknown(*b"PQT2"),
             ContentKind::WaveformColorDetail,
             ContentKind::WaveformColorPreview,
             ContentKind::SongStructure,
@@ -343,12 +345,11 @@ fn the_section_order_is_the_one_two_real_exports_use() {
         (b"DAT", &["PPTH", "PVBR", "PQTZ", "PWAV", "PWV2", "PCOB", "PCOB"], 0),
         (
             b"EXT",
-            // No `PQT2`, which both fixtures have between the cue lists and
-            // `PWV5`. Leaving it out is deliberate — its layout is a 0x38
-            // header of eleven words that nobody has published — and the
-            // CDJ-3000X result says a section simply missing is skipped,
-            // where a wrong one costs everything behind it.
-            &["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PWV5", "PWV4", "PSSI"],
+            // `PQT2` is where both fixtures have it, between the cue lists and
+            // `PWV5`, and empty: its layout past the 0x38 header is unpublished,
+            // so the header carries the one word every real one does and no
+            // beats. That is baken's form, and baken plays on a CDJ-3000.
+            &["PPTH", "PWV3", "PCOB", "PCOB", "PCO2", "PCO2", "PQT2", "PWV5", "PWV4", "PSSI"],
             0,
         ),
         (b"2EX", &["PPTH", "PWV7", "PWV6", "PWVC"], 0),

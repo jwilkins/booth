@@ -550,8 +550,16 @@ Against §2 to §5 what is left is:
 - `PWV4` carries `0x00000000` in its third header word, which is what both
   fixtures carry. It held `0x00960000` by analogy with `PWV3`, `PWV5` and
   `PWV7` until the fixtures were read.
-- The `.EXT` carries no extended beat grid at all, where rekordbox writes
-  `PQT2`; see §5.
+- The `.EXT` carries an *empty* `PQT2` where rekordbox writes a full one: the
+  0x38-byte header with `0x01000002` in its second word and no beats, which is
+  baken's form. Nothing was written there for a while, on a CDJ-3000X result
+  that said a missing section is skipped; the player that crashes on track load
+  is a CDJ-3000, so the working writer's form is used instead. See §5.
+- Every table's empty candidate in the file header's directory is its own
+  all-zero spare page at the end of the file, below `next_unused`, and the
+  table's page chain ends there. Until this was measured against baken's
+  output, all twenty tables named `next_unused` itself — a page that did not
+  exist — and a CDJ-3000 on 3.22 found no database. See the gist, §6.
 - `analysedBits` is 105 on every row, and settable with `--analysed-bits` or
   `BOOTH_ANALYSED_BITS` so a value can be tried on a deck without a rebuild. A
   CDJ-3000X that draws the colour waveform and no phrase strip has read the

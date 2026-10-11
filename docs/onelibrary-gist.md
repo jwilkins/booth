@@ -261,8 +261,12 @@ CDJ-3000X everything after that tag — the colour waveforms and the phrases —
 while the cues *before* it came through fine. A player reads these files in
 order and stops making sense of one at the first section it did not expect.
 `PQT2` is "an extended beat grid, two bytes a beat" and that is all anyone has
-published, so writing nothing there is safer than writing a guess: a missing
-section is skipped, a wrong one costs everything behind it.
+published. For a while nothing was written there, on the reasoning that a
+missing section is skipped where a wrong one costs everything behind it — but
+that was measured on a CDJ-3000X, and the player that crashes on track load is
+a CDJ-3000. An *empty* `PQT2` is now written: the 0x38-byte header carrying the
+one word every real one carries, `0x01000002`, and no beats. That is baken's
+form, and baken plays on a CDJ-3000 on 3.22.
 
 ### The directory name
 
@@ -452,6 +456,50 @@ plays without a `.2EX` names the file.
 Still open from before, and still the most likely alternative: the history
 tables are empty, which is the one item on fourfour's CDJ-3000 checklist this
 has never satisfied.
+
+### CDJ-3000, official firmware 3.22 — four candidates, and then the directory
+
+The player was restored to official 3.22, which is the firmware baken's testers
+report sticks playing on, so every result below is against a known-good target.
+Direct USB: **no database found**, each time. Over Pro DJ Link: **crashes on
+track load**, each time.
+
+Four candidates were written to drives and refused in turn, each matching a
+real export byte for byte in the field it changed: the one-row history table
+(#45); `0x1a` as `rows >> 3` with colours in the fixed page style (#46); the
+header page body — own index, first data page, `0x03ffffff`, marker, free-slot
+fill (#47). All three stay, because all three are what a real export writes.
+None was the fault.
+
+The fault was found by building baken in the container, pointing it at the same
+two tracks this program had just exported, and diffing *whole files* rather
+than fields — and it was in the first thing a player reads, which no comparison
+of tables could have reached. **The file header's table directory named the
+same empty candidate for all twenty tables, and the one it named was
+`next_unused`: a page that does not exist.** In both real exports and in
+baken, every table has its own candidate, every one is below `next_unused`,
+every one is an all-zero page, a populated table's last data page points `next`
+at it, and an empty table's header does — with `0x03ffffff` in its first-data
+word, not the page after it.
+
+Two things this program believed, both wrong, both now removed from the code
+and the comments: that a page written as zeroes "is not one" and gets a drive
+refused (the empty candidate *is* a zero page, in every working file), and that
+the end of a table is said by pointing past the end of the file (it is said by
+pointing at the table's own spare).
+
+Why five rounds missed it: the page chain at `0x0c` was always internally
+consistent, so two independent parsers and this program's own verifier accept
+the file; none of them follows the empty-candidate pointer. The CDJ-3000X reads
+`exportLibrary.db` and never opens `export.pdb`. And the comparisons were all
+field-against-field on pages that had rows.
+
+Also from the same diff: baken writes an empty `PQT2` in the `.EXT` where this
+wrote nothing (see §5), and no `exportExt.pdb` at all — so that file is not
+required.
+
+**Untested on hardware as of this writing.** It is the first candidate with a
+stated mechanism that a parser cannot see, matched by two working writers.
 
 ## 7. Still unknown
 
