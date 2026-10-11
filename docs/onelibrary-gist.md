@@ -553,12 +553,66 @@ writes a drive with `export.pdb` alone: if the player still hangs, a drive
 without `exportLibrary.db` says whether the second database is any part of it,
 which a drive carrying both cannot.
 
+**Tested: the database loads.** The player browses the drive. Loading a track
+then hangs it, which is the next entry.
+
+### CDJ-3000, 3.22, database loaded — hangs loading a track, from the drive and over Pro DJ Link alike
+
+The browse screen works. Select a track and the player hangs; load the same
+track onto it over Pro DJ Link from another player's slot and it hangs at the
+same point. The database is out of it now — over the link the metadata arrives
+by protocol from the other player — and what both paths share is the analysis
+files and the audio. So the analysis files were diffed section by section
+against baken's for the same forty tracks and against both rekordcrate
+fixtures: not the section order this time, which was done, but the header words
+and the bytes in the bodies.
+
+Four differences. Every one is a thing every working file has:
+
+- **The sixteen header bytes after `len_file`** are `1, 0x10000, 0x10000, 0`
+  in every real file of all three kinds and in baken's. This wrote zeroes.
+  Nobody has published what they mean.
+- **Hot cues before memory cues**, in `PCOB` and `PCO2` alike, in every real
+  file and in baken's. This wrote them the other way round.
+- **The three-band bytes were on the wrong scale and in the wrong order.** A
+  real `PWV7` never puts a band byte above 127 (the two fixture tracks top out
+  at 107/126/127 and 126/125/105), a real `PWV6` never above 45, and a real
+  `PWV4` keeps five of its six bytes at 127 or under with the second always at
+  128 or over. This wrote 0–255 in two of the three bands of both three-band
+  sections, 0–255 in three bytes of `PWV4` and 0–1 in a fourth. The order was
+  mid, high, low, from a published note; baken's fit against 1,070 real files
+  says low, mid, high, and the real data reads that way too — the first byte
+  carries the most energy and the third the least, and the gains that close the
+  file are capped highest for the third.
+- **`PWVC` is a per-band gain**, in hundredths — baken's reading, from the same
+  fit: `clamp(target / loudest, floor, cap)` with floors 80/80/95 and caps
+  267/300/500, and both fixture tracks sit inside: `91, 138, 396` and
+  `145, 249, 500`. This wrote per-band averages, which happen to land in the
+  same range and mean nothing.
+
+A mechanism, for once with a shape to it: the CDJ-3000 draws the three-band
+waveform as a track loads, and a byte above 127 in a field that is 0–127 in
+every file the firmware has ever read is the kind of thing a lookup table is
+indexed by. The CDJ-3000X's monochrome browse column — reported earlier and
+read as cosmetic — is the same bytes refused by a player that falls back
+instead of hanging. It never showed the three-band picture from this drive.
+
+All four are now written as the real files have them, with the band scaling
+following baken's fitted rules (MIT, attributed in the code): each band's peak
+with a release, scaled so its loudest column lands on a fixed target, capped at
+127; the preview the column mean of that, scaled per band; the colour preview's
+bytes derived from the preview the way the real ones relate. The window draws
+from the same bytes and now reads them in the new order and scale; a picture
+cached before this is redrawn, because its note no longer matches.
+
 **Untested on hardware as of this writing.**
 
 ## 7. Still unknown
 
 - Does any player need `exportExt.pdb`?
-- Which players actually require the `.2EX`, and does `PWVC` matter?
+- Which players actually require the `.2EX`. `PWVC` reads as the three band
+  gains (baken's fit, and both fixtures agree); what a player does with them is
+  not known.
 - Real `fileType` / `analysedBits` / `contentLink` values read from rows beside
   the files they describe.
 - Does a CDJ-3000 on 3.22 read `exportLibrary.db` when `export.pdb` is absent?

@@ -17,10 +17,14 @@ use anyhow::{bail, Result};
 use super::waveform::WaveformData;
 use super::{BeatGrid, Cue, CueKind, SongStructure};
 
-/// The header length rekordbox writes at the top of every analysis file. The
-/// sixteen bytes after `len_file` have no known purpose and are written as
-/// zeroes.
+/// The header length rekordbox writes at the top of every analysis file.
 const FILE_HEADER_LEN: u32 = 0x1c;
+
+/// The sixteen bytes after `len_file`. What they mean is unpublished; every
+/// real file carries exactly these — both rekordcrate fixtures, all three file
+/// kinds — and so does baken. This wrote zeroes there until a CDJ-3000 that had
+/// accepted the database hung loading a track.
+const FILE_HEADER_TAIL: [u8; 16] = [0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
 
 /// Where a track's analysis files go, worked out from where its audio went.
 ///
@@ -357,24 +361,18 @@ pub fn wave_3band_detail(data: &[u8]) -> Vec<u8> {
     entry_section(b"PWV7", 3, data, Some(0x0096_0000))
 }
 
-/// `PWVC` — the twenty bytes that close a real `.2EX`.
+/// `PWVC` — the twenty bytes that close a real `.2EX`: a zero, then the gain
+/// each band of `PWV7` was scaled by, in hundredths, low, mid, high.
 ///
-/// Three small numbers whose meaning nobody has published; a capture of a real
-/// export read them as something like `[88, 81, 127]`, which is the shape of a
-/// per-band average and is what this writes. It goes last, after both
-/// waveforms, so that a player which does not understand it has already read
-/// everything that matters.
-pub fn wave_3band_summary(bands: &[u8]) -> Vec<u8> {
+/// That reading is baken's, from fitting real files, and the two real exports
+/// examined carry `91, 138, 396` and `145, 249, 500` — inside the floors and
+/// caps the fit found. This wrote per-band averages here on the strength of one
+/// capture, which were numbers in a plausible range and not these.
+pub fn wave_3band_summary(gains: &[u16; 3]) -> Vec<u8> {
     let mut out = start(b"PWVC", 0x0e);
     put_u16(&mut out, 0);
-    for band in 0..3 {
-        let mut total = 0u64;
-        let mut count = 0u64;
-        for entry in bands.chunks_exact(3) {
-            total += u64::from(entry[band]);
-            count += 1;
-        }
-        put_u16(&mut out, (total.checked_div(count).unwrap_or(0)) as u16);
+    for gain in gains {
+        put_u16(&mut out, *gain);
     }
     finish(out)
 }
@@ -497,8 +495,8 @@ pub fn file(sections: &[Vec<u8>]) -> Vec<u8> {
     out.extend_from_slice(b"PMAI");
     put_u32(&mut out, FILE_HEADER_LEN);
     put_u32(&mut out, FILE_HEADER_LEN + body_len as u32);
-    let padding = FILE_HEADER_LEN as usize - out.len();
-    put_pad(&mut out, padding);
+    out.extend_from_slice(&FILE_HEADER_TAIL);
+    debug_assert_eq!(out.len(), FILE_HEADER_LEN as usize);
     for section in sections {
         out.extend_from_slice(section);
     }
@@ -528,12 +526,14 @@ impl Analysis<'_> {
         // does not find is not a risk worth taking for 1.6 kB a track.
         let mut sections = vec![path(self.on_drive_path)];
         sections.push(vbr(self.vbr.unwrap_or(&[0; 401])));
+        // Hot cues before memory cues, which is the order of every real file
+        // and of baken's; this had them the other way round.
         sections.extend([
             beat_grid(self.grid),
             wave_preview(&self.waveforms.preview),
             wave_tiny(&self.waveforms.tiny),
-            cues(self.cues, false),
             cues(self.cues, true),
+            cues(self.cues, false),
         ]);
         file(&sections)
     }
@@ -555,10 +555,10 @@ impl Analysis<'_> {
         let mut sections = vec![
             path(self.on_drive_path),
             wave_detail(&self.waveforms.detail),
-            cues(self.cues, false),
             cues(self.cues, true),
-            cues_extended(self.cues, false),
+            cues(self.cues, false),
             cues_extended(self.cues, true),
+            cues_extended(self.cues, false),
             beat_grid_2_empty(),
             wave_color_detail(&self.waveforms.color_detail),
             wave_color_preview(&self.waveforms.color_preview),
@@ -584,7 +584,7 @@ impl Analysis<'_> {
             path(self.on_drive_path),
             wave_3band_detail(&self.waveforms.band_detail),
             wave_3band_preview(&self.waveforms.band_preview),
-            wave_3band_summary(&self.waveforms.band_preview),
+            wave_3band_summary(&self.waveforms.band_gains),
         ])
     }
 }
@@ -995,6 +995,44 @@ mod tests {
              an empty one goes there, as baken writes, and never a PQTZ"
         );
         assert_eq!(codes(&inspect(&analysis.two_ex()).unwrap()), ["PPTH", "PWV7", "PWV6", "PWVC"]);
+    }
+
+    #[test]
+    fn a_file_header_carries_the_sixteen_bytes_every_real_one_does() {
+        let bytes = file(&[path("/Contents/a.flac")]);
+        assert_eq!(&bytes[0..4], b"PMAI");
+        assert_eq!(u32::from_be_bytes(bytes[4..8].try_into().unwrap()), 0x1c);
+        assert_eq!(bytes[12..28], [0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hot_cues_come_before_memory_cues_in_both_files() {
+        // The order of every real file and of baken's. The list's type is the
+        // first word after its header: 1 for hot cues, 0 for memory cues.
+        let grid = BeatGrid::constant(128.0, 0, 3_000);
+        let waveforms = WaveformData::silent(3.0);
+        let cues = [Cue::memory(1_000), Cue::hot(1, 2_000)];
+        let analysis = Analysis {
+            on_drive_path: "/Contents/a.flac",
+            grid: &grid,
+            cues: &cues,
+            waveforms: &waveforms,
+            structure: None,
+            vbr: None,
+        };
+        for (which, bytes) in [("DAT", analysis.dat()), ("EXT", analysis.ext())] {
+            let lists: Vec<String> = inspect(&bytes)
+                .unwrap()
+                .into_iter()
+                .filter(|s| s.fourcc == "PCOB" || s.fourcc == "PCO2")
+                .map(|s| format!("{} {}", s.fourcc, s.summary))
+                .collect();
+            for pair in lists.chunks_exact(2) {
+                assert!(pair[0].contains("hot"), "{which}: {lists:?}");
+                assert!(pair[1].contains("memory"), "{which}: {lists:?}");
+            }
+            assert!(!lists.is_empty(), "{which} has cue lists");
+        }
     }
 
     #[test]

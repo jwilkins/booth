@@ -2024,19 +2024,19 @@ mod tests {
 
         let bands = |audio: &Audio| {
             let drawn = booth_cli::export::waveform::analyze(audio).band_detail;
-            // Three bytes a column — mid, high, low, as the format stores them.
+            // Three bytes a column — low, mid, high, as the format stores them.
             let at = drawn.len() / 2 / 3 * 3;
             (drawn[at], drawn[at + 1], drawn[at + 2])
         };
 
-        let (_, _, only_bass) = bands(&low);
-        let (_, top_high, _) = bands(&high);
+        let (only_bass, _, _) = bands(&low);
+        let (_, _, top_high) = bands(&high);
         assert!(only_bass > 0, "a bass tone should have a low band");
         assert!(top_high > 0, "a treble tone should have a high band");
 
         // Summed, the picture has both in it — which is what an instrumental
         // is, and is not what either file alone looks like.
-        let (_, mixed_high, mixed_low) = bands(&both);
+        let (mixed_low, _, mixed_high) = bands(&both);
         assert!(mixed_low > 0 && mixed_high > 0, "the sum lost a band: {:?}", bands(&both));
 
         std::fs::remove_dir_all(&dir).unwrap();

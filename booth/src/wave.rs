@@ -25,6 +25,10 @@ pub const STRIP_HEIGHT: f32 = 26.0;
 /// The bytes in one column of the three-band preview, as the format stores
 /// them: mid, high, low.
 const COLUMN: usize = 3;
+/// Full scale of a band byte. The bytes are the drive's own `.2EX` encoding,
+/// which never goes above 127; a cache drawn before that was so is thrown away
+/// by its note, see `library::cache_waveform`.
+const BAND_FULL: f32 = 127.0;
 
 /// How the picture is coloured.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -427,12 +431,14 @@ impl Waveform<'_> {
 
     /// The three band heights of one column, as fractions of full scale.
     ///
-    /// Returns them in the order they are painted rather than the order they
-    /// are stored: lows first, so the mids and highs sit over the top of them.
+    /// Stored low, mid, high, which is also the order they are painted in:
+    /// lows first, so the mids and highs sit over the top of them.
     fn column(&self, index: usize) -> [f32; 3] {
         let at = index * COLUMN;
-        let byte = |offset: usize| self.bands.get(at + offset).copied().unwrap_or(0) as f32 / 255.0;
-        [byte(2), byte(0), byte(1)]
+        let byte = |offset: usize| {
+            (self.bands.get(at + offset).copied().unwrap_or(0) as f32 / BAND_FULL).min(1.0)
+        };
+        [byte(0), byte(1), byte(2)]
     }
 }
 
@@ -1167,8 +1173,10 @@ fn silhouette(bands: &[u8], width: usize, zoom: Zoom) -> (Vec<f32>, bool) {
         let mut peak = 0.0f32;
         for index in from..to.min(columns) {
             let at = index * COLUMN;
-            let byte = |offset: usize| bands.get(at + offset).copied().unwrap_or(0) as f32 / 255.0;
-            peak = peak.max(loudness(byte(2), byte(0), byte(1)));
+            let byte = |offset: usize| {
+                (bands.get(at + offset).copied().unwrap_or(0) as f32 / BAND_FULL).min(1.0)
+            };
+            peak = peak.max(loudness(byte(0), byte(1), byte(2)));
         }
         levels.push(peak);
     }
@@ -2351,15 +2359,19 @@ mod tests {
     }
 
     #[test]
-    fn a_column_is_read_lows_first_whatever_order_it_is_stored_in() {
-        // The format stores mid, high, low; the picture is painted low, mid,
-        // high, so that the quieter bands land on top of the louder one.
-        let bytes = bands(&[[51, 102, 255]]);
+    fn a_column_is_read_low_mid_high_on_the_scale_the_drive_uses() {
+        // The format stores low, mid, high with 127 as full scale, and the
+        // picture is painted in that order so the quieter bands land on top of
+        // the louder one. A byte above 127 — which no real file has — is full.
+        let saturated = bands(&[[255, 0, 0]]);
+        assert_eq!(wave(&saturated).column(0)[0], 1.0);
+
+        let bytes = bands(&[[127, 25, 51]]);
         let wave = wave(&bytes);
         let [low, mid, high] = wave.column(0);
-        assert!((low - 1.0).abs() < 0.01, "low should be the third byte: {low}");
-        assert!((mid - 0.2).abs() < 0.01, "mid should be the first byte: {mid}");
-        assert!((high - 0.4).abs() < 0.01, "high should be the second byte: {high}");
+        assert!((low - 1.0).abs() < 0.01, "low should be the first byte: {low}");
+        assert!((mid - 25.0 / 127.0).abs() < 0.01, "mid should be the second byte: {mid}");
+        assert!((high - 51.0 / 127.0).abs() < 0.01, "high should be the third byte: {high}");
     }
 
     #[test]

@@ -545,8 +545,16 @@ Against §2 to §5 what is left is:
   established (dj-usb-tkit and FableGear omit it and passed).
 - The `.2EX` now carries `PWV7`, `PWV6` — the order both rekordcrate fixtures
   use, against the §5 table, which is why §5 now marks that row disputed — and
-  a `PWVC` whose three values are a guess at what a real one holds, a per-band
-  average, which is the shape of the numbers a capture reported.
+  a `PWVC` carrying the gain each band of `PWV7` was scaled by, in hundredths,
+  which is baken's reading from fitting real files and the range both fixtures
+  sit in. It held per-band averages, a guess from one capture, before that.
+- The three-band bytes are low, mid, high and never above 127, and the colour
+  preview's six bytes relate the way a real file's do. They were mid, high, low
+  on a 0–255 scale until a CDJ-3000 that had accepted the database hung loading
+  every track; the two fixtures never go above 127 in `PWV7` or 45 in `PWV6`.
+  The analysis file header's sixteen unexplained bytes are `1, 0x10000,
+  0x10000, 0` as every real file has them, and hot cues come before memory
+  cues. See the gist, §6.
 - `PWV4` carries `0x00000000` in its third header word, which is what both
   fixtures carry. It held `0x00960000` by analogy with `PWV3`, `PWV5` and
   `PWV7` until the fixtures were read.

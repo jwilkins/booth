@@ -2081,6 +2081,9 @@ fn drawn_from_path(id: u32) -> PathBuf {
     data_dir().join("waveforms").join(format!("{id:08}.from"))
 }
 
+/// The first line of every note: which encoding the bytes beside it are in.
+const BANDS_ENCODING: &str = "bands: low, mid, high, full at 127";
+
 /// What a picture was drawn from: the files, and what they looked like.
 ///
 /// `None` when a file cannot be reached, which is not the same as a file that
@@ -2089,7 +2092,11 @@ fn drawn_from(sources: &[PathBuf]) -> Option<String> {
     if sources.is_empty() {
         return None;
     }
-    let mut lines = Vec::with_capacity(sources.len());
+    // The encoding comes first, so a picture drawn before the bytes changed
+    // meaning is drawn again rather than read as though they had not: the
+    // bands were mid, high, low on a 0–255 scale, and are now the drive's own
+    // low, mid, high with 127 as full.
+    let mut lines = vec![BANDS_ENCODING.to_string()];
     for path in sources {
         let meta = std::fs::metadata(path).ok()?;
         let at = meta
