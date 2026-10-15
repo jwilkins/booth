@@ -11,6 +11,11 @@ The first and third releases were tagged `0.01` and `0.03` and renamed to
 here. Both old tags are still in the repository, pointing at the same two
 commits as their new names.
 
+## 0.1.0 — unreleased
+
+The manifests say 0.1.0, so this is what is in them; the entry is written when
+the tag is, from what is between the two tags.
+
 ## 0.0.9 — 15 October 2026
 
 A drive this writes plays on a CDJ-3000, and a track's loudness can be brought
