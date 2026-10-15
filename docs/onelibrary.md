@@ -528,9 +528,11 @@ Against §2 to §5 what is left is:
   it (§5). With *that* fixed it reads the `.EXT` through: **colour waveforms
   and hot cues both come up on a loaded track**, which is the whole of what the
   analysis files are for and the first confirmation that this project's
-  `PCOB`/`PCO2` cues are written the way a player expects. Phrases (`PSSI`,
-  last in the file) and the three-band waveform out of the `.2EX` are the two
-  things not yet reported either way.
+  `PCOB`/`PCO2` cues are written the way a player expects. **Phrases come up
+  too**, reported later from the same player — so the `.EXT` is read to its
+  end and the masked `PSSI` is right. The three-band waveform out of the `.2EX`
+  is the one picture the 3000X never drew from these drives, and a CDJ-3000
+  hung on it; see the gist, §6.
 - **A CDJ-3000 on firmware 2.05 does not see the library at all**, which is the
   legacy `export.pdb` being refused rather than anything about OneLibrary — the
   3000 never reads that database. This is the first time the legacy writer has
@@ -545,8 +547,16 @@ Against §2 to §5 what is left is:
   established (dj-usb-tkit and FableGear omit it and passed).
 - The `.2EX` now carries `PWV7`, `PWV6` — the order both rekordcrate fixtures
   use, against the §5 table, which is why §5 now marks that row disputed — and
-  a `PWVC` whose three values are a guess at what a real one holds, a per-band
-  average, which is the shape of the numbers a capture reported.
+  a `PWVC` carrying the gain each band of `PWV7` was scaled by, in hundredths,
+  which is baken's reading from fitting real files and the range both fixtures
+  sit in. It held per-band averages, a guess from one capture, before that.
+- The three-band bytes are low, mid, high and never above 127, and the colour
+  preview's six bytes relate the way a real file's do. They were mid, high, low
+  on a 0–255 scale until a CDJ-3000 that had accepted the database hung loading
+  every track; the two fixtures never go above 127 in `PWV7` or 45 in `PWV6`.
+  The analysis file header's sixteen unexplained bytes are `1, 0x10000,
+  0x10000, 0` as every real file has them, and hot cues come before memory
+  cues. See the gist, §6.
 - `PWV4` carries `0x00000000` in its third header word, which is what both
   fixtures carry. It held `0x00960000` by analogy with `PWV3`, `PWV5` and
   `PWV7` until the fixtures were read.

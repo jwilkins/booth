@@ -52,15 +52,17 @@ pub struct WaveformData {
     pub tiny: Vec<u8>,
     /// `PWV3`: one byte per half-frame, encoded like `preview`.
     pub detail: Vec<u8>,
-    /// `PWV4`: 1,200 columns of six bytes.
+    /// `PWV4`: 1,200 columns of six bytes. See [`ThreeBand`].
     pub color_preview: Vec<u8>,
     /// `PWV5`: two bytes per half-frame — three bits each of red, green and
     /// blue, then five of height.
     pub color_detail: Vec<u8>,
-    /// `PWV6`: 1,200 columns of three bytes — mid, high, low.
+    /// `PWV6`: 1,200 columns of three bytes — low, mid, high, none above 127.
     pub band_preview: Vec<u8>,
-    /// `PWV7`: three bytes per half-frame, same order.
+    /// `PWV7`: three bytes per half-frame, same order and the same ceiling.
     pub band_detail: Vec<u8>,
+    /// `PWVC`: the gain each band of `PWV7` was scaled by, in hundredths.
+    pub band_gains: [u16; 3],
 }
 
 impl WaveformData {
@@ -89,16 +91,21 @@ impl WaveformData {
             |width: usize| Scaled::like(&summarise(columns, width), &wide, OVERVIEW_QUANTILE);
         let preview = over(PREVIEW_COLUMNS);
         let tiny = over(TINY_COLUMNS);
-        let wide = Scaled::of(&wide, OVERVIEW_QUANTILE);
+
+        // The three-band pictures and the colour preview are not scaled with
+        // the rest: they are in the drive's own encoding, which normalises each
+        // band on its own. See [`ThreeBand`].
+        let bands = ThreeBand::of(columns);
 
         Self {
             preview: preview.mono_bytes(),
             tiny: tiny.tiny_bytes(),
             detail: detail.mono_bytes(),
-            color_preview: wide.color_preview_bytes(),
+            color_preview: bands.color_preview_bytes(),
             color_detail: detail.color_detail_bytes(),
-            band_preview: wide.band_bytes(),
-            band_detail: detail.band_bytes(),
+            band_preview: bands.preview_bytes(),
+            band_detail: bands.detail_bytes(),
+            band_gains: bands.gains,
         }
     }
 }
@@ -159,18 +166,8 @@ impl Scaled {
         self.heights.iter().map(|h| height(*h, 15)).collect()
     }
 
-    fn band_bytes(&self) -> Vec<u8> {
-        self.bands.iter().flat_map(Column::band_bytes).collect()
-    }
-
     fn color_detail_bytes(&self) -> Vec<u8> {
         self.pairs().flat_map(|(c, h)| c.color_detail_bytes(h)).collect()
-    }
-
-    /// The browse-list picture is made of band levels only — it carries no
-    /// height of its own — so it comes from the band-scaled columns alone.
-    fn color_preview_bytes(&self) -> Vec<u8> {
-        self.bands.iter().flat_map(Column::color_preview_bytes).collect()
     }
 
     fn pairs(&self) -> impl Iterator<Item = (&Column, f32)> {
@@ -321,6 +318,14 @@ struct Column {
     mid_rms: f32,
     high_rms: f32,
     samples: f32,
+    /// The peaks of the three bands a CDJ-3000 draws, low, mid, high, split
+    /// at rekordbox's corners rather than at the colour waveform's — see
+    /// [`ThreeBand`]. Not the three above: those are complementary differences
+    /// of two low-passes, which is right for a picture whose bands share one
+    /// gain and wrong for one that normalises each band alone, because the
+    /// difference leaks almost half a bass tone into the mid band through
+    /// phase shift, and a per-band gain draws that leak at full height.
+    bands: [f32; 3],
 }
 
 impl Column {
@@ -338,6 +343,9 @@ impl Column {
         ] {
             *value *= gain;
         }
+        for value in &mut self.bands {
+            *value *= gain;
+        }
     }
 
     /// Add another column's measurements into this one, on the way to an
@@ -350,6 +358,9 @@ impl Column {
         self.low_rms += other.low_rms;
         self.mid_rms += other.mid_rms;
         self.high_rms += other.high_rms;
+        for (mine, theirs) in self.bands.iter_mut().zip(other.bands) {
+            *mine += theirs;
+        }
     }
 
     /// Five bits of height, three of whiteness — the encoding shared by the
@@ -382,29 +393,6 @@ impl Column {
         packed.to_be_bytes()
     }
 
-    /// Six bytes: two of whiteness, then the energy in the bottom half of the
-    /// range, then the low, mid and high bands.
-    ///
-    /// The three band bytes are what the browse list draws its little pictures
-    /// from, and a rekordbox-written drive draws them in strong oranges,
-    /// greens, magentas and blues. Writing each band's own loudness there gives
-    /// three large similar numbers for most music, which is a pale wash — so
-    /// each band is scaled by how much of the column it accounts for. The
-    /// loudest band keeps its full value, and the ones underneath it fall away,
-    /// which is what leaves a colour rather than a grey.
-    fn color_preview_bytes(&self) -> [u8; 6] {
-        let white = self.whiteness() * 36; // 0-7 spread across a byte
-        let (low, mid, high) = self.shares();
-        [
-            white,
-            white,
-            level(self.low.max(self.mid)),
-            level(self.low * low),
-            level(self.mid * mid),
-            level(self.high * high),
-        ]
-    }
-
     /// How much of this column each band accounts for, against the loudest of
     /// them rather than against their sum.
     ///
@@ -423,12 +411,6 @@ impl Column {
         }
         let share = |band: f32| (band / peak) * (band / peak);
         (share(self.low_rms), share(self.mid_rms), share(self.high_rms))
-    }
-
-    /// Three bytes, in the order the player wants them: mid, high, low. Drawn
-    /// as amber, white and dark blue.
-    fn band_bytes(&self) -> [u8; 3] {
-        [level(self.mid), level(self.high), level(self.low)]
     }
 
     /// The hue of a column, as three-bit components: one band per channel.
@@ -460,16 +442,195 @@ impl Column {
     }
 }
 
+/// The three-band pictures — the CDJ-3000's own waveform — and the colour
+/// preview, in the encoding a real `.2EX` and `.EXT` carry.
+///
+/// The rules are baken's, recovered by fitting rekordbox 7.2's analysis files
+/// against the audio they describe (1,070 tracks), and the constants are its
+/// fitted ones, reproduced under its MIT licence. They approximate what
+/// rekordbox does rather than reconstruct it, and before any question of how
+/// the picture looks they settle one of whether it can be read: a real file
+/// never puts a band byte above 127, and this wrote every band on a 0–255
+/// scale, in the order mid, high, low. A CDJ-3000 that had accepted the
+/// database hung on every track it was asked to load — from the drive and over
+/// Pro DJ Link alike, since both read these files — and a CDJ-3000X drew its
+/// browse column in monochrome, which is the picture it falls back to when the
+/// three-band one is unusable.
+///
+/// What a real file holds, band by band, low, mid, high:
+///
+/// - `PWV7`, the scrolling waveform: each band's peak in the column, held with
+///   a release so a hit decays over a few columns, then scaled by a gain that
+///   brings the band's loudest column to a fixed target — every band uses the
+///   same part of the scale whatever its share of the music — and capped at
+///   127. Both real exports examined top out at 105 to 127 in every band.
+/// - `PWVC`: those three gains, in hundredths. Both real exports sit inside the
+///   floor and cap below: `91, 138, 396` and `145, 249, 500`.
+/// - `PWV6`, the 1,200-column preview: the mean of `PWV7` over each column's
+///   span, scaled per band. Both real exports stay under 45.
+/// - `PWV4`, the colour preview a 3000-series browse column draws: its last
+///   three bytes are `PWV6` scaled again, and its first three are derived from
+///   them — the loudest band's level, a complement of it that sits at 128 or
+///   above wherever there is anything to draw, and the length of the colour
+///   vector. Measured on both real exports, byte position by byte position.
+///
+/// The bands are split at the fit's corners too — 300 Hz, 250 Hz to 1.5 kHz,
+/// 2.5 kHz — with one filter each, and not at the colour waveform's. See the
+/// note on [`Column`]'s `bands` for why the two cannot share a split.
+struct ThreeBand {
+    /// `PWV7`, as `[low, mid, high]` per column.
+    detail: Vec<[u8; 3]>,
+    /// `PWV6`, 1,200 columns.
+    preview: Vec<[u8; 3]>,
+    /// `PWVC`.
+    gains: [u16; 3],
+}
+
+/// How much of the last column's band peak carries into this one.
+const BAND_RELEASE: [f32; 3] = [0.97, 0.93, 0.90];
+/// The level the loudest column of each band is brought to, before
+/// [`BAND_SCALE`].
+const GAIN_TARGET: [f32; 3] = [78.0, 105.0, 115.0];
+/// The least and the most a band is scaled by, in hundredths. A band with
+/// nothing in it takes the floor.
+const GAIN_FLOOR: [u16; 3] = [80, 80, 95];
+const GAIN_CAP: [u16; 3] = [267, 300, 500];
+/// Applied on top of the gain to make a `PWV7` byte.
+const BAND_SCALE: [f32; 3] = [1.25, 1.15, 0.6];
+/// `PWV6` is the column mean of `PWV7` times these.
+const PREVIEW_SCALE: [f32; 3] = [0.56, 0.71, 2.0];
+/// `PWV4`'s last three bytes are `PWV6` times these.
+const COLOR_PREVIEW_SCALE: [f32; 3] = [2.4, 1.6, 1.1];
+/// The ceiling on every band byte in a real file.
+const BAND_CEILING: f32 = 127.0;
+/// Where the three bands are split: a low-pass, a high-pass into a low-pass,
+/// and a high-pass, second-order Butterworth all. The fit's corners, which
+/// overlap on purpose.
+const BAND_LOW_HZ: f32 = 300.0;
+const BAND_MID_LOW_HZ: f32 = 250.0;
+const BAND_MID_HIGH_HZ: f32 = 1_500.0;
+const BAND_HIGH_HZ: f32 = 2_500.0;
+
+impl ThreeBand {
+    fn of(columns: &[Column]) -> Self {
+        // Each band's envelope: the column's own peak, or what the release has
+        // left of the last column's, whichever is higher.
+        let mut envelope = vec![[0.0f32; 3]; columns.len()];
+        let mut held = [0.0f32; 3];
+        for (out, column) in envelope.iter_mut().zip(columns) {
+            for band in 0..3 {
+                held[band] = column.bands[band].max(held[band] * BAND_RELEASE[band]);
+            }
+            *out = held;
+        }
+
+        let mut gains = [0u16; 3];
+        for band in 0..3 {
+            let loudest = envelope.iter().map(|e| e[band]).fold(0.0f32, f32::max);
+            gains[band] = match loudest > 0.0 {
+                true => ((GAIN_TARGET[band] / loudest).round() as u32)
+                    .clamp(u32::from(GAIN_FLOOR[band]), u32::from(GAIN_CAP[band]))
+                    as u16,
+                false => GAIN_FLOOR[band],
+            };
+        }
+
+        let detail: Vec<[u8; 3]> = envelope
+            .iter()
+            .map(|e| {
+                let mut out = [0u8; 3];
+                for band in 0..3 {
+                    out[band] = band_byte(BAND_SCALE[band] * f32::from(gains[band]) * e[band]);
+                }
+                out
+            })
+            .collect();
+
+        let preview = match detail.is_empty() {
+            true => vec![[0u8; 3]; WIDE_COLUMNS],
+            false => spans(detail.len(), WIDE_COLUMNS)
+                .map(|span| {
+                    // Over at least a second rather than over the span alone,
+                    // which is where this departs from the fit, for the reason
+                    // `summarise` gives: a span of a long track is less than a
+                    // beat, and a mean over less than a beat draws a comb.
+                    let window = steadied(span, detail.len());
+                    let mut out = [0u8; 3];
+                    for band in 0..3 {
+                        let total: f32 =
+                            detail[window.clone()].iter().map(|c| f32::from(c[band])).sum();
+                        out[band] = band_byte(PREVIEW_SCALE[band] * total / window.len() as f32);
+                    }
+                    out
+                })
+                .collect(),
+        };
+
+        Self { detail, preview, gains }
+    }
+
+    fn detail_bytes(&self) -> Vec<u8> {
+        self.detail.iter().flatten().copied().collect()
+    }
+
+    fn preview_bytes(&self) -> Vec<u8> {
+        self.preview.iter().flatten().copied().collect()
+    }
+
+    /// `PWV4`: six bytes a column, the last three the bands and the first three
+    /// derived from them, as a real file relates them. A column with nothing
+    /// in it is six zeroes.
+    fn color_preview_bytes(&self) -> Vec<u8> {
+        self.preview
+            .iter()
+            .flat_map(|column| {
+                let mut out = [0u8; 6];
+                for band in 0..3 {
+                    out[3 + band] = band_byte(COLOR_PREVIEW_SCALE[band] * f32::from(column[band]));
+                }
+                let (r, g, b) = (f32::from(out[3]), f32::from(out[4]), f32::from(out[5]));
+                let loudest = r.max(g).max(b);
+                if loudest > 0.0 {
+                    out[2] = band_byte(0.91 * (r * r + g * g + b * b).sqrt());
+                    out[0] = band_byte(0.88 * loudest + 38.0);
+                    out[1] = (203.0 - 0.49 * f32::from(out[0])).round().clamp(0.0, 255.0) as u8;
+                }
+                out
+            })
+            .collect()
+    }
+}
+
+/// A band byte: rounded, and never above the ceiling a real file keeps.
+fn band_byte(value: f32) -> u8 {
+    value.round().clamp(0.0, BAND_CEILING) as u8
+}
+
+/// `parts` consecutive spans over `n` items, each at least one item long; they
+/// overlap when there are fewer items than parts. `n` must be at least one.
+fn spans(n: usize, parts: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+    (0..parts).map(move |k| {
+        let from = (k * n / parts).min(n - 1);
+        let to = ((k + 1) * n / parts).clamp(from + 1, n);
+        from..to
+    })
+}
+
+/// A span widened about its centre to at least [`OVERVIEW_WINDOW`] columns, and
+/// kept within the `n` there are.
+fn steadied(span: std::ops::Range<usize>, n: usize) -> std::ops::Range<usize> {
+    let window = span.len().max(OVERVIEW_WINDOW).min(n);
+    let centre = (span.start + span.end) / 2;
+    let from = centre.saturating_sub(window / 2).min(n - window);
+    from..from + window
+}
+
 /// Amplitude to an `n`-step height, once the track has been scaled against its
 /// own reference level. See [`SHAPE`] for the curve and why it is not a square
 /// root any more.
 fn height(amplitude: f32, max: u8) -> u8 {
     let shaped = amplitude.clamp(0.0, 1.0).powf(SHAPE);
     (shaped * max as f32).round().clamp(0.0, max as f32) as u8
-}
-
-fn level(amplitude: f32) -> u8 {
-    height(amplitude, 255)
 }
 
 /// Undo [`SHAPE`], turning a stored level back into the amplitude it was made
@@ -512,6 +673,61 @@ impl Slope {
     }
 }
 
+/// A second-order Butterworth section — the cookbook low-pass and high-pass at
+/// Q = 1/√2 — kept as its own state so a track can be filtered in one streaming
+/// pass. The three-band pictures are split with these rather than with
+/// [`Slope`]: a band filtered on its own has nothing leaking into it from the
+/// phase of another, which a picture that normalises each band alone cannot do
+/// without.
+struct Biquad {
+    b: [f32; 3],
+    a: [f32; 2],
+    x: [f32; 2],
+    y: [f32; 2],
+}
+
+impl Biquad {
+    fn low_pass(corner_hz: f32, sample_rate: u32) -> Self {
+        let (s, c) = (2.0 * std::f32::consts::PI * corner_hz / sample_rate as f32).sin_cos();
+        let alpha = s / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        Self::normalised(
+            [(1.0 - c) / 2.0, 1.0 - c, (1.0 - c) / 2.0],
+            1.0 + alpha,
+            -2.0 * c,
+            1.0 - alpha,
+        )
+    }
+
+    fn high_pass(corner_hz: f32, sample_rate: u32) -> Self {
+        let (s, c) = (2.0 * std::f32::consts::PI * corner_hz / sample_rate as f32).sin_cos();
+        let alpha = s / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        Self::normalised(
+            [(1.0 + c) / 2.0, -(1.0 + c), (1.0 + c) / 2.0],
+            1.0 + alpha,
+            -2.0 * c,
+            1.0 - alpha,
+        )
+    }
+
+    fn normalised(b: [f32; 3], a0: f32, a1: f32, a2: f32) -> Self {
+        Self {
+            b: [b[0] / a0, b[1] / a0, b[2] / a0],
+            a: [a1 / a0, a2 / a0],
+            x: [0.0; 2],
+            y: [0.0; 2],
+        }
+    }
+
+    fn next(&mut self, input: f32) -> f32 {
+        let output = self.b[0] * input + self.b[1] * self.x[0] + self.b[2] * self.x[1]
+            - self.a[0] * self.y[0]
+            - self.a[1] * self.y[1];
+        self.x = [input, self.x[0]];
+        self.y = [output, self.y[0]];
+        output
+    }
+}
+
 fn measure(audio: &Audio) -> Vec<Column> {
     let mut columns = vec![Column::default(); detail_columns(audio.duration_secs())];
     if audio.is_empty() {
@@ -522,6 +738,11 @@ fn measure(audio: &Audio) -> Vec<Column> {
     let frames = audio.frames();
     let mut low_pass = Slope::new(LOW_CORNER_HZ, audio.sample_rate);
     let mut low_mid_pass = Slope::new(HIGH_CORNER_HZ, audio.sample_rate);
+    // The three-band pictures' own split, one filter per band.
+    let mut band_low = Biquad::low_pass(BAND_LOW_HZ, audio.sample_rate);
+    let mut band_mid_above = Biquad::high_pass(BAND_MID_LOW_HZ, audio.sample_rate);
+    let mut band_mid_below = Biquad::low_pass(BAND_MID_HIGH_HZ, audio.sample_rate);
+    let mut band_high = Biquad::high_pass(BAND_HIGH_HZ, audio.sample_rate);
     let last = columns.len() - 1;
 
     for i in 0..frames {
@@ -543,6 +764,15 @@ fn measure(audio: &Audio) -> Vec<Column> {
         c.mid_rms += mid * mid;
         c.high_rms += high * high;
         c.samples += 1.0;
+
+        let banded = [
+            band_low.next(mono),
+            band_mid_below.next(band_mid_above.next(mono)),
+            band_high.next(mono),
+        ];
+        for (peak, sample) in c.bands.iter_mut().zip(banded) {
+            *peak = peak.max(sample.abs());
+        }
     }
 
     // Sums of squares become the root-mean-square they were being accumulated
@@ -819,18 +1049,65 @@ mod tests {
     }
 
     #[test]
-    fn the_bands_are_not_driven_past_the_top_of_their_range() {
-        // The height is a weighted blend of the bands and sits below any one of
-        // them, so a gain worked out from it and then applied to the bands
-        // overdrives them: a ten-kilohertz tone came out with a full mid band
-        // as well as a full high one, and every colour went with it. The two
-        // are scaled apart for exactly this reason.
+    fn no_band_byte_goes_above_the_ceiling_a_real_file_keeps() {
+        // Both real exports examined top out at 127 in `PWV7`, under 45 in
+        // `PWV6`, and at 127 in every byte of `PWV4` but the second. This wrote
+        // 255 in two of the three bands, and a CDJ-3000 hung loading every
+        // such track.
         for hz in [50.0f32, 800.0, 10_000.0] {
-            let w = analyze(&tone(hz, 1.0, 0.8));
-            let at = w.band_detail.len() / 2 / 3 * 3;
-            let full = w.band_detail[at..at + 3].iter().filter(|b| **b == 255).count();
-            assert!(full <= 1, "{hz} Hz saturated {full} bands: {:?}", &w.band_detail[at..at + 3]);
+            let w = analyze(&tone(hz, 1.0, 1.0));
+            assert!(w.band_detail.iter().all(|b| *b <= 127), "{hz} Hz PWV7");
+            assert!(w.band_preview.iter().all(|b| *b <= 127), "{hz} Hz PWV6");
+            for column in w.color_preview.chunks_exact(6) {
+                assert!(
+                    column[0] <= 127 && column[2..].iter().all(|b| *b <= 127),
+                    "{hz} Hz PWV4 {column:?}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn the_summary_carries_the_gain_each_band_was_scaled_by() {
+        // A quiet track is scaled up more than a loud one, and both real
+        // exports' values sit between the floor and the cap. Silence takes the
+        // floor, which is what a band with nothing in it gets.
+        let loud = analyze(&tone(1_000.0, 1.0, 0.9));
+        let quiet = analyze(&tone(1_000.0, 1.0, 0.09));
+        assert!(
+            quiet.band_gains[1] > loud.band_gains[1],
+            "quiet {:?} loud {:?}",
+            quiet.band_gains,
+            loud.band_gains
+        );
+        for w in [&loud, &quiet] {
+            for band in 0..3 {
+                assert!(
+                    (GAIN_FLOOR[band]..=GAIN_CAP[band]).contains(&w.band_gains[band]),
+                    "{:?}",
+                    w.band_gains
+                );
+            }
+        }
+        assert_eq!(WaveformData::silent(1.0).band_gains, GAIN_FLOOR);
+    }
+
+    #[test]
+    fn the_colour_preview_has_the_shape_of_a_real_one() {
+        // Six bytes a column: the first and third never above 127, the second
+        // at 128 or above wherever there is anything to draw, and the last
+        // three the bands. Measured on both real exports, column by column.
+        let w = analyze(&tone(1_000.0, 2.0, 0.8));
+        let mut drawn = 0;
+        for column in w.color_preview.chunks_exact(6) {
+            if column[3..].iter().all(|b| *b == 0) {
+                continue;
+            }
+            drawn += 1;
+            assert!(column[0] <= 127 && column[2] <= 127, "{column:?}");
+            assert!(column[1] >= 128, "{column:?}");
+        }
+        assert!(drawn > WIDE_COLUMNS / 2, "{drawn} columns drawn of {WIDE_COLUMNS}");
     }
 
     #[test]
@@ -907,20 +1184,24 @@ mod tests {
 
     #[test]
     fn the_bands_follow_the_pitch() {
-        // Byte order within a three-band entry is mid, high, low.
+        // Byte order within a three-band entry is low, mid, high: the order
+        // baken's fit against real files found, and the one the real data
+        // reads in — the first byte carries the most energy and the third the
+        // least, and the gains that close the file are capped highest for the
+        // third. This wrote mid, high, low.
         let band = |hz: f32| {
             let w = analyze(&tone(hz, 1.0, 0.8));
             let at = w.band_detail.len() / 2 / 3 * 3; // a column from the middle
             (w.band_detail[at], w.band_detail[at + 1], w.band_detail[at + 2])
         };
 
-        let (mid, high, low) = band(50.0);
+        let (low, mid, high) = band(50.0);
         assert!(low > mid && low > high, "50 Hz should be mostly low: {low} {mid} {high}");
 
-        let (mid, high, low) = band(800.0);
+        let (low, mid, high) = band(800.0);
         assert!(mid > low && mid > high, "800 Hz should be mostly mid: {low} {mid} {high}");
 
-        let (mid, high, low) = band(10_000.0);
+        let (low, mid, high) = band(10_000.0);
         assert!(high > low && high > mid, "10 kHz should be mostly high: {low} {mid} {high}");
     }
 

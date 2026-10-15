@@ -386,6 +386,32 @@ fn the_section_order_is_the_one_two_real_exports_use() {
     assert_eq!((pwv7.1, pwv7.2[2]), (0x18, 0x0096_0000));
     let pwvc = two_ex.iter().find(|(code, ..)| code == "PWVC").unwrap();
     assert_eq!((pwvc.1, pwvc.0.len()), (0x0e, 4), "PWVC is a 0x0e header and twenty bytes");
+
+    // The file header's sixteen unexplained bytes, the same in every real file
+    // of all three kinds, and the hot-cue list before the memory-cue list —
+    // both of which this had wrong while a CDJ-3000 hung loading tracks.
+    for (which, bytes) in
+        [("DAT", analysis.dat()), ("EXT", analysis.ext()), ("2EX", analysis.two_ex())]
+    {
+        assert_eq!(
+            bytes[12..28],
+            [0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+            "{which} header"
+        );
+    }
+    // The `.DAT` has the old-style lists alone; the `.EXT` has both kinds.
+    let lists: [(&str, Vec<u8>, &[&str]); 2] =
+        [("DAT", analysis.dat(), &["PCOB"]), ("EXT", analysis.ext(), &["PCOB", "PCO2"])];
+    for (which, bytes, codes) in lists {
+        for code in codes {
+            let types: Vec<u32> = sections(&bytes)
+                .into_iter()
+                .filter(|(found, ..)| found == code)
+                .map(|(_, _, words)| words[0])
+                .collect();
+            assert_eq!(types, [1, 0], "{which} {code}: hot cues first, then memory");
+        }
+    }
 }
 
 /// Every section of an analysis file as `(fourcc, len_header, header words)`.

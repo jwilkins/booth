@@ -25,6 +25,10 @@ pub const STRIP_HEIGHT: f32 = 26.0;
 /// The bytes in one column of the three-band preview, as the format stores
 /// them: mid, high, low.
 const COLUMN: usize = 3;
+/// Full scale of a band byte. The bytes are the drive's own `.2EX` encoding,
+/// which never goes above 127; a cache drawn before that was so is thrown away
+/// by its note, see `library::cache_waveform`.
+const BAND_FULL: f32 = 127.0;
 
 /// How the picture is coloured.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -427,12 +431,14 @@ impl Waveform<'_> {
 
     /// The three band heights of one column, as fractions of full scale.
     ///
-    /// Returns them in the order they are painted rather than the order they
-    /// are stored: lows first, so the mids and highs sit over the top of them.
+    /// Stored low, mid, high, which is also the order they are painted in:
+    /// lows first, so the mids and highs sit over the top of them.
     fn column(&self, index: usize) -> [f32; 3] {
         let at = index * COLUMN;
-        let byte = |offset: usize| self.bands.get(at + offset).copied().unwrap_or(0) as f32 / 255.0;
-        [byte(2), byte(0), byte(1)]
+        let byte = |offset: usize| {
+            (self.bands.get(at + offset).copied().unwrap_or(0) as f32 / BAND_FULL).min(1.0)
+        };
+        [byte(0), byte(1), byte(2)]
     }
 }
 
@@ -1167,8 +1173,10 @@ fn silhouette(bands: &[u8], width: usize, zoom: Zoom) -> (Vec<f32>, bool) {
         let mut peak = 0.0f32;
         for index in from..to.min(columns) {
             let at = index * COLUMN;
-            let byte = |offset: usize| bands.get(at + offset).copied().unwrap_or(0) as f32 / 255.0;
-            peak = peak.max(loudness(byte(2), byte(0), byte(1)));
+            let byte = |offset: usize| {
+                (bands.get(at + offset).copied().unwrap_or(0) as f32 / BAND_FULL).min(1.0)
+            };
+            peak = peak.max(loudness(byte(0), byte(1), byte(2)));
         }
         levels.push(peak);
     }
@@ -1503,7 +1511,8 @@ mod tests {
     }
 
     /// A record whose columns all sit at `level`, except where `loud` says
-    /// otherwise. One column a pixel at the widths these tests use.
+    /// otherwise. One column a pixel at the widths these tests use, on the
+    /// drive's scale: 127 is full, and nothing above it occurs.
     fn at_levels(levels: &[u8]) -> Vec<u8> {
         bands(&levels.iter().map(|level| [*level; 3]).collect::<Vec<_>>())
     }
@@ -1515,8 +1524,8 @@ mod tests {
         fn a_record_that_already_swings_is_drawn_as_it_is() {
             // A quiet intro, a loud drop. Nothing to fix: the picture is
             // already saying where the record moves.
-            let mut levels = vec![20u8; 50];
-            levels.extend(std::iter::repeat_n(250u8, 50));
+            let mut levels = vec![10u8; 50];
+            levels.extend(std::iter::repeat_n(125u8, 50));
             let (shown, stretched) = silhouette(&at_levels(&levels), 100, Zoom::default());
 
             assert!(!stretched, "a dynamic record was stretched");
@@ -1529,8 +1538,8 @@ mod tests {
             // The case this exists for: a club record mastered to within a few
             // decibels of itself from end to end. Drawn honestly it is a
             // rectangle, which is true and tells nobody where the break is.
-            let mut levels = vec![200u8; 50];
-            levels.extend(std::iter::repeat_n(215u8, 50));
+            let mut levels = vec![100u8; 50];
+            levels.extend(std::iter::repeat_n(108u8, 50));
             let (shown, stretched) = silhouette(&at_levels(&levels), 100, Zoom::default());
 
             assert!(stretched, "a flat master was left as a rectangle");
@@ -1546,8 +1555,8 @@ mod tests {
         fn a_stretched_picture_never_draws_a_quiet_part_as_silence() {
             // Mapping the quietest part to nothing would say the record has
             // silence in it, which is a thing it could have had and does not.
-            let mut levels = vec![200u8; 50];
-            levels.extend(std::iter::repeat_n(215u8, 50));
+            let mut levels = vec![100u8; 50];
+            levels.extend(std::iter::repeat_n(108u8, 50));
             let (shown, _) = silhouette(&at_levels(&levels), 100, Zoom::default());
 
             assert!(
@@ -1563,8 +1572,8 @@ mod tests {
             // two cuts, a drop-out — would otherwise be the floor, and the
             // quiet half and the loud half would both be squashed into the top
             // of the strip and look alike.
-            let mut levels = vec![200u8; 50];
-            levels.extend(std::iter::repeat_n(215u8, 49));
+            let mut levels = vec![100u8; 50];
+            levels.extend(std::iter::repeat_n(108u8, 49));
             levels[40] = 0;
             let (shown, stretched) = silhouette(&at_levels(&levels), 99, Zoom::default());
 
@@ -1582,7 +1591,7 @@ mod tests {
             // Nothing to reveal. Stretching a picture with no variation in it
             // at all would turn rounding into a shape, which is a picture of
             // nothing presented as a picture of something.
-            let (shown, stretched) = silhouette(&at_levels(&[200u8; 99]), 99, Zoom::default());
+            let (shown, stretched) = silhouette(&at_levels(&[100u8; 99]), 99, Zoom::default());
 
             assert!(!stretched);
             assert!(shown.windows(2).all(|pair| pair[0] == pair[1]), "{shown:?}");
@@ -2351,15 +2360,19 @@ mod tests {
     }
 
     #[test]
-    fn a_column_is_read_lows_first_whatever_order_it_is_stored_in() {
-        // The format stores mid, high, low; the picture is painted low, mid,
-        // high, so that the quieter bands land on top of the louder one.
-        let bytes = bands(&[[51, 102, 255]]);
+    fn a_column_is_read_low_mid_high_on_the_scale_the_drive_uses() {
+        // The format stores low, mid, high with 127 as full scale, and the
+        // picture is painted in that order so the quieter bands land on top of
+        // the louder one. A byte above 127 — which no real file has — is full.
+        let saturated = bands(&[[255, 0, 0]]);
+        assert_eq!(wave(&saturated).column(0)[0], 1.0);
+
+        let bytes = bands(&[[127, 25, 51]]);
         let wave = wave(&bytes);
         let [low, mid, high] = wave.column(0);
-        assert!((low - 1.0).abs() < 0.01, "low should be the third byte: {low}");
-        assert!((mid - 0.2).abs() < 0.01, "mid should be the first byte: {mid}");
-        assert!((high - 0.4).abs() < 0.01, "high should be the second byte: {high}");
+        assert!((low - 1.0).abs() < 0.01, "low should be the first byte: {low}");
+        assert!((mid - 25.0 / 127.0).abs() < 0.01, "mid should be the second byte: {mid}");
+        assert!((high - 51.0 / 127.0).abs() < 0.01, "high should be the third byte: {high}");
     }
 
     #[test]
