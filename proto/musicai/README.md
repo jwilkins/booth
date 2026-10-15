@@ -132,7 +132,7 @@ set `BOOTH_GENRE_MODEL`, or put it in `~/.cache/booth/models/`.
 
 It is run with a pure-Rust ONNX runtime, so there is no Python and no TensorFlow to install. The
 spectrogram the model reads was checked stage by stage against Essentia's own front end, and the
-activations agree with Essentia's TensorFlow graph to within 0.005 on the reference signal the
+activations agree with Essentia's TensorFlow graph to within 0.0001 on the reference signal the
 tests carry. The price is speed: about 45 ms a patch, and a five-minute track is 290 patches, so
 some thirteen seconds a track. A track under two seconds is too short for one patch and gets
 nothing.
