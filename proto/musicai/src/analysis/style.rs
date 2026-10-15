@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(bands[0].0, 1);
         assert_eq!(bands[0].1.len(), 1);
         let (first, weights) = &bands[BANDS - 1];
-        assert!(first + weights.len() <= BINS - 1, "the top band reaches the Nyquist bin");
+        assert!(first + weights.len() < BINS, "the top band reaches the Nyquist bin");
     }
 
     #[test]
