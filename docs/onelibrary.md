@@ -446,7 +446,7 @@ reads can change with a firmware update.
 | **dj-usb-tkit** (Rust/Tauri, MIT) | Both databases from scratch (`usb_utils.rs`: DDL, 27 menu items, 22 categories, 17 sorts, 8 colours, 28 My Tags; `PRAGMA key` only; no `cue` rows, no `exportExt.pdb`, no `.2EX`) | **CDJ-3000X, firmware 1.31, 2026-09-02**: four scenarios pass — normal export, strict-parity repair, non-ASCII strings, and a fresh-initialised stick with more than 16 tracks ("accepted and playable"). CDJ-3000 3.20 also. Self-reported in the project's own test matrix; waveform and grid provenance not recorded. |
 | **FableGear** (Python, sqlcipher3) | `exportLibrary.db` only, from DDL and rows copied from a real export; `.DAT`/`.EXT` writers, no `.2EX`; `cue` rows written | **CDJ-3000, 2026-07-29**: a OneLibrary-only stick "loaded and played … without issues". Firmware not recorded. Not tested on a CDJ-3000X. |
 | **fourfour** pioneer-usb-writer (Rust) | Both databases, `.DAT`/`.EXT`, artwork; WAL then checkpoint; `analysedBits` 105, `contentLink` 0 | CDJ-3000, firmware 3.19: a dual-format drive works, and fourfour says that player reads OneLibrary but still needs the legacy `.EXT`. CDJ-3000X "from reference specs" only. |
-| **this project** (`proto/musicai/src/export/onelibrary.rs`) | Both databases from one collection, all three ANLZ files, no `exportExt.pdb`, no artwork; `cue` left empty | **CDJ-3000X, firmware 1.40, September 2026**: playlists, track list and key search read; no waveform, grid, phrases, cues or deck BPM, because the analysis directories were named after the track id (§5.1 — since fixed, and untested since). The same drive on a **CDJ-3000, firmware 2.05**: the library was not seen at all, which is the legacy `export.pdb` being refused rather than anything to do with OneLibrary |
+| **this project** (`proto/musicai/src/export/onelibrary.rs`) | Both databases from one collection, all three ANLZ files, no `exportExt.pdb`, no artwork; `cue` left empty | **CDJ-3000X, firmware 1.40 and later, September–October 2026**: browses and plays, with colour waveforms, hot cues and phrases on a loaded track, once the analysis directories were named by the hash in §5.1. **CDJ-3000, firmware 3.22, October 2026**: browses and plays, from the slot and over Pro DJ Link, once the legacy `export.pdb` and the analysis files carried what every real export does — the earlier refusal on 2.05 was the pdb's, not OneLibrary's (gist §6) |
 | rbox (Rust, GPL-3.0) | Create and insert; no cue insert | None |
 | pyrekordbox `devicelib_plus` (git only; 0.4.4 on PyPI predates it) | Read and write | None |
 | rekordbox-explorer (JavaScript) | A playlist writer, deliberately unshipped: "we still have no CDJ to test against" | None |
@@ -615,13 +615,12 @@ Against §2 to §5 what is left is:
    that rebuilds both from the collection on every write gets this for free.
 4. **Name analysis directories the way rekordbox does**, after verifying the
    hash in §5.1 against a real export, and add `PWVC` to the `.2EX`.
-5. **Test on hardware with a control.** A rekordbox-written stick first, on the
-   same player, then the hand-written one; record the firmware; and record not
-   just that the drive mounts but that the waveform, grid, hot cues, playlists
-   and My Tags appear without the player re-analysing, and that a cue set on
-   the player is written back and read by rekordbox. The CDJ-3000X (1.31+) and
-   the CDJ-3000 (3.22) are the two players that matter, and an OPUS-QUAD or
-   XDJ-AZ would answer whether the all-in-ones behave like the 3000X.
+5. **Test on hardware with a control.** Done without the control: a CDJ-3000X
+   and a CDJ-3000 on 3.22 both browse and play a hand-written drive, waveforms,
+   grid, hot cues and phrases included, with no re-analysis (gist §6). Still to
+   do: the rekordbox-written stick on the same players for comparison, a cue
+   set on the player written back and read by rekordbox, and an OPUS-QUAD or
+   XDJ-AZ to answer whether the all-in-ones behave like the 3000X.
 6. **Decide the key and licence question before shipping**, not after: the
    reader's policy (user-supplied key, never bundled) can extend to the writer
    unchanged, and the sync sheet should say what a drive was written for.
@@ -649,24 +648,25 @@ Including this repository's own.
 Answered since this was written, and left here so the answers are findable:
 a CDJ-3000X **recomputes** the analysis directory and ignores
 `analysisDataFilePath` (§5.1), and it does **not** silently re-analyse a track
-whose analysis it cannot find — it shows nothing at all.
+whose analysis it cannot find — it shows nothing at all. A CDJ-3000 refused the
+legacy `export.pdb` because its file header's directory named a page past the
+end of the file as every table's spare; with each table given its own, it saw
+the database, and with the browse menu's category and sort tables, dated track
+rows and analysis files carrying what every real export does, it plays (gist
+§6).
 
 Still open:
 
 - Does any player need `exportExt.pdb`, and what does a OneLibrary-only player
   do about My Tags without it — it has a `myTag` table of its own, which
   suggests not.
-- Which players require the `.2EX`, and whether `PWVC` matters. This project
-  writes `PWV7` then `PWV6` and no `PWVC`, where rekordbox writes all three in
-  the other order; whether that is enough is the next thing a drive test would
-  say.
+- Which players require the `.2EX`. This project writes it as rekordbox does,
+  `PWV7`, `PWV6`, `PWVC`, and a CDJ-3000 plays it; what a player does with the
+  three gains in `PWVC` is not known.
 - The real `fileType`, `analysedBits` and `contentLink` values, read from rows
   beside their files.
 - Whether the CDJ-3000 on 3.22 reads `exportLibrary.db` when `export.pdb` is
   absent (FableGear's result says something did).
-- **Why a CDJ-3000 on firmware 2.05 refuses a legacy `export.pdb` this project
-  writes** — see §9. The candidates are all in fourfour's notes and none of
-  them has been isolated.
 - What `myTagMasterDBID` is for, and whether a player cares.
 - What AlphaTheta's "more flexible library loading" will be, and when.
 

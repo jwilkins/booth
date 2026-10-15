@@ -998,12 +998,13 @@ carries it, as it carries the one for rekordbox's own library — they are
 different keys, and both are in `proto/musicai/src/rekordbox/mod.rs` with where they came
 from. The sheet says which databases a drive will carry before it writes them.
 
-**A CDJ-3000X has read one.** Playlists, track list and key search all came up
-off a drive this wrote, which is the first hardware evidence the database is
-right — and it is evidence about the database, not the drive. Whether the
-player used the analysis files it was given or measured its own on load is a
-separate question, still open, and the one where this program is most likely to
-be wrong.
+**A CDJ-3000X and a CDJ-3000 have both played from one.** Playlists, track
+list, key search, colour and three-band waveforms, beat grid, hot cues and
+phrases all came up off a drive this wrote, with no pause for the player to
+measure anything of its own — so the analysis files are read, not recomputed.
+The CDJ-3000 reads the legacy database rather than this one, and getting it to
+play took bringing that file and the analysis files to what every real export
+carries; the account is in `docs/onelibrary-gist.md`, §6.
 
 ## What a player will actually open
 
