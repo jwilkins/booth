@@ -1122,15 +1122,23 @@ mod tests {
         let artist = before.of(Column::Artist).unwrap();
         assert!(before.total() < layout.columns.iter().map(|s| s.width).sum::<f32>());
 
+        // To a hundredth of a point rather than exactly: the pull is scaled
+        // into the stored width and back, and whether that round trip lands on
+        // the same float depends on what the columns happen to add up to.
+        // Eleven points back is the bug; a hundredth is a rounding.
+        let landed = |widths: &Widths, wanted: f32| {
+            let got = widths.of(Column::Artist).unwrap();
+            assert!((got - wanted).abs() < 0.01, "the drag did not land: {got} for {wanted}");
+        };
         assert!(layout.drag_edge(&before, 0, 30.0));
         let after = layout.widths(narrow);
-        assert_eq!(after.of(Column::Artist), Some(artist + 30.0), "the drag did not land");
+        landed(&after, artist + 30.0);
         assert!((after.total() - narrow).abs() < 0.01, "the row stopped filling the window");
 
         // And the one after it, from where the first left off, because a drag
         // is a stream of these rather than one.
         assert!(layout.drag_edge(&after, 0, 30.0));
-        assert_eq!(layout.widths(narrow).of(Column::Artist), Some(artist + 60.0));
+        landed(&layout.widths(narrow), artist + 60.0);
     }
 
     #[test]
