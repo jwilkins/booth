@@ -3,10 +3,12 @@
 A DJ library that prepares tracks and writes the USB drives a Pioneer / AlphaTheta player reads —
 without rekordbox anywhere in the process.
 
-A **CDJ-3000X on firmware 1.40** browses and plays a drive this writes, with nothing rekordbox has
-touched on it: playlists, track list, key search, colour waveforms, beat grid and hot cues on a
-loaded track. That is the newer of the two on-drive database formats, which every player sold
-since 2023 needs and which no other free tool had been seen to write.
+A **CDJ-3000X** and a **CDJ-3000 on firmware 3.22** both browse and play a drive this writes,
+with nothing rekordbox has touched on it: playlists, track list, key search, colour and
+three-band waveforms, beat grid, hot cues and phrases on a loaded track, from the slot and over
+Pro DJ Link. That covers both on-drive database formats — the legacy one every player since
+2009 reads, and the newer one every player sold since 2023 needs, which no other free tool had
+been seen to write.
 
 ```sh
 cargo run --release          # the library window
@@ -44,8 +46,8 @@ with a free key.
   work on; the checks use that generation's rules, and anything it cannot open — a FLAC on a
   nexus deck, a 96 kHz file on an NXS2 — is re-encoded to a 320 kbps MP3 on the way onto the
   stick. Your library keeps its lossless copy. (The files for older players are all written, but
-  only current players have been seen to browse a drive from here — a CDJ-3000X on firmware
-  1.40 and a CDJ-1500X on firmware 1.10 — and one CDJ-3000 on firmware 2.05 refused one; see
+  only current players have been seen to play a drive from here — a CDJ-3000X, a CDJ-1500X on
+  firmware 1.10 and a CDJ-3000 on firmware 3.22; see
   [what it does not do yet](booth/README.md#what-it-does-not-do-yet).)
 - **Keeps a copy of every drive.** Databases and analysis copied, audio hard-linked, so a backup
   of a 64 GB stick costs megabytes. What a player recorded having played comes back as playlists.

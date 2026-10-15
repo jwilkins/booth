@@ -11,10 +11,58 @@ The first and third releases were tagged `0.01` and `0.03` and renamed to
 here. Both old tags are still in the repository, pointing at the same two
 commits as their new names.
 
-## 0.0.9 — unreleased
+## 0.0.9 — 15 October 2026
 
-The manifests already say 0.0.9, so this is what is in them; the date goes in
-when the tag does.
+A drive this writes plays on a CDJ-3000, and a track's loudness can be brought
+to a level before it goes on one.
+
+**The drive on a CDJ-3000**
+
+Eight rounds against two players, each one a field a real export carries that
+this did not, until a CDJ-3000 on firmware 3.22 browsed a drive and played
+from it — from the slot and over Pro DJ Link — and a CDJ-3000X drew colour
+waveforms, hot cues and phrases from the same stick. The account is
+`docs/onelibrary-gist.md` §6; this is what changed on the drive.
+
+- The legacy database, `export.pdb`, which the CDJ-3000 reads and the 3000X
+  does not:
+  - the one history row every real export carries, where the table was empty;
+  - each data page described the way a real export describes it — the row
+    count shifted down by three in the field this wrote a group count into,
+    and the fixed tables in the page style of their own that real files give
+    them;
+  - a header page that points at its table's first data page, with the
+    free-slot fill a real one has, where this wrote zeroes and a player had a
+    header that led nowhere;
+  - every table its own empty spare page, named in the file header's
+    directory, where this named one page past the end of the file for all
+    twenty tables — which is what had the whole database refused;
+  - the browse menu's categories and sort orders, tables 17 and 18, written
+    from the same definition as the OneLibrary `category` and `sort` tables
+    where they were empty; a date, a bitrate and the id-like word real rows
+    carry on every track row; the fill past the count on the tracks' and
+    history's header pages; and sequence numbers 2 to 5 on the four fixed
+    tables. With these the player saw the database and browsed it.
+- The analysis files:
+  - the `.2EX` in the order a real export uses, `PWV7` then `PWV6`, and the
+    header word on `PWV4` that real files carry;
+  - the word rekordbox puts after the column count of `PWAV` and `PWV2`, which
+    this wrote with a nibble transposed;
+  - an empty `PQT2` in the `.EXT` where rekordbox writes one;
+  - the sixteen header bytes every real file carries; hot cues before memory
+    cues; the three-band waveforms low, mid, high on the 0–127 scale a real
+    file keeps — they were 0–255 and mid, high, low, and a CDJ-3000 hung
+    loading every track — with the colour preview's six bytes related as real
+    ones are and `PWVC` as the three band gains it is. With these the player
+    loads and plays.
+- A stem's three analysis files are looked at on every sync, not only its
+  parent's, and a grid no player can draw — a file a deck had rewritten with
+  beats before the start of the track — is written again without being asked.
+  That was a CDJ-3000 crash four syncs had not cleared.
+- `--no-onelibrary` on `booth-cli export`, for writing a drive with the legacy
+  database alone when a player's trouble has to be pinned to one of the two.
+- The window draws its three-band waveform from the drive's own encoding now,
+  and redraws any picture cached in the old one.
 
 **Loudness**
 
@@ -44,6 +92,8 @@ when the tag does.
 - `CHANGELOG.md`, written from the tags.
 - A note in `CLAUDE.md` on what a new tag needs: the three manifests and the
   changelog, neither of which happens on its own.
+- rust-analyzer in the container a web session gets, as a second opinion
+  beside clippy, which stays the gate.
 
 ## 0.0.8 — 7 October 2026
 

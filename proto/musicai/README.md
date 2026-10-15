@@ -477,8 +477,12 @@ there, so a drive carrying both says nothing about which of the two a player tha
 on it is choking on, and a drive carrying only the first does. It is for finding that
 out, not for a drive that has to play in an unknown booth, which needs both.
 
-**What is missing before this plays in a club:** none of it has been tried on real
-hardware. It has been checked against an independent parser, which is not the same thing.
+**What has been tried on real hardware:** a CDJ-3000X browses and plays a drive this
+writes, with colour waveforms, hot cues and phrases on a loaded track, and a CDJ-3000 on
+firmware 3.22 does the same, from the slot and over Pro DJ Link. Getting there took eight
+rounds against the players, each one a field a real export carries that this did not; the
+account is in [`docs/onelibrary-gist.md`](../../docs/onelibrary-gist.md), §6. What has not
+been tried is a club.
 
 ## Trying it on a player
 
@@ -648,8 +652,8 @@ invisible. The database format is documented in the same place and checked the s
 plan this belongs to, and [`docs/onelibrary.md`](../../docs/onelibrary.md) is what is known
 about OneLibrary — the database the CDJ-3000X and the other newer players read instead
 of `export.pdb`. `export` writes one alongside the legacy database, under the key every
-drive uses (overridable with `--onelibrary-key` or `ONELIBRARY_KEY`). A CDJ-3000X has
-browsed one; whether it used the analysis files is still unproven.
+drive uses (overridable with `--onelibrary-key` or `ONELIBRARY_KEY`). A CDJ-3000X and a
+CDJ-3000 have both browsed and played from one, analysis files included.
 
 ## Notes
 

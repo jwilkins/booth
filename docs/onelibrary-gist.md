@@ -408,9 +408,10 @@ acceptance, and they're the best available checklist:
 - **the history tables must not be empty** — their fix was to embed pages
   copied out of a working rekordbox export.
 
-I've implemented all of those except the last and it is still untested. If
-someone with a CDJ-3000 and a byte-diff against a real stick wants to finish
-this off, that's the open one.
+All of those are now implemented, the last as the one-row history table every
+real export carries rather than embedded pages, and none of them was what
+refused the drive: see the last three entries in this section for what was,
+and for the CDJ-3000 that now plays it.
 
 ### CDJ-3000X, later firmware — instant waveforms, a monochrome browse column, and a CDJ-3000 that reboots
 
@@ -439,9 +440,10 @@ this was writing, in exactly those sections:
   1,200-column colour preview.
 
 Both are now what the fixtures say, and a test pins the framing of all three
-files against them. Whether either was the cause is **untested on hardware** —
-and the `.2EX` change contradicts the FableGear order, so if the browse column
-is still monochrome, that is the thing to put back first.
+files against them. Neither was what left the browse column monochrome: that
+was the three-band bytes themselves, which were on a 0–255 scale in a format
+that stops at 127 — see the last entry in this section. The `.2EX` order stays
+as the fixtures have it, and a CDJ-3000 plays it.
 
 **A CDJ-3000 reboots when it loads a track.** On firmware 2.05 the same player
 did not see the library at all; it now browses and crashes on load, which is
@@ -611,7 +613,14 @@ bytes derived from the preview the way the real ones relate. The window draws
 from the same bytes and now reads them in the new order and scale; a picture
 cached before this is redrawn, because its note no longer matches.
 
-**Untested on hardware as of this writing.**
+**Tested: it plays.** With all of the above on the drive, a CDJ-3000 on
+official firmware 3.22 browses it and loads and plays tracks from it, from the
+slot and over Pro DJ Link alike. That is the first time a CDJ-3000 has played a
+drive written by this program, and it closes the question §6 opened: a drive
+with no rekordbox anywhere in its history plays on the 3000X and on the 3000.
+Which of the items in the last two entries were necessary is not known, and
+will not be until one is taken away again on purpose; they were made together
+because every working file has all of them.
 
 ## 7. Still unknown
 
@@ -625,10 +634,11 @@ cached before this is redrawn, because its note no longer matches.
   (FableGear reports a OneLibrary-only stick playing on a CDJ-3000, which
   officially cannot happen.)
 - What `myTagMasterDBID` is for.
-- Whether the empty-history-tables rule is really what refuses a pdb.
-- Whether a browse menu with no categories — tables 17 and 18 empty — is what
-  hangs a CDJ-3000 loading a drive, or one of the smaller differences fixed
-  alongside it was.
+- Which of the changes between the first drive a CDJ-3000 saw and the first it
+  played were necessary. The browse menu's categories and sort orders, the
+  dated track rows, the analysis file header's sixteen bytes, the cue list
+  order and the three-band byte ranges were all made at once; the way to find
+  out is to take one away at a time, and nobody has.
 
 ## 8. Claims worth not repeating
 
