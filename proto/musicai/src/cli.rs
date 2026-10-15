@@ -52,6 +52,8 @@ pub struct Cli {
 pub enum Command {
     /// Report loudness and peak levels without changing anything.
     Analyze(AnalyzeArgs),
+    /// Say what kind of record each file is, with the Discogs genre model.
+    Genre(GenreArgs),
     /// Write the per-track analysis files a Pioneer/AlphaTheta player reads.
     Anlz(AnlzArgs),
     /// Build a whole USB drive a Pioneer/AlphaTheta player can browse.
@@ -383,6 +385,30 @@ pub struct InputArgs {
 pub struct AnalyzeArgs {
     #[command(flatten)]
     pub input: InputArgs,
+
+    /// Emit one JSON object per file instead of a table.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Which files to hear, and which model to hear them with.
+#[derive(Args, Clone, Debug)]
+pub struct GenreArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
+    /// The model file, `discogs-effnet-bsdynamic-1.onnx`.
+    ///
+    /// Not shipped and not downloaded: it is the Music Technology Group's,
+    /// under CC BY-NC-SA 4.0, and the README says where to fetch it from. When
+    /// this is not given, `BOOTH_GENRE_MODEL` is read, and then
+    /// `~/.cache/booth/models/` is looked in.
+    #[arg(long, value_name = "FILE")]
+    pub model: Option<PathBuf>,
+
+    /// How many styles to print per file, surest first.
+    #[arg(long, default_value_t = 3, value_name = "N")]
+    pub top: usize,
 
     /// Emit one JSON object per file instead of a table.
     #[arg(long)]

@@ -306,6 +306,13 @@ pub fn fingerprint(track: &Track) -> u64 {
     // right — re-reading a track and getting the same words back is not a
     // change the drive is missing, and getting different ones is.
     eat(crate::library::words_as_comment(&track.lyrics, &track.refrains).as_bytes());
+    // The genre, only where there is one. Hashing an empty genre too would
+    // change every fingerprint the day the field appeared and mark every track
+    // on every drive as needing writing again, for a row that would come out
+    // the same; a track that has gained a genre is the one whose row has not.
+    if !track.genre.is_empty() {
+        eat(track.genre.as_bytes());
+    }
     hash
 }
 
@@ -354,6 +361,7 @@ pub fn prep(track: &Track) -> booth_cli::export::Prep {
         // confidently wrong rather than measured.
         bpm: (track.has_grid && track.bpm > 0.0).then_some(track.bpm),
         key: track.key.clone(),
+        genre: track.genre.clone(),
         // Empty for almost every record, and that is the tracker's grid being
         // as good as the collection's. It fills in for a grid that bends,
         // which is the one case re-measuring would destroy.

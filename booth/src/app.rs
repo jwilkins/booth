@@ -1946,7 +1946,7 @@ impl App {
             self.envelopes = None;
         }
         self.ensure_local(&ids);
-        self.start(Job::Analyze(waiting.clone()));
+        self.start(Job::Analyze { tracks: waiting.clone(), genre: self.config.genre.clone() });
 
         // And the stems, where there are any. Listening to a record is the
         // moment its pictures are made, and a stem row has a picture of its
@@ -2949,14 +2949,15 @@ impl App {
                 }
                 Update::Analyzed(analyzed) => {
                     crate::debug!(
-                        "analysed #{}: {:.2} BPM (confidence {:.1}), key {}, {} beats, {} phrases, {} cues",
+                        "analysed #{}: {:.2} BPM (confidence {:.1}), key {}, {} beats, {} phrases, {} cues, genre {}",
                         analyzed.id,
                         analyzed.bpm,
                         analyzed.grid_confidence,
                         if analyzed.key.is_empty() { "none" } else { &analyzed.key },
                         analyzed.beats,
                         analyzed.phrases.len(),
-                        analyzed.cues.len()
+                        analyzed.cues.len(),
+                        if analyzed.genre.is_empty() { "none" } else { &analyzed.genre }
                     );
                     if let Some(track) = self.library.get_mut(analyzed.id) {
                         track.bpm = analyzed.bpm;
@@ -2968,6 +2969,14 @@ impl App {
                         track.key_confidence = analyzed.key_confidence;
                         track.energy = analyzed.energy;
                         track.intensity = analyzed.intensity;
+                        // Only where the model heard something. An analysis
+                        // run with no model is not a finding that the track
+                        // has no genre, and should not take away one heard
+                        // when there was.
+                        if !analyzed.genre.is_empty() {
+                            track.genre = analyzed.genre.clone();
+                            track.genre_confidence = analyzed.genre_confidence;
+                        }
                         track.phrases = analyzed.phrases.clone();
                         track.cues = analyzed.cues.clone();
                         track.loudness_lufs = analyzed.loudness_lufs;
@@ -5689,6 +5698,19 @@ impl App {
                     format!("{} {:.2}", track.key, track.key_confidence)
                 },
                 !track.key.is_empty(),
+            );
+            // The style and the model's activation for it, which is not a
+            // share of anything: 0.3 is the model being fairly sure of a
+            // style it rarely hears, not a thirty per cent chance.
+            measurement(
+                ui,
+                "genre",
+                &if track.genre.is_empty() {
+                    "none".to_string()
+                } else {
+                    format!("{} {:.2}", track.genre, track.genre_confidence)
+                },
+                !track.genre.is_empty(),
             );
             // The rank and the number it is a rank of, because five bars cannot
             // say whether a track sat just under a threshold or nowhere near
@@ -10197,6 +10219,39 @@ impl App {
                         .color(theme::dim())
                         .size(theme::SMALL),
                     );
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Genre");
+                    ui.label(
+                        RichText::new(
+                            "Saying what kind of record a track is — Goa trance rather than \
+                         progressive, tech house rather than hard house — takes a model \
+                         trained on Discogs, and Booth does not ship it or download it: \
+                         it is the Music Technology Group's, under CC BY-NC-SA 4.0. Fetch \
+                         discogs-effnet-bsdynamic-1.onnx from their Essentia models page \
+                         and point at it here; it is heard the next time tracks are \
+                         analysed. Everything else works without it.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+                    let mut genre_model = self.config.genre.model.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut genre_model)
+                                .desired_width(ui.available_width())
+                                .hint_text("path to discogs-effnet-bsdynamic-1.onnx")
+                                .font(theme::mono(11.0)),
+                        )
+                        .on_hover_text(
+                            "BOOTH_GENRE_MODEL when this is empty, and then \
+                             ~/.cache/booth/models/ if the file is there.",
+                        )
+                        .changed()
+                    {
+                        self.config.genre.model = genre_model.trim().to_string();
+                        changed = true;
+                    }
 
                     ui.add_space(14.0);
                     pane_label(ui, "Words");

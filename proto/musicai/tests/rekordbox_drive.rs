@@ -1371,6 +1371,7 @@ mod what_the_collection_knows {
                 parts: Vec::new(),
                 beat_ms: Vec::new(),
                 comment: String::new(),
+                genre: String::new(),
             },
         );
         assert_eq!(on_drive(&drive, &analysis, ".EXT"), measured);

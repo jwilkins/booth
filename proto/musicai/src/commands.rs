@@ -12,8 +12,8 @@ use crate::audio::decode::decode_file;
 use crate::audio::encode::{write_file, Codec, EncodeOptions};
 use crate::audio::mp3::SeekIndex;
 use crate::cli::{
-    AnalyzeArgs, AnlzArgs, ExportArgs, NormalizeArgs, NormalizeMode, OnAmbiguous, RunArgs,
-    StemsArgs, Step, TagArgs,
+    AnalyzeArgs, AnlzArgs, ExportArgs, GenreArgs, NormalizeArgs, NormalizeMode, OnAmbiguous,
+    RunArgs, StemsArgs, Step, TagArgs,
 };
 use crate::discover;
 use crate::export::image::{capacity_for, Destination, DriveImage};
@@ -1039,6 +1039,10 @@ fn prepare(
             .unwrap_or_default(),
         key: key.clone(),
         comment: supplied.map(|prep| prep.comment.clone()).unwrap_or_default(),
+        // Only what the collection says. The exporter has no genre model of
+        // its own to fall back on, and the file's tag is not read here either
+        // — see `booth-cli genre` for hearing one.
+        genre: supplied.map(|prep| prep.genre.clone()).unwrap_or_default(),
         file_path: on_drive.clone(),
         analyze_path,
         tempo_x100: (listened.bpm * 100.0).round() as u32,
@@ -1204,6 +1208,89 @@ fn json_line(path: &Path, measured: &Loudness, duration: f64, channels: usize) -
         measured.range_lu,
         json_number(measured.true_peak_db()),
         json_number(measured.sample_peak_db()),
+    )
+}
+
+// -- genre -----------------------------------------------------------------
+
+/// Hear what kind of record each file is.
+///
+/// The model is loaded once and shared: the files are heard in parallel like
+/// everything else here, and a classifier can be asked from several threads at
+/// once. See [`analysis::style`] for what it is and where it comes from.
+pub fn genre(args: &GenreArgs, reporter: &dyn Reporter) -> Result<()> {
+    use crate::analysis::style;
+
+    let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    let model = style::locate(args.model.as_deref()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no genre model: pass --model, set {}, or put {} in ~/.cache/booth/models/. It is \
+             at {}",
+            style::MODEL_VARIABLE,
+            style::MODEL_FILE,
+            style::MODEL_URL
+        )
+    })?;
+    let classifier = style::Classifier::load(&model)?;
+
+    let progress = Progress::new(reporter, files.len());
+    let results: Vec<Result<Vec<String>>> = files
+        .par_iter()
+        .map(|path| {
+            if progress.cancelled() {
+                return Ok(Vec::new());
+            }
+            let outcome = (|| {
+                let audio = decode_file(path)?;
+                let styles = classifier.classify(&audio)?;
+                Ok(vec![match args.json {
+                    true => genre_json(path, &styles, args.top),
+                    false => genre_row(path, &styles, args.top),
+                }])
+            })();
+            progress.tick();
+            outcome
+        })
+        .collect();
+
+    let (lines, mut outcome) = partition(&files, results);
+    outcome.cancelled = reporter.cancelled();
+    for line in lines {
+        reporter.event(Event::Line(line));
+    }
+    outcome.report(reporter)
+}
+
+fn genre_row(path: &Path, styles: &[analysis::style::Style], top: usize) -> String {
+    let heard: Vec<String> =
+        styles.iter().take(top).map(|s| format!("{} ({:.2})", s.style, s.confidence)).collect();
+    format!(
+        "{:<40} {}",
+        elide(&path.display().to_string(), 40),
+        match heard.is_empty() {
+            true => "too short to hear".to_string(),
+            false => heard.join(", "),
+        }
+    )
+}
+
+fn genre_json(path: &Path, styles: &[analysis::style::Style], top: usize) -> String {
+    let heard: Vec<String> = styles
+        .iter()
+        .take(top)
+        .map(|s| {
+            format!(
+                r#"{{"genre":{},"style":{},"confidence":{:.4}}}"#,
+                json_string(s.genre),
+                json_string(s.style),
+                s.confidence
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"file":{},"styles":[{}]}}"#,
+        json_string(&path.display().to_string()),
+        heard.join(",")
     )
 }
 

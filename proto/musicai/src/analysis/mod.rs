@@ -1,16 +1,23 @@
 //! Working out what is in a track: where the beats are, how it is put
 //! together, and where a DJ would want to drop a cue.
 //!
-//! Everything here is signal processing rather than a model. That is a
-//! deliberate limit: it runs offline in seconds, it explains itself, and every
-//! decision it makes is one the user can see and correct. Where it is weaker
-//! than a trained model — telling a sung line from a centred lead, mostly — the
-//! documentation says so rather than hoping.
+//! Everything here is signal processing rather than a model, with one
+//! exception. That is a deliberate limit: it runs offline in seconds, it
+//! explains itself, and every decision it makes is one the user can see and
+//! correct. Where it is weaker than a trained model — telling a sung line from
+//! a centred lead, mostly — the documentation says so rather than hoping.
+//!
+//! The exception is [`style`]: what kind of record a track is cannot be
+//! measured, only recognised, so that one is a network. It is kept apart from
+//! [`analyze`], which stays the measurement it always was and needs nothing
+//! installed; the classifier is run by whoever has the weights.
 
 pub mod cues;
 pub mod features;
 pub mod key;
 pub mod structure;
+pub mod style;
+pub mod style_classes;
 pub mod tempo;
 
 use crate::audio::Audio;

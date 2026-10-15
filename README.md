@@ -29,6 +29,11 @@ with a free key.
   a player draws, all measured locally. No analysis step on the player, no waiting in the booth.
   A record at one tempo is gridded at one tempo — eight beats from anywhere in it are eight beats
   from anywhere else — and one that really moves is gridded moving.
+- **Says what kind of record it is.** One of the 400 styles Discogs files records under — Goa
+  trance rather than progressive, tech house rather than hard house — heard by the Music Technology
+  Group's Discogs-EffNet model, run locally in pure Rust. The model is theirs and optional: point
+  Booth at the file and every track analysed from then on carries a genre, in the collection and on
+  the drive.
 - **Levels them.** EBU R128 loudness normalisation, by re-encoding or by ReplayGain tags with the
   audio left untouched.
 - **Names them.** Acoustic fingerprinting through AcoustID and MusicBrainz, and — for the white

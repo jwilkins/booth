@@ -553,6 +553,10 @@ pub struct Config {
     /// stem and cueing the hook.
     #[serde(default)]
     pub whisper: Whisper,
+    /// Where to find the genre model, for saying what kind of record each
+    /// track is.
+    #[serde(default)]
+    pub genre: Genre,
 }
 
 /// What to run when nothing says otherwise: whisper.cpp's own binary name, as
@@ -655,6 +659,31 @@ impl Whisper {
             )),
             false => Ok(()),
         }
+    }
+}
+
+/// Where the genre classifier's weights are.
+///
+/// Off by default in the same sense as [`Whisper`]: Booth does not ship the
+/// model and will not download it — it is the Music Technology Group's, under
+/// a licence that is theirs to grant and not this program's to assume — so
+/// until a file is pointed at, tracks have no genre and everything else
+/// works. The README says where to get it and what it is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Genre {
+    /// The ONNX file. Empty means fall back to `BOOTH_GENRE_MODEL`, and then
+    /// to `~/.cache/booth/models/discogs-effnet-bsdynamic-1.onnx` if it is
+    /// there, which is where the repository's own hook puts it.
+    pub model: String,
+}
+
+impl Genre {
+    /// The file to load, if anything names one. The setting first, then the
+    /// environment, then the cache — see
+    /// [`booth_cli::analysis::style::locate`].
+    pub fn model(&self) -> Option<PathBuf> {
+        booth_cli::analysis::style::locate(Some(Path::new(self.model.trim())))
     }
 }
 
@@ -791,6 +820,7 @@ impl Default for Config {
             keep_drives: true,
             from_other_drives: OnForeign::default(),
             whisper: Whisper::default(),
+            genre: Genre::default(),
         }
     }
 }

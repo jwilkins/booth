@@ -27,8 +27,9 @@ pub enum Job {
     /// Walk the paths and read what each file says about itself. Fast: no
     /// decoding beyond what the tags need.
     Import { paths: Vec<PathBuf>, recursive: bool },
-    /// Listen to each track: grid, key, phrases, cues, loudness, waveform.
-    Analyze(Vec<(u32, PathBuf)>),
+    /// Listen to each track: grid, key, phrases, cues, loudness, waveform —
+    /// and the genre, where there is a model to hear it with.
+    Analyze { tracks: Vec<(u32, PathBuf)>, genre: crate::config::Genre },
     /// Listen again, and keep only the tempo and the beats.
     ///
     /// The same measurement as [`Job::Analyze`] — one decode either way, and
@@ -140,7 +141,7 @@ impl Job {
             Job::Identify { .. } => "identifying",
             Job::Hash(_) => "checking for copies",
             Job::Verify { .. } => "checking the collection",
-            Job::Analyze(_) => "analysing",
+            Job::Analyze { .. } => "analysing",
             Job::Normalize { .. } => "levelling",
             Job::Regrid(_) => "measuring the grid",
             Job::Separate { .. } => "stems",
@@ -403,6 +404,11 @@ pub struct Analyzed {
     /// show it and so a miscalibrated meter is diagnosable rather than just
     /// wrong.
     pub intensity: f32,
+    /// What kind of record it is, as the genre model heard it — `Goa Trance`,
+    /// `Tech House` — or empty when there was no model to ask, or the track
+    /// was too short for it to hear.
+    pub genre: String,
+    pub genre_confidence: f32,
     /// Every beat, when the grid bends. Empty when a tempo says it all.
     pub beat_ms: Vec<u32>,
     pub phrases: Vec<Phrase>,
@@ -552,12 +558,26 @@ fn is_float_wav(path: &Path) -> bool {
     false
 }
 
-/// Listen to one track.
-pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
+/// Listen to one track, and with a classifier, hear what kind of record it is.
+pub fn analyze_file(
+    id: u32,
+    path: &Path,
+    genre: Option<&booth_cli::analysis::style::Classifier>,
+) -> anyhow::Result<Analyzed> {
     let audio = decode_file(path)?;
     let analysis = analysis::analyze(&audio);
     let waveform = booth_cli::export::waveform::analyze(&audio);
     let loudness = booth_cli::loudness::measure(&audio).ok();
+    // A model that fails on one track costs that track its genre and nothing
+    // else: the grid, the cues and the picture are the analysis, and this is
+    // on top of it.
+    let heard = genre.and_then(|classifier| match classifier.classify(&audio) {
+        Ok(styles) => styles.into_iter().next(),
+        Err(e) => {
+            crate::warn!("#{id} has no genre: {e:#}");
+            None
+        }
+    });
 
     let beat_ms: Vec<u32> = analysis.grid.beats.iter().map(|b| b.time_ms).collect();
     // Kept only when a tempo and a downbeat could not put these beats back.
@@ -600,6 +620,8 @@ pub fn analyze_file(id: u32, path: &Path) -> anyhow::Result<Analyzed> {
         key_confidence: analysis.key.as_ref().map(|k| k.confidence).unwrap_or(0.0),
         energy: energy_from(intensity),
         intensity,
+        genre: heard.as_ref().map(|style| style.style.to_string()).unwrap_or_default(),
+        genre_confidence: heard.as_ref().map(|style| style.confidence).unwrap_or(0.0),
         beat_ms: bent,
         phrases,
         cues,
@@ -997,7 +1019,7 @@ impl Drop for Runner {
 fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
     match job {
         Job::Import { paths, recursive } => import(&paths, recursive, reporter),
-        Job::Analyze(tracks) => analyze_all(&tracks, reporter),
+        Job::Analyze { tracks, genre } => analyze_all(&tracks, &genre, reporter),
         Job::Regrid(tracks) => regrid_all(&tracks, reporter),
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
         Job::Convert(tracks) => convert(&tracks, reporter),
@@ -1261,12 +1283,50 @@ fn hash_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<()>
     Ok(())
 }
 
-fn analyze_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<()> {
+/// The genre model, where there is one to load.
+///
+/// Having none is not a failure — the model is optional, and a collection
+/// without it gets every other measurement — so that case is silent. A model
+/// that is named and will not load is said once, as a note on the job, rather
+/// than once per track or not at all.
+fn genre_classifier(
+    genre: &config::Genre,
+    reporter: &Channel,
+) -> Option<booth_cli::analysis::style::Classifier> {
+    let path = genre.model()?;
+    let started = std::time::Instant::now();
+    match booth_cli::analysis::style::Classifier::load(&path) {
+        Ok(classifier) => {
+            crate::debug!(
+                "genre model {} loaded in {:.2}s",
+                path.display(),
+                started.elapsed().as_secs_f32()
+            );
+            Some(classifier)
+        }
+        Err(e) => {
+            crate::warn!("no genre this time: {e:#}");
+            let _ = reporter.tx.send(Update::Line(format!(
+                "The genre model could not be loaded, so these tracks have no genre: {e:#}"
+            )));
+            None
+        }
+    }
+}
+
+fn analyze_all(
+    tracks: &[(u32, PathBuf)],
+    genre: &config::Genre,
+    reporter: &Channel,
+) -> anyhow::Result<()> {
     use rayon::prelude::*;
     use std::sync::atomic::AtomicUsize;
 
     let total = tracks.len();
     let done = AtomicUsize::new(0);
+    // Once for the job rather than once per track: it is the same model for
+    // every track, and a classifier can be asked from several threads at once.
+    let classifier = genre_classifier(genre, reporter);
 
     // In parallel, because analysis is the slow part of adding a crate and it
     // is pure measurement — nothing here writes anything.
@@ -1275,7 +1335,7 @@ fn analyze_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<
             return;
         }
         let started = std::time::Instant::now();
-        match analyze_file(*id, path) {
+        match analyze_file(*id, path, classifier.as_ref()) {
             Ok(analyzed) => {
                 crate::debug!(
                     "listened to {} in {:.1}s",
@@ -1906,7 +1966,10 @@ fn regrid_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<(
         if reporter.cancelled() {
             break;
         }
-        match analyze_file(*id, path) {
+        // Without the genre: this keeps only the tempo and the beats, so
+        // hearing what kind of record it is would be thirteen seconds for
+        // nothing.
+        match analyze_file(*id, path, None) {
             Ok(measured) => {
                 crate::debug!(
                     "re-measured #{id}: {:.2} BPM, {} beats",
@@ -2149,7 +2212,7 @@ mod tests {
         let path = dir.join("track.wav");
         write_beats(&path, 128.0, 8);
 
-        let analyzed = analyze_file(3, &path).unwrap();
+        let analyzed = analyze_file(3, &path, None).unwrap();
         assert_eq!(analyzed.id, 3);
         assert!(analyzed.has_grid);
         assert!((analyzed.bpm - 128.0).abs() < 1.0, "{} BPM", analyzed.bpm);
@@ -2179,7 +2242,7 @@ mod tests {
         let path = dir.join("track.wav");
         write_beats(&path, 128.0, 16);
 
-        let analyzed = analyze_file(1, &path).unwrap();
+        let analyzed = analyze_file(1, &path, None).unwrap();
         for phrase in &analyzed.phrases {
             assert!(phrase.end_ms >= phrase.start_ms, "{phrase:?}");
             assert!(
@@ -2201,7 +2264,7 @@ mod tests {
         let audio = Audio::new(rate as u32, vec![samples.clone(), samples]).unwrap();
         write_file(&path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
 
-        let analyzed = analyze_file(1, &path).unwrap();
+        let analyzed = analyze_file(1, &path, None).unwrap();
         assert!(!analyzed.has_grid);
         assert_eq!(analyzed.beats, 0);
 
@@ -2291,6 +2354,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A genre setting that names a file that is not there.
+    ///
+    /// Not the default: with the setting empty, the environment and then the
+    /// cache are looked in, and a developer's machine has the model in the
+    /// cache — this repository's own hook puts it there — where CI does not.
+    /// A test that ran the network here and not there would be timed by the
+    /// machine it was on; one that names a missing file is the same
+    /// everywhere, and exercises the one note the job makes about it.
+    fn no_genre_model() -> config::Genre {
+        config::Genre { model: "/nowhere/no-such-model.onnx".into() }
+    }
+
     #[test]
     fn an_analysis_job_reports_one_result_per_track_and_finishes() {
         let dir = scratch("analyze-job");
@@ -2299,7 +2374,10 @@ mod tests {
         write_beats(&a, 128.0, 4);
         write_beats(&b, 140.0, 4);
 
-        let mut runner = Runner::start(Job::Analyze(vec![(1, a), (2, b)]), Arc::new(|| {}));
+        let mut runner = Runner::start(
+            Job::Analyze { tracks: vec![(1, a), (2, b)], genre: no_genre_model() },
+            Arc::new(|| {}),
+        );
         runner.join();
 
         let updates = runner.drain();
@@ -2474,7 +2552,10 @@ mod tests {
         write_beats(&good, 128.0, 4);
         std::fs::write(&bad, b"not a wav").unwrap();
 
-        let mut runner = Runner::start(Job::Analyze(vec![(1, good), (2, bad)]), Arc::new(|| {}));
+        let mut runner = Runner::start(
+            Job::Analyze { tracks: vec![(1, good), (2, bad)], genre: no_genre_model() },
+            Arc::new(|| {}),
+        );
         runner.join();
 
         let updates = runner.drain();

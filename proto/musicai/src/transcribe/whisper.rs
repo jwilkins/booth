@@ -11,8 +11,9 @@
 //!
 //! Either way the audio is handed over as 16 kHz mono, which is what the models
 //! are trained on and the only thing whisper.cpp will read. The stem on disk is
-//! 44.1 kHz stereo, so it is converted on the way — see [`resample`], which is
-//! written for speech recognition and for nothing else.
+//! 44.1 kHz stereo, so it is converted on the way — see
+//! [`crate::audio::resample`], which is written for feeding a model and for
+//! nothing else.
 //!
 //! What comes back is timed lines. What to do with them is [`super`]'s problem.
 
@@ -23,6 +24,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::audio::resample::resample;
 use crate::audio::Audio;
 
 use super::{Line, Transcript};
@@ -436,74 +438,6 @@ fn write_speech(audio: &Audio, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// How many input samples either side of an output sample are read, at the
-/// lower of the two rates. More is a sharper filter and a slower one.
-const TAPS: f64 = 24.0;
-
-/// Change a signal's sample rate, band-limited.
-///
-/// A windowed sinc, evaluated per output sample rather than built into a
-/// polyphase table: a vocal stem is converted once, in a job that is about to
-/// spend a minute in a neural network, so there is nothing to win by being
-/// clever about it.
-///
-/// This is for feeding a recogniser and nothing else. It is honest about
-/// aliasing — that is the whole reason it is not a bare pick-every-nth — but it
-/// has had none of the care that writing somebody's library through a
-/// resampler would need, and no audio anybody listens to goes through it.
-fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
-    if input.is_empty() || from == to || from == 0 || to == 0 {
-        return input.to_vec();
-    }
-    let ratio = to as f64 / from as f64;
-    // Cutoff in cycles per input sample. Below the output's Nyquist when going
-    // down, with a little room for the filter to roll off in.
-    let cutoff = 0.45 * ratio.min(1.0);
-    let half = (TAPS / ratio.min(1.0)).ceil();
-    let reach = half as isize;
-    let out_len = (input.len() as f64 * ratio).floor() as usize;
-
-    let mut out = Vec::with_capacity(out_len);
-    for n in 0..out_len {
-        let centre = n as f64 / ratio;
-        let nearest = centre.floor() as isize;
-        let mut sum = 0.0f64;
-        let mut weight = 0.0f64;
-        for i in (nearest - reach)..=(nearest + reach) {
-            if i < 0 || i as usize >= input.len() {
-                continue;
-            }
-            let x = i as f64 - centre;
-            // Blackman window over the taps, so the stopband is deep enough
-            // that what is filtered out stays out.
-            let u = x / half;
-            let window = 0.42
-                + 0.5 * (std::f64::consts::PI * u).cos()
-                + 0.08 * (2.0 * std::f64::consts::PI * u).cos();
-            let tap = window * sinc(2.0 * cutoff * x);
-            sum += tap * input[i as usize] as f64;
-            weight += tap;
-        }
-        // Normalised by the weights actually used, which gives unity gain in
-        // the middle and a sane answer at both ends rather than a fade.
-        out.push(match weight.abs() > 1e-9 {
-            true => (sum / weight) as f32,
-            false => 0.0,
-        });
-    }
-    out
-}
-
-fn sinc(x: f64) -> f64 {
-    match x.abs() < 1e-9 {
-        true => 1.0,
-        false => {
-            let pi_x = std::f64::consts::PI * x;
-            pi_x.sin() / pi_x
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,39 +748,6 @@ mod tests {
                 (2.0 * std::f32::consts::PI * hz * t).sin()
             })
             .collect()
-    }
-
-    fn energy(signal: &[f32]) -> f32 {
-        signal.iter().map(|s| s * s).sum::<f32>() / signal.len().max(1) as f32
-    }
-
-    #[test]
-    fn resampling_keeps_the_length_and_the_level() {
-        let input = tone(440.0, 44_100, 1.0);
-        let out = resample(&input, 44_100, SPEECH_RATE);
-
-        assert!(out.len().abs_diff(SPEECH_RATE as usize) < 4, "{} samples", out.len());
-        // A tone well inside the band comes through at the level it went in.
-        let ratio = energy(&out[100..out.len() - 100]) / energy(&input);
-        assert!((ratio - 1.0).abs() < 0.05, "level changed by a factor of {ratio:.3}");
-    }
-
-    #[test]
-    fn resampling_does_not_fold_the_top_of_the_band_back_down() {
-        // 15 kHz has nowhere to go at 16 kHz: taking every nth sample would
-        // fold it down to 1 kHz and put a whistle right through the speech.
-        let input = tone(15_000.0, 44_100, 1.0);
-        let out = resample(&input, 44_100, SPEECH_RATE);
-
-        let left = energy(&out[200..out.len() - 200]);
-        assert!(left < 0.001, "{left:.5} of the 15 kHz tone survived as an alias");
-    }
-
-    #[test]
-    fn resampling_a_signal_that_is_already_at_the_right_rate_leaves_it_alone() {
-        let input = tone(440.0, SPEECH_RATE, 0.1);
-        assert_eq!(resample(&input, SPEECH_RATE, SPEECH_RATE), input);
-        assert!(resample(&[], 44_100, SPEECH_RATE).is_empty());
     }
 
     #[test]
