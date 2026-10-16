@@ -2421,7 +2421,13 @@ impl App {
             // The words are not cleared here. They are replaced when the new
             // ones arrive, so a re-read that never starts — no recogniser, a
             // missing file — leaves the track with the words it had.
-            let unread = again || track.lyrics.is_empty();
+            // Words with no times are waiting for the recogniser too: a
+            // server that had them only as text, or lines typed in. The
+            // transcript is what gives them times — see `take_heard_words` —
+            // where a realignment would stack them all on the first word sung.
+            let untimed = !track.lyrics.is_empty()
+                && track.lyrics.iter().all(|line| line.start_ms == 0 && line.end_ms == 0);
+            let unread = again || track.lyrics.is_empty() || untimed;
             match (unread, track.lyrics_aligned, track.stems.vocals.clone()) {
                 // Words already read and already placed: nothing to wait for.
                 (false, true, _) => known.push(id),
@@ -2565,16 +2571,6 @@ impl App {
     ///
     /// Returns whether the collection changed.
     fn take_found_words(&mut self, id: u32, found: &booth_cli::tag::lyrics::Found) -> bool {
-        let timed = !found.synced.lines.is_empty();
-        let lyrics = match timed {
-            true => crate::library::lyrics_from(&found.synced),
-            false => found
-                .plain
-                .iter()
-                .map(|text| crate::library::Lyric { start_ms: 0, end_ms: 0, text: text.clone() })
-                .collect(),
-        };
-
         let Some(track) = self.library.get_mut(id) else { return false };
         if found.instrumental {
             // The server saying so outright is worth as much as listening and
@@ -2583,6 +2579,31 @@ impl App {
             crate::info!("#{id} is an instrumental, so there are no words to read");
             return true;
         }
+        // How the words came timed: against another pressing, by this track's
+        // own stem, or not at all.
+        let synced = !found.synced.lines.is_empty();
+        // Words the server had only as text, on a track whose stem has been
+        // heard: the recogniser's times are these words' times, and the words
+        // are better than the recogniser's — see `take_heard_words`.
+        let heard_before = !synced
+            && track.words_from == crate::library::WordsFrom::Recogniser
+            && track.lyrics.iter().any(|line| line.start_ms > 0);
+        let by_ear = match heard_before {
+            true => booth_cli::transcribe::reference::time_words(
+                &found.plain,
+                &crate::library::transcript(&track.lyrics),
+            ),
+            false => None,
+        };
+        let lyrics: Vec<crate::library::Lyric> = match (&by_ear, synced) {
+            (Some(timed), _) => crate::library::lyrics_from(timed),
+            (None, true) => crate::library::lyrics_from(&found.synced),
+            (None, false) => found
+                .plain
+                .iter()
+                .map(|text| crate::library::Lyric { start_ms: 0, end_ms: 0, text: text.clone() })
+                .collect(),
+        };
         if lyrics.is_empty() {
             return false;
         }
@@ -2594,22 +2615,160 @@ impl App {
         // record — and the old doubt belonged to words that are gone.
         track.heard_surely = None;
         // Timed against another pressing, so they are words without places
-        // until the stem says otherwise.
-        track.lyrics_aligned = !timed;
+        // until the stem says otherwise. Timed by this track's own stem, or
+        // not timed at all, a realignment has nothing to do: the first are
+        // placed, and the second are read for their times instead — see
+        // `words_plan`.
+        track.lyrics_aligned = !synced;
         let has_stem = track.stems.vocals.is_some();
 
         crate::info!(
             "#{id} took {} from a lyrics server{}",
             plural(lines, "line"),
-            match (timed, has_stem) {
-                (true, true) => ", to be placed against its stem",
-                (true, false) => ", timed against another pressing",
+            match (by_ear.is_some(), synced, has_stem) {
+                (true, _, _) => ", timed by what the recogniser heard",
+                (false, true, true) => ", to be placed against its stem",
+                (false, true, false) => ", timed against another pressing",
                 _ => "",
             }
         );
         self.auto_cue(id);
         self.prep_changed(id);
         true
+    }
+
+    /// Fold what the recogniser heard into a track's record.
+    ///
+    /// Three things arrive here, told apart by what the track already has and
+    /// whether the recogniser vouched for its words. A realignment carries no
+    /// confidence and moves only the times. A transcript landing on words
+    /// somebody wrote down — a server's, a lyric file's, a person's — lends
+    /// them its times and is otherwise forgotten: written words are right and
+    /// heard ones are a third wrong on the published benchmarks, and when they
+    /// are sung is the one thing the recogniser knows that nobody wrote down.
+    /// Anything else is the words heard, taken as they are.
+    ///
+    /// Returns how many lines the track has afterwards.
+    fn take_heard_words(
+        &mut self,
+        id: u32,
+        lyrics: Vec<crate::library::Lyric>,
+        confidence: Option<f32>,
+        language: Option<String>,
+    ) -> usize {
+        use crate::library::WordsFrom;
+        /// What became of the written words, where there were any.
+        enum Written {
+            Timed(usize),
+            Kept(usize),
+            Outvoted,
+            None,
+        }
+        let heard = lyrics.len();
+        let written = {
+            let Some(track) = self.library.get_mut(id) else { return 0 };
+            let has_written = confidence.is_some()
+                && !track.lyrics.is_empty()
+                && !matches!(track.words_from, WordsFrom::Recogniser | WordsFrom::Unsaid);
+            match has_written {
+                false => Written::None,
+                true => {
+                    let texts: Vec<String> =
+                        track.lyrics.iter().map(|line| line.text.clone()).collect();
+                    let heard_transcript = crate::library::transcript(&lyrics);
+                    match booth_cli::transcribe::reference::time_words(&texts, &heard_transcript) {
+                        Some(timed) => {
+                            let placed = crate::library::lyrics_from(&timed);
+                            track.refrains = crate::library::refrains_from(&placed);
+                            track.lyrics = placed;
+                            track.lyrics_aligned = true;
+                            if let Some(said) = language.as_deref().filter(|l| !l.trim().is_empty())
+                            {
+                                track.language = said.to_string();
+                            }
+                            Written::Timed(track.lyrics.len())
+                        }
+                        // Nothing heard to time them by. The words stay, and
+                        // the track is not an instrumental: somebody wrote
+                        // these down.
+                        None if heard == 0 => Written::Kept(track.lyrics.len()),
+                        None => Written::Outvoted,
+                    }
+                }
+            }
+        };
+        match written {
+            Written::Timed(count) => {
+                crate::info!(
+                    "#{id}: {} timed by {} the recogniser heard",
+                    plural(count, "written line"),
+                    plural(heard, "line")
+                );
+                let placed = self.auto_cue(id);
+                self.note(
+                    format!("{} timed by ear, {}", plural(count, "line"), plural(placed, "cue")),
+                    theme::text(),
+                );
+                return count;
+            }
+            Written::Kept(count) => {
+                crate::info!("#{id}: nothing was heard to time the written words by, so they stay");
+                self.note("nothing sung was made out; the written words are kept", theme::dim());
+                return count;
+            }
+            Written::Outvoted => crate::info!(
+                "#{id}: the recogniser agreed with too few of the written words to time them, so \
+                 what it heard is taken instead"
+            ),
+            Written::None => {}
+        }
+
+        if let Some(track) = self.library.get_mut(id) {
+            // What repeats in them, worked out here and kept: it is shown in
+            // two panels that redraw every frame, and it is the thing a DJ
+            // recognises a record by months later.
+            track.refrains = crate::library::refrains_from(&lyrics);
+            track.lyrics = lyrics;
+            // Only where the recogniser said. A realignment moves the times
+            // and never the words, so it has nothing new to report about
+            // either and must not wipe what is already known.
+            if confidence.is_some() {
+                track.heard_surely = confidence;
+            }
+            if let Some(language) = language.filter(|l| !l.trim().is_empty()) {
+                track.language = language;
+            }
+            if confidence.is_some() {
+                track.words_from = WordsFrom::Recogniser;
+            }
+            // Both paths that produce this place the words against the stem
+            // first, so arriving here is what being placed means.
+            track.lyrics_aligned = true;
+        }
+        // Said plainly, because an empty transcript is a real answer and
+        // looks exactly like a failure from outside: a track that turns out
+        // to have no words should say so rather than leave somebody waiting
+        // for cues.
+        match heard {
+            0 => {
+                // Recorded rather than only reported. An empty transcript off
+                // a stem that was listened to is a real answer — this record
+                // has no singing on it — and without keeping it every press
+                // of Words paid for the same minutes again.
+                if let Some(track) = self.library.get_mut(id) {
+                    track.instrumental = true;
+                }
+                self.note("nothing sung was made out", theme::dim());
+            }
+            _ => {
+                let placed = self.auto_cue(id);
+                self.note(
+                    format!("{} heard, {}", plural(heard, "line"), plural(placed, "cue")),
+                    theme::text(),
+                );
+            }
+        }
+        heard
     }
 
     /// Hand stems that are already on disk to the recogniser.
@@ -3113,10 +3272,6 @@ impl App {
                 }
                 Update::WordsLookedUp { id, found, verdict, then_read } => {
                     use booth_cli::tag::lyrics::Verdict;
-                    // The recogniser pass this track would have had was held
-                    // back while the server was asked. Only a verdict that
-                    // settles the words lets it go.
-                    let settled = verdict == Verdict::Keep;
                     match verdict {
                         // Taken without asking. The track was identified by
                         // its sound, or what was written down agrees with what
@@ -3125,10 +3280,6 @@ impl App {
                             if self.take_found_words(id, &found) {
                                 changed = true;
                             }
-                            // The words are this record's and the times are
-                            // another pressing's, so the stem still has
-                            // something to say about where they go.
-                            to_cue.push(id);
                         }
                         // Plausible and not certain. The one thing not to do
                         // is write it in quietly: wrong words on a cue are
@@ -3136,76 +3287,48 @@ impl App {
                         Verdict::Ask => self.wondering.push(Wondering { id, found: *found }),
                         Verdict::No => {}
                     }
+                    // The recogniser pass this track would have had was held
+                    // back while the server was asked. Only words that are
+                    // settled *and timed* let it go: words a server had only
+                    // as text are this record's, and when they are sung is
+                    // the one thing the recogniser knows that the server did
+                    // not — see `take_heard_words`.
+                    let (timed, instrumental) = self
+                        .library
+                        .get(id)
+                        .map(|track| {
+                            let timed = verdict == Verdict::Keep
+                                && track
+                                    .lyrics
+                                    .iter()
+                                    .any(|line| line.start_ms > 0 || line.end_ms > 0);
+                            (timed, track.instrumental)
+                        })
+                        .unwrap_or((false, false));
+                    if timed {
+                        // The words are this record's and the times are
+                        // another pressing's, so the stem still has something
+                        // to say about where they go.
+                        to_cue.push(id);
+                    }
                     // Nothing settled it, so the slow way round after all —
                     // but only where a recogniser pass was what this stood in
                     // for. Reading the stem while the question is still open is
                     // deliberate: somebody who answers "not this record" wants
                     // the words that were sung, not an empty panel and another
                     // wait.
-                    match (settled, then_read) {
+                    match (timed || instrumental, then_read) {
                         (false, Some(vocals)) => to_read.push(job::Transcribable { id, vocals }),
                         // Asked for on its own and nothing came of it. Counted
                         // rather than said one at a time, because a batch of
-                        // white labels is a batch of misses.
-                        (false, None) => unanswered += 1,
-                        (true, _) => {}
+                        // white labels is a batch of misses. Words taken
+                        // without times are not a miss: they wait for a stem.
+                        (false, None) if verdict != Verdict::Keep => unanswered += 1,
+                        _ => {}
                     }
                 }
                 Update::Transcribed { id, lyrics, confidence, language } => {
-                    let heard = lyrics.len();
-                    if let Some(track) = self.library.get_mut(id) {
-                        // What repeats in them, worked out here and kept: it
-                        // is shown in two panels that redraw every frame, and
-                        // it is the thing a DJ recognises a record by months
-                        // later.
-                        track.refrains = crate::library::refrains_from(&lyrics);
-                        track.lyrics = lyrics;
-                        // Only where the recogniser said. A realignment moves
-                        // the times and never the words, so it has nothing new
-                        // to report about either and must not wipe what is
-                        // already known.
-                        if confidence.is_some() {
-                            track.heard_surely = confidence;
-                        }
-                        if let Some(language) = language.filter(|l| !l.trim().is_empty()) {
-                            track.language = language;
-                        }
-                        if confidence.is_some() {
-                            track.words_from = crate::library::WordsFrom::Recogniser;
-                        }
-                        // Both paths that produce this update place the words
-                        // against the stem first, so arriving here is what
-                        // being placed means.
-                        track.lyrics_aligned = true;
-                    }
-                    // Said plainly, because an empty transcript is a real
-                    // answer and looks exactly like a failure from outside: a
-                    // track that turns out to have no words should say so
-                    // rather than leave somebody waiting for cues.
-                    match heard {
-                        0 => {
-                            // Recorded rather than only reported. An empty
-                            // transcript off a stem that was listened to is a
-                            // real answer — this record has no singing on it —
-                            // and without keeping it every press of Words paid
-                            // for the same minutes again.
-                            if let Some(track) = self.library.get_mut(id) {
-                                track.instrumental = true;
-                            }
-                            self.note("nothing sung was made out", theme::dim());
-                        }
-                        _ => {
-                            let placed = self.auto_cue(id);
-                            self.note(
-                                format!(
-                                    "{} heard, {}",
-                                    crate::library::plural(heard, "line"),
-                                    crate::library::plural(placed, "cue")
-                                ),
-                                theme::text(),
-                            );
-                        }
-                    }
+                    self.take_heard_words(id, lyrics, confidence, language);
                     changed = true;
                 }
                 Update::Progress { done, total } => {
@@ -10619,7 +10742,7 @@ impl App {
                         .add(
                             egui::TextEdit::singleline(&mut model)
                                 .desired_width(ui.available_width())
-                                .hint_text("path to ggml-base.en.bin, or a model name")
+                                .hint_text("path to ggml-large-v3-turbo.bin, or a model name like turbo")
                                 .font(theme::mono(11.0)),
                         )
                         .on_hover_text(
@@ -13838,6 +13961,107 @@ mod tests {
                         title: "Der Kommissar".into(),
                         duration_secs: 300.0,
                     }
+                }
+
+                /// What a server answers when it has the words only as text.
+                fn plain(lines: &[&str]) -> Found {
+                    Found {
+                        synced: Transcript::default(),
+                        plain: lines.iter().map(|text| text.to_string()).collect(),
+                        instrumental: false,
+                        artist: "Falco".into(),
+                        title: "Der Kommissar".into(),
+                        duration_secs: 300.0,
+                    }
+                }
+
+                #[test]
+                fn words_a_server_had_only_as_text_are_timed_by_what_the_recogniser_heard() {
+                    // The karaoke tools' rule: the words from the people who
+                    // wrote them down, the times from the recogniser, which is
+                    // a third wrong about words and right about when.
+                    let (mut app, id) = sung("timed-by-ear", &[]);
+                    assert!(app.take_found_words(id, &plain(&["Drei, vier", "Jetzt gehn wir ab"])));
+                    assert!(
+                        app.library.get(id).unwrap().lyrics.iter().all(|line| line.start_ms == 0),
+                        "text has no times until something hears it"
+                    );
+
+                    let heard = vec![
+                        Lyric { start_ms: 1_000, end_ms: 2_000, text: "drei vier".into() },
+                        Lyric {
+                            start_ms: 9_000,
+                            end_ms: 11_000,
+                            text: "jetzt gehen wir ab".into(),
+                        },
+                    ];
+                    assert_eq!(app.take_heard_words(id, heard, Some(0.8), Some("de".into())), 2);
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(
+                        track
+                            .lyrics
+                            .iter()
+                            .map(|line| (line.start_ms, line.text.as_str()))
+                            .collect::<Vec<_>>(),
+                        [(1_000, "Drei, vier"), (9_000, "Jetzt gehn wir ab")]
+                    );
+                    assert_eq!(track.words_from, WordsFrom::Server, "the written words were lost");
+                    assert_eq!(
+                        track.heard_surely, None,
+                        "nobody's doubt attaches to written words"
+                    );
+                    assert!(track.lyrics_aligned, "times off this track's own stem are placed");
+                    assert_eq!(track.language, "de");
+                }
+
+                #[test]
+                fn hearing_nothing_takes_no_written_words_away_and_calls_nothing_an_instrumental() {
+                    let (mut app, id) = sung("heard-nothing", &[]);
+                    assert!(app.take_found_words(id, &plain(&["Drei, vier", "Jetzt gehn wir ab"])));
+                    assert_eq!(app.take_heard_words(id, Vec::new(), Some(0.0), None), 2);
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(track.lyrics.len(), 2, "the written words went");
+                    assert!(!track.instrumental, "a server with the words says there are words");
+                }
+
+                #[test]
+                fn a_transcript_that_is_not_these_words_is_taken_as_what_was_heard() {
+                    // Either not this record or not a transcript; either way
+                    // the written words cannot be timed by it, and what was
+                    // sung is the honest answer.
+                    let (mut app, id) = sung("outvoted", &[]);
+                    assert!(app.take_found_words(id, &plain(&["Drei, vier", "Jetzt gehn wir ab"])));
+                    let heard = vec![Lyric {
+                        start_ms: 40_000,
+                        end_ms: 42_000,
+                        text: "hold me closer now".into(),
+                    }];
+                    app.take_heard_words(id, heard, Some(0.8), None);
+
+                    let track = app.library.get(id).unwrap();
+                    assert_eq!(track.lyrics[0].text, "hold me closer now");
+                    assert_eq!(track.words_from, WordsFrom::Recogniser);
+                }
+
+                #[test]
+                fn words_without_times_are_read_for_their_times_rather_than_placed() {
+                    // A realignment moves a line by the time on it, so a dozen
+                    // lines at zero would all land on the first word sung. The
+                    // recogniser is the thing that can give them times.
+                    let (mut app, id) = sung("untimed-plan", &[]);
+                    assert!(app.take_found_words(id, &plain(&["Drei, vier", "Jetzt gehn wir ab"])));
+                    let track = app.library.get_mut(id).unwrap();
+                    track.stems.vocals = Some(track.path.with_extension("vocals.wav"));
+
+                    let plan = app.words_plan(&[id], false);
+                    assert_eq!(
+                        plan.reading.iter().map(|read| read.id).collect::<Vec<_>>(),
+                        [id],
+                        "untimed words were not sent to the recogniser"
+                    );
+                    assert!(plan.placing.is_empty(), "untimed lines were sent to be placed");
                 }
 
                 #[test]

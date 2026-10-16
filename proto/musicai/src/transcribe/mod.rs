@@ -16,6 +16,7 @@
 //! is here is everything after it, which is the part that has opinions.
 
 pub mod align;
+pub mod reference;
 pub mod whisper;
 
 /// One stretch of speech, as the recogniser heard it.
