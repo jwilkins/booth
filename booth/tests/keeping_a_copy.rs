@@ -251,6 +251,7 @@ fn writing_tags_puts_the_collections_names_into_the_file() {
         title: "Roll With The Punches".into(),
         album: "Livity Sound".into(),
         date: Some("2019".into()),
+        genre: None,
         on_existing: booth_cli::tag::OnExisting::Overwrite,
     }]);
     let mut runner = Runner::start(job, Arc::new(|| {}));
@@ -283,6 +284,7 @@ fn a_format_with_no_tag_block_reports_that_it_has_none() {
         title: "Y".into(),
         album: String::new(),
         date: None,
+        genre: None,
         on_existing: booth_cli::tag::OnExisting::Overwrite,
     }]);
     let mut runner = Runner::start(job, Arc::new(|| {}));
@@ -331,6 +333,7 @@ fn filling_in_blanks_does_not_overwrite_what_is_already_tagged() {
         title: "Roll With The Punches".into(),
         album: "Livity Sound".into(),
         date: None,
+        genre: None,
         on_existing: booth_cli::tag::OnExisting::Keep,
     }]);
     let mut runner = Runner::start(job, Arc::new(|| {}));

@@ -112,6 +112,14 @@ found out something true about it, and leaving that only in the collection means
 the file stays anonymous to every other program that opens it — while replacing
 an artist somebody typed by hand is exactly the thing worth being careful about.
 
+The genre the model hears goes through the same door. A file with no genre tag
+gets it written in, at the middle level and above; a file whose tag already says
+another genre is put to you in a sheet, like a fingerprint that disagrees with
+the file's own names, and the collection takes whichever side you choose — the
+file is only rewritten when you choose the model's. The one exception is a tag
+that says exactly what the model said last time: that is Booth's own earlier
+answer, and a new hearing replaces it without asking.
+
 The inspector's **Write these into the file** always overwrites, whatever the
 setting says: pressing it is somebody saying "these ones, now". FLAC, MP3, AIFF
 and M4A — a WAV has nowhere to put them, and says so rather than appearing to
@@ -348,7 +356,7 @@ inspector.
 
 ## What the columns mean
 
-Artist, Title, BPM, Key, Energy, Stems, Location. **Click a heading to sort by
+Artist, Title, BPM, Key, Energy, Genre, Stems, Location. **Click a heading to sort by
 it**; click again to reverse. Names start forwards, measurements start at the
 loud end, and the choice is remembered between runs.
 
@@ -943,6 +951,65 @@ separation that finishes and only then finds there is nothing to hand the stem t
 has wasted the expensive half of the work. Nothing else in Booth needs any of
 this — only the words do.
 
+### Installing the genre model
+
+Booth can say what kind of record each track is — **Goa Trance**, **Tech
+House**, **Hardstyle**: one of the 400 styles Discogs files records under — and
+put it in the collection's Genre column and the player's genre field. It takes
+a model to do it, and Booth does not ship the model or download it.
+
+The model is **Discogs-EffNet**, from the Music Technology Group at Universitat
+Pompeu Fabra: an EfficientNet trained on four million Discogs-tagged tracks
+(Alonso-Jiménez, Serra and Bogdanov, *Music Representation Learning Based on
+Editorial Metadata from Discogs*, ISMIR 2022), released under
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). Booth is
+free software, and it runs the model's ONNX export with a pure-Rust runtime, so
+there is nothing else to install. Fetch the file:
+
+```sh
+mkdir -p ~/.cache/booth/models
+curl -L -o ~/.cache/booth/models/discogs-effnet-bsdynamic-1.onnx \
+  https://essentia.upf.edu/models/music-style-classification/discogs-effnet/discogs-effnet-bsdynamic-1.onnx
+```
+
+It is 18 MB, and its SHA-256 as published is
+`a280825b334797cf677939db8cd5762c0392aedd0ca6415dbc1cd083f045e43c`. That
+location is looked in when nothing else names the file; otherwise point at it
+under **Genre** in Settings, or in `BOOTH_GENRE_MODEL`. Then tick **Hear the
+genre of each track analysed**, under the same heading. It is a switch, and it
+starts off: the genre is heard as part of every analysis, at about thirteen
+seconds a track on top, and a file that happens to be on the disk should not
+be the same thing as asking for that. Settings says, under the path, where the
+model would be read from, or that none was found.
+
+From then on every track analysed gets a genre: in the Genre column, with the
+model's confidence beside it in the inspector, and on the drive the next time
+it is synced. Tracks analysed before the switch was on are not re-read on their
+own — select them and **Analyse** again. The thirteen seconds are the pure-Rust
+runtime's price for nothing to install, and a track under two seconds long is
+too short for the model to hear at all. Switched off again, nothing is taken
+away: a track keeps the genre it was heard to have, and an analysis without
+the model does not erase it.
+
+A file's own genre tag counts too. It is read in when the track is added and
+shown as the file's — in the inspector without a number, since a tag is not a
+measurement — and it goes on the drive like any other. When the model then
+hears the track, what the tag says decides what happens, under the same
+**Tags** setting as the names: a blank is filled in; a tag that already agrees
+is left alone; a tag that says something else is put to you in a sheet, and the
+collection and the file follow your answer. A tag that says exactly what the
+model said on an earlier pass is Booth's own earlier answer, and is replaced
+without asking.
+
+What it says is the model's opinion, not a measurement. It learned how Discogs
+users file records, so it draws the distinctions that community draws
+constantly — but whether it draws them as you would is something to check on a
+crate you know before trusting the column, and a white label nobody has filed
+anywhere is heard as whatever it most resembles. The confidence is the model's
+activation for that style, 0 to 1, and not a share of anything: 0.3 is the
+model being fairly sure of a style it rarely hears, not a thirty per cent
+chance.
+
 ## Importing a rekordbox library
 
 rekordbox keeps its library in `master.db`, a SQLCipher-encrypted SQLite file.
@@ -1472,6 +1539,12 @@ drive played only on older hardware has a history nothing here can see.
   a cue in the wrong place. The inspector shows how many lines were heard, what
   it decided the hook was, and where the words came from, so a bad reading can
   be seen to be one — and the words can be corrected by hand from there.
+- Genre is a model's opinion, and an optional one: it is off until switched on
+  in Settings, needs the Discogs-EffNet file installed separately, costs about
+  thirteen seconds a track on top of the analysis, and files a record where
+  Discogs users would have, which is not always where you would. A genre the
+  file's own tag carries is read in and defended — a disagreement is asked
+  about rather than settled — but there is no way yet to type one in by hand.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with
   its confidence for that reason.

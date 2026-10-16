@@ -3,20 +3,21 @@
 # What this repository needs from the machine it is built on, fetched once
 # per container.
 #
-# Four tiers, and they are deliberately different about failure. The build
+# Five tiers, and they are deliberately different about failure. The build
 # dependencies are not optional: without ALSA's headers `alsa-sys` does not
 # compile and nothing in the workspace builds, so those are installed first
 # and loudly. rust-analyzer is for reading the code rather than building it,
-# so it is added quietly and nothing cares if it fails. The speech recogniser
-# is optional — only cueing a track from its words needs it, every test around
-# that runs off fixtures — so it is fetched best-effort and a session where the
-# download failed is a session that still works, minus one feature. The stem
-# separator is not fetched at all; see below.
+# so it is added quietly and nothing cares if it fails. The genre model and
+# the speech recogniser are optional — only saying what kind of record a track
+# is needs the one, only cueing a track from its words needs the other, and
+# every test around either runs off fixtures — so both are fetched best-effort
+# and a session where a download failed is a session that still works, minus
+# one feature. The stem separator is not fetched at all; see below.
 #
-# Nothing lands in the working tree. The recogniser and its weights go to a
-# cache directory, and where they went is written into the session's
-# environment, which is what `booth::config::Whisper` already reads when its
-# settings are empty.
+# Nothing lands in the working tree. The model, the recogniser and its weights
+# go to a cache directory, and where they went is written into the session's
+# environment, which is what `booth::config::Whisper` and `booth::config::Genre`
+# already read when their settings are empty.
 
 set -uo pipefail
 
@@ -83,6 +84,34 @@ elif rustup component add rust-analyzer >/dev/null 2>&1; then
   say "added rust-analyzer"
 else
   say "WARNING: could not add rust-analyzer — the whole-workspace check will be unavailable"
+fi
+
+# -- the genre model, for saying what kind of record a track is ------------
+
+# The Music Technology Group's Discogs-EffNet, as the ONNX file Booth reads
+# with its own runtime: 18 MB, one fetch, nothing to build. Checked against the
+# published digest — the same one `booth_cli::analysis::style::MODEL_SHA256`
+# carries — so that a truncated or substituted download is not mistaken for
+# the model. Before the recogniser, which a session can skip, because this is
+# seconds and that is minutes.
+GENRE_MODEL="$CACHE/models/discogs-effnet-bsdynamic-1.onnx"
+GENRE_SHA256="a280825b334797cf677939db8cd5762c0392aedd0ca6415dbc1cd083f045e43c"
+mkdir -p "$CACHE/models"
+
+if [ -s "$GENRE_MODEL" ]; then
+  say "genre model already here"
+else
+  say "fetching the genre model"
+  if curl -fsSL --retry 3 --retry-delay 2 \
+    -o "$GENRE_MODEL.part" \
+    "https://essentia.upf.edu/models/music-style-classification/discogs-effnet/discogs-effnet-bsdynamic-1.onnx" 2>/dev/null &&
+    echo "$GENRE_SHA256  $GENRE_MODEL.part" | sha256sum -c --quiet - >/dev/null 2>&1; then
+    mv "$GENRE_MODEL.part" "$GENRE_MODEL"
+    say "fetched the genre model ($(du -h "$GENRE_MODEL" | cut -f1))"
+  else
+    rm -f "$GENRE_MODEL.part"
+    say "WARNING: could not fetch the genre model — tracks will have no genre"
+  fi
 fi
 
 # -- the speech recogniser, for cueing a track from its words --------------
@@ -155,6 +184,9 @@ fi
 # `Whisper::program` and `Whisper::model` fall back to these when the settings
 # are empty, so nothing has to be typed into the window to try the feature.
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  # The genre model is found in the cache without this; it is exported so
+  # that `booth-cli genre` can be run bare, the same as the recogniser.
+  [ -s "$GENRE_MODEL" ] && echo "export BOOTH_GENRE_MODEL=\"$GENRE_MODEL\"" >>"$CLAUDE_ENV_FILE"
   [ -x "$WHISPER_BIN" ] && echo "export BOOTH_WHISPER_BIN=\"$WHISPER_BIN\"" >>"$CLAUDE_ENV_FILE"
   [ -s "$MODEL" ] && echo "export BOOTH_WHISPER_MODEL=\"$MODEL\"" >>"$CLAUDE_ENV_FILE"
   # A library is one language far more often than it is many, and a recogniser

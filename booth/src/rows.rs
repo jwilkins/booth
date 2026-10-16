@@ -19,18 +19,21 @@ pub enum Column {
     Bpm,
     Key,
     Energy,
+    /// What kind of record it is, as the genre model heard it.
+    Genre,
     Stems,
     /// Where the file is.
     Location,
 }
 
 impl Column {
-    pub const ALL: [Column; 7] = [
+    pub const ALL: [Column; 8] = [
         Column::Artist,
         Column::Title,
         Column::Bpm,
         Column::Key,
         Column::Energy,
+        Column::Genre,
         Column::Stems,
         Column::Location,
     ];
@@ -42,6 +45,7 @@ impl Column {
             Column::Bpm => "BPM",
             Column::Key => "Key",
             Column::Energy => "Energy",
+            Column::Genre => "Genre",
             Column::Stems => "Stems",
             Column::Location => "Location",
         }
@@ -63,6 +67,7 @@ impl Column {
             Column::Bpm => "Tempo, from the grid",
             Column::Key => "Camelot key",
             Column::Energy => "How hard it goes, as a rank",
+            Column::Genre => "What kind of record it is, as the genre model heard it",
             Column::Stems => "Whether a kit has been rendered",
             Column::Location => "The file it plays from",
         }
@@ -74,7 +79,9 @@ impl Column {
     /// The five narrow ones are as wide as their contents: a tempo is always
     /// six characters, a Camelot key two or three, and the energy column is
     /// wide enough for the letter-spaced word above the meter rather than for
-    /// the meter. The three that hold names are wide because names are.
+    /// the meter. The three that hold names are wide because names are, and
+    /// the genre sits between: Discogs's longest style names — "Progressive
+    /// Breaks", "Italo-Disco" — are eighteen characters.
     pub fn default_width(self) -> f32 {
         match self {
             Column::Artist => 230.0,
@@ -82,6 +89,7 @@ impl Column {
             Column::Bpm => 58.0,
             Column::Key => 42.0,
             Column::Energy => 64.0,
+            Column::Genre => 120.0,
             Column::Stems => 88.0,
             Column::Location => 230.0,
         }
@@ -704,6 +712,11 @@ pub fn row(
                     meter(&painter, rect, x, track.energy);
                 }
             }
+            Column::Genre => {
+                let genre =
+                    if track.genre.is_empty() { "—".to_string() } else { track.genre.clone() };
+                text(&painter, rect, x, width, &genre, ink, false);
+            }
             Column::Stems => {
                 if !track.stems.is_empty() || indented {
                     pill(
@@ -845,6 +858,7 @@ pub fn compare(a: &Track, b: &Track, sort: Sort) -> std::cmp::Ordering {
         Column::Bpm => !track.has_grid || track.bpm <= 0.0,
         Column::Key => track.key.is_empty(),
         Column::Energy => track.energy == 0,
+        Column::Genre => track.genre.is_empty(),
         Column::Stems => track.stems.is_empty(),
         Column::Location => track.path.as_os_str().is_empty(),
     };
@@ -864,6 +878,7 @@ pub fn compare(a: &Track, b: &Track, sort: Sort) -> std::cmp::Ordering {
         // the one thing it is read for.
         Column::Key => wheel(&a.key).cmp(&wheel(&b.key)),
         Column::Energy => a.energy.cmp(&b.energy),
+        Column::Genre => text_of(&a.genre).cmp(&text_of(&b.genre)),
         Column::Stems => a.stems.is_complete().cmp(&b.stems.is_complete()),
         Column::Location => a.path.cmp(&b.path),
     };
@@ -1107,15 +1122,23 @@ mod tests {
         let artist = before.of(Column::Artist).unwrap();
         assert!(before.total() < layout.columns.iter().map(|s| s.width).sum::<f32>());
 
+        // To a hundredth of a point rather than exactly: the pull is scaled
+        // into the stored width and back, and whether that round trip lands on
+        // the same float depends on what the columns happen to add up to.
+        // Eleven points back is the bug; a hundredth is a rounding.
+        let landed = |widths: &Widths, wanted: f32| {
+            let got = widths.of(Column::Artist).unwrap();
+            assert!((got - wanted).abs() < 0.01, "the drag did not land: {got} for {wanted}");
+        };
         assert!(layout.drag_edge(&before, 0, 30.0));
         let after = layout.widths(narrow);
-        assert_eq!(after.of(Column::Artist), Some(artist + 30.0), "the drag did not land");
+        landed(&after, artist + 30.0);
         assert!((after.total() - narrow).abs() < 0.01, "the row stopped filling the window");
 
         // And the one after it, from where the first left off, because a drag
         // is a stream of these rather than one.
         assert!(layout.drag_edge(&after, 0, 30.0));
-        assert_eq!(layout.widths(narrow).of(Column::Artist), Some(artist + 60.0));
+        landed(&layout.widths(narrow), artist + 60.0);
     }
 
     #[test]

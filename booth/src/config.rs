@@ -553,6 +553,10 @@ pub struct Config {
     /// stem and cueing the hook.
     #[serde(default)]
     pub whisper: Whisper,
+    /// Whether to say what kind of record each track is, and where the model
+    /// that says it lives.
+    #[serde(default)]
+    pub genre: Genre,
 }
 
 /// What to run when nothing says otherwise: whisper.cpp's own binary name, as
@@ -655,6 +659,41 @@ impl Whisper {
             )),
             false => Ok(()),
         }
+    }
+}
+
+/// Whether to say what kind of record each track is, and with what.
+///
+/// A switch, and one that starts off. Booth does not ship the model and will
+/// not download it — it is the Music Technology Group's, under a licence that
+/// is theirs to grant and not this program's to assume — and even with the
+/// file to hand, hearing a track costs about thirteen seconds on top of its
+/// analysis. [`Whisper`] gets by without a switch because the words are asked
+/// for by a button and cost nothing until then; the genre is heard as part of
+/// every analysis, so a file that happens to be in the cache — this
+/// repository's own hook puts one there — must not be the same thing as
+/// wanting it. The README says where to get the model and what it is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Genre {
+    /// Hear the genre of each track analysed. Off, the model is not looked
+    /// for, and a track keeps whatever genre it already has.
+    pub enabled: bool,
+    /// The ONNX file. Empty means fall back to `BOOTH_GENRE_MODEL`, and then
+    /// to `~/.cache/booth/models/discogs-effnet-bsdynamic-1.onnx` if it is
+    /// there, which is where the repository's own hook puts it.
+    pub model: String,
+}
+
+impl Genre {
+    /// Where the model is, whether or not it is wanted: the setting first,
+    /// then the environment, then the cache — see
+    /// [`booth_cli::analysis::style::locate`]. Whether to load it is
+    /// [`Self::enabled`], which the analysis asks first; this is kept apart
+    /// so that Settings can show where a model would be read from before the
+    /// switch is thrown.
+    pub fn model(&self) -> Option<PathBuf> {
+        booth_cli::analysis::style::locate(Some(Path::new(self.model.trim())))
     }
 }
 
@@ -791,6 +830,7 @@ impl Default for Config {
             keep_drives: true,
             from_other_drives: OnForeign::default(),
             whisper: Whisper::default(),
+            genre: Genre::default(),
         }
     }
 }
@@ -1447,5 +1487,47 @@ mod whisper_settings {
         // And a setting still beats a default, which is the half of this that
         // would go unnoticed if the default were the only thing asserted.
         assert_eq!(Whisper::program_from(" whisper ", None), "whisper");
+    }
+}
+
+#[cfg(test)]
+mod genre_settings {
+    use super::*;
+
+    #[test]
+    fn the_genre_is_off_until_it_is_switched_on() {
+        // The default, and what a settings file from before there was a switch
+        // reads as: naming the model was never the same as asking for it, and
+        // a file written by the hook into the cache even less so.
+        assert!(!Genre::default().enabled);
+        let old: Genre = serde_json::from_str(r#"{"model":"/models/discogs.onnx"}"#).unwrap();
+        assert!(!old.enabled);
+        assert_eq!(old.model, "/models/discogs.onnx");
+    }
+
+    #[test]
+    fn the_switch_survives_a_round_trip() {
+        let on = Genre { enabled: true, model: String::new() };
+        let text = serde_json::to_string(&on).unwrap();
+        assert_eq!(serde_json::from_str::<Genre>(&text).unwrap(), on);
+    }
+
+    #[test]
+    fn where_the_model_is_does_not_depend_on_the_switch() {
+        // Settings shows where a model would be read from before it is wanted,
+        // so the lookup cannot be the thing that honours the switch. A named
+        // file is reported whether or not it exists, for the reason
+        // `style::locate` gives: a setting pointing at nothing should fail
+        // loudly when it is loaded, not be skipped in silence.
+        let named = "/nowhere/discogs-effnet-bsdynamic-1.onnx";
+        let off = Genre { enabled: false, model: named.into() };
+        let on = Genre { enabled: true, model: named.into() };
+        assert_eq!(off.model(), Some(PathBuf::from(named)));
+        assert_eq!(on.model(), Some(PathBuf::from(named)));
+        assert_eq!(Genre { enabled: true, model: "  ".into() }.model(), {
+            // Whatever the environment and the cache say, which is not this
+            // test's to assert — only that the switch did not change it.
+            Genre { enabled: false, model: String::new() }.model()
+        });
     }
 }

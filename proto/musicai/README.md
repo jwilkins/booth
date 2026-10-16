@@ -104,6 +104,47 @@ album/02 - the quiet one.flac                4:12 -18.3 LUFS   9.1 LU   -2.1 dBT
 
 `--json` emits one object per line for scripting.
 
+## Genre
+
+Say what kind of record each file is:
+
+```sh
+booth-cli genre ~/Music/crate
+```
+
+```
+crate/01 - opener.flac                     Goa Trance (0.61), Psy-Trance (0.22), Progressive Trance (0.09)
+crate/02 - after hours.mp3                 Tech House (0.48), Minimal (0.31), Techno (0.14)
+```
+
+One of the 400 styles Discogs files records under, surest first, with the model's activation for
+each — not a share of anything, since a track can score high on two and most score low on all.
+`--top` says how many to print and `--json` emits one object per line.
+
+`--tag` writes the surest style into each file's genre tag, through the same door as `tag`: a
+file with no genre gets it filled in, one that already says another genre is kept and the line
+says so, and `--on-existing overwrite` replaces it. A WAV has nowhere to put one and is left
+alone. The window asks before replacing a tag; from here there is nobody to ask, so keeping is
+the default.
+
+The model is **Discogs-EffNet** from the Music Technology Group at Universitat Pompeu Fabra, from
+Alonso-Jiménez, Serra and Bogdanov, *Music Representation Learning Based on Editorial Metadata from
+Discogs* (ISMIR 2022), released under
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). It is not shipped and not
+downloaded. Fetch `discogs-effnet-bsdynamic-1.onnx` from
+<https://essentia.upf.edu/models/music-style-classification/discogs-effnet/> — 18 MB, SHA-256
+`a280825b334797cf677939db8cd5762c0392aedd0ca6415dbc1cd083f045e43c` — and pass it with `--model`,
+set `BOOTH_GENRE_MODEL`, or put it in `~/.cache/booth/models/`.
+
+It is run with a pure-Rust ONNX runtime, so there is no Python and no TensorFlow to install. The
+spectrogram the model reads was checked stage by stage against Essentia's own front end, and the
+activations agree with Essentia's TensorFlow graph to within 0.0001 on the reference signal the
+tests carry, and on a real record handed over as Essentia's own 16 kHz mono. From the MP3, with
+this program's decoder and resampler in the path, the same record came out within 0.061 on every
+style — the size of the difference between Essentia's own resampling qualities. The price is
+speed: about 45 ms a patch, and a five-minute track is 290 patches, so some thirteen seconds a
+track. A track under two seconds is too short for one patch and gets nothing.
+
 ## Normalize
 
 Two modes, chosen with `--mode`.

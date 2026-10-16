@@ -649,6 +649,18 @@ pub struct Track {
     /// threshold or nowhere near one.
     #[serde(default)]
     pub intensity: f32,
+    /// What kind of record it is: one of Discogs's 400 styles — `Goa Trance`,
+    /// `Tech House` — which is what a player's genre field shows. The file's
+    /// own genre tag, where it has one, until a model has listened; a heard
+    /// genre fills a blank, and is asked about over a tag that says something
+    /// else, the way a fingerprint is asked about over a tagged name.
+    #[serde(default)]
+    pub genre: String,
+    /// The model's activation for that style, 0 to 1, so that a guess can be
+    /// told from a certainty. Not a share: the 400 do not sum to one. Zero
+    /// means the genre came from the file's tag rather than from listening.
+    #[serde(default)]
+    pub genre_confidence: f32,
     pub beats: usize,
     /// Every beat, for a track whose grid bends.
     ///
@@ -868,6 +880,8 @@ impl Track {
             key_confidence: 0.0,
             energy: 0,
             intensity: 0.0,
+            genre: String::new(),
+            genre_confidence: 0.0,
             beats: 0,
             beat_ms: Vec::new(),
             downbeat_ms: None,
@@ -1855,6 +1869,8 @@ impl Library {
             kept.key_confidence = copy.key_confidence;
             kept.energy = copy.energy;
             kept.intensity = copy.intensity;
+            kept.genre = copy.genre.clone();
+            kept.genre_confidence = copy.genre_confidence;
             kept.beats = copy.beats;
             kept.phrases = copy.phrases.clone();
             kept.loudness_lufs = copy.loudness_lufs;

@@ -24,6 +24,7 @@ fn run() -> Result<()> {
     let reporter = booth_cli::report::Stdio::new(cli.verbose);
     match &cli.command {
         Some(Command::Analyze(args)) => commands::analyze(args, &reporter),
+        Some(Command::Genre(args)) => commands::genre(args, &reporter),
         Some(Command::Anlz(args)) => commands::anlz(args, &reporter),
         Some(Command::Export(args)) => commands::export(args, &reporter).map(|_| ()),
         Some(Command::Normalize(args)) => commands::normalize(args, &reporter),

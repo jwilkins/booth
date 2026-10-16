@@ -307,6 +307,13 @@ pub struct Prep {
     /// The exporter does not make one of its own: what belongs here is what
     /// the collection knows and the audio does not.
     pub comment: String,
+    /// What kind of record it is, as the player's genre field should show it:
+    /// `Goa Trance`, `Tech House`. Empty means write nothing.
+    ///
+    /// The collection's answer rather than the exporter's for the same reason
+    /// as the key: the exporter can only measure what it is handed, and the
+    /// collection has had the whole track and perhaps a person's correction.
+    pub genre: String,
 }
 
 impl Prep {
@@ -318,6 +325,7 @@ impl Prep {
             && self.key.is_empty()
             && self.beat_ms.is_empty()
             && self.comment.is_empty()
+            && self.genre.is_empty()
     }
 }
 
