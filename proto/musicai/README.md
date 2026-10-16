@@ -585,6 +585,52 @@ everything written is parsed back by
 read with [mtools](https://www.gnu.org/software/mtools/), so the filesystem is one that
 something other than us agrees is a filesystem.
 
+### Trying it on an older player
+
+The players a drive most needs to work on are the ones it is least likely to be checked
+against: a CDJ-2000NXS2 in a booth reads the `.EXT` colour waveform the CDJ-3000 ignores,
+stops at 48 kHz, and has no idea what a `.2EX` file is.
+[cdj-nxs2-qemu](https://github.com/Stijn-Jacobs/cdj-nxs2-qemu) boots that player's own
+firmware under QEMU, with board models of its three processors, and seven older players
+experimentally — the CDJ-2000NXS, CDJ-900NXS, CDJ-2000, CDJ-900, XDJ-1000, XDJ-1000MK2 and
+XDJ-700, which between them are both older rows of [`compat::Player`](src/compat.rs). Unlike
+cdj3k-emu it runs on Linux, macOS and Windows, and headless.
+
+Its stick is a disk image attached as USB mass storage, copy-on-write, so an image written
+here goes straight in and comes back untouched even though the firmware rewrites
+`export.pdb` on a stick it has used:
+
+```sh
+booth-cli export ~/Music/set -r --image ~/rekordbox.img
+cd ~/cdj-nxs2 && MEDIA_MODE=img MEDIA_IMG_SRC=~/rekordbox.img ./start.sh
+```
+
+A plain export folder goes in through QEMU's virtual FAT instead, with
+`MEDIA_MODE=ro MEDIADIR=~/stick`. Press `U` for the stick, browse, load, play.
+
+The same thing as a test is `tests/player_firmware.rs`: it writes a drive of synthetic
+tracks, boots one headless CDJ-2000NXS2 on it with the emulator's own run chain, lets the
+rig load the first track, and reads back what the rig leaves — the driver's `VERDICT
+LOADED`, the playhead scorer's `MOTION`, the firmware's own log line for the `.EXT` waveform
+it read, and its error count. A second test hands it a 96 kHz FLAC exported for a CDJ-3000
+and expects the refusal the compatibility table promises, which until then is a claim read
+off a specification sheet. Both are `#[ignore]`d and need the checkout:
+
+```sh
+BOOTH_CDJ_EMU=~/cdj-nxs2 cargo test --release --test player_firmware -- --ignored --test-threads=1
+```
+
+Things to know before setting time aside. The emulator is built from source — QEMU and a DSP
+module, roughly 30 to 80 minutes and 3 GB on a multi-core machine — and needs the player's
+firmware update file (`C2KNXS2.UPD` 1.87), which is yours to download from the manufacturer
+and never goes in a repository, so none of this runs in CI. Its own stick images are FAT16
+and the one written here is FAT32; real players read both, and the emulated USB stack should,
+but that is the first thing a run measures. The older players have few keys mapped, so a
+browse of the whole tree is an NXS2 matter for now; the rest load the first track and play.
+And the rig attaches the stick at start over QEMU's human monitor, not the machine protocol
+the CDJ-3000 emulator listens on, so **Send to the emulator** does not reach it; the image
+goes in at start as above.
+
 ## What it hears
 
 Analysis is signal processing rather than a model: it runs offline in a couple of seconds

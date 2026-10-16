@@ -1161,7 +1161,10 @@ over QEMU's machine protocol, on the port in Settings (4445, one port per
 emulator instance). Nothing listening means the image is shown in a file manager
 instead, and the log says which happened. Whether the firmware then mounts it is
 the part this cannot promise: the emulator's own attach also nudges its guest,
-and only the medium change is reachable from outside.
+and only the medium change is reachable from outside. That emulator is a
+CDJ-3000; for the nexus 2 line and older there is a second one, which takes the
+same image at start rather than over a socket — see *Trying it on an older
+player* in the library README.
 
 The delta in the dock is the difference between the drive's playlist and what
 was last written to it, so a moved cue shows as *changed* rather than as a
