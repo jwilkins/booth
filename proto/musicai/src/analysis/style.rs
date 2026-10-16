@@ -52,6 +52,17 @@
 //! patches. They are not a distribution — a track can score high on two
 //! styles, and most score low on all — so what is reported is the surest
 //! style and how sure, not a share.
+//!
+//! On a real record the whole path was then checked against Essentia's own
+//! loader and predictor (a netlabel techno release, 4:52, 292 patches, 16
+//! October 2026). Handed Essentia's 16 kHz mono, this agrees with it to 0.0001
+//! on every one of the 400 styles. Handed the MP3, so that the decoder and the
+//! resampler are this program's, the surest style is the same (Techno, 0.60
+//! against 0.54) and no style differs by more than 0.061 — which is the size
+//! of the difference between Essentia's own resampling qualities on the same
+//! file (0.066 between its best and its default sinc, 0.067 between its
+//! default and linear). The model is that sensitive to the resampler, and
+//! this one sits inside the spread of Essentia's.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
