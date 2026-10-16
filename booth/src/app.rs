@@ -10228,13 +10228,31 @@ impl App {
                          progressive, tech house rather than hard house — takes a model \
                          trained on Discogs, and Booth does not ship it or download it: \
                          it is the Music Technology Group's, under CC BY-NC-SA 4.0. Fetch \
-                         discogs-effnet-bsdynamic-1.onnx from their Essentia models page \
-                         and point at it here; it is heard the next time tracks are \
-                         analysed. Everything else works without it.",
+                         discogs-effnet-bsdynamic-1.onnx from their Essentia models page, \
+                         point at it here and switch it on; it is heard the next time \
+                         tracks are analysed, at about thirteen seconds a track on top. \
+                         Everything else works without it.",
                         )
                         .color(theme::dim())
                         .size(theme::SMALL),
                     );
+                    // A switch rather than the presence of a file, because the
+                    // genre is heard as part of every analysis and thirteen
+                    // seconds a track is not a cost to incur by accident: this
+                    // repository's own hook leaves the model in the cache.
+                    if ui
+                        .checkbox(
+                            &mut self.config.genre.enabled,
+                            "Hear the genre of each track analysed",
+                        )
+                        .on_hover_text(
+                            "Off, the model is not looked for, and a track keeps whatever \
+                             genre it already has.",
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
                     let mut genre_model = self.config.genre.model.clone();
                     if ui
                         .add(
@@ -10251,6 +10269,44 @@ impl App {
                     {
                         self.config.genre.model = genre_model.trim().to_string();
                         changed = true;
+                    }
+                    // Where the model would be read from, said here rather than
+                    // discovered a job later: the switch and the path are two
+                    // settings, and the one answer anyone wants from them is
+                    // whether the pair will work.
+                    let wanted = self.config.genre.enabled;
+                    let trouble = if wanted { theme::amber() } else { theme::dim() };
+                    match self.config.genre.model() {
+                        Some(path) if path.is_file() => {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new(if wanted { "Reads" } else { "Would read" })
+                                        .color(theme::dim())
+                                        .size(theme::SMALL),
+                                );
+                                path_label(ui, &path, theme::dim());
+                            });
+                        }
+                        Some(path) => {
+                            ui.horizontal_wrapped(|ui| {
+                                path_label(ui, &path, trouble);
+                                ui.label(
+                                    RichText::new("is not there")
+                                        .color(trouble)
+                                        .size(theme::SMALL),
+                                );
+                            });
+                        }
+                        None => {
+                            ui.label(
+                                RichText::new(
+                                    "No model found: nothing here, in BOOTH_GENRE_MODEL, or in \
+                                     ~/.cache/booth/models/.",
+                                )
+                                .color(trouble)
+                                .size(theme::SMALL),
+                            );
+                        }
                     }
 
                     ui.add_space(14.0);

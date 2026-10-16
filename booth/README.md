@@ -967,15 +967,21 @@ curl -L -o ~/.cache/booth/models/discogs-effnet-bsdynamic-1.onnx \
 It is 18 MB, and its SHA-256 as published is
 `a280825b334797cf677939db8cd5762c0392aedd0ca6415dbc1cd083f045e43c`. That
 location is looked in when nothing else names the file; otherwise point at it
-under **Genre** in Settings, or in `BOOTH_GENRE_MODEL`.
+under **Genre** in Settings, or in `BOOTH_GENRE_MODEL`. Then tick **Hear the
+genre of each track analysed**, under the same heading. It is a switch, and it
+starts off: the genre is heard as part of every analysis, at about thirteen
+seconds a track on top, and a file that happens to be on the disk should not
+be the same thing as asking for that. Settings says, under the path, where the
+model would be read from, or that none was found.
 
 From then on every track analysed gets a genre: in the Genre column, with the
 model's confidence beside it in the inspector, and on the drive the next time
-it is synced. Tracks analysed before the model was there are not re-read on
-their own — select them and **Analyse** again. It costs about thirteen seconds
-a track on top of the analysis, which is the pure-Rust runtime's price for
-nothing to install, and a track under two seconds long is too short for the
-model to hear at all.
+it is synced. Tracks analysed before the switch was on are not re-read on their
+own — select them and **Analyse** again. The thirteen seconds are the pure-Rust
+runtime's price for nothing to install, and a track under two seconds long is
+too short for the model to hear at all. Switched off again, nothing is taken
+away: a track keeps the genre it was heard to have, and an analysis without
+the model does not erase it.
 
 What it says is the model's opinion, not a measurement. It learned how Discogs
 users file records, so it draws the distinctions that community draws
@@ -1515,11 +1521,12 @@ drive played only on older hardware has a history nothing here can see.
   a cue in the wrong place. The inspector shows how many lines were heard, what
   it decided the hook was, and where the words came from, so a bad reading can
   be seen to be one — and the words can be corrected by hand from there.
-- Genre is a model's opinion, and an optional one: it needs the Discogs-EffNet
-  file installed separately, costs about thirteen seconds a track on top of the
-  analysis, and files a record where Discogs users would have, which is not
-  always where you would. Nothing checks it against a genre the file's own tag
-  carries, and there is no way yet to correct it by hand.
+- Genre is a model's opinion, and an optional one: it is off until switched on
+  in Settings, needs the Discogs-EffNet file installed separately, costs about
+  thirteen seconds a track on top of the analysis, and files a record where
+  Discogs users would have, which is not always where you would. Nothing checks
+  it against a genre the file's own tag carries, and there is no way yet to
+  correct it by hand.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with
   its confidence for that reason.

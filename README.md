@@ -32,8 +32,8 @@ with a free key.
 - **Says what kind of record it is.** One of the 400 styles Discogs files records under — Goa
   trance rather than progressive, tech house rather than hard house — heard by the Music Technology
   Group's Discogs-EffNet model, run locally in pure Rust. The model is theirs and optional: point
-  Booth at the file and every track analysed from then on carries a genre, in the collection and on
-  the drive.
+  Booth at the file, switch it on, and every track analysed from then on carries a genre, in the
+  collection and on the drive.
 - **Levels them.** EBU R128 loudness normalisation, by re-encoding or by ReplayGain tags with the
   audio left untouched.
 - **Names them.** Acoustic fingerprinting through AcoustID and MusicBrainz, and — for the white

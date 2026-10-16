@@ -1283,17 +1283,41 @@ fn hash_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<()>
     Ok(())
 }
 
-/// The genre model, where there is one to load.
+/// The genre model, where it is wanted and there is one to load.
 ///
-/// Having none is not a failure — the model is optional, and a collection
-/// without it gets every other measurement — so that case is silent. A model
-/// that is named and will not load is said once, as a note on the job, rather
-/// than once per track or not at all.
+/// Switched off is not a failure — the genre is optional, and a collection
+/// without it gets every other measurement — so that case is silent, and the
+/// model is not even looked for. Switched on and coming to nothing is said
+/// once, as a note on the job rather than once per track or not at all: a
+/// switch that is on and does nothing is the kind of quiet that gets a
+/// feature reported broken.
 fn genre_classifier(
     genre: &config::Genre,
     reporter: &Channel,
 ) -> Option<booth_cli::analysis::style::Classifier> {
-    let path = genre.model()?;
+    if !genre.enabled {
+        return None;
+    }
+    load_genre_model(genre.model(), reporter)
+}
+
+/// Load the model the switch asked for, from wherever it was found — or say
+/// why there is none this time. Apart from the switch and the lookup so that
+/// both ways of coming to nothing can be tested without a model on the
+/// machine, or the environment's say in where one would be.
+fn load_genre_model(
+    path: Option<PathBuf>,
+    reporter: &Channel,
+) -> Option<booth_cli::analysis::style::Classifier> {
+    let Some(path) = path else {
+        crate::warn!("genre is on, but there is no model to hear it with");
+        let _ = reporter.tx.send(Update::Line(
+            "Genre is on, but no model was found, so these tracks have no genre: fetch \
+             discogs-effnet-bsdynamic-1.onnx and point at it under Genre in Settings."
+                .to_string(),
+        ));
+        return None;
+    };
     let started = std::time::Instant::now();
     match booth_cli::analysis::style::Classifier::load(&path) {
         Ok(classifier) => {
@@ -2354,16 +2378,76 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A genre setting that names a file that is not there.
+    /// A genre setting that is switched on and names a file that is not there.
     ///
-    /// Not the default: with the setting empty, the environment and then the
-    /// cache are looked in, and a developer's machine has the model in the
-    /// cache — this repository's own hook puts it there — where CI does not.
-    /// A test that ran the network here and not there would be timed by the
-    /// machine it was on; one that names a missing file is the same
-    /// everywhere, and exercises the one note the job makes about it.
+    /// Not the default, and not merely switched on: with the setting empty,
+    /// the environment and then the cache are looked in, and a developer's
+    /// machine has the model in the cache — this repository's own hook puts
+    /// it there — where CI does not. A test that ran the network here and not
+    /// there would be timed by the machine it was on; one that names a
+    /// missing file is the same everywhere, and exercises the note the job
+    /// makes about a model it cannot load.
     fn no_genre_model() -> config::Genre {
-        config::Genre { model: "/nowhere/no-such-model.onnx".into() }
+        config::Genre { enabled: true, model: "/nowhere/no-such-model.onnx".into() }
+    }
+
+    /// The updates that are the job talking about the genre, as opposed to
+    /// reporting a track.
+    fn genre_notes(updates: &[Update]) -> Vec<String> {
+        updates
+            .iter()
+            .filter_map(|u| match u {
+                Update::Line(text) if text.to_lowercase().contains("genre") => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_genre_that_is_switched_off_is_not_looked_for() {
+        // The same missing file as `no_genre_model`, with the switch off: the
+        // note it would earn is not made, because the model was never asked
+        // after. Off has to mean off, not "on, and quietly failing".
+        let dir = scratch("analyze-genre-off");
+        let a = dir.join("a.wav");
+        write_beats(&a, 128.0, 4);
+
+        let mut runner = Runner::start(
+            Job::Analyze {
+                tracks: vec![(1, a)],
+                genre: config::Genre { enabled: false, ..no_genre_model() },
+            },
+            Arc::new(|| {}),
+        );
+        runner.join();
+
+        let updates = runner.drain();
+        let notes = genre_notes(&updates);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(updates.iter().any(|u| matches!(u, Update::Analyzed(a) if a.id == 1)));
+        assert!(matches!(updates.last(), Some(Update::Done(Ok(())))));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_genre_switched_on_with_nothing_to_hear_it_with_says_so_once() {
+        // Both ways of coming to nothing: no model anywhere, and a model that
+        // is named and will not load. Each is one note on the job, and neither
+        // is a classifier.
+        let (tx, rx) = channel();
+        let reporter =
+            Channel { tx, cancel: Arc::new(AtomicBool::new(false)), wake: Arc::new(|| {}) };
+
+        assert!(load_genre_model(None, &reporter).is_none());
+        assert!(load_genre_model(Some("/nowhere/no-such-model.onnx".into()), &reporter).is_none());
+        drop(reporter);
+
+        let notes = genre_notes(&rx.iter().collect::<Vec<_>>());
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].contains("no model was found"), "{}", notes[0]);
+        assert!(notes[0].contains("Settings"), "{}", notes[0]);
+        assert!(notes[1].contains("could not be loaded"), "{}", notes[1]);
     }
 
     #[test]
