@@ -284,6 +284,8 @@ pub struct App {
     asking: Vec<u32>,
     /// Fingerprint matches that need a person to decide.
     questions: Vec<crate::identify::Question>,
+    /// Tracks whose file says one genre while the model heard another.
+    genre_questions: Vec<crate::identify::GenreQuestion>,
     /// The track whose fields are being edited, and the text as typed. Kept
     /// apart from the collection so that a half-typed name is not a name.
     editing: Option<Edit>,
@@ -601,6 +603,11 @@ enum Pending {
     /// The list needs rebuilding in a new order.
     Resort,
     WriteTags(u32),
+    /// An answer to a genre question: the file's word or the model's.
+    AnswerGenre {
+        id: u32,
+        answer: crate::identify::GenreAnswer,
+    },
     /// Take words a lyrics server offered, after somebody looked at them.
     TakeFoundWords(u32, Box<booth_cli::tag::lyrics::Found>),
     /// Ask a lyrics server about a track, and do nothing else.
@@ -909,6 +916,7 @@ impl App {
             settings: false,
             asking: Vec::new(),
             questions: Vec::new(),
+            genre_questions: Vec::new(),
             editing: None,
             pick: None,
             focus_bar: false,
@@ -2959,6 +2967,10 @@ impl App {
                         analyzed.cues.len(),
                         if analyzed.genre.is_empty() { "none" } else { &analyzed.genre }
                     );
+                    // Whether the genre heard goes into the file, and under
+                    // what policy; decided in the fold, written after it,
+                    // once the record is no longer borrowed.
+                    let mut genre_write: Option<booth_cli::tag::OnExisting> = None;
                     if let Some(track) = self.library.get_mut(analyzed.id) {
                         track.bpm = analyzed.bpm;
                         track.grid_confidence = analyzed.grid_confidence;
@@ -2972,10 +2984,43 @@ impl App {
                         // Only where the model heard something. An analysis
                         // run with no model is not a finding that the track
                         // has no genre, and should not take away one heard
-                        // when there was.
+                        // when there was. What the file's own tag says decides
+                        // whether the heard genre goes straight in or is put
+                        // to the user first: a tag is somebody's answer, the
+                        // same as a tagged name is.
                         if !analyzed.genre.is_empty() {
-                            track.genre = analyzed.genre.clone();
-                            track.genre_confidence = analyzed.genre_confidence;
+                            use crate::identify::GenreDecision;
+                            let decision = crate::identify::decide_genre(
+                                track,
+                                &analyzed.tagged_genre,
+                                &analyzed.genre,
+                            );
+                            if decision != GenreDecision::Ask {
+                                track.genre = analyzed.genre.clone();
+                                track.genre_confidence = analyzed.genre_confidence;
+                            }
+                            let policy = self.config.write_tags.on_existing();
+                            match decision {
+                                GenreDecision::Take => genre_write = policy,
+                                // Over this program's own earlier answer. The
+                                // setting's "only where blank" protects other
+                                // people's answers, and this one was ours.
+                                GenreDecision::Replace => {
+                                    genre_write =
+                                        policy.map(|_| booth_cli::tag::OnExisting::Overwrite)
+                                }
+                                GenreDecision::Agrees => {}
+                                GenreDecision::Ask => {
+                                    if !self.genre_questions.iter().any(|q| q.id == analyzed.id) {
+                                        self.genre_questions.push(crate::identify::GenreQuestion {
+                                            id: analyzed.id,
+                                            file_says: analyzed.tagged_genre.clone(),
+                                            heard: analyzed.genre.clone(),
+                                            confidence: analyzed.genre_confidence,
+                                        });
+                                    }
+                                }
+                            }
                         }
                         track.phrases = analyzed.phrases.clone();
                         track.cues = analyzed.cues.clone();
@@ -2986,6 +3031,9 @@ impl App {
                         track.channels = analyzed.channels;
                         track.bitrate_kbps = bitrate(track.bytes, analyzed.duration_secs);
                         track.analyzed = true;
+                    }
+                    if let Some(on_existing) = genre_write {
+                        self.write_genre(analyzed.id, on_existing);
                     }
                     // An analysis replaces the grid, the cues and the phrases,
                     // which is exactly what a player can also change.
@@ -3961,6 +4009,7 @@ impl eframe::App for App {
             self.words_sheet(ctx);
         }
         self.questions_sheet(ctx);
+        self.genre_questions_sheet(ctx);
         self.naming_sheet(ctx);
         if self.help {
             self.help_sheet(ctx);
@@ -5701,14 +5750,17 @@ impl App {
             );
             // The style and the model's activation for it, which is not a
             // share of anything: 0.3 is the model being fairly sure of a
-            // style it rarely hears, not a thirty per cent chance.
+            // style it rarely hears, not a thirty per cent chance. A genre
+            // with no number came out of the file's own tag.
             measurement(
                 ui,
                 "genre",
                 &if track.genre.is_empty() {
                     "none".to_string()
-                } else {
+                } else if track.genre_confidence > 0.0 {
                     format!("{} {:.2}", track.genre, track.genre_confidence)
+                } else {
+                    format!("{} (the file's tag)", track.genre)
                 },
                 !track.genre.is_empty(),
             );
@@ -7255,6 +7307,43 @@ impl App {
                 Pending::WriteTags(id) => {
                     self.write_tags(id, booth_cli::tag::OnExisting::Overwrite)
                 }
+                Pending::AnswerGenre { id, answer } => {
+                    if let Some(at) = self.genre_questions.iter().position(|q| q.id == id) {
+                        let question = self.genre_questions.remove(at);
+                        match answer {
+                            crate::identify::GenreAnswer::Heard => {
+                                crate::info!(
+                                    "#{id} took the genre heard, {} ({:.2}), over the file's {}",
+                                    question.heard,
+                                    question.confidence,
+                                    question.file_says
+                                );
+                                if let Some(track) = self.library.get_mut(id) {
+                                    track.genre = question.heard.clone();
+                                    track.genre_confidence = question.confidence;
+                                }
+                                // Confirmed, so the file's own value is the one
+                                // being replaced, on purpose; the setting still
+                                // decides whether the file is written at all.
+                                if self.config.write_tags != crate::config::WriteTags::Never {
+                                    self.write_genre(id, booth_cli::tag::OnExisting::Overwrite);
+                                }
+                            }
+                            crate::identify::GenreAnswer::File => {
+                                crate::info!(
+                                    "#{id} kept the file's genre, {}, over {}",
+                                    question.file_says,
+                                    question.heard
+                                );
+                                if let Some(track) = self.library.get_mut(id) {
+                                    track.genre = question.file_says.clone();
+                                    track.genre_confidence = 0.0;
+                                }
+                            }
+                        }
+                        touched = true;
+                    }
+                }
                 Pending::EditPhrase { id, edit } => {
                     touched |= self.edit_phrase(id, edit);
                 }
@@ -7806,7 +7895,9 @@ impl App {
         // Collected rather than started: identifying a crate produces a match
         // per track, and one job per file would be forty "started tagging,
         // finished tagging" lines for what is one errand.
-        self.to_retag.retain(|waiting| waiting.id != track.id);
+        // The names only: a genre an analysis queued for the same file is a
+        // different errand with its own policy, and stays in the queue.
+        self.to_retag.retain(|waiting| waiting.id != track.id || waiting.is_genre_only());
         self.unlike.retain(|waiting| waiting.id != track.id);
         let write = Retag {
             id: track.id,
@@ -7815,6 +7906,7 @@ impl App {
             title: track.title.clone(),
             album: track.album.clone(),
             date: track.year.map(|year| year.to_string()),
+            genre: None,
             on_existing,
         };
 
@@ -7834,6 +7926,43 @@ impl App {
             write.title
         );
         self.unlike.push(write);
+    }
+
+    /// Queue the genre a track now has for its file's tag block.
+    ///
+    /// Apart from [`Self::write_tags`] because that one guards names with the
+    /// file name — a file whose name says nothing about the artist about to go
+    /// into it is the shape of a wrong fingerprint — and a genre has no such
+    /// witness. Nothing is said about a file with nowhere to put one: this
+    /// runs behind every analysis, and a WAV is not news.
+    fn write_genre(&mut self, id: u32, on_existing: booth_cli::tag::OnExisting) {
+        let Some(track) = self.library.get(id) else { return };
+        let genre = track.genre.trim();
+        if genre.is_empty() {
+            return;
+        }
+        match booth_cli::tag::tag_kind(&track.path) {
+            Some(booth_cli::tag::TagKind::None) | None => {
+                crate::debug!("#{id}: a .{} has nowhere to keep a genre", track.format);
+                return;
+            }
+            Some(_) => {}
+        }
+        crate::debug!(
+            "queueing the genre {genre} for {} ({on_existing:?})",
+            track.path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        self.to_retag.retain(|waiting| !(waiting.id == id && waiting.is_genre_only()));
+        self.to_retag.push(Retag {
+            id,
+            path: track.path.clone(),
+            artist: String::new(),
+            title: String::new(),
+            album: String::new(),
+            date: None,
+            genre: Some(genre.to_string()),
+            on_existing,
+        });
     }
 
     /// Start the tagging that has piled up, if any has.
@@ -8419,6 +8548,149 @@ impl App {
 
         if !open {
             self.questions.clear();
+        }
+    }
+
+    /// Tracks whose file says one genre while the model heard another.
+    ///
+    /// The same shape as the match questions, for the same reason: a tag is
+    /// somebody's answer, so a disagreement with it is put to a person rather
+    /// than settled by rule, however sure the model is.
+    fn genre_questions_sheet(&mut self, ctx: &egui::Context) {
+        let questions = self.genre_questions.clone();
+        if questions.is_empty() {
+            return;
+        }
+        let writes = self.config.write_tags != crate::config::WriteTags::Never;
+        let mut open = true;
+
+        egui::Window::new(format!("{} to check", plural(questions.len(), "genre")))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(640.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "The file's own genre tag says one thing and the model heard another. \
+                         A tag is somebody's answer, so it is not replaced without asking. The \
+                         number is the model's activation for what it heard: 0.3 is it being \
+                         fairly sure of a style it rarely hears, not a thirty per cent chance.",
+                    )
+                    .color(theme::dim())
+                    .size(theme::SMALL),
+                );
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for question in &questions {
+                        let named = self
+                            .library
+                            .get(question.id)
+                            .map(|track| format!("{} — {}", track.artist, track.title))
+                            .unwrap_or_default();
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("{:.2}", question.confidence))
+                                    .font(theme::mono(11.0))
+                                    .color(theme::amber()),
+                            );
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(format!("heard: {}", question.heard))
+                                        .color(theme::text()),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "file says: {} — {named}",
+                                        question.file_says
+                                    ))
+                                    .font(theme::mono(10.0))
+                                    .color(theme::dim()),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .button("Keep the file's")
+                                        .on_hover_text(
+                                            "The collection takes the file's genre too, and the \
+                                             file is left as it is.",
+                                        )
+                                        .clicked()
+                                    {
+                                        self.pending.push(Pending::AnswerGenre {
+                                            id: question.id,
+                                            answer: crate::identify::GenreAnswer::File,
+                                        });
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Use what was heard")
+                                                    .color(theme::booth())
+                                                    .strong(),
+                                            )
+                                            .fill(theme::amber()),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.pending.push(Pending::AnswerGenre {
+                                            id: question.id,
+                                            answer: crate::identify::GenreAnswer::Heard,
+                                        });
+                                    }
+                                },
+                            );
+                        });
+                        ui.separator();
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Use all heard")
+                        .on_hover_text("Take the model's genre for every track here.")
+                        .clicked()
+                    {
+                        for question in &questions {
+                            self.pending.push(Pending::AnswerGenre {
+                                id: question.id,
+                                answer: crate::identify::GenreAnswer::Heard,
+                            });
+                        }
+                    }
+                    if ui
+                        .button("Keep all the files'")
+                        .on_hover_text("Leave every one of these as its file has it.")
+                        .clicked()
+                    {
+                        for question in &questions {
+                            self.pending.push(Pending::AnswerGenre {
+                                id: question.id,
+                                answer: crate::identify::GenreAnswer::File,
+                            });
+                        }
+                    }
+                    ui.label(
+                        RichText::new(if writes {
+                            "Taking what was heard also writes it into the file."
+                        } else {
+                            "Nothing is written to any file: tags are set to never."
+                        })
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+                });
+            });
+
+        if !open {
+            self.genre_questions.clear();
         }
     }
 
@@ -10214,7 +10486,9 @@ impl App {
                          answer, which is why the middle one is the default: a lookup that \
                          names an untagged file has found out something true about it. \
                          FLAC and MP3 only — a WAV has nowhere to put them. The inspector's \
-                         own button always overwrites, whatever this says.",
+                         own button always overwrites, whatever this says. The genre the \
+                         model hears goes in the same way: filled in where the file has \
+                         none, asked about where the file says something else.",
                         )
                         .color(theme::dim())
                         .size(theme::SMALL),

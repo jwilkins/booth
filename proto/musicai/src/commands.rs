@@ -1243,9 +1243,13 @@ pub fn genre(args: &GenreArgs, reporter: &dyn Reporter) -> Result<()> {
             let outcome = (|| {
                 let audio = decode_file(path)?;
                 let styles = classifier.classify(&audio)?;
+                let tagged = match (args.tag, styles.first()) {
+                    (true, Some(surest)) => Some(tag_genre(path, surest.style, args.on_existing)?),
+                    _ => None,
+                };
                 Ok(vec![match args.json {
-                    true => genre_json(path, &styles, args.top),
-                    false => genre_row(path, &styles, args.top),
+                    true => genre_json(path, &styles, args.top, tagged.as_ref()),
+                    false => genre_row(path, &styles, args.top, tagged.as_ref()),
                 }])
             })();
             progress.tick();
@@ -1261,20 +1265,82 @@ pub fn genre(args: &GenreArgs, reporter: &dyn Reporter) -> Result<()> {
     outcome.report(reporter)
 }
 
-fn genre_row(path: &Path, styles: &[analysis::style::Style], top: usize) -> String {
+/// What became of the genre in a file's tag block.
+#[derive(Clone, Debug, PartialEq)]
+enum Tagged {
+    /// Written: the file had none.
+    Wrote,
+    /// The file already said it.
+    Unchanged,
+    /// The file says something else and was left saying it.
+    Kept(String),
+    /// A format with no tag block.
+    Nowhere,
+}
+
+impl Tagged {
+    fn describe(&self) -> String {
+        match self {
+            Tagged::Wrote => "tag: wrote".to_string(),
+            Tagged::Unchanged => "tag: already there".to_string(),
+            Tagged::Kept(existing) => format!("tag: kept {existing:?}"),
+            Tagged::Nowhere => "tag: nowhere to put it".to_string(),
+        }
+    }
+}
+
+/// Put the style in the file's genre tag, under the same policy as `tag`.
+///
+/// The file is read first because the writer's `unchanged` does not tell "it
+/// already said so" from "it said something else and was kept", and the
+/// person reading the line wants to know which.
+fn tag_genre(path: &Path, style: &str, on_existing: crate::tag::OnExisting) -> Result<Tagged> {
+    use crate::tag::{tag_kind, Field, Metadata, TagKind};
+    match tag_kind(path) {
+        Some(TagKind::None) | None => return Ok(Tagged::Nowhere),
+        Some(_) => {}
+    }
+    let before = crate::tag::read_metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.genre)
+        .map(|genre| genre.trim().to_string())
+        .unwrap_or_default();
+    let metadata = Metadata { genre: Some(style.to_string()), ..Default::default() };
+    let outcome = crate::tag::write_tags(path, &metadata, on_existing, None)?;
+    Ok(if outcome.written.contains(&Field::Genre) {
+        Tagged::Wrote
+    } else if before == style {
+        Tagged::Unchanged
+    } else {
+        Tagged::Kept(before)
+    })
+}
+
+fn genre_row(
+    path: &Path,
+    styles: &[analysis::style::Style],
+    top: usize,
+    tagged: Option<&Tagged>,
+) -> String {
     let heard: Vec<String> =
         styles.iter().take(top).map(|s| format!("{} ({:.2})", s.style, s.confidence)).collect();
     format!(
-        "{:<40} {}",
+        "{:<40} {}{}",
         elide(&path.display().to_string(), 40),
         match heard.is_empty() {
             true => "too short to hear".to_string(),
             false => heard.join(", "),
-        }
+        },
+        tagged.map(|tagged| format!("  {}", tagged.describe())).unwrap_or_default()
     )
 }
 
-fn genre_json(path: &Path, styles: &[analysis::style::Style], top: usize) -> String {
+fn genre_json(
+    path: &Path,
+    styles: &[analysis::style::Style],
+    top: usize,
+    tagged: Option<&Tagged>,
+) -> String {
     let heard: Vec<String> = styles
         .iter()
         .take(top)
@@ -1287,10 +1353,20 @@ fn genre_json(path: &Path, styles: &[analysis::style::Style], top: usize) -> Str
             )
         })
         .collect();
+    let tag = match tagged {
+        None => String::new(),
+        Some(Tagged::Wrote) => r#","tag":"wrote""#.to_string(),
+        Some(Tagged::Unchanged) => r#","tag":"unchanged""#.to_string(),
+        Some(Tagged::Nowhere) => r#","tag":"nowhere""#.to_string(),
+        Some(Tagged::Kept(existing)) => {
+            format!(r#","tag":"kept","file_genre":{}"#, json_string(existing))
+        }
+    };
     format!(
-        r#"{{"file":{},"styles":[{}]}}"#,
+        r#"{{"file":{},"styles":[{}]{}}}"#,
         json_string(&path.display().to_string()),
-        heard.join(",")
+        heard.join(","),
+        tag
     )
 }
 

@@ -212,6 +212,66 @@ pub fn source_of(track: &Track) -> &'static str {
     }
 }
 
+/// Which way a genre the model heard goes, given what the file's own tag says.
+///
+/// [`decide`] for one field: a blank is filled, agreement is not a question,
+/// and a value somebody put in the file is never replaced without asking,
+/// however sure the model is. The one addition is that the model may correct
+/// itself: a tag that says exactly what the model said last time is this
+/// program's own earlier answer, and a new hearing replaces it without asking.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GenreDecision {
+    /// Into the record, and into the file where the setting allows: the file
+    /// has no genre of its own.
+    Take,
+    /// Into the record, and over the file's genre, which was this program's
+    /// own earlier answer.
+    Replace,
+    /// The file already says it. The record takes the measurement; the file is
+    /// left alone.
+    Agrees,
+    /// The file says something else, and that is somebody's answer.
+    Ask,
+}
+
+/// What to do with `heard`, the model's surest style, given `file_says`, the
+/// file's own genre tag, and the record as it stands. `heard` is not empty.
+pub fn decide_genre(track: &Track, file_says: &str, heard: &str) -> GenreDecision {
+    let file_says = file_says.trim();
+    if file_says.is_empty() {
+        return GenreDecision::Take;
+    }
+    if simplify(file_says) == simplify(heard) {
+        return GenreDecision::Agrees;
+    }
+    // Heard before, and the file says what was heard then: that tag is ours.
+    if track.genre_confidence > 0.0 && simplify(file_says) == simplify(&track.genre) {
+        return GenreDecision::Replace;
+    }
+    GenreDecision::Ask
+}
+
+/// A track whose file says one genre while the model heard another.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenreQuestion {
+    pub id: u32,
+    /// What the file's tag says.
+    pub file_says: String,
+    /// What the model heard, and how surely.
+    pub heard: String,
+    pub confidence: f32,
+}
+
+/// Which answer to a genre question was taken.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GenreAnswer {
+    /// Keep the file's genre, in the record too.
+    File,
+    /// Take what was heard, and write it into the file where the setting
+    /// allows.
+    Heard,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +455,65 @@ mod tests {
         assert_eq!(found.describe(), "Batu — Marius (Livity Sound)");
         let bare = Match { artist: "Batu".into(), title: "Marius".into(), ..Match::default() };
         assert_eq!(bare.describe(), "Batu — Marius");
+    }
+
+    /// A record whose genre the model heard on an earlier pass.
+    fn heard_before(genre: &str) -> Track {
+        let mut track = Track::placeholder(1);
+        track.genre = genre.into();
+        track.genre_confidence = 0.6;
+        track
+    }
+
+    /// A record whose genre came in from the file's tag.
+    fn tagged(genre: &str) -> Track {
+        let mut track = Track::placeholder(1);
+        track.genre = genre.into();
+        track
+    }
+
+    #[test]
+    fn a_file_with_no_genre_takes_what_was_heard() {
+        assert_eq!(decide_genre(&Track::placeholder(1), "", "Techno"), GenreDecision::Take);
+        assert_eq!(decide_genre(&Track::placeholder(1), "  ", "Techno"), GenreDecision::Take);
+        // Even where the record heard something else last time: the file is
+        // the thing being filled, and it has nothing.
+        assert_eq!(decide_genre(&heard_before("Trance"), "", "Techno"), GenreDecision::Take);
+    }
+
+    #[test]
+    fn a_file_that_already_says_the_genre_is_not_a_question() {
+        assert_eq!(
+            decide_genre(&tagged("tech house"), "tech house", "Tech House"),
+            GenreDecision::Agrees
+        );
+        assert_eq!(decide_genre(&tagged("Hip-Hop"), "Hip-Hop", "Hip Hop"), GenreDecision::Agrees);
+    }
+
+    #[test]
+    fn a_genre_somebody_tagged_is_never_replaced_without_asking() {
+        assert_eq!(decide_genre(&tagged("Techno"), "Techno", "Tech House"), GenreDecision::Ask);
+        // However the record came to have no genre: the file's word is the
+        // thing being protected, not the record's.
+        assert_eq!(
+            decide_genre(&Track::placeholder(1), "Techno", "Tech House"),
+            GenreDecision::Ask
+        );
+    }
+
+    #[test]
+    fn the_models_own_earlier_answer_is_replaced_without_asking() {
+        assert_eq!(
+            decide_genre(&heard_before("Techno"), "Techno", "Tech House"),
+            GenreDecision::Replace
+        );
+    }
+
+    #[test]
+    fn a_tag_changed_since_the_model_last_heard_it_is_somebodys_answer_again() {
+        assert_eq!(
+            decide_genre(&heard_before("Techno"), "Minimal", "Tech House"),
+            GenreDecision::Ask
+        );
     }
 }

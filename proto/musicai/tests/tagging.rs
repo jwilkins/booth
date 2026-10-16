@@ -52,6 +52,7 @@ fn metadata() -> Metadata {
         album: Some("Pablo Honey".into()),
         album_artist: Some("Radiohead".into()),
         date: Some("1993-02-22".into()),
+        genre: Some("Alternative Rock".into()),
         track_number: Some(2),
         total_tracks: Some(12),
         disc_number: Some(1),
@@ -98,6 +99,7 @@ fn writes_every_field_to_a_flac() {
     assert_eq!(vorbis(&path, "ALBUM").as_deref(), Some("Pablo Honey"));
     assert_eq!(vorbis(&path, "ALBUMARTIST").as_deref(), Some("Radiohead"));
     assert_eq!(vorbis(&path, "DATE").as_deref(), Some("1993-02-22"));
+    assert_eq!(vorbis(&path, "GENRE").as_deref(), Some("Alternative Rock"));
     assert_eq!(vorbis(&path, "TRACKNUMBER").as_deref(), Some("2"));
     assert_eq!(vorbis(&path, "TOTALTRACKS").as_deref(), Some("12"));
     // Picard-compatible names, so other software recognises these.
@@ -123,6 +125,7 @@ fn writes_every_field_to_an_mp3() {
     assert_eq!(tag.track(), Some(2));
     assert_eq!(tag.total_tracks(), Some(12));
     assert_eq!(tag.disc(), Some(1));
+    assert_eq!(tag.genre_parsed().as_deref(), Some("Alternative Rock"));
 
     let recorded = tag.date_recorded().expect("no recording date");
     assert_eq!((recorded.year, recorded.month, recorded.day), (1993, Some(2), Some(22)));
@@ -496,6 +499,7 @@ fn an_m4a_carries_tags_like_anything_else() {
     assert_eq!(read.album.as_deref(), Some("Pablo Honey"));
     assert_eq!(read.track_number, Some(2));
     assert_eq!(read.total_tracks, Some(12));
+    assert_eq!(read.genre.as_deref(), Some("Alternative Rock"));
     // The freeform atoms go under Picard's own names, so every other program
     // that reads them finds them where it looks.
     assert_eq!(read.recording_mbid.as_deref(), metadata().recording_mbid.as_deref());
@@ -534,4 +538,33 @@ fn something_that_is_not_an_mp4_says_so() {
     let error = write_tags(&path, &metadata(), OnExisting::Overwrite, None).unwrap_err();
     let text = format!("{error:#}");
     assert!(text.contains("not an MP4"), "unhelpful: {text}");
+}
+
+/// The genre the model hears goes through the same door as a name from a
+/// lookup: filled in where the file has none, kept where it has one, and
+/// reported where the two disagree — in each format that has a tag block.
+#[test]
+fn a_heard_genre_fills_a_blank_and_never_replaces_a_tagged_one_unasked() {
+    for codec in [Codec::Flac, Codec::Mp3] {
+        let dir = Scratch::new(&format!("genre-{}", codec.extension()));
+        let path = dir.track(codec);
+        let read = |path: &PathBuf| booth_cli::tag::read_metadata(path).unwrap().genre;
+
+        let heard = Metadata { genre: Some("Tech House".into()), ..Default::default() };
+        let first = write_tags(&path, &heard, OnExisting::Keep, None).unwrap();
+        assert_eq!(first.written, vec![Field::Genre]);
+        assert_eq!(read(&path).as_deref(), Some("Tech House"));
+
+        let other = Metadata { genre: Some("Techno".into()), ..Default::default() };
+        let kept = write_tags(&path, &other, OnExisting::Keep, None).unwrap();
+        assert!(kept.written.is_empty(), "{:?}", kept.written);
+        let reported = write_tags(&path, &other, OnExisting::Report, None).unwrap();
+        assert_eq!(reported.conflicts.len(), 1);
+        assert_eq!(reported.conflicts[0].field, Field::Genre);
+        assert_eq!(reported.conflicts[0].existing, "Tech House");
+        assert_eq!(read(&path).as_deref(), Some("Tech House"), "reporting wrote");
+
+        write_tags(&path, &other, OnExisting::Overwrite, None).unwrap();
+        assert_eq!(read(&path).as_deref(), Some("Techno"));
+    }
 }

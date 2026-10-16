@@ -413,6 +413,19 @@ pub struct GenreArgs {
     /// Emit one JSON object per file instead of a table.
     #[arg(long)]
     pub json: bool,
+
+    /// Write the surest style into each file's genre tag.
+    ///
+    /// Through the same door as `tag`: a file with no genre gets it filled in,
+    /// and `--on-existing` says what happens to one the file already carries
+    /// — kept by default, because it is somebody's answer. A WAV has nowhere
+    /// to put it and is left alone.
+    #[arg(long)]
+    pub tag: bool,
+
+    /// What to do about a genre the file already has, when `--tag` is on.
+    #[arg(long, value_enum, default_value_t = OnExisting::Keep)]
+    pub on_existing: OnExisting,
 }
 
 #[derive(Args, Clone, Debug)]

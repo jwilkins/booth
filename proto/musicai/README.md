@@ -121,6 +121,12 @@ One of the 400 styles Discogs files records under, surest first, with the model'
 each — not a share of anything, since a track can score high on two and most score low on all.
 `--top` says how many to print and `--json` emits one object per line.
 
+`--tag` writes the surest style into each file's genre tag, through the same door as `tag`: a
+file with no genre gets it filled in, one that already says another genre is kept and the line
+says so, and `--on-existing overwrite` replaces it. A WAV has nowhere to put one and is left
+alone. The window asks before replacing a tag; from here there is nobody to ask, so keeping is
+the default.
+
 The model is **Discogs-EffNet** from the Music Technology Group at Universitat Pompeu Fabra, from
 Alonso-Jiménez, Serra and Bogdanov, *Music Representation Learning Based on Editorial Metadata from
 Discogs* (ISMIR 2022), released under

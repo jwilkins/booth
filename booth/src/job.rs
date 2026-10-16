@@ -255,8 +255,23 @@ pub struct Retag {
     pub title: String,
     pub album: String,
     pub date: Option<String>,
+    /// The genre, where there is one to write: the style the model heard, as
+    /// the player's genre field shows it.
+    pub genre: Option<String>,
     /// What to do about a field the file already has a value for.
     pub on_existing: booth_cli::tag::OnExisting,
+}
+
+impl Retag {
+    /// Whether this carries a genre and nothing else — the write an analysis
+    /// queues, as opposed to the names a lookup or an edit queues.
+    pub fn is_genre_only(&self) -> bool {
+        self.genre.is_some()
+            && self.artist.trim().is_empty()
+            && self.title.trim().is_empty()
+            && self.album.trim().is_empty()
+            && self.date.is_none()
+    }
 }
 
 /// Something the worker found out.
@@ -409,6 +424,10 @@ pub struct Analyzed {
     /// was too short for it to hear.
     pub genre: String,
     pub genre_confidence: f32,
+    /// What the file's own genre tag says, trimmed, or empty. Read alongside so
+    /// that whoever folds this in can tell a blank to fill from somebody's
+    /// answer to ask about, without opening the file again.
+    pub tagged_genre: String,
     /// Every beat, when the grid bends. Empty when a tempo says it all.
     pub beat_ms: Vec<u32>,
     pub phrases: Vec<Phrase>,
@@ -464,6 +483,10 @@ pub fn read_record(id: u32, path: &Path, hashes: bool) -> Track {
         .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_default();
     track.year = metadata.date.as_deref().and_then(|d| d.get(..4)?.parse().ok());
+    // The file's genre tag, as its word on what kind of record it is. The
+    // confidence stays at zero, which marks it as the tag's answer rather than
+    // the model's: a heard genre fills a blank, and asks before replacing this.
+    track.genre = metadata.genre.map(|genre| genre.trim().to_string()).unwrap_or_default();
 
     if !hashes {
         return track;
@@ -578,6 +601,14 @@ pub fn analyze_file(
             None
         }
     });
+    // The file's own word on it, for the fold to weigh against what was heard.
+    // One tag read against seconds of decoding, so not made conditional on
+    // there being a model; a WAV simply has none.
+    let tagged_genre = booth_cli::tag::read_metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.genre)
+        .map(|genre| genre.trim().to_string())
+        .unwrap_or_default();
 
     let beat_ms: Vec<u32> = analysis.grid.beats.iter().map(|b| b.time_ms).collect();
     // Kept only when a tempo and a downbeat could not put these beats back.
@@ -622,6 +653,7 @@ pub fn analyze_file(
         intensity,
         genre: heard.as_ref().map(|style| style.style.to_string()).unwrap_or_default(),
         genre_confidence: heard.as_ref().map(|style| style.confidence).unwrap_or(0.0),
+        tagged_genre,
         beat_ms: bent,
         phrases,
         cues,
@@ -1589,6 +1621,7 @@ fn retag(tracks: &[Retag], reporter: &Channel) -> anyhow::Result<()> {
             artist: non_empty(&track.artist),
             album: non_empty(&track.album),
             date: track.date.clone(),
+            genre: track.genre.clone(),
             ..Default::default()
         };
         match booth_cli::tag::write_tags(&track.path, &metadata, track.on_existing, None) {
@@ -2180,6 +2213,38 @@ mod tests {
         assert_eq!(track.title, "track", "the file name, until a tag says otherwise");
         assert!(track.bytes > 0);
         assert!(!track.analyzed, "reading a record is not analysing it");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_files_genre_tag_is_read_in_as_its_own_answer() {
+        use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+        let dir = scratch("record-genre");
+        let path = dir.join("tagged.flac");
+        let plane: Vec<f32> = (0..44_100)
+            .map(|i| 0.3 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44_100.0).sin())
+            .collect();
+        let audio = booth_cli::audio::Audio::new(44_100, vec![plane.clone(), plane]).unwrap();
+        write_file(&path, &audio, Codec::Flac, &EncodeOptions::default()).unwrap();
+        booth_cli::tag::write_tags(
+            &path,
+            &booth_cli::tag::Metadata { genre: Some(" Tech House ".into()), ..Default::default() },
+            booth_cli::tag::OnExisting::Overwrite,
+            None,
+        )
+        .unwrap();
+
+        // At import: the tag's word, marked as the tag's by a confidence of
+        // zero, which is what tells the fold it is somebody's answer.
+        let track = read_record(3, &path, false);
+        assert_eq!(track.genre, "Tech House");
+        assert_eq!(track.genre_confidence, 0.0, "a tag is not a measurement");
+
+        // And alongside an analysis, so the fold need not open the file again.
+        let analyzed = analyze_file(3, &path, None).unwrap();
+        assert_eq!(analyzed.tagged_genre, "Tech House");
+        assert!(analyzed.genre.is_empty(), "nothing was heard without a model");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

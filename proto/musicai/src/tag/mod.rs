@@ -34,6 +34,8 @@ pub enum Field {
     Album,
     AlbumArtist,
     Date,
+    /// Discogs's style, as a player's genre field shows it: `Tech House`.
+    Genre,
     TrackNumber,
     TotalTracks,
     DiscNumber,
@@ -46,12 +48,13 @@ pub enum Field {
 }
 
 impl Field {
-    pub const ALL: [Field; 14] = [
+    pub const ALL: [Field; 15] = [
         Field::Title,
         Field::Artist,
         Field::Album,
         Field::AlbumArtist,
         Field::Date,
+        Field::Genre,
         Field::TrackNumber,
         Field::TotalTracks,
         Field::DiscNumber,
@@ -71,6 +74,7 @@ impl Field {
             Field::Album => "ALBUM",
             Field::AlbumArtist => "ALBUMARTIST",
             Field::Date => "DATE",
+            Field::Genre => "GENRE",
             Field::TrackNumber => "TRACKNUMBER",
             Field::TotalTracks => "TOTALTRACKS",
             Field::DiscNumber => "DISCNUMBER",
@@ -91,6 +95,7 @@ impl Field {
             Field::Album => "album",
             Field::AlbumArtist => "album artist",
             Field::Date => "date",
+            Field::Genre => "genre",
             Field::TrackNumber => "track number",
             Field::TotalTracks => "total tracks",
             Field::DiscNumber => "disc number",
@@ -118,6 +123,9 @@ pub struct Metadata {
     pub album: Option<String>,
     pub album_artist: Option<String>,
     pub date: Option<String>,
+    /// One style, as the genre field is one string on every player: the model's
+    /// surest, or whatever the file already said.
+    pub genre: Option<String>,
     pub track_number: Option<u32>,
     pub total_tracks: Option<u32>,
     pub disc_number: Option<u32>,
@@ -138,6 +146,10 @@ impl Metadata {
             title: recording.title.clone(),
             artist: recording.artist.clone(),
             album: release.and_then(|r| r.title.clone()),
+            // MusicBrainz has genres as folksonomy tags, not as a field, and
+            // a lookup that guessed one would be the kind of answer the tag
+            // policy exists to protect people from.
+            genre: None,
             // Fall back to the recording's own artist when the release does not
             // name one, which is the common case for a single-artist album.
             album_artist: release
@@ -169,6 +181,7 @@ impl Metadata {
             Field::Album => self.album.clone(),
             Field::AlbumArtist => self.album_artist.clone(),
             Field::Date => self.date.clone(),
+            Field::Genre => self.genre.clone(),
             Field::TrackNumber => self.track_number.map(|n| n.to_string()),
             Field::TotalTracks => self.total_tracks.map(|n| n.to_string()),
             Field::DiscNumber => self.disc_number.map(|n| n.to_string()),
@@ -320,6 +333,7 @@ fn set_field(metadata: &mut Metadata, field: Field, value: Option<String>) {
         Field::Album => metadata.album = Some(value),
         Field::AlbumArtist => metadata.album_artist = Some(value),
         Field::Date => metadata.date = Some(value),
+        Field::Genre => metadata.genre = Some(value),
         Field::TrackNumber => metadata.track_number = number(),
         Field::TotalTracks => metadata.total_tracks = number(),
         Field::DiscNumber => metadata.disc_number = number(),
@@ -483,6 +497,8 @@ impl TagTarget for Id3Target<'_> {
             Field::Album => self.0.album().map(str::to_string),
             Field::AlbumArtist => self.0.album_artist().map(str::to_string),
             Field::Date => self.0.date_recorded().map(|d| d.to_string()),
+            // Parsed, so an ID3v1-style "(17)" reads as the name it stands for.
+            Field::Genre => self.0.genre_parsed().map(|genre| genre.into_owned()),
             Field::TrackNumber => self.0.track().map(|n| n.to_string()),
             Field::TotalTracks => self.0.total_tracks().map(|n| n.to_string()),
             Field::DiscNumber => self.0.disc().map(|n| n.to_string()),
@@ -509,6 +525,7 @@ impl TagTarget for Id3Target<'_> {
             Field::Artist => self.0.set_artist(value),
             Field::Album => self.0.set_album(value),
             Field::AlbumArtist => self.0.set_album_artist(value),
+            Field::Genre => self.0.set_genre(value),
             Field::Date => {
                 if let Some(timestamp) = parse_id3_date(value) {
                     self.0.set_date_recorded(timestamp);
@@ -621,6 +638,7 @@ impl TagTarget for Mp4Target<'_> {
             Field::Album => self.0.album().map(str::to_string),
             Field::AlbumArtist => self.0.album_artist().map(str::to_string),
             Field::Date => self.0.year().map(str::to_string),
+            Field::Genre => self.0.genre().map(str::to_string),
             Field::TrackNumber => self.0.track_number().map(|n| n.to_string()),
             Field::TotalTracks => self.0.total_tracks().map(|n| n.to_string()),
             Field::DiscNumber => self.0.disc_number().map(|n| n.to_string()),
@@ -642,6 +660,7 @@ impl TagTarget for Mp4Target<'_> {
             Field::Album => self.0.set_album(value),
             Field::AlbumArtist => self.0.set_album_artist(value),
             Field::Date => self.0.set_year(value),
+            Field::Genre => self.0.set_genre(value),
             Field::TrackNumber => {
                 if let Some(n) = number() {
                     self.0.set_track_number(n);
@@ -743,6 +762,7 @@ mod tests {
             album: Some("Pablo Honey".into()),
             album_artist: Some("Radiohead".into()),
             date: Some("1993-02-22".into()),
+            genre: Some("Alternative Rock".into()),
             track_number: Some(2),
             total_tracks: Some(12),
             disc_number: Some(1),

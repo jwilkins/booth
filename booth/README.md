@@ -112,6 +112,14 @@ found out something true about it, and leaving that only in the collection means
 the file stays anonymous to every other program that opens it — while replacing
 an artist somebody typed by hand is exactly the thing worth being careful about.
 
+The genre the model hears goes through the same door. A file with no genre tag
+gets it written in, at the middle level and above; a file whose tag already says
+another genre is put to you in a sheet, like a fingerprint that disagrees with
+the file's own names, and the collection takes whichever side you choose — the
+file is only rewritten when you choose the model's. The one exception is a tag
+that says exactly what the model said last time: that is Booth's own earlier
+answer, and a new hearing replaces it without asking.
+
 The inspector's **Write these into the file** always overwrites, whatever the
 setting says: pressing it is somebody saying "these ones, now". FLAC, MP3, AIFF
 and M4A — a WAV has nowhere to put them, and says so rather than appearing to
@@ -983,6 +991,16 @@ too short for the model to hear at all. Switched off again, nothing is taken
 away: a track keeps the genre it was heard to have, and an analysis without
 the model does not erase it.
 
+A file's own genre tag counts too. It is read in when the track is added and
+shown as the file's — in the inspector without a number, since a tag is not a
+measurement — and it goes on the drive like any other. When the model then
+hears the track, what the tag says decides what happens, under the same
+**Tags** setting as the names: a blank is filled in; a tag that already agrees
+is left alone; a tag that says something else is put to you in a sheet, and the
+collection and the file follow your answer. A tag that says exactly what the
+model said on an earlier pass is Booth's own earlier answer, and is replaced
+without asking.
+
 What it says is the model's opinion, not a measurement. It learned how Discogs
 users file records, so it draws the distinctions that community draws
 constantly — but whether it draws them as you would is something to check on a
@@ -1524,9 +1542,9 @@ drive played only on older hardware has a history nothing here can see.
 - Genre is a model's opinion, and an optional one: it is off until switched on
   in Settings, needs the Discogs-EffNet file installed separately, costs about
   thirteen seconds a track on top of the analysis, and files a record where
-  Discogs users would have, which is not always where you would. Nothing checks
-  it against a genre the file's own tag carries, and there is no way yet to
-  correct it by hand.
+  Discogs users would have, which is not always where you would. A genre the
+  file's own tag carries is read in and defended — a disagreement is asked
+  about rather than settled — but there is no way yet to type one in by hand.
 - Key detection is right about 37% of the time on a real library, and confuses
   a key with its relative major or minor about 18% of the time. It is shown with
   its confidence for that reason.
