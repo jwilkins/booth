@@ -206,7 +206,7 @@ Stems are named after the track they came from, so they stay identifiable once t
 directory they were written into.
 
 Options worth knowing: `--only vocals,drums` to write a subset, `--format wav` to override the
-output codec, `-o DIR` to change where they land.
+output codec, `-o DIR` to change where they land, `--backend roformer` for the cleaner voice.
 
 ### Stems look like the file they came from
 
@@ -285,6 +285,53 @@ on a CPU — roughly four minutes per track — and much faster on a GPU via `--
 Isolation is verified rather than asserted. `tests/stem_isolation.rs` transcribes the mix and each
 stem with Whisper and checks that the sung words come back from the vocal stem and not from the
 others; see [Tests](#tests) for how to run it.
+
+### RoFormer (`--backend roformer`)
+
+The cleanest vocal stem there is, through
+[audio-separator](https://github.com/nomadkaraoke/python-audio-separator), which you install
+yourself:
+
+```sh
+pipx install "audio-separator[cpu]"      # [gpu] on an NVIDIA card; [cpu] is also the Apple Silicon one
+brew install ffmpeg                      # it shells out to ffmpeg and will not start without it
+booth-cli stems --backend roformer track.flac
+```
+
+The band-split RoFormers (BS-RoFormer, Mel-Band RoFormer) separate a voice about three decibels
+cleaner than the Demucs family — 10.8 to 11.6 dB of vocal SDR on MUSDB18-HQ against 8.0 for
+Hybrid Demucs, by the Mel-Band paper's own table — which is the difference between a stem that is
+quiet between the lines and one that is not. The released RoFormer weights split a record two
+ways, the voice and everything else, so this backend runs `audio-separator` twice: its
+BS-RoFormer takes the record to a voice and an instrumental, and its demucs takes the
+*instrumental* to drums, bass and other, which fold into `drums` and `melody` as the demucs
+backend folds them. The instrumental rather than the record, so the voice cannot leak back into
+the melody and the three stems add back up to the track. It is about twice the work of demucs
+alone, and slow on a CPU.
+
+`audio-separator` fetches the weights it is asked for the first time it is asked, into
+`~/.cache/booth/models/audio-separator/` (`--roformer-models` to put them elsewhere; its own
+default is under `/tmp`, which is a gigabyte fetched again after every reboot). They are
+community-trained and come with no stated licence, which is why nothing here copies them
+anywhere. `--roformer-model` names another of its RoFormers (`audio-separator --list_models`),
+`--roformer-rest-model` another demucs for the rest — `--quality` picks `htdemucs_ft.yaml` or
+`htdemucs.yaml` otherwise — and `--roformer-bin` says where the program is.
+
+Two things it does that are worth knowing. It works at 44.1 kHz whatever it is given, so a record
+at another rate gets its stems brought back to that rate here: a stem keeps its parent's rate.
+And it pulls anything over nine tenths of full scale down to that before writing 16-bit audio, so
+a kit comes back a shade under the record's level and never clipped. It is not offered an
+installer the way demucs is: a Python program with PyTorch behind it is not something to put on
+a machine from here, and the error says what to type.
+
+Measured here, on the spoken lyric over a synthetic band that the words measurement uses, on four
+CPU cores: both passes took 29 minutes for 64 seconds of record, so on anything longer than a
+single this is a GPU or Apple Silicon feature; the three stems summed back to the record to a
+correlation of 0.997, a tenth of a decibel down; and the vocal stem was digital silence — zero,
+not quiet — wherever nobody spoke, so the words detector found the eight spoken stretches and
+nothing else, where the built-in separator's stem gave it one stretch covering everything. The
+weights are 640 MB for the RoFormer and 340 MB for `htdemucs_ft`. `tests/roformer_backend.rs` is
+the measurement; see [Tests](#tests) for how to run it.
 
 ### The built-in separator (`--backend dsp`)
 

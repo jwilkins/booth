@@ -497,6 +497,11 @@ fn batch_options(ui: &mut egui::Ui, settings: &mut Settings) {
         );
         ui.selectable_value(
             &mut settings.stems.backend,
+            booth_cli::stems::Backend::Roformer,
+            "RoFormer",
+        );
+        ui.selectable_value(
+            &mut settings.stems.backend,
             booth_cli::stems::Backend::Dsp,
             "Built-in",
         );
@@ -607,12 +612,17 @@ fn stems_options(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.horizontal(|ui| {
         ui.label("Separator");
         ui.selectable_value(&mut args.backend, Backend::Demucs, "Demucs");
+        ui.selectable_value(&mut args.backend, Backend::Roformer, "RoFormer");
         ui.selectable_value(&mut args.backend, Backend::Dsp, "Built-in");
     });
     ui.label(
         RichText::new(match args.backend {
             Backend::Demucs => {
                 "A neural model. Much better, needs demucs installed, slow on a CPU."
+            }
+            Backend::Roformer => {
+                "The cleanest voice, through audio-separator: its RoFormer for the vocals, \
+                 its demucs for the rest. Needs audio-separator installed; twice the work."
             }
             Backend::Dsp => "No install needed, but voices leak into every stem.",
         })

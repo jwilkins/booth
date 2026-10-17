@@ -3,6 +3,7 @@
 pub mod demucs;
 pub mod dsp;
 pub mod install;
+pub mod roformer;
 
 use std::fmt;
 use std::str::FromStr;
@@ -111,9 +112,13 @@ impl StemSet {
 /// Which separator to run.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Backend {
-    /// Shell out to a locally installed `demucs`. The default: it is the only
-    /// one of the two that genuinely isolates a voice.
+    /// Shell out to a locally installed `demucs`. The default: three stems
+    /// from one program, and it genuinely isolates a voice.
     Demucs,
+    /// Shell out to a locally installed `audio-separator` for a RoFormer
+    /// voice, the cleanest there is, and its demucs for the rest. Slow
+    /// without a GPU or Apple Silicon — see [`roformer`].
+    Roformer,
     /// The built-in signal-processing separator. Needs nothing installed and
     /// runs offline, but leaks vocals into every stem — see the module docs
     /// for what it can and cannot do.

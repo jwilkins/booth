@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rayon::prelude::*;
 
 use crate::analysis;
@@ -22,7 +22,7 @@ use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
 use crate::normalize::{self, Settings};
 use crate::report::{self, Event, Progress, Reporter};
-use crate::stems::{demucs, dsp, install, Backend, Stem, StemSet};
+use crate::stems::{demucs, dsp, install, roformer, Backend, Stem, StemSet};
 use crate::tag::{acoustid, coverart, fingerprint, musicbrainz, Metadata, TagOutcome};
 
 /// Outcome of a batch: how many files worked, and the failures.
@@ -1681,6 +1681,21 @@ pub fn stems_files(args: &StemsArgs, files: &[PathBuf], reporter: &dyn Reporter)
             args.demucs.install_demucs,
         )?),
         Backend::Dsp => None,
+        // Found rather than installed: a Python program with PyTorch behind
+        // it is not something to put on somebody's machine from here, and
+        // the error says what to type.
+        Backend::Roformer => Some(
+            install::locate(args.roformer.roformer_bin.as_os_str())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{} is not installed or not on PATH. Install it with \
+                         `pipx install \"audio-separator[cpu]\"` (`[gpu]` on an NVIDIA card), \
+                         point at it with --roformer-bin, or use --backend demucs or dsp.",
+                        args.roformer.roformer_bin.display()
+                    )
+                })?
+                .into_os_string(),
+        ),
     };
 
     let encode = EncodeOptions {
@@ -1773,6 +1788,23 @@ fn separate_one(
             });
             // Demucs' own output is an intermediate; the stems we write are the
             // deliverable. Clean up whether or not it succeeded.
+            let _ = std::fs::remove_dir_all(&work_dir);
+            result?
+        }
+        Backend::Roformer => {
+            let work_dir = args.out_dir.join(".roformer-work");
+            let mut config = roformer::Config::new(work_dir.clone());
+            config.program = demucs_bin
+                .map(|p| p.to_os_string())
+                .unwrap_or_else(|| args.roformer.roformer_bin.clone().into_os_string());
+            config.vocal_model = args.roformer.roformer_model.clone();
+            config.rest_model = args.rest_model();
+            config.shifts = args.shifts();
+            config.models_dir = args.roformer.roformer_models.clone();
+
+            let result = roformer::separate(path, &config, &|percent| {
+                reporter.event(Event::Step { percent })
+            });
             let _ = std::fs::remove_dir_all(&work_dir);
             result?
         }

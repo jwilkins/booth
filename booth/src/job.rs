@@ -1731,9 +1731,8 @@ fn separate(
 ) -> anyhow::Result<()> {
     let mut args = stems_args(backend, quality);
     crate::info!(
-        "separating with {} shifts={}, writing {}{}",
-        args.model(),
-        args.shifts(),
+        "separating with {}, writing {}{}",
+        args.separator(),
         args.format.name(),
         match args.vbr() {
             Some(quality) => format!(" V{quality}"),

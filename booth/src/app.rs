@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use booth_cli::cli::ExportArgs;
-use booth_cli::stems::Backend;
 use eframe::egui::{self, Color32, RichText, Ui};
 
 use crate::config::{Config, OnExternal};
@@ -2199,7 +2198,7 @@ impl App {
         self.start(Job::Separate {
             tracks: waiting,
             stems_in: self.config.stems_location(),
-            backend: Backend::Demucs,
+            backend: self.config.separator.to_cli(),
             quality: self.config.stem_quality.to_cli(),
         });
     }
@@ -10400,6 +10399,30 @@ impl App {
                             "Off by default, because both of the others rewrite a file you \
                              already have. With one of them chosen, a Level button appears \
                              beside Re-analyse on a track and on a batch.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Separator");
+                    for separator in crate::config::Separator::ALL {
+                        if ui
+                            .radio_value(&mut self.config.separator, separator, separator.label())
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.label(
+                            RichText::new(separator.blurb()).color(theme::dim()).size(theme::SMALL),
+                        );
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Neither comes with Booth: `pipx install demucs`, or `pipx install \
+                             \"audio-separator[cpu]\"`, which fetches its models the first time \
+                             it runs. The RoFormer's voice is what the words are read against, \
+                             and a kit already rendered is not rendered again by changing this.",
                         )
                         .color(theme::dim())
                         .size(theme::SMALL),
