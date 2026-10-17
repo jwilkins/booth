@@ -10,10 +10,14 @@
 //!   its weights the first time it is run, so it is only offline afterwards.
 //!
 //! Either way the audio is handed over as 16 kHz mono, which is what the models
-//! are trained on and the only thing whisper.cpp will read. The stem on disk is
+//! are trained on and the only thing whisper.cpp will read. What is on disk is
 //! 44.1 kHz stereo, so it is converted on the way — see
 //! [`crate::audio::resample`], which is written for feeding a model and for
 //! nothing else.
+//!
+//! What is handed over is, by preference, the record itself cut to where its
+//! vocal stem is singing — [`transcribe_mix`], and [`super::cut`] for why —
+//! and the stem on its own where there is no record to read.
 //!
 //! What comes back is timed lines. What to do with them is [`super`]'s problem.
 
@@ -110,25 +114,92 @@ pub fn transcribe_audio(
     config: &Config,
     on_progress: &dyn Fn(u8),
 ) -> Result<Transcript> {
-    let flavour = config.kind();
-    // Before the audio is looked at, because a recogniser that is not set up
-    // is not set up whatever it was handed — and a misconfiguration that only
-    // showed itself on tracks that *do* have singing would be one somebody
-    // finds out about in a booth.
-    if flavour == Flavour::Cpp && config.model.is_none() {
+    set_up(config)?;
+    // Before anything expensive: a stem with no voice on it is an
+    // instrumental, and a recogniser handed one does not hand back an empty
+    // transcript — it hallucinates. See [`super::align::has_singing`].
+    if !super::align::has_singing(audio) {
+        return Ok(Transcript::default());
+    }
+    // Put the lines where the singing is before anybody sees them. Whisper's
+    // own timing is wrong on a stem in a way that is measurable and fixable,
+    // and the fixing needs the audio — which nothing downstream has, because
+    // what is kept in a collection is the words. See [`super::align`].
+    Ok(super::align::aligned(recognise(audio, config, on_progress)?, audio))
+}
+
+/// What the recogniser made of a record, and what it was handed to make it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Heard {
+    pub transcript: Transcript,
+    pub handed: Handed,
+}
+
+/// What the recogniser was handed, which is not always the record.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Handed {
+    /// Nothing: the stem has no singing on it, so there was nothing to read.
+    Nothing,
+    /// The record, cut to these stretches of it — in ms, on its clock — which
+    /// came to this share of its length.
+    Stretches { stretches: Vec<(u32, u32)>, share: f32 },
+    /// The stem, whole. It has singing on it that the detector could place
+    /// nowhere — clicks loud enough to count and too short to be a phrase — so
+    /// it was read the old way rather than not at all.
+    WholeStem,
+}
+
+/// Read the words off a record where its vocal stem says they are sung.
+///
+/// The stem finds the singing and the record is what is read — see
+/// [`super::cut`] for the measurement behind that. The two are the same record
+/// on the same clock, the stem being the mix with the band taken out, so the
+/// stretches found on one are cut from the other. A stem with nothing sung on
+/// it is an instrumental and costs nothing, as in [`transcribe_audio`].
+pub fn transcribe_mix(
+    mix: &Audio,
+    stem: &Audio,
+    config: &Config,
+    on_progress: &dyn Fn(u8),
+) -> Result<Heard> {
+    set_up(config)?;
+    if !super::align::has_singing(stem) {
+        return Ok(Heard { transcript: Transcript::default(), handed: Handed::Nothing });
+    }
+    let spans = super::align::voiced_spans(stem);
+    let Some(cut) = super::cut::Cut::of(mix, &spans) else {
+        let transcript = super::align::aligned(recognise(stem, config, on_progress)?, stem);
+        return Ok(Heard { transcript, handed: Handed::WholeStem });
+    };
+    let mut transcript = cut.put_back(recognise(&cut.audio, config, on_progress)?);
+    // Placed the way a stem's lines are, against the same measurement of the
+    // stem: the margin either side of a stretch is there so a line keeps its
+    // first consonant, not so a cue lands in it.
+    super::align::to_the_voice(&mut transcript, &spans);
+    let handed = Handed::Stretches { stretches: cut.stretches(), share: cut.share() };
+    Ok(Heard { transcript, handed })
+}
+
+/// Say so if the recogniser is not set up, before any audio is looked at.
+///
+/// A recogniser that is not set up is not set up whatever it was handed, and a
+/// misconfiguration that only showed itself on tracks that *do* have singing
+/// would be one somebody finds out about in a booth.
+fn set_up(config: &Config) -> Result<()> {
+    if config.kind() == Flavour::Cpp && config.model.is_none() {
         bail!(
             "whisper.cpp needs a model file and none is set. Download one — \
              ggml-base.en.bin is a good first choice — and point at it with \
              --whisper-model, or use OpenAI's `whisper` instead."
         );
     }
-    // Then, before anything expensive: a stem with no voice on it is an
-    // instrumental, and a recogniser handed one does not hand back an empty
-    // transcript — it hallucinates. See [`super::align::has_singing`].
-    if !super::align::has_singing(audio) {
-        return Ok(Transcript::default());
-    }
+    Ok(())
+}
 
+/// Run the recogniser over some audio and read back what it heard, timed
+/// against that audio and not yet placed.
+fn recognise(audio: &Audio, config: &Config, on_progress: &dyn Fn(u8)) -> Result<Transcript> {
+    let flavour = config.kind();
     std::fs::create_dir_all(&config.work_dir)
         .with_context(|| format!("creating {}", config.work_dir.display()))?;
 
@@ -200,11 +271,7 @@ pub fn transcribe_audio(
     let json = std::fs::read_to_string(&written).with_context(|| {
         format!("whisper finished but wrote no transcript at {}", written.display())
     })?;
-    // Put the lines where the singing is before anybody sees them. Whisper's
-    // own timing is wrong on a stem in a way that is measurable and fixable,
-    // and the fixing needs the audio — which nothing downstream has, because
-    // what is kept in a collection is the words. See [`super::align`].
-    Ok(super::align::aligned(read(&json, flavour)?, audio))
+    read(&json, flavour)
 }
 
 /// Turn whichever program's JSON into timed lines.
@@ -713,6 +780,42 @@ mod tests {
         let heard = transcribe_audio(&audio, &config, &|_| {})
             .expect("an instrumental should not need a recogniser at all");
         assert!(heard.lines.is_empty(), "{heard:?}");
+    }
+
+    #[test]
+    fn a_record_whose_stem_has_nothing_sung_on_it_never_reaches_the_recogniser_either() {
+        // The record is loud from end to end — it is a record — and the stem
+        // is what says whether anybody is singing on it. The binary does not
+        // exist, so reaching it would be an error.
+        let dir = std::env::temp_dir().join("musicai-whisper-instrumental-mix");
+        let mut config = Config::new(dir);
+        config.program = OsString::from("definitely-not-a-real-whisper-binary");
+        config.model = Some(PathBuf::from("model.bin"));
+
+        let mix = Audio::new(16_000, vec![tone(110.0, 16_000, 4.0)]).unwrap();
+        let stem = Audio::new(16_000, vec![vec![0.0; 16_000 * 4]]).unwrap();
+        let heard = transcribe_mix(&mix, &stem, &config, &|_| {})
+            .expect("an instrumental should not need a recogniser at all");
+        assert!(heard.transcript.lines.is_empty(), "{heard:?}");
+        assert_eq!(heard.handed, Handed::Nothing);
+    }
+
+    #[test]
+    fn a_record_whose_stem_is_singing_reaches_the_recogniser_with_the_record() {
+        // Which it cannot here, since there is no binary — but the error is
+        // the recogniser's, so the stretches were cut and handed over, rather
+        // than the stem being answered for as silent.
+        let dir = std::env::temp_dir().join("musicai-whisper-missing-mix");
+        let mut config = Config::new(dir);
+        config.program = OsString::from("definitely-not-a-real-whisper-binary");
+        config.model = Some(PathBuf::from("model.bin"));
+
+        let mix = Audio::new(16_000, vec![tone(110.0, 16_000, 4.0)]).unwrap();
+        let mut voice = vec![0.0f32; 16_000 * 4];
+        voice[16_000..32_000].copy_from_slice(&tone(220.0, 16_000, 1.0));
+        let stem = Audio::new(16_000, vec![voice]).unwrap();
+        let err = transcribe_mix(&mix, &stem, &config, &|_| {}).unwrap_err();
+        assert!(err.to_string().contains("not on PATH"), "{err}");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Reading the words out of a vocal stem, and finding what the track keeps
+//! Reading the words off a record, and finding what the track keeps
 //! coming back to.
 //!
 //! A DJ's most useful cue is rarely the loudest moment. It is the line the
@@ -7,15 +7,17 @@
 //! before it are the same loudness, the same instruments and the same key. The
 //! words are the only thing that tells them apart.
 //!
-//! So the vocal stem is transcribed, and the transcript is read for repetition.
-//! Two passes, neither of them clever: group the lines that say the same thing,
-//! then take the group with the most separate airings. That is the hook, and
-//! where it first lands is where the cue goes.
+//! So the record is transcribed where its vocal stem says the singing is — see
+//! [`cut`] for why that and not the stem — and the transcript is read for
+//! repetition. Two passes, neither of them clever: group the lines that say the
+//! same thing, then take the group with the most separate airings. That is the
+//! hook, and where it first lands is where the cue goes.
 //!
 //! The transcription itself is somebody else's program — see [`whisper`]. What
 //! is here is everything after it, which is the part that has opinions.
 
 pub mod align;
+pub mod cut;
 pub mod reference;
 pub mod whisper;
 

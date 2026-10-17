@@ -185,13 +185,21 @@ pub struct Drawable {
     pub sources: Vec<PathBuf>,
 }
 
-/// A track to read the words off, and the stem to read them off.
+/// A track to read the words off: the record, and the vocal stem that says
+/// where on it the singing is.
 ///
-/// The vocal stem rather than the mix. A recogniser handed a club record
-/// transcribes the kick drum, and the whole reason this waits on a separation
-/// is that an isolated voice is the only thing it has a chance with.
+/// Both, because they answer different questions. A recogniser handed a club
+/// record whole transcribes the kick drum, which is why this waits on a
+/// separation; handed the separated voice it hears the separator's scars as
+/// syllables, which is why it is not given that either. The stem's loudness
+/// says where the singing is, and those stretches of the record are what it
+/// reads — see `booth_cli::transcribe::cut`.
+#[derive(Clone, Debug)]
 pub struct Transcribable {
     pub id: u32,
+    /// The record itself.
+    pub mix: PathBuf,
+    /// Its vocal stem.
     pub vocals: PathBuf,
 }
 
@@ -209,7 +217,8 @@ pub struct Askable {
     /// What has already been heard off the stem, which may be nothing. A
     /// remix keeps the hook, so even a few lines are evidence.
     pub heard: Vec<crate::library::Lyric>,
-    /// The vocal stem to hand the recogniser if the server does not settle it.
+    /// The recogniser pass to run if the server does not settle it: the record
+    /// and its vocal stem.
     ///
     /// Carried here rather than looked up when the answer arrives, because it
     /// is the difference between the two ways a lookup is asked for and the
@@ -218,7 +227,7 @@ pub struct Askable {
     /// where it fails, and a lookup somebody asked for on its own owes
     /// nothing. `None` either way for a track with no stem yet — the
     /// separation already queued carries that one.
-    pub then_read: Option<PathBuf>,
+    pub then_read: Option<Transcribable>,
 }
 
 /// Words already read, to be put back where the singing is.
@@ -363,7 +372,7 @@ pub enum Update {
         found: Box<booth_cli::tag::lyrics::Found>,
         verdict: booth_cli::tag::lyrics::Verdict,
         /// Handed back as it was given: see [`Askable::then_read`].
-        then_read: Option<PathBuf>,
+        then_read: Option<Transcribable>,
     },
     /// A vocal stem has been through the recogniser. Empty lines are a real
     /// answer: it means nothing was sung, or nothing could be made out.
@@ -1973,14 +1982,13 @@ fn transcribe(
         let config = whisper.to_cli(work.clone());
         crate::info!(
             "reading the words off {}",
-            track.vocals.file_name().unwrap_or_default().to_string_lossy()
+            track.mix.file_name().unwrap_or_default().to_string_lossy()
         );
 
-        let outcome =
-            booth_cli::transcribe::whisper::transcribe(&track.vocals, &config, &|percent| {
-                let _ = reporter.tx.send(Update::Step { percent });
-                (reporter.wake)();
-            });
+        let outcome = hear(track, &config, &|percent| {
+            let _ = reporter.tx.send(Update::Step { percent });
+            (reporter.wake)();
+        });
         let _ = std::fs::remove_dir_all(&work);
 
         match outcome {
@@ -2002,13 +2010,72 @@ fn transcribe(
             Err(e) => {
                 let _ = reporter
                     .tx
-                    .send(Update::Failed { path: track.vocals.clone(), message: format!("{e:#}") });
+                    .send(Update::Failed { path: track.mix.clone(), message: format!("{e:#}") });
             }
         }
         batch.finished_one();
         (reporter.wake)();
     }
     Ok(())
+}
+
+/// How far a stem's length may be from its record's and still be its stem.
+///
+/// The stem is the record with the band taken out, so it is the record's
+/// length to within an encoder's padding — an mp3's delay and padding come to
+/// about fifty milliseconds. Seconds off is another file: a kit rendered from
+/// an earlier edit, a file renamed over another's. Stretches measured on that
+/// would cut the record in the wrong places, so the stem is read on its own
+/// instead, as it used to be.
+const STEM_SLACK_SECS: f64 = 2.0;
+
+/// Read the words off one track: the record where its stem is singing, or the
+/// stem on its own where the record cannot be read or is not the stem's.
+fn hear(
+    track: &Transcribable,
+    config: &booth_cli::transcribe::whisper::Config,
+    on_progress: &dyn Fn(u8),
+) -> anyhow::Result<booth_cli::transcribe::Transcript> {
+    use anyhow::Context as _;
+    use booth_cli::audio::decode::decode_file;
+    use booth_cli::transcribe::whisper::{self, Handed};
+
+    let stem = decode_file(&track.vocals)
+        .with_context(|| format!("reading {}", track.vocals.display()))?;
+    let mix = match decode_file(&track.mix) {
+        Ok(mix) => mix,
+        Err(e) => {
+            crate::warn!(
+                "#{}: the record could not be read ({e:#}), so the words are read off the stem",
+                track.id
+            );
+            return whisper::transcribe_audio(&stem, config, on_progress);
+        }
+    };
+    let apart = (mix.duration_secs() - stem.duration_secs()).abs();
+    if apart > STEM_SLACK_SECS {
+        crate::warn!(
+            "#{}: the stem is {apart:.1} s off the record's length, so it is not this record's \
+             to cut by; the words are read off the stem",
+            track.id
+        );
+        return whisper::transcribe_audio(&stem, config, on_progress);
+    }
+    let heard = whisper::transcribe_mix(&mix, &stem, config, on_progress)?;
+    match &heard.handed {
+        Handed::Nothing => crate::debug!("#{}: nothing is sung on the stem", track.id),
+        Handed::WholeStem => crate::info!(
+            "#{}: the stem has singing nowhere the detector could place, so it was read whole",
+            track.id
+        ),
+        Handed::Stretches { stretches, share } => crate::info!(
+            "#{}: read {:.0}% of the record, in {}",
+            track.id,
+            share * 100.0,
+            crate::library::plural(stretches.len(), "stretch")
+        ),
+    }
+    Ok(heard.transcript)
 }
 
 /// Measure each track's grid again, and report only that.
