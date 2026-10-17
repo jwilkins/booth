@@ -248,6 +248,51 @@ pub fn clock(ms: u32) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
+/// Which program renders a stem kit.
+///
+/// Two of the engine's three: the built-in separator is not offered here,
+/// because a kit whose voice bleeds into every stem is a kit nobody who has
+/// seen the other kind would choose, and a window has no `--backend dsp` to
+/// have been passed by a script that knows better.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Separator {
+    /// `demucs`: three stems from one program, and the one most people have.
+    #[default]
+    Demucs,
+    /// `audio-separator`'s BS-RoFormer for the voice and its demucs for the
+    /// rest: the cleanest vocal stem there is, at twice the work.
+    Roformer,
+}
+
+impl Separator {
+    pub const ALL: [Separator; 2] = [Separator::Demucs, Separator::Roformer];
+
+    pub fn to_cli(self) -> booth_cli::stems::Backend {
+        match self {
+            Separator::Demucs => booth_cli::stems::Backend::Demucs,
+            Separator::Roformer => booth_cli::stems::Backend::Roformer,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Separator::Demucs => "demucs",
+            Separator::Roformer => "RoFormer",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Separator::Demucs => "demucs, installed with pipx — four stems from one model",
+            Separator::Roformer => {
+                "audio-separator's BS-RoFormer for the voice, its demucs for the rest — the \
+                 cleanest vocal stem, about twice the work, and slow without a GPU or Apple \
+                 Silicon"
+            }
+        }
+    }
+}
+
 /// How much work a separation is worth.
 ///
 /// The command line owns the real definition — which model, how many shifts —
@@ -436,6 +481,9 @@ pub struct Config {
     /// Whether the transport shows where you are or what is left.
     #[serde(default)]
     pub counting: Counting,
+    /// Which program renders a stem kit. See [`Separator`].
+    #[serde(default)]
+    pub separator: Separator,
     /// How much work a separation is worth.
     pub stem_quality: Quality,
     /// Whether Booth levels a track's loudness, and how. See [`Normalize`].
@@ -810,6 +858,7 @@ impl Default for Config {
             paint: crate::wave::Paint::default(),
             length: Length::default(),
             counting: Counting::default(),
+            separator: Separator::default(),
             stem_quality: Quality::default(),
             normalize: Normalize::default(),
             warn_before_stems: true,
@@ -1176,6 +1225,18 @@ mod tests {
     }
 
     #[test]
+    fn stems_are_rendered_by_demucs_unless_said_otherwise() {
+        // The one most people have, and the one every earlier settings file
+        // was written against: a file from before the choice existed must
+        // mean what it meant.
+        assert_eq!(Config::default().separator, Separator::Demucs);
+        assert_eq!(Separator::Demucs.to_cli(), booth_cli::stems::Backend::Demucs);
+        assert_eq!(Separator::Roformer.to_cli(), booth_cli::stems::Backend::Roformer);
+        let older: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(older.separator, Separator::Demucs);
+    }
+
+    #[test]
     fn stems_are_rendered_well_by_default() {
         // Rendered once, played for years: the slow one is the right default.
         assert_eq!(Config::default().stem_quality, Quality::High);
@@ -1206,6 +1267,7 @@ mod tests {
         config.paint = crate::wave::Paint::Stems;
         config.length = Length::Beats;
         config.stem_quality = Quality::Standard;
+        config.separator = Separator::Roformer;
         config.sort = crate::rows::Sort { column: crate::rows::Column::Bpm, descending: true };
         config.save(&path).unwrap();
 

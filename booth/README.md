@@ -769,6 +769,28 @@ Three modes, on the right of the cue row, remembered between runs:
   say where the *voice* is. Without a kit it falls back to frequency rather than
   drawing nothing.
 
+## Separator
+
+Two choices in Settings, **demucs** by default:
+
+- **demucs** — three stems from one program, and the one most people have.
+  `pipx install demucs` (with `pipx inject demucs numpy`, which it forgets to
+  depend on).
+- **RoFormer** — `audio-separator`'s BS-RoFormer for the voice, and its demucs
+  for the rest. The band-split RoFormers separate a voice about three decibels
+  cleaner than the Demucs family, which is the difference between a stem that is
+  quiet between the lines and one that is not — and the words are read against
+  that quiet (see *Cues from the words*). About twice the work, and slow
+  without a GPU or Apple Silicon. `pipx install "audio-separator[cpu]"`, and
+  ffmpeg, which it shells out to; it fetches its models the first time it
+  runs, into `~/.cache/booth/models/audio-separator/`. Measured on the test
+  record, its vocal stem is silent — zero — wherever nobody sings, and the
+  words read off the record cut by it came back line for line.
+
+Neither comes with Booth. Changing the choice renders nothing again on its own:
+a kit already on disk stays, and **Re-stem** is what asks for a new one. On the
+command line it is `--backend demucs|roformer|dsp`.
+
 ## Stem quality
 
 Two choices in Settings, **high** by default:
@@ -781,7 +803,8 @@ Two choices in Settings, **high** by default:
 A kit is rendered once and then played for years, so the slow one is the
 default; the fast one is for a first pass over a whole library. On the command
 line it is `--quality high|standard`, and `--demucs-model` / `--demucs-shifts`
-still override whichever it picked.
+still override whichever it picked. With the RoFormer separator the same choice
+picks the demucs that splits the rest.
 
 ## Where stems go
 

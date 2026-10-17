@@ -296,6 +296,30 @@ impl StemsArgs {
     pub fn shifts(&self) -> u32 {
         self.demucs.demucs_shifts.unwrap_or_else(|| self.quality.shifts())
     }
+
+    /// The demucs the RoFormer backend splits the rest with: whatever was
+    /// named, else the model the chosen quality implies, as `audio-separator`
+    /// names it.
+    pub fn rest_model(&self) -> String {
+        self.roformer
+            .roformer_rest_model
+            .clone()
+            .unwrap_or_else(|| format!("{}.yaml", self.quality.model()))
+    }
+
+    /// The separator and what it runs, for a log line.
+    pub fn separator(&self) -> String {
+        match self.backend {
+            Backend::Dsp => "the built-in separator".to_string(),
+            Backend::Demucs => format!("demucs {} shifts={}", self.model(), self.shifts()),
+            Backend::Roformer => format!(
+                "audio-separator: {} for the voice, {} shifts={} for the rest",
+                self.roformer.roformer_model,
+                self.rest_model(),
+                self.shifts()
+            ),
+        }
+    }
 }
 
 impl ExportArgs {
@@ -839,6 +863,9 @@ pub struct StemsArgs {
 
     #[command(flatten)]
     pub demucs: DemucsArgs,
+
+    #[command(flatten)]
+    pub roformer: RoformerArgs,
 }
 
 /// Tuning for the built-in separator. All of it has sensible defaults; these
@@ -936,4 +963,31 @@ pub struct DemucsArgs {
     /// but only on macOS and only when there is a terminal to answer on.
     #[arg(long, value_enum, default_value_t = InstallPolicy::Ask)]
     pub install_demucs: InstallPolicy,
+}
+
+#[derive(Args, Clone, Debug)]
+#[command(next_help_heading = "RoFormer backend")]
+pub struct RoformerArgs {
+    /// The audio-separator executable to run.
+    #[arg(long, value_name = "PATH", default_value = "audio-separator")]
+    pub roformer_bin: PathBuf,
+
+    /// The RoFormer model for the voice, by its file name as `audio-separator
+    /// --list_models` gives it. The default is the BS-RoFormer the program
+    /// itself defaults to.
+    #[arg(long, value_name = "FILE", default_value = crate::stems::roformer::VOCAL_MODEL)]
+    pub roformer_model: String,
+
+    /// The demucs model audio-separator splits the rest with, likewise.
+    ///
+    /// Overrides whatever `--quality` would have chosen. Left unset, `high`
+    /// gives `htdemucs_ft.yaml` and `standard` gives `htdemucs.yaml`.
+    #[arg(long, value_name = "FILE")]
+    pub roformer_rest_model: Option<String>,
+
+    /// Where audio-separator keeps the weights it downloads. Left unset,
+    /// `~/.cache/booth/models/audio-separator/`, beside the other models this
+    /// program is pointed at; its own default is under /tmp.
+    #[arg(long, value_name = "DIR")]
+    pub roformer_models: Option<PathBuf>,
 }

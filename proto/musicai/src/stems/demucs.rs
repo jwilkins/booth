@@ -164,7 +164,11 @@ pub fn separate(input: &Path, config: &Config, on_progress: &dyn Fn(u8)) -> Resu
 /// `passes` is how many bars to expect. Each runs to 100% and then the next
 /// begins, so a caller told the raw figure would watch it reset to zero
 /// several times and conclude the work had started over.
-fn read_progress(mut stream: impl Read, passes: u32, on_progress: &dyn Fn(u8)) -> String {
+pub(super) fn read_progress(
+    mut stream: impl Read,
+    passes: u32,
+    on_progress: &dyn Fn(u8),
+) -> String {
     let mut whole = String::new();
     let mut line = String::new();
     let mut buffer = [0u8; 4096];

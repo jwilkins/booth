@@ -271,15 +271,15 @@ fn pipx_bin_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("bin"))
 }
 
-/// Look for demucs, including where an install would have just put it.
+/// Look for a program, including where a pipx install would have just put it.
 pub fn locate(program: &OsStr) -> Option<PathBuf> {
     find_executable(program).or_else(|| {
-        // Only worth checking pipx's directory for the default name; an
-        // explicit --demucs-bin means the user knows where it is.
-        if program != OsStr::new("demucs") {
+        // Only worth checking pipx's directory for a bare name; an explicit
+        // path means the user knows where it is.
+        if Path::new(program).components().count() > 1 {
             return None;
         }
-        let candidate = pipx_bin_dir()?.join("demucs");
+        let candidate = pipx_bin_dir()?.join(program);
         candidate.is_file().then_some(candidate)
     })
 }
