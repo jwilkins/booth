@@ -888,6 +888,18 @@ Words read before this existed say so, and are placed against their stem the
 next time they are cued — a second of decoding rather than another pass through
 the recogniser, because the words were never the thing that was wrong.
 
+Words a lyrics server has only as text are the other way round: right, and
+without times. Those are read for their times rather than placed — the stem goes
+through the recogniser, and what it heard lends its times to the written lines,
+word by word, the way the karaoke tools make a timed lyric out of a database
+entry and a transcript. The written words stay; the recogniser's are forgotten,
+because on the published benchmarks a recogniser gets a third of sung words
+wrong and a lyrics database gets them right, and when a line is sung is the one
+thing the recogniser knows that nobody wrote down. Where the two agree about too
+few words to say the heard times are these words' times, what was heard is
+taken instead and the log says so. The same happens to lines typed in by hand
+without times.
+
 The words are kept in the collection once they have been heard, so cueing the
 same track again is instant and costs no stem render and no recogniser. The
 memory cue the grid is anchored to is never moved, but the hot cues are replaced
@@ -943,8 +955,11 @@ Booth does not ship a speech recogniser and will not download one. Set it up
 under **Words** in Settings:
 
 - **whisper.cpp** — `brew install whisper-cpp`, or build it. Needs no Python and
-  no network, and needs a ggml model file naming: `ggml-base.en.bin` is a good
-  first choice. This is the one to reach for.
+  no network, and needs a ggml model file naming. `ggml-large-v3-turbo.bin`
+  (1.6 GB) is the one to use: on the published lyrics benchmarks the large
+  Whisper models get about one sung word in three wrong, and the small ones far
+  more, so the quick `ggml-base.en.bin` (150 MB) is for trying the feature
+  rather than for cueing from it. This is the one to reach for.
 - **OpenAI's `whisper`** — `pipx install openai-whisper`. Name the program
   `whisper` and it is called the Python way; anything else is treated as
   whisper.cpp. It downloads its weights the first time it runs, and shells out to
