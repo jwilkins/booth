@@ -2246,10 +2246,10 @@ impl App {
 
     /// What a lyrics server needs to be asked about one track.
     ///
-    /// `then_read` is the vocal stem owed to the recogniser if the server does
-    /// not settle it, and is `None` where nothing is owed — a track with no
-    /// stem yet, or a lookup somebody asked for on its own.
-    fn askable(&self, track: &Track, then_read: Option<PathBuf>) -> job::Askable {
+    /// `then_read` is the recogniser pass owed if the server does not settle
+    /// it — the record and its stem — and is `None` where nothing is owed: a
+    /// track with no stem yet, or a lookup somebody asked for on its own.
+    fn askable(&self, track: &Track, then_read: Option<job::Transcribable>) -> job::Askable {
         job::Askable {
             id: track.id,
             artist: track.artist.clone(),
@@ -2440,7 +2440,9 @@ impl App {
                 // Same, but the stem has gone. Nothing can be measured, so cue
                 // from what is there rather than refusing to cue at all.
                 (false, false, None) => known.push(id),
-                (true, _, Some(vocals)) => reading.push(job::Transcribable { id, vocals }),
+                (true, _, Some(vocals)) => {
+                    reading.push(job::Transcribable { id, mix: track.path.clone(), vocals })
+                }
                 (true, _, None) => rendering.push(id),
             }
         }
@@ -2461,7 +2463,7 @@ impl App {
         // nothing of anybody.
         let asking: Vec<job::Askable> = reading
             .iter()
-            .map(|wanting| (wanting.id, Some(wanting.vocals.clone())))
+            .map(|wanting| (wanting.id, Some(wanting.clone())))
             .chain(rendering.iter().map(|id| (*id, None)))
             .filter_map(|(id, stem)| self.library.get(id).map(|track| (track, stem)))
             .filter(|(track, _)| !track.artist.trim().is_empty() && !track.title.trim().is_empty())
@@ -3273,30 +3275,33 @@ impl App {
                     // depends on whether the part the recogniser needs is
                     // among what was rendered.
                     let vocals = kit.vocals.clone();
-                    let audio = self.library.get(id).map(|track| track.duration_secs);
+                    let record =
+                        self.library.get(id).map(|track| (track.duration_secs, track.path.clone()));
                     if let Some(track) = self.library.get_mut(id) {
                         track.stems = kit;
                     }
                     // So the next batch can say how long it will take. Timed
                     // here rather than guessed from the hardware, because the
                     // same track is minutes on a CPU and seconds on a GPU.
-                    if let Some(audio) = audio {
-                        self.config.record_stem_pace(took_secs, audio as f32);
+                    if let Some((audio, _)) = &record {
+                        self.config.record_stem_pace(took_secs, *audio as f32);
                         paced = true;
                     }
                     if self.want_cues.remove(&id) {
-                        match (self.words_answered(id), vocals) {
+                        match (self.words_answered(id), vocals, record) {
                             // Whether those words still need placing is the
                             // question `auto_cue_tracks` already answers, so
                             // it is left to answer it.
-                            (true, _) => to_cue.push(id),
-                            (false, Some(vocals)) => {
-                                to_read.push(job::Transcribable { id, vocals })
+                            (true, _, _) => to_cue.push(id),
+                            (false, Some(vocals), Some((_, mix))) => {
+                                to_read.push(job::Transcribable { id, mix, vocals })
                             }
-                            (false, None) => self.note(
+                            (false, None, _) => self.note(
                                 "the separation produced no vocal stem to read",
                                 theme::amber(),
                             ),
+                            // A track that has left the collection since.
+                            (false, Some(_), None) => {}
                         }
                     }
                     changed = true;
@@ -3359,7 +3364,7 @@ impl App {
                     // the words that were sung, not an empty panel and another
                     // wait.
                     match (timed || instrumental, then_read) {
-                        (false, Some(vocals)) => to_read.push(job::Transcribable { id, vocals }),
+                        (false, Some(reading)) => to_read.push(reading),
                         // Asked for on its own and nothing came of it. Counted
                         // rather than said one at a time, because a batch of
                         // white labels is a batch of misses. Words taken

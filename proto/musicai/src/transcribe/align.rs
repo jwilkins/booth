@@ -164,19 +164,29 @@ pub fn voiced_spans(audio: &Audio) -> Vec<(u32, u32)> {
     joined
 }
 
-/// Move every line to the onset of the singing it belongs to.
+/// Move each line to the onset of the singing it belongs to.
 ///
 /// A line inside a phrase goes back to that phrase's start, which is what stops
 /// a cue clipping its own first word. A line in a silence goes forward to the
 /// next phrase, which is what fixes the first segment's missing lead-in. A line
 /// past the last phrase is left where it is: there is nothing to move it to.
+///
+/// Each onset goes to one line: the first that lands inside its phrase or in
+/// the silence before it. A verse sung without a half-second's pause is one
+/// phrase to the measurement and several lines to the recogniser, and moving
+/// them all to its start stacked them there — measured on a stem with no quiet
+/// in it at all, where every line of a minute's singing came back at zero. The
+/// lines after the first keep the recogniser's own times, which inside a phrase
+/// are within about a tenth of a second.
 pub fn to_the_voice(transcript: &mut Transcript, spans: &[(u32, u32)]) {
     if spans.is_empty() {
         return;
     }
+    transcript.lines.sort_by_key(|line: &Line| line.start_ms);
+    let mut taken: Option<u32> = None;
     for line in &mut transcript.lines {
         let Some(moved) = onset_for(line.start_ms, spans) else { continue };
-        if moved.abs_diff(line.start_ms) > REACH_MS {
+        if taken == Some(moved) || moved.abs_diff(line.start_ms) > REACH_MS {
             continue;
         }
         // The line keeps its length rather than its end, so a line moved
@@ -184,8 +194,9 @@ pub fn to_the_voice(transcript: &mut Transcript, spans: &[(u32, u32)]) {
         let ran_for = line.end_ms.saturating_sub(line.start_ms);
         line.start_ms = moved;
         line.end_ms = moved.saturating_add(ran_for);
+        taken = Some(moved);
     }
-    // Moving lines can put them out of order where two landed in one phrase.
+    // Moving lines can put them out of order where two landed round one onset.
     transcript.lines.sort_by_key(|line: &Line| line.start_ms);
 }
 
@@ -315,6 +326,29 @@ mod tests {
         // And the second one, which whisper had a tenth of a second late,
         // comes back to the start of its own phrase rather than clipping it.
         assert_eq!(transcript.lines[1].start_ms, 10_044);
+    }
+
+    #[test]
+    fn the_lines_after_the_first_in_one_long_phrase_stay_where_they_were_heard() {
+        // A verse with no half-second pause in it is one phrase here and four
+        // lines to the recogniser. The first takes the onset; the rest keep
+        // their own times, rather than all four landing on the first word.
+        let spans = [(10_000, 30_000)];
+        let mut transcript = said(&[(10_200, 13_000), (14_100, 17_000), (18_050, 21_000)]);
+        to_the_voice(&mut transcript, &spans);
+        let starts: Vec<u32> = transcript.lines.iter().map(|line| line.start_ms).collect();
+        assert_eq!(starts, [10_000, 14_100, 18_050]);
+    }
+
+    #[test]
+    fn a_line_in_the_silence_takes_the_onset_and_the_line_inside_keeps_its_time() {
+        // The recogniser's first segment at zero, and its second where the
+        // singing really is: one onset between them, and it goes to the first.
+        let spans = [(4_000, 9_000)];
+        let mut transcript = said(&[(0, 1_000), (4_120, 6_000)]);
+        to_the_voice(&mut transcript, &spans);
+        let starts: Vec<u32> = transcript.lines.iter().map(|line| line.start_ms).collect();
+        assert_eq!(starts, [4_000, 4_120]);
     }
 
     #[test]

@@ -809,12 +809,24 @@ apart. The words do.
 So the pass is three steps, each skipped when it has already been taken:
 
 1. **Render the vocal stem**, if there is not one. A recogniser handed a club
-   record transcribes the kick drum; an isolated voice is the only thing it has a
-   chance with. This is the expensive step — minutes a track — and it is the same
-   separation the **Stems** button runs, so a track that already has a kit skips
-   straight past it.
-2. **Read the stem**, with whichever Whisper is installed. What comes back is
-   timed lines.
+   record whole transcribes the kick drum, and the stem is what says where on
+   the record the singing is. This is the expensive step — minutes a track — and
+   it is the same separation the **Stems** button runs, so a track that already
+   has a kit skips straight past it.
+2. **Read the record where the stem is singing**, with whichever Whisper is
+   installed. The stem is the voice, so where it is loud is where the singing
+   is, and those stretches of the record — with a third of a second either side,
+   so no line loses its first consonant — are what the recogniser hears, end to
+   end, with a short silence between them. Not the stem itself: a separated
+   voice carries the separator's scars, and a recogniser hears them as
+   syllables. On the published benchmark of whole songs, Whisper read no better
+   off separated vocals than off the mix (22.9 against 23.0 percent of words
+   wrong), and cutting the mix where the vocals were loud is what brought it to
+   20.4, the best open result against that benchmark. What comes back is timed
+   lines, put back on the record's clock. This wants a stem that is quiet
+   between the lines, which a separator's is and the built-in separator's is
+   not — its bleed carries the kick — so with the built-in separator the whole
+   record is read, which still measured better than reading its stem.
 3. **Find what repeats.** Lines that say the same thing are grouped — loosely,
    because a recogniser writes the same sung phrase four slightly different ways
    and matching word-for-word would count a hook sung eight times as eight
@@ -883,6 +895,12 @@ thing in the file. Each line moves back to the start of the phrase it lands
 inside, or forward to the next one if it lands in a silence. On the measurement
 above that puts both phrases within 4 ms of the truth, and the back-to-the-start
 half is what stops a cue clipping its own first word.
+
+Reading the record cut to where the stem is singing takes most of that error
+away before it is made: the recogniser's zero is now a third of a second before
+the first sung stretch rather than the start of the record. The lines are still
+put where the singing is afterwards, by the same rule, against the same
+measurement of the stem.
 
 Words read before this existed say so, and are placed against their stem the
 next time they are cued — a second of decoding rather than another pass through
