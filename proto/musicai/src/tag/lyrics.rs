@@ -129,8 +129,11 @@ pub fn beside(track: &Path) -> Option<PathBuf> {
         let named = folder.join(stem).with_extension(extension);
         // Read back from the directory rather than trusted as spelled, so a
         // case-insensitive volume does not hand back a path that then fails to
-        // open on a case-sensitive one.
-        named.is_file().then_some(named)
+        // open on a case-sensitive one. And not one this program wrote: that is
+        // its own earlier answer, which the collection already holds, and
+        // handed back from here it would outrank a server's as a person's —
+        // see [`written_here`].
+        (named.is_file() && !written_here(&named)).then_some(named)
     })
 }
 
@@ -159,6 +162,121 @@ pub fn read_beside(file: &Path, duration_secs: f64) -> Result<Found> {
         title: file.file_name().unwrap_or_default().to_string_lossy().into_owned(),
         duration_secs,
     })
+}
+
+/// What this program puts in the `[re:]` tag of a lyric file it writes — the
+/// tag an LRC names its editor in — so that its own files can be told from
+/// somebody's.
+pub const WRITTEN_BY: &str = "Booth";
+
+/// How far into a lyric file the header can run. Tags come before the first
+/// timed line, and nobody writes thirty of them.
+const HEADER_LINES: usize = 32;
+
+/// Whether a lyric file is one this program wrote.
+///
+/// Decided by the file's own header rather than remembered, because the
+/// collection that wrote it may not be the one looking: the words were
+/// written beside the track so that other programs would find them, and that
+/// includes another copy of this one.
+pub fn written_here(file: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(file) else { return false };
+    text.lines().take(HEADER_LINES).any(|line| {
+        line.trim()
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|tag| tag.split_once(':'))
+            .is_some_and(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("re") && value.trim() == WRITTEN_BY
+            })
+    })
+}
+
+/// What to write beside a track.
+pub struct Sidecar<'a> {
+    pub artist: &'a str,
+    pub title: &'a str,
+    pub duration_secs: f64,
+    /// Where the words came from, in words — "heard off the stem", "looked
+    /// up" — for the `[by:]` line, so that whoever opens the file knows what
+    /// kind of answer it is reading.
+    pub source: &'a str,
+    pub lines: &'a [Line],
+}
+
+/// The LRC text for a track's words.
+///
+/// `[mm:ss.cc]` on every line, which is what every player reads and what
+/// [`parse_lrc`] reads back. Words nobody timed — a server that only had them
+/// as text — go in bare: a player shows those as plain lyrics, where a file of
+/// `[00:00.00]` lines would show every line at once at the start.
+pub fn to_lrc(sidecar: &Sidecar) -> String {
+    let mut out = String::new();
+    let mut tag = |name: &str, value: &str| {
+        let value = value.trim();
+        if !value.is_empty() {
+            out.push_str(&format!("[{name}:{value}]\n"));
+        }
+    };
+    tag("ar", sidecar.artist);
+    tag("ti", sidecar.title);
+    if sidecar.duration_secs > 0.0 {
+        let secs = sidecar.duration_secs.round() as u64;
+        tag("length", &format!("{:02}:{:02}", secs / 60, secs % 60));
+    }
+    tag("re", WRITTEN_BY);
+    tag("ve", env!("CARGO_PKG_VERSION"));
+    match sidecar.source.trim().is_empty() {
+        true => tag("by", WRITTEN_BY),
+        false => tag("by", &format!("{WRITTEN_BY}, {}", sidecar.source.trim())),
+    }
+
+    let timed = sidecar.lines.iter().any(|line| line.start_ms > 0);
+    let mut lines: Vec<&Line> = sidecar.lines.iter().collect();
+    if timed {
+        lines.sort_by_key(|line| line.start_ms);
+    }
+    for line in lines {
+        // One line is one line: a break inside the text would read as a lyric
+        // with no time on it.
+        let text = line.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            continue;
+        }
+        match timed {
+            true => out.push_str(&format!("{}{text}\n", stamp(line.start_ms))),
+            false => out.push_str(&format!("{text}\n")),
+        }
+    }
+    out
+}
+
+/// `[mm:ss.cc]`, to the nearest hundredth.
+fn stamp(ms: u32) -> String {
+    let centis = (ms + 5) / 10;
+    format!("[{:02}:{:02}.{:02}]", centis / 6000, centis / 100 % 60, centis % 100)
+}
+
+/// What came of writing a lyric file beside a track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Wrote {
+    /// Written — over this program's own earlier file, where there was one.
+    Written(PathBuf),
+    /// A lyric file was already there and was not this program's, so it was
+    /// left as it is: a file somebody filed next to the track is their answer,
+    /// and no answer of this program's replaces it unasked.
+    LeftAlone(PathBuf),
+}
+
+/// Write the words beside the track, as `<name>.lrc`.
+pub fn write_beside(track: &Path, sidecar: &Sidecar) -> Result<Wrote> {
+    let file = track.with_extension("lrc");
+    if file.exists() && !written_here(&file) {
+        return Ok(Wrote::LeftAlone(file));
+    }
+    std::fs::write(&file, to_lrc(sidecar))
+        .with_context(|| format!("writing {}", file.display()))?;
+    Ok(Wrote::Written(file))
 }
 
 /// A rate-limited LRCLIB client.
@@ -769,5 +887,117 @@ mod tests {
         assert_eq!(urlencoding("Der Kommissar"), "Der%20Kommissar");
         assert_eq!(urlencoding("A&B / C?"), "A%26B%20%2F%20C%3F");
         assert_eq!(urlencoding("Bj\u{f6}rk"), "Bj%C3%B6rk");
+    }
+
+    fn sidecar<'a>(lines: &'a [Line]) -> Sidecar<'a> {
+        Sidecar {
+            artist: "Radiohead",
+            title: "Creep",
+            duration_secs: 238.6,
+            source: "looked up",
+            lines,
+        }
+    }
+
+    #[test]
+    fn the_words_are_written_as_an_lrc_every_player_reads() {
+        let lines = [
+            Line { start_ms: 24_090, end_ms: 30_000, text: "Couldn't look you in the eye".into() },
+            Line { start_ms: 19_164, end_ms: 24_090, text: "  When you were\nhere before ".into() },
+        ];
+        let lrc = to_lrc(&sidecar(&lines));
+        assert_eq!(
+            lrc,
+            format!(
+                "[ar:Radiohead]\n[ti:Creep]\n[length:03:59]\n[re:Booth]\n[ve:{}]\n\
+                 [by:Booth, looked up]\n[00:19.16]When you were here before\n\
+                 [00:24.09]Couldn't look you in the eye\n",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        // And it reads back as written: the starts to the hundredth, in order.
+        let back = parse_lrc(&lrc);
+        assert_eq!(
+            back.lines.iter().map(|l| (l.start_ms, l.text.as_str())).collect::<Vec<_>>(),
+            [(19_160, "When you were here before"), (24_090, "Couldn't look you in the eye")]
+        );
+    }
+
+    #[test]
+    fn a_stamp_rounds_to_the_hundredth_and_carries() {
+        assert_eq!(stamp(19_164), "[00:19.16]");
+        assert_eq!(stamp(19_165), "[00:19.17]");
+        assert_eq!(stamp(59_996), "[01:00.00]");
+        assert_eq!(stamp(0), "[00:00.00]");
+        assert_eq!(stamp(3_600_000), "[60:00.00]");
+    }
+
+    #[test]
+    fn words_nobody_timed_go_in_bare_rather_than_all_at_the_start() {
+        let lines = [
+            Line { start_ms: 0, end_ms: 0, text: "one".into() },
+            Line { start_ms: 0, end_ms: 0, text: "two".into() },
+        ];
+        let lrc = to_lrc(&sidecar(&lines));
+        assert!(lrc.ends_with("[by:Booth, looked up]\none\ntwo\n"), "{lrc}");
+        assert!(parse_lrc(&lrc).lines.is_empty(), "bare lines are not timed lines");
+    }
+
+    #[test]
+    fn a_file_this_program_wrote_is_told_from_somebodys_by_its_header() {
+        let dir = scratch("written-here");
+        let ours = dir.join("ours.lrc");
+        std::fs::write(&ours, to_lrc(&sidecar(&[]))).unwrap();
+        let theirs = dir.join("theirs.lrc");
+        std::fs::write(&theirs, "[re:Some Other Program]\n[00:10.00] hold me closer now\n")
+            .unwrap();
+        assert!(written_here(&ours));
+        assert!(!written_here(&theirs));
+        assert!(!written_here(&dir.join("missing.lrc")));
+    }
+
+    #[test]
+    fn writing_beside_a_track_replaces_its_own_file_and_never_somebodys() {
+        let dir = scratch("write-beside");
+        let track = dir.join("track.flac");
+        std::fs::write(&track, b"not really a flac").unwrap();
+        let file = track.with_extension("lrc");
+        let lines = [Line { start_ms: 10_000, end_ms: 12_000, text: "hold me closer now".into() }];
+
+        assert_eq!(write_beside(&track, &sidecar(&lines)).unwrap(), Wrote::Written(file.clone()));
+        let again = [Line { start_ms: 11_000, end_ms: 13_000, text: "hold me closer now".into() }];
+        assert_eq!(write_beside(&track, &sidecar(&again)).unwrap(), Wrote::Written(file.clone()));
+        assert!(
+            std::fs::read_to_string(&file).unwrap().contains("[00:11.00]"),
+            "its own file was not written again"
+        );
+
+        let theirs = "[00:40.00] hold me closer now\n";
+        std::fs::write(&file, theirs).unwrap();
+        assert_eq!(write_beside(&track, &sidecar(&lines)).unwrap(), Wrote::LeftAlone(file.clone()));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            theirs,
+            "somebody's file was written over"
+        );
+    }
+
+    #[test]
+    fn this_programs_own_lyric_file_is_not_somebodys_answer_beside_the_track() {
+        // Looked for beside the track, a file this program wrote would come
+        // back above a server's, as a person's. It is the collection's own
+        // earlier answer, and asking again is asking for something newer.
+        let dir = scratch("own-beside");
+        let track = dir.join("track.flac");
+        std::fs::write(&track, b"not really a flac").unwrap();
+        let lines = [Line { start_ms: 10_000, end_ms: 12_000, text: "hold me closer now".into() }];
+        write_beside(&track, &sidecar(&lines)).unwrap();
+        assert!(
+            beside(&track).is_none(),
+            "its own file came back as a lyric file beside the track"
+        );
+        // Somebody's does, under either name.
+        std::fs::write(track.with_extension("txt"), "hold me closer now\n").unwrap();
+        assert_eq!(beside(&track), Some(track.with_extension("txt")));
     }
 }

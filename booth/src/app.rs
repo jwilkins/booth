@@ -2704,6 +2704,7 @@ impl App {
                     plural(count, "written line"),
                     plural(heard, "line")
                 );
+                self.save_words_beside(id);
                 let placed = self.auto_cue(id);
                 self.note(
                     format!("{} timed by ear, {}", plural(count, "line"), plural(placed, "cue")),
@@ -2761,6 +2762,7 @@ impl App {
                 self.note("nothing sung was made out", theme::dim());
             }
             _ => {
+                self.save_words_beside(id);
                 let placed = self.auto_cue(id);
                 self.note(
                     format!("{} heard, {}", plural(heard, "line"), plural(placed, "cue")),
@@ -2769,6 +2771,44 @@ impl App {
             }
         }
         heard
+    }
+
+    /// Put a track's words beside its file, as `<name>.lrc`.
+    ///
+    /// Every program that shows lyrics looks there first, so words this
+    /// program heard or found are no use to any of them while they live only
+    /// in the collection. Written after every change to the words — found,
+    /// heard, placed against the stem, corrected by hand — so the file is
+    /// never behind the record. A lyric file this program did not write is
+    /// somebody's answer and is left as it is, and words that came out of one
+    /// have nothing to write back.
+    fn save_words_beside(&mut self, id: u32) {
+        use booth_cli::tag::lyrics::{write_beside, Sidecar, Wrote};
+        let Some(track) = self.library.get(id) else { return };
+        if track.lyrics.is_empty() || track.words_from == crate::library::WordsFrom::Beside {
+            return;
+        }
+        let transcript = crate::library::transcript(&track.lyrics);
+        let sidecar = Sidecar {
+            artist: &track.artist,
+            title: &track.title,
+            duration_secs: track.duration_secs,
+            source: track.words_from.label(),
+            lines: &transcript.lines,
+        };
+        let name = |path: &std::path::Path| {
+            path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+        };
+        match write_beside(&track.path, &sidecar) {
+            Ok(Wrote::Written(path)) => {
+                crate::debug!("#{id}: the words are beside the track in {}", name(&path))
+            }
+            Ok(Wrote::LeftAlone(path)) => crate::info!(
+                "#{id}: {} is not this program's, so it keeps what it says",
+                name(&path)
+            ),
+            Err(e) => crate::warn!("#{id}: could not write the words beside the track: {e:#}"),
+        }
     }
 
     /// Hand stems that are already on disk to the recogniser.
@@ -3279,6 +3319,7 @@ impl App {
                         Verdict::Keep => {
                             if self.take_found_words(id, &found) {
                                 changed = true;
+                                self.save_words_beside(id);
                             }
                         }
                         // Plausible and not certain. The one thing not to do
@@ -7342,7 +7383,10 @@ impl App {
                 Pending::Separate(id) => self.separate_tracks(&[id]),
                 Pending::SeparateMany { tracks, for_cues } => self.separate_for(&tracks, for_cues),
                 Pending::TakeFoundWords(id, found) => {
-                    touched |= self.take_found_words(id, &found);
+                    if self.take_found_words(id, &found) {
+                        touched = true;
+                        self.save_words_beside(id);
+                    }
                 }
                 Pending::SaveWords(id) => {
                     touched |= self.save_edited_words(id);
@@ -11589,6 +11633,7 @@ impl App {
         crate::info!("#{id} took {} corrected by hand", plural(count, "line"));
         self.auto_cue(id);
         self.prep_changed(id);
+        self.save_words_beside(id);
         true
     }
 
@@ -14379,6 +14424,54 @@ mod tests {
                         ["hold me closer now", "and then home"]
                     );
                     assert_eq!(track.words_from, WordsFrom::Beside);
+                }
+
+                #[test]
+                fn words_that_are_found_are_written_beside_the_track_as_an_lrc() {
+                    // Wherever the words came from, the file beside the track
+                    // is where every other program looks for them.
+                    let (mut app, id) = read_already("lrc-written");
+                    let found = booth_cli::tag::lyrics::Found {
+                        synced: booth_cli::tag::lyrics::parse_lrc(
+                            "[00:19.16] When you were here before\n\
+                             [00:24.09] Couldn't look you in the eye",
+                        ),
+                        plain: vec![
+                            "When you were here before".into(),
+                            "Couldn't look you in the eye".into(),
+                        ],
+                        instrumental: false,
+                        artist: "Falco".into(),
+                        title: "Der Kommissar".into(),
+                        duration_secs: 300.0,
+                    };
+                    assert!(app.take_found_words(id, &found), "nothing was taken");
+                    app.save_words_beside(id);
+
+                    let track = app.library.get(id).unwrap();
+                    let lrc = std::fs::read_to_string(track.path.with_extension("lrc")).unwrap();
+                    assert!(lrc.contains("[re:Booth]"), "{lrc}");
+                    assert!(lrc.contains("[by:Booth, looked up]"), "{lrc}");
+                    assert!(lrc.contains("[ar:Falco]\n[ti:Der Kommissar]\n"), "{lrc}");
+                    assert!(lrc.contains("[00:19.16]When you were here before\n"), "{lrc}");
+                }
+
+                #[test]
+                fn a_lyric_file_somebody_else_wrote_is_never_written_over() {
+                    // The rule the tags follow, for the same reason: a file
+                    // somebody filed next to the track is their answer.
+                    let (mut app, id) = read_already("lrc-theirs");
+                    let track = app.library.get(id).unwrap();
+                    let lyric = track.path.with_extension("lrc");
+                    let theirs = "[by:a person]\n[00:40.00] hold me closer now\n";
+                    std::fs::write(&lyric, theirs).unwrap();
+
+                    // Heard off the stem, say: the kind of answer that most
+                    // needs stopping at somebody's file.
+                    let track = app.library.get_mut(id).unwrap();
+                    track.words_from = WordsFrom::Recogniser;
+                    app.save_words_beside(id);
+                    assert_eq!(std::fs::read_to_string(&lyric).unwrap(), theirs);
                 }
 
                 #[test]

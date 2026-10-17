@@ -905,6 +905,16 @@ same track again is instant and costs no stem render and no recogniser. The
 memory cue the grid is anchored to is never moved, but the hot cues are replaced
 wholesale, which is what the button says it does.
 
+Wherever the words came from, they are also written beside the track as
+`<name>.lrc`, the file every player and tagger looks for first, with the artist,
+the title and where the words came from in its header. It is written again
+whenever the words change — placed against the stem, corrected by hand — so it
+is never behind the collection. A lyric file Booth did not write is somebody's
+answer: it is read, and never written over. Booth's own carries `[re:Booth]` so
+that it can be told apart, and is passed over when a lyric file beside the track
+is looked for — which is what makes **Look up the words** ask a server rather
+than hand back the last answer.
+
 A cue's label is read on the waveform by resting on it: the marker has room
 for a letter or a dot, and "V1 Get Down" is the thing worth reading. **Memory
 cues hang from the bottom edge and hot cues from the top.** They are two
