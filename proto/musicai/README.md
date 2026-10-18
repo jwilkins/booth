@@ -293,10 +293,16 @@ The cleanest vocal stem there is, through
 yourself:
 
 ```sh
-pipx install "audio-separator[cpu]"      # [gpu] on an NVIDIA card; [cpu] is also the Apple Silicon one
-brew install ffmpeg                      # it shells out to ffmpeg and will not start without it
+pipx install --python python3.12 "audio-separator[cpu]"   # or: uv tool install --python 3.12 "audio-separator[cpu]"
+brew install ffmpeg                                        # it shells out to ffmpeg and will not start without it
 booth-cli stems --backend roformer track.flac
 ```
+
+`[gpu]` on an NVIDIA card; `[cpu]` is also the Apple Silicon one. Python 3.12 or 3.13, not 3.14: the
+RoFormer code checks its own types with beartype, `audio-separator` pins a beartype that predates
+3.14, and under 3.14 it dies instantiating the model with a message about `stft_window_fn` and a
+type hint beartype does not support. `booth-cli` recognises that failure and says which Python to
+install under.
 
 The band-split RoFormers (BS-RoFormer, Mel-Band RoFormer) separate a voice about three decibels
 cleaner than the Demucs family — 10.8 to 11.6 dB of vocal SDR on MUSDB18-HQ against 8.0 for
