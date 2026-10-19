@@ -21,9 +21,11 @@
 //!
 //! Like the demucs backend, nothing here installs or downloads anything. The
 //! program is Python with PyTorch behind it, installed as
-//! `pipx install "audio-separator[cpu]"` (`[gpu]` on an NVIDIA card; the
-//! `[cpu]` extra is also the Apple Silicon one, where it runs on the GPU
-//! through MPS), it shells out to ffmpeg and will not start without it, and
+//! `pipx install --python python3.12 "audio-separator[cpu]"` (`[gpu]` on an
+//! NVIDIA card; the `[cpu]` extra is also the Apple Silicon one, where it
+//! runs on the GPU through MPS; Python 3.12 or 3.13 because the beartype it
+//! pins predates 3.14), it shells out to ffmpeg and will not start without
+//! it, and
 //! it fetches the weights it is asked for the first time it is asked, into the
 //! directory [`Config::models_dir`] names. They are community-trained and come
 //! without a stated licence, which is a reason to leave them where they are
@@ -290,6 +292,21 @@ fn missing(program: &OsString, e: std::io::Error) -> anyhow::Error {
 
 /// Recognise failures whose cause is not obvious from the traceback.
 fn diagnose(stderr: &str, config: &Config) -> Option<String> {
+    // Measured, on a Mac whose pipx ran Python 3.14: the RoFormer code checks
+    // its own types with beartype, audio-separator pins beartype below 0.19,
+    // and that beartype predates 3.14, where `Callable | None` became a
+    // different kind of object at run time. It dies instantiating the model.
+    if stderr.contains("unsupported by @beartype") {
+        return Some(
+            "audio-separator's RoFormer code checks its own types with beartype, and the \
+             beartype it pins predates Python 3.14, where `Callable | None` became a different \
+             kind of object at run time. Install it under Python 3.12 or 3.13 instead: \
+             `uv tool install --python 3.12 \"audio-separator[cpu]\"`, or \
+             `pipx install --python python3.12 \"audio-separator[cpu]\"` (`pipx reinstall` with \
+             the same flag if it is already there)."
+                .to_string(),
+        );
+    }
     // Measured: a fresh install refuses to start without it, before any model
     // is looked at, with a traceback that ends in this line.
     if stderr.contains("No such file or directory: 'ffmpeg'") {
@@ -550,6 +567,21 @@ mod tests {
         assert!(err.contains("audio-separator[cpu]"), "{err}");
         assert!(err.contains("--backend demucs or dsp"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_python_too_new_for_its_beartype_is_explained() {
+        // What a Mac whose pipx ran Python 3.14 said, word for word: the model
+        // never loads, and nothing in the message says which Python to use.
+        let config = Config::new(PathBuf::from("/work"));
+        let stderr = "RuntimeError: Failed to instantiate Roformer model: Method \
+                      audio_separator.separator.uvr_lib_v5.roformer.bs_roformer.BSRoformer.__init__() \
+                      parameter \"stft_window_fn\" type hint collections.abc.Callable | None either \
+                      PEP-noncompliant or currently unsupported by @beartype.. This may be due to \
+                      missing parameters or configuration validation failures.";
+        let hint = diagnose(stderr, &config).expect("the beartype failure was not recognised");
+        assert!(hint.contains("Python 3.12 or 3.13"), "{hint}");
+        assert!(hint.contains("--python 3.12"), "{hint}");
     }
 
     #[test]

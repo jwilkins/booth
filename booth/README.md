@@ -781,9 +781,11 @@ Two choices in Settings, **demucs** by default:
   cleaner than the Demucs family, which is the difference between a stem that is
   quiet between the lines and one that is not — and the words are read against
   that quiet (see *Cues from the words*). About twice the work, and slow
-  without a GPU or Apple Silicon. `pipx install "audio-separator[cpu]"`, and
-  ffmpeg, which it shells out to; it fetches its models the first time it
-  runs, into `~/.cache/booth/models/audio-separator/`. Measured on the test
+  without a GPU or Apple Silicon. `pipx install --python python3.12
+  "audio-separator[cpu]"` — under Python 3.12 or 3.13, not 3.14, which the
+  beartype it pins predates — and ffmpeg, which it shells out to; it fetches
+  its models the first time it runs, into
+  `~/.cache/booth/models/audio-separator/`. Measured on the test
   record, its vocal stem is silent — zero — wherever nobody sings, and the
   words read off the record cut by it came back line for line.
 
