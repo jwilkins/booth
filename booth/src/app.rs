@@ -2886,6 +2886,12 @@ impl App {
             };
             candidates.push(candidate);
         }
+        // And the room between the words: the longest stretch with nothing
+        // sung, for laying another record's vocal over. Only a track whose
+        // words have been read knows where its singing is.
+        if let Some(stretch) = cues::instrumental_stretch(&beats, &sung) {
+            candidates.push(stretch);
+        }
 
         let start = track
             .cues
@@ -13095,6 +13101,15 @@ fn what_the_words_decided(
         }
     }
 
+    // And the room between the words, which is a cue of its own.
+    if let Some(stretch) = booth_cli::analysis::cues::instrumental_stretch(grid, sung) {
+        said.push(format!(
+            "nothing sung for {} from {}: room for another record's vocal",
+            plural(stretch.bars.unwrap_or(0) as usize, "bar"),
+            time_text(stretch.time_ms)
+        ));
+    }
+
     // Which beat of the bar a cue sits on, and whether it is inside a word:
     // what is worth knowing about a cue that will be pressed live.
     let placement = |at: u32| -> String {
@@ -14166,6 +14181,39 @@ mod tests {
                     .find(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .unwrap_or_else(|| panic!("{cues:?}"));
                 assert_eq!(line.time_ms, 40_600, "{cues:?}");
+            }
+
+            #[test]
+            fn the_longest_stretch_with_nothing_sung_gets_a_button_and_says_how_long_it_is() {
+                // Singing until 36.5 s and again from 80 s: twenty bars of
+                // room from the four-bar line at 40 s, which is the one moment
+                // for laying another record's vocal over that nothing else
+                // names.
+                let (mut app, id) = sung(
+                    "instrumental",
+                    &[
+                        (20_000, "walking through the city at night"),
+                        (34_500, "hold me closer now"),
+                        (80_000, "take me home"),
+                    ],
+                );
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let stretch = cues
+                    .iter()
+                    .find(|cue| cue.letter != 0 && cue.label == "instrumental")
+                    .unwrap_or_else(|| panic!("{cues:?}"));
+                assert_eq!(stretch.time_ms, 40_000, "{cues:?}");
+                assert!(
+                    cues.iter()
+                        .any(|cue| cue.letter == 0 && cue.label == "Instrumental \u{b7} 20 bars"),
+                    "{cues:?}"
+                );
+                let said = &app.library.get(id).unwrap().words_decided;
+                assert!(
+                    said.iter().any(|line| line.contains("nothing sung for 20 bars from 0:40.00")),
+                    "{said:#?}"
+                );
             }
 
             #[test]

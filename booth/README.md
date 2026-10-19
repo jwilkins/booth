@@ -877,8 +877,9 @@ so **the buttons are filled in a fixed order**, the order a DJ remixing a record
 live reaches for them: the first drop; the hook; the first break; the drop back
 in, which is the hook's return after the break or failing that the second drop;
 a way in, the intro or the build before the first drop; a way out, the outro;
-a build before a drop, to ride into it; and a second line the room sings. A
-role nothing on the record fills is skipped rather than held open, and whatever
+a build before a drop, to ride into it; an instrumental stretch of eight bars
+or more, to lay another record's vocal over; and a second line the room sings.
+A role nothing on the record fills is skipped rather than held open, and whatever
 buttons the roles leave go to the rest by worth — a third drop before a second
 break — with the lines sung once last, spread over the record. Ranking the
 arrangement against the words produced sets that were all of one or all of the
@@ -921,6 +922,14 @@ that place alike, to the one on a phrase boundary, eight bars from the start of
 its section or four; and between those, to the earliest. The first airing keeps
 its marker. A chorus that starts on a pickup the first time round often starts
 clean the fourth, and the fourth is the one worth a button.
+
+**The room between the words.** The longest stretch with nothing sung — eight
+bars or more between one line and the next, read off the stem — gets a button
+at its bar line, or at the first four-bar boundary after the singing stops
+where that still leaves the eight, so that a vocal laid over it from the button
+lands in phrase. The intro and the outro are not it; they have cues of their
+own. The marker says how long it is: `Instrumental · 20 bars`. Only a track
+whose words have been read has one, because that is when the stem was measured.
 
 Two things it will not do. **An ad-lib is not a hook**: a line needs at least two
 words, because "yeah" is the most repeated thing in half the vocal stems ever

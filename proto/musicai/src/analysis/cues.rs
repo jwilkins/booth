@@ -45,12 +45,16 @@ enum Role {
     MixOut,
     /// A build before a drop, to ride into it live.
     PreDrop,
+    /// Eight bars or more with nothing sung: room for another record's vocal.
+    Instrumental,
     /// A second line the room sings.
     Refrain,
 }
 
-/// The eight, in the order they are filled. See [`Role`].
-const ORDER: [Role; HOT_CUES] = [
+/// The roles, in the order they are filled. See [`Role`]. One more than there
+/// are buttons: a record with every one of them to offer fills the eight
+/// before the last is reached, and most records are missing several.
+const ORDER: [Role; HOT_CUES + 1] = [
     Role::FirstDrop,
     Role::Hook,
     Role::Break,
@@ -58,6 +62,7 @@ const ORDER: [Role; HOT_CUES] = [
     Role::MixIn,
     Role::MixOut,
     Role::PreDrop,
+    Role::Instrumental,
     Role::Refrain,
 ];
 /// How long the voice has to keep going before its arrival counts, in seconds.
@@ -88,6 +93,11 @@ pub enum Reason {
     /// Only ever fills a button nothing better wanted — see [`to_the_buttons`]
     /// — which on a track with no chorus is most of them.
     Line,
+    /// The longest stretch of the record with nothing sung over it, at its
+    /// bar line: eight bars or more of room to lay another record's vocal
+    /// over, which is the one moment a remix reaches for that neither the
+    /// arrangement nor the words name. See [`instrumental_stretch`].
+    Instrumental,
 }
 
 impl Reason {
@@ -102,6 +112,7 @@ impl Reason {
             // The hook, back: what a DJ calls it is the same thing.
             Reason::Comeback => "hook",
             Reason::Line => "line",
+            Reason::Instrumental => "instrumental",
         }
     }
 
@@ -119,6 +130,8 @@ impl Reason {
             Reason::Hook | Reason::Comeback => (0xe8, 0x3c, 0x9e),
             Reason::Refrain => (0xb4, 0x5c, 0xc8),
             Reason::Line => (0x74, 0x55, 0xa4),
+            // Teal: nothing sung, so none of the purples, and not a section.
+            Reason::Instrumental => (0x2a, 0x9d, 0x8f),
         };
         Rgb { r, g, b }
     }
@@ -143,6 +156,9 @@ impl Reason {
             // less than a second line the room sings.
             Reason::Comeback => 55,
             Reason::Section(Kind::Up) => 50,
+            // Reached by its role or not at all, in practice: below a build,
+            // because where the two coincide the build's name says more.
+            Reason::Instrumental => 48,
             Reason::Line => 45,
         }
     }
@@ -283,6 +299,50 @@ pub fn sections(structure: &Structure, beat_times: &[u32]) -> Vec<Candidate> {
         .collect()
 }
 
+/// How many bars with nothing sung make an instrumental stretch worth a
+/// button. Eight: a phrase, which is the least another record's vocal can be
+/// laid over and sound meant.
+pub const INSTRUMENTAL_BARS: usize = 8;
+
+/// The longest stretch of the record with nothing sung over it, as a cue at
+/// its bar line, where it is [`INSTRUMENTAL_BARS`] long or longer.
+///
+/// `grid` is every beat from the first downbeat and `sung` is where the stem
+/// is singing, as `transcribe::align::voiced_spans` measures it. Only the gaps
+/// between sung stretches are looked at: before the first is the intro and
+/// after the last the outro, which have cues of their own. The cue goes on the
+/// first bar line after the singing stops — or on the first four-bar boundary
+/// after it, where that still leaves the eight, because a vocal laid over from
+/// a phrase boundary lands in phrase and one laid over from bar three does
+/// not. `None` with no grid, no words read, or no gap long enough.
+pub fn instrumental_stretch(grid: &[u32], sung: &[(u32, u32)]) -> Option<Candidate> {
+    use super::place::BEATS_PER_BAR;
+    let bar = BEATS_PER_BAR;
+    // Whole bars from the bar line at beat `from` before the singing resumes.
+    let bars_clear = |from: usize, until: u32| {
+        (1..).take_while(|&n| grid.get(from + n * bar).is_some_and(|&end| end <= until)).count()
+    };
+    let mut best: Option<(usize, u32)> = None;
+    for pair in sung.windows(2) {
+        let (quiet_from, quiet_until) = (pair[0].1, pair[1].0);
+        let first_beat = grid.partition_point(|at| *at < quiet_from);
+        let bar_line = first_beat.div_ceil(bar) * bar;
+        let phrase_line = bar_line.div_ceil(bar * 4) * bar * 4;
+        let start = [phrase_line, bar_line].into_iter().find(|&from| {
+            grid.get(from).is_some() && bars_clear(from, quiet_until) >= INSTRUMENTAL_BARS
+        });
+        let Some(from) = start else { continue };
+        let bars = bars_clear(from, quiet_until);
+        if best.is_none_or(|(longest, _)| bars > longest) {
+            best = Some((bars, grid[from]));
+        }
+    }
+    best.map(|(bars, at)| Candidate {
+        bars: u16::try_from(bars).ok(),
+        ..Candidate::new(at, Reason::Instrumental)
+    })
+}
+
 /// Turn everything worth cueing into the cues a player will actually hold.
 ///
 /// One memory cue at `start_ms`, then the best eight of `candidates` in time
@@ -376,11 +436,15 @@ fn to_the_buttons(kept: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
             }),
             Role::MixOut => latest(&taken, &is(Reason::Section(Kind::Outro))),
             Role::PreDrop => earliest(&taken, &is(Reason::Section(Kind::Up))),
+            Role::Instrumental => earliest(&taken, &is(Reason::Instrumental)),
             Role::Refrain => earliest(&taken, &is(Reason::Refrain)),
         };
         if let Some(i) = pick {
             taken[i] = true;
             chosen.push(i);
+        }
+        if chosen.len() == HOT_CUES {
+            break;
         }
     }
 
@@ -473,6 +537,11 @@ fn memory_cues(start_ms: u32, end_ms: Option<u32>, kept: &[(Candidate, u32)]) ->
                     None => format!("{word} {count}"),
                 }
             }
+            // One a record, and what it is worth saying is how long it is.
+            Reason::Instrumental => match candidate.bars {
+                Some(bars) => format!("Instrumental \u{b7} {bars} bars"),
+                None => "Instrumental".to_string(),
+            },
             _ => match candidate.label.as_deref() {
                 Some(text) => {
                     // Numbered by the line it is, not by how many have been
@@ -1269,6 +1338,76 @@ mod tests {
             vec![30_000, 60_000, 64_000, 70_000, 120_000, 150_000, 184_000, 240_000],
             "{hot:?}"
         );
+    }
+
+    #[test]
+    fn an_instrumental_stretch_takes_its_button_before_a_second_line() {
+        // The same record with eight bars of nothing sung at 200 s: the
+        // stretch is the eighth role and the refrain the ninth, so the
+        // refrain is what gives way.
+        let mut lines = vec![
+            line(64_000, "hold me closer now"),
+            line(70_000, "take me home"),
+            line(184_000, "hold me closer now"),
+            line(190_000, "take me home"),
+        ];
+        for (i, text) in VERSE.iter().enumerate() {
+            lines.push(line(10_000 + i as u32 * 7_000, text));
+        }
+        let words = crate::transcribe::Transcript { lines, ..Default::default() };
+        let sections = [
+            (0, Kind::Intro),
+            (30_000, Kind::Up),
+            (60_000, Kind::Chorus),
+            (120_000, Kind::Down),
+            (150_000, Kind::Up),
+            (180_000, Kind::Chorus),
+            (240_000, Kind::Outro),
+        ];
+        let mut candidates: Vec<Candidate> =
+            sections.iter().map(|&(at, kind)| Candidate::new(at, Reason::Section(kind))).collect();
+        candidates.extend(words.moments().iter().map(from_moment));
+        candidates
+            .push(Candidate { bars: Some(16), ..Candidate::new(200_000, Reason::Instrumental) });
+
+        let cues = assemble(0, None, candidates);
+        let hot: Vec<u32> = cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
+        assert_eq!(hot, vec![30_000, 60_000, 64_000, 120_000, 150_000, 184_000, 200_000, 240_000]);
+        assert!(
+            marks(&cues).iter().any(|mark| mark == "Instrumental \u{b7} 16 bars"),
+            "{:?}",
+            marks(&cues)
+        );
+    }
+
+    #[test]
+    fn the_longest_stretch_with_nothing_sung_is_cued_at_its_phrase_line() {
+        // 120 BPM: a bar is two seconds. Singing until 36.5 s and again from
+        // 80 s leaves 43.5 s, twenty-one bars from the bar line at 38 s; the
+        // four-bar boundary at 40 s still leaves twenty, so the cue goes
+        // there. A gap of six bars elsewhere is not a stretch, and the intro
+        // and the outro are not looked at however long they are.
+        let grid: Vec<u32> = (0..400).map(|i| i * 500).collect();
+        let sung = [(20_000, 22_000), (34_500, 36_500), (80_000, 82_000), (94_000, 96_000)];
+        let stretch = instrumental_stretch(&grid, &sung).expect("a stretch");
+        assert_eq!(
+            (stretch.time_ms, stretch.bars, stretch.reason),
+            (40_000, Some(20), Reason::Instrumental)
+        );
+
+        // Where taking the phrase line would leave too few bars, the bar
+        // line itself: singing until 36.5 s and again from 55 s is eight whole bars
+        // from 38 s and only seven from 40 s.
+        let short =
+            instrumental_stretch(&grid, &[(34_500, 36_500), (55_000, 57_000)]).expect("a stretch");
+        assert_eq!((short.time_ms, short.bars), (38_000, Some(8)));
+
+        assert!(instrumental_stretch(&grid, &[(34_500, 36_500), (50_000, 52_000)]).is_none());
+        assert!(
+            instrumental_stretch(&grid, &[(100_000, 102_000)]).is_none(),
+            "the intro is not a stretch"
+        );
+        assert!(instrumental_stretch(&[], &sung).is_none());
     }
 
     #[test]
