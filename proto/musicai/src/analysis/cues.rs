@@ -18,11 +18,48 @@ use super::structure::{Kind, Structure};
 
 /// A player has eight hot cues, A through H.
 const HOT_CUES: usize = 8;
-/// How many of those each kind of cue gets before the other kind may have the
-/// rest. Half each: the arrangement and the words are two different ways of
-/// finding your place in a record, and a set that is all of one of them is
-/// only half a set.
-const SHARE: usize = HOT_CUES / 2;
+
+/// What a button is for, in the order the eight are filled.
+///
+/// A fixed order rather than a ranking, because what a DJ remixing a record
+/// live reaches for is a set: the drop, the hook, the break, the drop back in,
+/// a way in, a way out, the build before the drop, and a second line the room
+/// sings. Ranking the arrangement against the words produced sets that were
+/// all of one or all of the other, and sharing the buttons half and half
+/// between them fixed that by count and not by kind — a busy arrangement's
+/// four were its four loudest sections, and the words' four the hook and three
+/// verse lines. A role nothing on the record fills is skipped, not held open.
+#[derive(Clone, Copy, Debug)]
+enum Role {
+    /// The first drop: where the floor moves.
+    FirstDrop,
+    /// The line the room sings.
+    Hook,
+    /// The first breakdown: where a second record comes in.
+    Break,
+    /// The hook coming back after the break, or failing that the second drop.
+    DropBackIn,
+    /// A way in: the intro, or the build before the first drop.
+    MixIn,
+    /// A way out: the outro.
+    MixOut,
+    /// A build before a drop, to ride into it live.
+    PreDrop,
+    /// A second line the room sings.
+    Refrain,
+}
+
+/// The eight, in the order they are filled. See [`Role`].
+const ORDER: [Role; HOT_CUES] = [
+    Role::FirstDrop,
+    Role::Hook,
+    Role::Break,
+    Role::DropBackIn,
+    Role::MixIn,
+    Role::MixOut,
+    Role::PreDrop,
+    Role::Refrain,
+];
 /// How long the voice has to keep going before its arrival counts, in seconds.
 /// Shorter than this is a vocal stab, not an entry.
 const MIN_VOCAL_SECONDS: f64 = 1.0;
@@ -295,56 +332,84 @@ pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) 
 
 /// Which of the candidates get the eight buttons, in time order.
 ///
-/// Half to the arrangement and half to the words, and then whatever the other
-/// kind did not want. The two are different ways of finding your place in a
-/// record — the drop is where the floor moves and the hook is where the room
-/// sings — and ranking them against each other produced sets that were all of
-/// one or all of the other: a busy arrangement took every button and left a
-/// track's words uncued, and a wordy record took them all back.
+/// Each [`Role`] in [`ORDER`] takes the moment that fills it, where the record
+/// has one. Whatever buttons the roles leave go to the rest by worth — a third
+/// drop before a second break — with the lines sung once last, spread over the
+/// record rather than taken from its front: taken from the front, three
+/// buttons went to the first twenty seconds of a verse while the rest of the
+/// record had none, which is a map of a verse.
 ///
-/// Neither half is held open. A track with nine sections and no words gets
-/// eight sections; an instrumental gets its eight and nothing is left blank
-/// that could have been filled. What *is* left blank is what nothing was found
-/// for, which is the honest answer — an empty button says "nothing here" and a
+/// Nothing is held open. A track with nine sections and no words gets eight
+/// sections; an instrumental gets its eight and nothing is left blank that
+/// could have been filled. What *is* left blank is what nothing was found for,
+/// which is the honest answer — an empty button says "nothing here" and a
 /// made-up one says the wrong thing in a booth.
+///
+/// Takes the list in time order, as [`fold`] leaves it, so that the earliest
+/// moment of a kind is the first match.
 fn to_the_buttons(kept: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
-    let (mut sections, words): (Vec<_>, Vec<_>) =
-        kept.into_iter().partition(|(candidate, _)| candidate.reason.is_section());
-    // The lines sung once are kept apart from the words that are ranked: they
-    // are all worth the same, and which of them get a button is a question of
-    // where in the record they are, not of which came first.
-    let (lines, mut words): (Vec<_>, Vec<_>) =
-        words.into_iter().partition(|(candidate, _)| candidate.reason == Reason::Line);
-
-    // Best first within each kind, so taking from the front of each takes the
-    // ones worth having. Ties go to the earlier moment.
-    let worth = |a: &(Candidate, u32), b: &(Candidate, u32)| {
-        b.1.cmp(&a.1).then(a.0.time_ms.cmp(&b.0.time_ms))
+    let mut taken = vec![false; kept.len()];
+    let mut chosen: Vec<usize> = Vec::new();
+    let earliest = |taken: &[bool], wanted: &dyn Fn(&Candidate) -> bool| {
+        kept.iter().enumerate().position(|(i, (candidate, _))| !taken[i] && wanted(candidate))
     };
-    sections.sort_by(worth);
-    words.sort_by(worth);
+    let latest = |taken: &[bool], wanted: &dyn Fn(&Candidate) -> bool| {
+        kept.iter().enumerate().rposition(|(i, (candidate, _))| !taken[i] && wanted(candidate))
+    };
+    let is = |reason: Reason| move |candidate: &Candidate| candidate.reason == reason;
+    let first_drop = kept
+        .iter()
+        .find(|(candidate, _)| candidate.reason == Reason::Section(Kind::Chorus))
+        .map(|(candidate, _)| candidate.time_ms);
+    for role in ORDER {
+        let pick = match role {
+            Role::FirstDrop => earliest(&taken, &is(Reason::Section(Kind::Chorus))),
+            Role::Hook => earliest(&taken, &is(Reason::Hook)),
+            Role::Break => earliest(&taken, &is(Reason::Section(Kind::Down))),
+            // The first drop is taken by now, so the earliest drop left is
+            // the second.
+            Role::DropBackIn => earliest(&taken, &is(Reason::Comeback))
+                .or_else(|| earliest(&taken, &is(Reason::Section(Kind::Chorus)))),
+            Role::MixIn => earliest(&taken, &|candidate: &Candidate| {
+                matches!(candidate.reason, Reason::Section(Kind::Intro | Kind::Up))
+                    && first_drop.is_none_or(|drop| candidate.time_ms < drop)
+            }),
+            Role::MixOut => latest(&taken, &is(Reason::Section(Kind::Outro))),
+            Role::PreDrop => earliest(&taken, &is(Reason::Section(Kind::Up))),
+            Role::Refrain => earliest(&taken, &is(Reason::Refrain)),
+        };
+        if let Some(i) = pick {
+            taken[i] = true;
+            chosen.push(i);
+        }
+    }
 
-    let offered = words.len() + lines.len();
-    let from_sections = SHARE.max(HOT_CUES.saturating_sub(offered)).min(sections.len());
-    let from_words = (HOT_CUES - from_sections).min(offered);
-    sections.truncate(from_sections);
+    // Then whatever is left, best first and ties to the earlier moment, with
+    // the lines sung once kept back: they are all worth the same, and which of
+    // them get a button is a question of where in the record they are.
+    let mut rest: Vec<usize> =
+        (0..kept.len()).filter(|&i| !taken[i] && kept[i].0.reason != Reason::Line).collect();
+    rest.sort_by(|&a, &b| {
+        kept[b].1.cmp(&kept[a].1).then(kept[a].0.time_ms.cmp(&kept[b].0.time_ms))
+    });
+    for i in rest.into_iter().take(HOT_CUES.saturating_sub(chosen.len())) {
+        taken[i] = true;
+        chosen.push(i);
+    }
+    let room = HOT_CUES.saturating_sub(chosen.len());
+    let lines: Vec<(u32, usize)> = (0..kept.len())
+        .filter(|&i| !taken[i] && kept[i].0.reason == Reason::Line)
+        .map(|i| (kept[i].0.time_ms, i))
+        .collect();
+    chosen.extend(crate::transcribe::spread_in_time(lines, room).into_iter().map(|(_, i)| i));
 
-    // The ranked words first — the hook, the refrains, the voice arriving, the
-    // hook coming back — and whatever is left over goes to the one-off lines,
-    // spread over the record rather than taken from its front. Taken from the
-    // front, three buttons went to the first twenty seconds of a verse while
-    // the rest of the record had none, which is a map of a verse.
-    let ranked = from_words.min(words.len());
-    words.truncate(ranked);
-    let timed: Vec<(u32, (Candidate, u32))> =
-        lines.into_iter().map(|entry| (entry.0.time_ms, entry)).collect();
-    let spare = crate::transcribe::spread_in_time(timed, from_words - ranked);
-    words.extend(spare.into_iter().map(|(_, entry)| entry));
-
-    let mut out = sections;
-    out.extend(words);
-    out.sort_by_key(|(candidate, _)| candidate.time_ms);
-    out
+    // Indices in order are moments in order, `kept` being in time order.
+    chosen.sort_unstable();
+    kept.into_iter()
+        .enumerate()
+        .filter(|(i, _)| chosen.binary_search(i).is_ok())
+        .map(|(_, entry)| entry)
+        .collect()
 }
 
 /// What a section is called on a marker, in the words a DJ uses about a record.
@@ -1164,38 +1229,86 @@ mod tests {
     }
 
     #[test]
-    fn the_buttons_are_shared_between_the_arrangement_and_the_words() {
-        // Four and four where there are four of each to be had. Ranking them
-        // against one another gave sets that were all of one or all of the
-        // other: a busy arrangement took every button and left the words
-        // uncued.
+    fn the_eight_are_filled_in_the_order_a_live_remix_reaches_for_them() {
+        // Everything on offer: six sections past the start, a hook that comes
+        // back after a long break, a second, shorter line — between lines sung
+        // as often, the longer is the hook — and a verse of one-off lines. The
+        // eight are the build in, the drop, the hook, the refrain, the break,
+        // the second build, the hook back and the outro — and not the second
+        // drop, which the hook's return already is, nor any verse line.
+        let mut lines = vec![
+            line(64_000, "hold me closer now"),
+            line(70_000, "take me home"),
+            line(184_000, "hold me closer now"),
+            line(190_000, "take me home"),
+        ];
+        for (i, text) in VERSE.iter().enumerate() {
+            lines.push(line(10_000 + i as u32 * 7_000, text));
+        }
+        let words = crate::transcribe::Transcript { lines, ..Default::default() };
+        let sections = [
+            (0, Kind::Intro),
+            (30_000, Kind::Up),
+            (60_000, Kind::Chorus),
+            (120_000, Kind::Down),
+            (150_000, Kind::Up),
+            (180_000, Kind::Chorus),
+            (240_000, Kind::Outro),
+        ];
+        let mut candidates: Vec<Candidate> =
+            sections.iter().map(|&(at, kind)| Candidate::new(at, Reason::Section(kind))).collect();
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let hot: Vec<(u32, String)> = assemble(0, None, candidates)
+            .into_iter()
+            .filter(Cue::is_hot)
+            .map(|cue| (cue.time_ms, cue.comment.unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            hot.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+            vec![30_000, 60_000, 64_000, 70_000, 120_000, 150_000, 184_000, 240_000],
+            "{hot:?}"
+        );
+    }
+
+    #[test]
+    fn a_busy_arrangement_cannot_push_the_words_out() {
+        // Nine drops, and a record with a hook, its comeback and a refrain:
+        // the words' three are in the eight whatever the arrangement offers,
+        // because the set is incomplete without them. Sharing the buttons
+        // half and half used to see to that by count; the order does it by
+        // kind, and gives the arrangement the other five rather than four.
         let words = crate::transcribe::Transcript {
-            lines: VERSE
-                .iter()
-                .enumerate()
-                .map(|(i, text)| line(25_000 + i as u32 * 40_000, text))
-                .collect(),
+            lines: vec![
+                line(31_000, "hold me closer now"),
+                line(37_000, "take me home"),
+                line(151_000, "hold me closer now"),
+                line(157_000, "take me home"),
+            ],
             ..Default::default()
         };
-        let kinds = [Kind::Intro, Kind::Up, Kind::Chorus, Kind::Down, Kind::Chorus, Kind::Down];
-        let mut candidates: Vec<Candidate> = kinds
-            .iter()
-            .enumerate()
-            .map(|(i, &kind)| Candidate::new(i as u32 * 45_000 + 2_000, Reason::Section(kind)))
+        let mut candidates: Vec<Candidate> = (0..9)
+            .map(|i| Candidate::new(i * 20_000 + 10_000, Reason::Section(Kind::Chorus)))
             .collect();
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let hot = buttons(&assemble(0, None, candidates));
-        let sung = hot.iter().filter(|name| VERSE.contains(&name.as_str())).count();
+        let hot: Vec<(u32, String)> = assemble(0, None, candidates)
+            .into_iter()
+            .filter(Cue::is_hot)
+            .map(|cue| (cue.time_ms, cue.comment.unwrap_or_default()))
+            .collect();
         assert_eq!(hot.len(), HOT_CUES, "{hot:?}");
-        assert_eq!(sung, SHARE, "the words should have had half: {hot:?}");
-        assert_eq!(hot.len() - sung, SHARE, "and the arrangement the other half: {hot:?}");
+        for (at, what) in [(31_000, "the hook"), (151_000, "its comeback"), (37_000, "the refrain")]
+        {
+            assert!(hot.iter().any(|(when, _)| *when == at), "{what} has no button: {hot:?}");
+        }
+        assert_eq!(hot.iter().filter(|(_, name)| name == "drop").count(), 5, "{hot:?}");
     }
 
     #[test]
     fn an_instrumental_gets_every_button_for_its_arrangement() {
-        // Neither half is held open. There is nothing to put in the words'
-        // share, so the arrangement has it.
+        // Nothing is held open. There are no words to fill the roles that
+        // want them, so the arrangement has every button.
         let kinds = [
             Kind::Intro,
             Kind::Up,
@@ -1231,8 +1344,9 @@ mod tests {
 
     #[test]
     fn a_line_only_fills_a_button_nothing_better_wanted() {
-        // A hook and two refrains is already a full share, so the one-off
-        // lines stay markers.
+        // A hook and a refrain take their buttons, and a line sung once is a
+        // marker whatever else happens — and a button too where one is
+        // spare, as here, which costs the marker nothing.
         let mut lines: Vec<crate::transcribe::Line> =
             (0..3).map(|i| line(20_000 + i * 90_000, "hold me closer now")).collect();
         lines.extend((0..3).map(|i| line(50_000 + i * 90_000, "and the night comes down")));

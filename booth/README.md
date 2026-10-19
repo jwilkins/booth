@@ -873,14 +873,19 @@ Around them go **where the singing starts** and **the start of every phrase** th
 arrangement analysis found — intro, build, break, drop, outro.
 
 A player holds eight hot cues and a busy track offers more than eight moments,
-so **the buttons are shared rather than ranked against each other**: four to
-the arrangement, four to the words, and then whatever the other kind did not
-want. They are two different ways of finding your place in a record — the drop
-is where the floor moves and the hook is where the room sings — and ranking
-them together produced sets that were all of one or all of the other. Neither
-share is held open: an instrumental gets all eight for its sections. Within
-each share they are ranked, so the hook takes the words' first slot and the
-drop the arrangement's.
+so **the buttons are filled in a fixed order**, the order a DJ remixing a record
+live reaches for them: the first drop; the hook; the first break; the drop back
+in, which is the hook's return after the break or failing that the second drop;
+a way in, the intro or the build before the first drop; a way out, the outro;
+a build before a drop, to ride into it; and a second line the room sings. A
+role nothing on the record fills is skipped rather than held open, and whatever
+buttons the roles leave go to the rest by worth — a third drop before a second
+break — with the lines sung once last, spread over the record. Ranking the
+arrangement against the words produced sets that were all of one or all of the
+other, and sharing the buttons half and half fixed that by count rather than by
+kind: a busy arrangement's four were its four loudest sections, and the words'
+four the hook and three verse lines. An instrumental still gets all eight for
+its sections.
 
 **A track that repeats nothing still comes back cued.** A rap, a live take, a
 record with one verse and no chorus has no hook and no refrains, and its lines
