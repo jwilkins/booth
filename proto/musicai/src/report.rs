@@ -196,11 +196,15 @@ pub fn plural(count: usize, noun: &str) -> String {
         return format!("1 {noun}");
     }
     // A noun ending in a consonant and a y takes -ies, which is the difference
-    // between "3 copies" and "3 copys". Everything else here takes -s.
+    // between "3 copies" and "3 copys"; one ending in a hiss takes -es, which
+    // is the difference between "5 stretches" and "5 stretchs", a line a log
+    // was seen to say. Everything else here takes -s.
     let vowel = |c: char| "aeiou".contains(c);
+    let hisses = ["s", "x", "z", "ch", "sh"].iter().any(|end| noun.ends_with(end));
     match noun.strip_suffix('y').filter(|stem| stem.chars().next_back().is_some_and(|c| !vowel(c)))
     {
         Some(stem) => format!("{count} {stem}ies"),
+        None if hisses => format!("{count} {noun}es"),
         None => format!("{count} {noun}s"),
     }
 }
@@ -239,6 +243,10 @@ mod tests {
         assert_eq!(plural(1, "copy"), "1 copy");
         // A vowel before the y keeps the plain -s: days, not daies.
         assert_eq!(plural(2, "day"), "2 days");
+        // A hiss takes -es: a log was seen to say "5 stretchs".
+        assert_eq!(plural(5, "stretch"), "5 stretches");
+        assert_eq!(plural(2, "match"), "2 matches");
+        assert_eq!(plural(1, "stretch"), "1 stretch");
     }
 
     #[test]
