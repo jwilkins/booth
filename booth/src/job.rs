@@ -383,6 +383,9 @@ pub enum Update {
         /// `None` from a recogniser that did not say.
         confidence: Option<f32>,
         language: Option<String>,
+        /// Where the stem is singing, measured on the way — see
+        /// [`crate::library::Track::sung`]. Empty where no stem was decoded.
+        sung: Vec<(u32, u32)>,
     },
     /// One row's waveform, measured from its own audio.
     Drawn {
@@ -1942,6 +1945,7 @@ fn realign(tracks: Vec<Realigning>, reporter: &Channel) -> anyhow::Result<()> {
                     lyrics,
                     confidence: None,
                     language: None,
+                    sung: spans,
                 });
             }
             // Not a failure worth stopping for: the stem has moved or will not
@@ -1991,7 +1995,7 @@ fn transcribe(
         let _ = std::fs::remove_dir_all(&work);
 
         match outcome {
-            Ok(transcript) => {
+            Ok((transcript, sung)) => {
                 crate::debug!(
                     "#{}: {}, hook {:?}",
                     track.id,
@@ -2004,6 +2008,7 @@ fn transcribe(
                     lyrics,
                     confidence: transcript.confidence,
                     language: transcript.language.clone(),
+                    sung,
                 });
             }
             Err(e) => {
@@ -2030,17 +2035,22 @@ const STEM_SLACK_SECS: f64 = 2.0;
 
 /// Read the words off one track: the record where its stem is singing, or the
 /// stem on its own where the record cannot be read or is not the stem's.
+///
+/// With where the stem is singing, measured while it is decoded: the words
+/// are placed against that measurement, and so — see
+/// [`crate::library::Track::sung`] — are the cues.
 fn hear(
     track: &Transcribable,
     config: &booth_cli::transcribe::whisper::Config,
     on_progress: &dyn Fn(u8),
-) -> anyhow::Result<booth_cli::transcribe::Transcript> {
+) -> anyhow::Result<(booth_cli::transcribe::Transcript, Vec<(u32, u32)>)> {
     use anyhow::Context as _;
     use booth_cli::audio::decode::decode_file;
     use booth_cli::transcribe::whisper::{self, Handed};
 
     let stem = decode_file(&track.vocals)
         .with_context(|| format!("reading {}", track.vocals.display()))?;
+    let sung = booth_cli::transcribe::align::voiced_spans(&stem);
     let mix = match decode_file(&track.mix) {
         Ok(mix) => mix,
         Err(e) => {
@@ -2048,7 +2058,8 @@ fn hear(
                 "#{}: the record could not be read ({e:#}), so the words are read off the stem",
                 track.id
             );
-            return whisper::transcribe_audio(&stem, config, on_progress);
+            let transcript = whisper::transcribe_audio(&stem, config, on_progress)?;
+            return Ok((transcript, sung));
         }
     };
     let apart = (mix.duration_secs() - stem.duration_secs()).abs();
@@ -2058,7 +2069,8 @@ fn hear(
              to cut by; the words are read off the stem",
             track.id
         );
-        return whisper::transcribe_audio(&stem, config, on_progress);
+        let transcript = whisper::transcribe_audio(&stem, config, on_progress)?;
+        return Ok((transcript, sung));
     }
     let heard = whisper::transcribe_mix(&mix, &stem, config, on_progress)?;
     match &heard.handed {
@@ -2074,7 +2086,7 @@ fn hear(
             crate::library::plural(stretches.len(), "stretch")
         ),
     }
-    Ok(heard.transcript)
+    Ok((heard.transcript, sung))
 }
 
 /// Measure each track's grid again, and report only that.

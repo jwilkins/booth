@@ -965,6 +965,20 @@ that it can be told apart, and is passed over when a lyric file beside the track
 is looked for — which is what makes **Look up the words** ask a server rather
 than hand back the last answer.
 
+**Where the singing is** is kept with the words once a stem has been measured:
+the stretches of the stem with a voice in them, to twenty milliseconds. The
+lines say where each starts and nothing about the line before running on over
+the bar, and that is the question a cue has to answer, because a cue set inside
+a word clips it. So the account under the cues says, for every line the track
+comes back to, where each airing lands in the bar in beats after the one —
+`0.2` is just after it, `3.8` is a pickup to the next — marking the ones with
+something sung between the one and them, and for every cue, which beat of the
+bar it sits on and whether it falls inside a word. These are measurements
+rather than rules, taken first so that the rules for where a cue goes can be
+set from what records do. A collection whose words were placed before this
+existed takes the measurement the next time those tracks are cued, by the same
+decode that placed them.
+
 A cue's label is read on the waveform by resting on it: the marker has room
 for a letter or a dot, and "V1 Get Down" is the thing worth reading. **Memory
 cues hang from the bottom edge and hot cues from the top.** They are two
