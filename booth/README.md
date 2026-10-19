@@ -895,10 +895,27 @@ wrong thing in a booth.
 Two moments that land on top of each other become one cue, and it keeps the
 words: a drop that is also where a line falls says which line.
 
-Cues from the words are rounded **down** to the beat rather than to the nearest
-one. A sung line rarely starts on the beat — a pickup is the whole point of a
-pickup — and a hook cue that clips its own first word is one nobody presses
-twice.
+**Where a word cue goes.** A hot cue is pressed live, in time with another
+deck, so it wants to be on the one; and it must never fall inside a word,
+because a cue that clips its own first syllable is one nobody presses twice.
+Those two pull against each other on a line that starts a beat and a half into
+its bar, and they are settled in this order: on the bar line before the line,
+where the line starts within half a beat of it and nothing is sung between the
+two; on that bar line anyway, where the longer way in is clear of singing, so
+that pressed on another deck's one the words arrive in phrase; on the beat
+before the line, where that beat is not inside the line before; and failing all
+three, on the line's own start, off the grid. Markers stay on the beat before
+the words they mark, because a marker is for reading the words where they are
+sung. The half-beat was reasoned from one record and is there to be set from
+the measurements above.
+
+**Which airing gets the button.** A line the track comes back to used to be
+cued where it first landed, whatever that first landing was like. The button
+now goes to the airing that places best by the order above; between airings
+that place alike, to the one on a phrase boundary, eight bars from the start of
+its section or four; and between those, to the earliest. The first airing keeps
+its marker. A chorus that starts on a pickup the first time round often starts
+clean the fourth, and the fourth is the one worth a button.
 
 Two things it will not do. **An ad-lib is not a hook**: a line needs at least two
 words, because "yeah" is the most repeated thing in half the vocal stems ever
