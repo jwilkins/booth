@@ -12925,6 +12925,20 @@ fn what_the_words_decided(
     };
     let was = said.len();
     for cue in after {
+        // A memory cue has no letter to be matched by — every one of them is
+        // "letter 0" — so matching on the letter found the Start marker for
+        // each of them and reported twenty-seven markers as having moved from
+        // Start. A marker is the same marker when it is at the same time with
+        // the same words; a new one is said, and the rest are not.
+        if cue.letter == 0 {
+            let same = before
+                .iter()
+                .any(|old| old.letter == 0 && old.time_ms == cue.time_ms && old.label == cue.label);
+            if !same {
+                said.push(format!("{} {}", cue.name(), reading(cue)));
+            }
+            continue;
+        }
         match before.iter().find(|old| old.letter == cue.letter) {
             Some(old) if old.time_ms == cue.time_ms && old.label == cue.label => {}
             Some(old) => {
@@ -12933,7 +12947,7 @@ fn what_the_words_decided(
             None => said.push(format!("{} set to {}", cue.name(), reading(cue))),
         }
     }
-    for old in before {
+    for old in before.iter().filter(|old| old.letter != 0) {
         if !after.iter().any(|cue| cue.letter == old.letter) {
             said.push(format!("{} cleared, was {}", old.name(), reading(old)));
         }
@@ -13629,6 +13643,39 @@ mod tests {
                 assert!(said.iter().any(|line| line == "C set to 2:30.00 outro"), "{said:#?}");
                 assert!(
                     said.iter().any(|line| line == "B cleared, was 1:36.00 break"),
+                    "{said:#?}"
+                );
+            }
+
+            #[test]
+            fn markers_are_said_once_each_and_never_as_moved_from_start() {
+                // Every memory cue is "letter 0", so matched by letter each
+                // one found Start and was reported as "Start → V3 …", twenty
+                // seven times over in the report this answers. A marker that
+                // was there already says nothing; a new one is named once.
+                let words =
+                    heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
+                let before = [cue(0, 0, "Start"), cue(0, 40_000, "V1 hold me closer now")];
+                let after = [
+                    cue(0, 0, "Start"),
+                    cue(0, 40_000, "V1 hold me closer now"),
+                    cue(0, 100_000, "V1 hold me closer now"),
+                    cue(1, 40_000, "hold me closer now"),
+                ];
+                let said = what_the_words_decided(&words, &before, &after);
+                assert!(
+                    said.iter().any(|line| line == "\u{2022} 1:40.00 V1 hold me closer now"),
+                    "{said:#?}"
+                );
+                assert!(
+                    !said
+                        .iter()
+                        .any(|line| line.starts_with('\u{2022}') && line.contains('\u{2192}')),
+                    "{said:#?}"
+                );
+                assert_eq!(
+                    said.iter().filter(|line| line.starts_with('\u{2022}')).count(),
+                    1,
                     "{said:#?}"
                 );
             }
