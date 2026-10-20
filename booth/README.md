@@ -862,7 +862,12 @@ saying the same thing — a player that could jump to one moment of the record,
 with the drops and the breakdowns pushed out of the set entirely. Each of the
 track's repeated lines is now cued once, where it first lands, and at most three
 lines get a cue at all: the hook, a second line and a tag is already generous,
-and everything past that is a slot taken from a drop.
+and everything past that is a slot taken from a drop. The one exception is the
+hook coming back after it has been away for longer than a chorus takes to come
+round — twenty seconds, which is a verse — because that is the drop back in
+after the break, and the moment a DJ reaches for. It is offered as a button
+below the refrains and above any line sung once; the hook's other returns, and
+every return of a lesser line, stay markers.
 
 Around them go **where the singing starts** and **the start of every phrase** the
 arrangement analysis found — intro, build, break, drop, outro.
@@ -879,11 +884,13 @@ drop the arrangement's.
 
 **A track that repeats nothing still comes back cued.** A rap, a live take, a
 record with one verse and no chorus has no hook and no refrains, and its lines
-are what it has, so they fill the spare buttons — in time order, spread through
-the record rather than taken from the front, because four cues in the first
-ninety seconds map a verse and not a track. What nothing was found for stays
-empty: an empty button says "nothing here" and a made-up one says the wrong
-thing in a booth.
+are what it has, so they fill the spare buttons — spread through the record's
+running time rather than taken from the front, because four cues in the first
+ninety seconds map a verse and not a track. Spread by time, not along the list
+of them: a record whose one-off lines are all in its first verse came back with
+three buttons on the first twenty seconds that way. What nothing was found for
+stays empty: an empty button says "nothing here" and a made-up one says the
+wrong thing in a booth.
 
 Two moments that land on top of each other become one cue, and it keeps the
 words: a drop that is also where a line falls says which line.
@@ -988,9 +995,11 @@ A sung line gets a verse number and the line itself every time it lands:
 `V1 Get Down`, then `V1 Get Down` again where it comes back. A player shows a
 memory cue's comment while the track is loaded, and a CDJ-3000X has been seen to
 show the whole of a line that long, so the words are on the deck in front of you
-and the number says where in the record you are. Those returns cost no button — they are marked as moments that can only
-ever be memory cues, so they never take a slot from a drop and never lend their
-words to a section they happen to land on.
+and the number says where in the record you are. Those returns cost no button —
+they are marked as moments that can only ever be memory cues, so they never take
+a slot from a drop and never lend their words to a section they happen to land
+on — except the hook's comeback after a verse's worth of absence, which is a
+button where one is spare.
 
 ### Installing a recogniser
 

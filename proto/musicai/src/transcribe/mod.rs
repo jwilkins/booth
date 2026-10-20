@@ -106,6 +106,16 @@ pub enum MomentKind {
     /// memory cue, which costs nothing and is what turns a list of markers
     /// into a map of the record.
     Return,
+    /// The hook coming back from its longest absence, a verse's worth at
+    /// least — see [`COMEBACK_MS`] — which is the drop back in after the
+    /// break, and the moment a DJ reaches for.
+    ///
+    /// Worth a button where one is spare, which a return inside a chorus is
+    /// not: a hook sung every eight seconds is one moment coming round, and a
+    /// hook that has been gone half a minute is the record starting again.
+    /// One per record, so a chorus that comes round four times is still one
+    /// line and one comeback, not five buttons saying the same thing.
+    Comeback,
     /// A line that is sung once and never comes back.
     ///
     /// Worth less than any of the above and worth more than an empty button.
@@ -157,6 +167,17 @@ const APART_MS: u32 = 4_000;
 /// How many times a line has to come round before it is the hook rather than
 /// just a line.
 const MIN_TIMES: usize = 2;
+
+/// How long the hook has to have been away for its return to be a comeback
+/// rather than another time round.
+///
+/// Twenty seconds: longer than a chorus takes to sing its line again — four to
+/// eight seconds, in every chorus measured here — and about the length of a
+/// verse, so a hook that has been gone this long is coming back from somewhere
+/// else in the record. Measured on a report where the hook's return after a
+/// thirty-six second break had no button while three lines of the first verse
+/// did.
+const COMEBACK_MS: u32 = 20_000;
 
 /// How many of the track's repeated lines get a cue of their own.
 ///
@@ -266,8 +287,9 @@ impl Transcript {
         // Most repeated first, so the top line is the hook and the next ones
         // are the lesser ones — which is the order they should lose their
         // slots in when the arrangement wants them.
-        let repeated = self.refrains().into_iter().filter(|line| line.times() >= MIN_TIMES);
-        for (rank, line) in repeated.take(LINES).enumerate() {
+        let (repeated, once): (Vec<Refrain>, Vec<Refrain>) =
+            self.refrains().into_iter().partition(|line| line.times() >= MIN_TIMES);
+        for (rank, line) in repeated.iter().take(LINES).enumerate() {
             let text = comment(&line.text);
             let kind = match rank {
                 0 => MomentKind::Hook,
@@ -277,9 +299,46 @@ impl Transcript {
             moments.push(Moment { time_ms: first, kind, text: text.clone() });
             // Every time it comes round after that. The words are on the first
             // one, so these carry the same text for the cue set to recognise
-            // them by and are marked as returns so they stay off the buttons.
+            // them by, and they are returns — markers, never buttons — except
+            // the one where the hook comes back from its longest absence, a
+            // verse's worth at least, which is the drop back in and is offered
+            // as a button. One, not one per chorus: every chorus start is a
+            // moment, and eight buttons on one line is not a map.
+            let comeback = (rank == 0)
+                .then(|| {
+                    again
+                        .iter()
+                        .scan(first, |last, &at| {
+                            let gap = at.saturating_sub(*last);
+                            *last = at;
+                            Some((gap, at))
+                        })
+                        .filter(|(gap, _)| *gap >= COMEBACK_MS)
+                        // The longest absence, and the earlier one of two the
+                        // same length.
+                        .max_by_key(|(gap, at)| (*gap, std::cmp::Reverse(*at)))
+                        .map(|(_, at)| at)
+                })
+                .flatten();
             for &at in again {
-                moments.push(Moment { time_ms: at, kind: MomentKind::Return, text: text.clone() });
+                let kind = match comeback == Some(at) {
+                    true => MomentKind::Comeback,
+                    false => MomentKind::Return,
+                };
+                moments.push(Moment { time_ms: at, kind, text: text.clone() });
+            }
+        }
+        // The lines the track comes back to beyond the few that get a button
+        // of their own are still lines: a marker where they first land, and
+        // spare-button material like anything sung once. Before this they
+        // fell between the two lists and were nowhere.
+        for line in repeated.iter().skip(LINES) {
+            if let Some(&at) = line.at.first() {
+                moments.push(Moment {
+                    time_ms: at,
+                    kind: MomentKind::Line,
+                    text: comment(&line.text),
+                });
             }
         }
 
@@ -288,13 +347,19 @@ impl Transcript {
         // the rest as markers, so a track with a chorus is unaffected and one
         // without stops coming back from the words empty-handed.
         //
-        // Spread through the record rather than taken from the front, because
-        // four cues in the first ninety seconds map a verse and not a track.
-        let mut once: Vec<Refrain> =
-            self.refrains().into_iter().filter(|line| line.times() < MIN_TIMES).collect();
-        once.sort_by_key(|line| line.at.first().copied().unwrap_or(0));
-        for line in spread(once, SPARE_LINES) {
-            let Some(&at) = line.at.first() else { continue };
+        // Spread through the record's time rather than taken from the front
+        // or spread along the list, because four cues in the first ninety
+        // seconds map a verse and not a track — and a record whose one-off
+        // lines are all in its first verse, spread along the list, is still
+        // all first verse.
+        let timed: Vec<(u32, Refrain)> = once
+            .into_iter()
+            .filter_map(|line| {
+                let at = *line.at.first()?;
+                Some((at, line))
+            })
+            .collect();
+        for (at, line) in spread_in_time(timed, SPARE_LINES) {
             moments.push(Moment { time_ms: at, kind: MomentKind::Line, text: comment(&line.text) });
         }
 
@@ -455,25 +520,41 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// At most `how_many` of a list, evenly spaced through it.
+/// At most `how_many` of a list of timed things, spread over the time they
+/// span, in time order.
 ///
-/// The ones in the middle as well as the ones at the ends: taking the first
-/// few off the front of a time-ordered list puts every cue in the first verse.
-fn spread<T>(items: Vec<T>, how_many: usize) -> Vec<T> {
+/// The one nearest each of `how_many` evenly spaced moments between the first
+/// and the last, each taken once. Over time rather than along the list: a list
+/// of one-off lines spread by position is spread over the lines, and a record
+/// whose one-off lines are all in its first verse hands back a first verse that
+/// way. Spread over the time they cover, the same list hands back the verse
+/// thinned out and whatever lies beyond it.
+pub(crate) fn spread_in_time<T>(mut items: Vec<(u32, T)>, how_many: usize) -> Vec<(u32, T)> {
     if how_many == 0 {
         return Vec::new();
     }
+    items.sort_by_key(|(at, _)| *at);
     if items.len() <= how_many {
         return items;
     }
-    let step = items.len() as f64 / how_many as f64;
-    let wanted: Vec<usize> = (0..how_many).map(|n| ((n as f64 + 0.5) * step) as usize).collect();
-    items
-        .into_iter()
-        .enumerate()
-        .filter(|(at, _)| wanted.contains(at))
-        .map(|(_, item)| item)
-        .collect()
+    let first = items.first().map_or(0.0, |(at, _)| *at as f64);
+    let last = items.last().map_or(0.0, |(at, _)| *at as f64);
+    let mut taken = vec![false; items.len()];
+    for n in 0..how_many {
+        let target = first + (last - first) * (n as f64 + 0.5) / how_many as f64;
+        let nearest = items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !taken[*i])
+            .min_by(|(_, a), (_, b)| {
+                (a.0 as f64 - target).abs().total_cmp(&(b.0 as f64 - target).abs())
+            })
+            .map(|(i, _)| i);
+        if let Some(i) = nearest {
+            taken[i] = true;
+        }
+    }
+    items.into_iter().zip(taken).filter(|(_, kept)| *kept).map(|(item, _)| item).collect()
 }
 
 /// A segment's phrases, where splitting it finds the same phrase twice.
@@ -850,11 +931,12 @@ mod tests {
         // The complaint this answers: a hook sung six times was six cues
         // saying the same thing, so a player could jump to one moment of the
         // record and the drops had nowhere left to go.
+        // A chorus: the line comes round every eight seconds.
         let transcript = said(&[
             (10_000, "walking through the city at night"),
             (30_000, "hold me closer now"),
-            (60_000, "hold me closer now"),
-            (120_000, "hold me closer now"),
+            (38_000, "hold me closer now"),
+            (46_000, "hold me closer now"),
         ]);
 
         let moments = transcript.moments();
@@ -905,12 +987,103 @@ mod tests {
             ]
         );
         // And each comes back, carrying the same words so a cue set can tell
-        // which line it is without reading it again.
+        // which line it is without reading it again. The hook's returns are a
+        // minute apart, so the first of them is its comeback; the other, and
+        // the lesser line's return, are returns however long they were away.
         assert_eq!(
             moments.iter().filter(|m| m.kind == MomentKind::Return).count(),
-            3,
+            2,
             "{moments:?}"
         );
+        let comebacks: Vec<u32> =
+            moments.iter().filter(|m| m.kind == MomentKind::Comeback).map(|m| m.time_ms).collect();
+        assert_eq!(comebacks, vec![80_000], "{moments:?}");
+        assert!(moments.iter().all(|m| !m.text.is_empty()));
+    }
+
+    #[test]
+    fn the_hook_coming_back_from_its_longest_absence_is_a_comeback_and_the_rest_are_returns() {
+        // The report this answers: a hook sung through a chorus, gone for a
+        // thirty-six second break, and back — with no button on the return,
+        // while three lines of the first verse had one each. A second chorus
+        // twenty-five seconds later is a return: one comeback a record.
+        let transcript = said(&[
+            (40_000, "hold me closer now"),
+            (48_000, "hold me closer now"),
+            (56_000, "hold me closer now"),
+            (100_000, "hold me closer now"),
+            (108_000, "hold me closer now"),
+            (133_000, "hold me closer now"),
+        ]);
+        let kinds: Vec<(u32, MomentKind)> =
+            transcript.moments().iter().map(|m| (m.time_ms, m.kind)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (40_000, MomentKind::Hook),
+                (48_000, MomentKind::Return),
+                (56_000, MomentKind::Return),
+                (100_000, MomentKind::Comeback),
+                (108_000, MomentKind::Return),
+                (133_000, MomentKind::Return),
+            ]
+        );
+        // A hook that is never away long enough has no comeback at all.
+        let steady = said(&[(40_000, "hold me closer now"), (55_000, "hold me closer now")]);
+        assert!(!steady.moments().iter().any(|m| m.kind == MomentKind::Comeback));
+    }
+
+    #[test]
+    fn a_fourth_repeated_line_is_still_a_line_and_not_nothing() {
+        // Three repeated lines get buttons of their own. The fourth used to
+        // fall between the lists — not a refrain, not sung once — and vanish:
+        // no marker, no spare-button offer. It is a line.
+        let mut lines: Vec<(u32, &str)> = Vec::new();
+        for (i, text) in [
+            "hold me closer now",
+            "and I don't want to go home",
+            "walking through the city at night",
+            "the rain has not stopped falling",
+        ]
+        .iter()
+        .enumerate()
+        {
+            lines.push((20_000 + i as u32 * 10_000, text));
+            lines.push((120_000 + i as u32 * 10_000, text));
+        }
+        let transcript = said(&lines);
+        let moments = transcript.moments();
+        // Which of the four is fourth is the ranking's business — equal
+        // counts go to the longer line — so what is asserted is that three
+        // have buttons of their own and the fourth is a line, where it first
+        // lands, rather than nowhere.
+        let kinds: Vec<MomentKind> = moments
+            .iter()
+            .filter(|m| matches!(m.kind, MomentKind::Hook | MomentKind::Refrain | MomentKind::Line))
+            .map(|m| m.kind)
+            .collect();
+        assert_eq!(kinds.iter().filter(|k| **k == MomentKind::Hook).count(), 1, "{moments:?}");
+        assert_eq!(kinds.iter().filter(|k| **k == MomentKind::Refrain).count(), 2, "{moments:?}");
+        let fourth: Vec<&Moment> = moments.iter().filter(|m| m.kind == MomentKind::Line).collect();
+        assert_eq!(fourth.len(), 1, "{moments:?}");
+        assert!(fourth[0].time_ms < 60_000, "where it first lands: {:?}", fourth[0]);
+    }
+
+    #[test]
+    fn spare_lines_are_spread_over_the_time_they_cover_and_not_along_the_list() {
+        // Ten lines in the first ten seconds and one a minute and a half
+        // later. Spread along the list, four of eleven are all in the first
+        // ten seconds; spread over time, the late one is always among them.
+        let mut timed: Vec<(u32, u32)> = (0..10).map(|i| (i * 1_000, i)).collect();
+        timed.push((100_000, 10));
+        let picked: Vec<u32> = spread_in_time(timed, 4).into_iter().map(|(at, _)| at).collect();
+        assert_eq!(picked.len(), 4);
+        assert!(picked.contains(&100_000), "{picked:?}");
+        assert!(picked.windows(2).all(|w| w[0] < w[1]), "in time order: {picked:?}");
+        // Fewer things than places takes them all, in time order.
+        let few = spread_in_time(vec![(5_000, 'b'), (1_000, 'a')], 4);
+        assert_eq!(few, vec![(1_000, 'a'), (5_000, 'b')]);
+        assert!(spread_in_time(vec![(1_000, 'a')], 0).is_empty());
     }
 
     #[test]
@@ -959,9 +1132,11 @@ mod tests {
             !moments.iter().any(|m| m.kind == MomentKind::VocalIn),
             "the entry was cued twice: {moments:?}"
         );
-        // The line coming round again is a marker, and only a marker.
+        // The line coming round a minute later is the hook back from a verse,
+        // which is offered as a button; a return inside a chorus would be a
+        // marker only.
         assert_eq!(moments.len(), 2, "{moments:?}");
-        assert_eq!(moments[1].kind, MomentKind::Return);
+        assert_eq!(moments[1].kind, MomentKind::Comeback);
     }
 
     #[test]
