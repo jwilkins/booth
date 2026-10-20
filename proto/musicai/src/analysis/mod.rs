@@ -15,6 +15,7 @@
 pub mod cues;
 pub mod features;
 pub mod key;
+pub mod place;
 pub mod structure;
 pub mod style;
 pub mod style_classes;
