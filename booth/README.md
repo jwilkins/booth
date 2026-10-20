@@ -955,6 +955,13 @@ same track again is instant and costs no stem render and no recogniser. The
 memory cue the grid is anchored to is never moved, but the hot cues are replaced
 wholesale, which is what the button says it does.
 
+The inspector shows the words themselves and what the cueing decided, under the
+lines the track keeps coming back to. Each is a few lines tall, so that the tags
+and the file under them stay where they were left whichever track is selected,
+with **expand** at the right of its heading to open it out to fifty lines, and
+**collapse** to put it back. A lyric is read top to bottom, and reading one
+through a slot a few lines tall is reading it through a letterbox.
+
 Wherever the words came from, they are also written beside the track as
 `<name>.lrc`, the file every player and tagger looks for first, with the artist,
 the title and where the words came from in its header. It is written again

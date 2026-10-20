@@ -278,6 +278,12 @@ pub struct App {
     details: bool,
     /// Set while the settings sheet is open.
     settings: bool,
+    /// Whether the inspector's lyric sheet is opened out to [`EXPANDED_ROWS`]
+    /// rather than the few lines that fit in [`WORDS_HEIGHT`]. Not kept across
+    /// runs: it is where somebody is reading, not a setting.
+    words_expanded: bool,
+    /// The same for the account of what the words decided.
+    decided_expanded: bool,
     /// Tracks found outside the library, waiting for an answer. Only ever set
     /// when the policy is to ask.
     asking: Vec<u32>,
@@ -913,6 +919,8 @@ impl App {
             sheet: false,
             details: false,
             settings: false,
+            words_expanded: false,
+            decided_expanded: false,
             asking: Vec::new(),
             questions: Vec::new(),
             genre_questions: Vec::new(),
@@ -4373,6 +4381,15 @@ const POORLY_HEARD: f32 = 0.7;
 /// — the tags and the file — stay where somebody left them.
 const WORDS_HEIGHT: f32 = 180.0;
 
+/// How many rows the two panels about a track's words show when opened out.
+///
+/// Fifty, which is a lyric: a verse-chorus record has thirty to sixty lines,
+/// and the account of what the cueing decided runs to about as many. Enough
+/// that opening a panel out means reading it rather than scrolling it, and
+/// bounded so that a recogniser that heard four hundred fragments does not put
+/// four hundred rows between the tags and the file.
+const EXPANDED_ROWS: usize = 50;
+
 fn sheet_height(ctx: &egui::Context) -> f32 {
     (ctx.content_rect().height() - 72.0).max(240.0)
 }
@@ -7072,10 +7089,15 @@ impl App {
             // row, so the collection is the only place the whole thing is.
             if !track.lyrics.is_empty() {
                 ui.add_space(14.0);
-                pane_label(ui, "The words");
+                let height = expandable_pane_label(
+                    ui,
+                    "The words",
+                    &mut self.words_expanded,
+                    &theme::sans(theme::SMALL),
+                );
                 egui::ScrollArea::vertical()
                     .id_salt("the-words")
-                    .max_height(WORDS_HEIGHT)
+                    .max_height(height)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for line in &track.lyrics {
@@ -7119,10 +7141,15 @@ impl App {
             // which is a record that lasts until the next thing is logged.
             if !track.words_decided.is_empty() {
                 ui.add_space(14.0);
-                pane_label(ui, "What the words decided");
+                let height = expandable_pane_label(
+                    ui,
+                    "What the words decided",
+                    &mut self.decided_expanded,
+                    &theme::mono(9.5),
+                );
                 egui::ScrollArea::vertical()
                     .id_salt("what-the-words-decided")
-                    .max_height(WORDS_HEIGHT)
+                    .max_height(height)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for line in &track.words_decided {
@@ -12760,6 +12787,46 @@ fn pane_label(ui: &mut Ui, text: &str) {
     ui.add_space(4.0);
 }
 
+/// A pane heading with "expand" at the right of it, for a panel that is shown
+/// short and can be opened out. Returns the height the panel gets this frame.
+///
+/// Short by default — [`WORDS_HEIGHT`] — so that what is under the panel stays
+/// where it was left; [`EXPANDED_ROWS`] rows of `row` when opened out, because
+/// a lyric is read top to bottom and reading one through a slot a few lines
+/// tall is reading it through a letterbox. In rows rather than points so that
+/// the panel opened out holds the number of lines it says, whatever the font.
+fn expandable_pane_label(ui: &mut Ui, text: &str, expanded: &mut bool, row: &egui::FontId) -> f32 {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(theme::label_text(text)).size(theme::LABEL).color(theme::dim()).strong(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (word, hover) = match *expanded {
+                true => ("collapse", "Back to a few lines".to_string()),
+                false => ("expand", format!("Open this out to {EXPANDED_ROWS} lines")),
+            };
+            if ui
+                .add(
+                    egui::Label::new(RichText::new(word).size(theme::LABEL).color(theme::dim()))
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_text(hover)
+                .clicked()
+            {
+                *expanded = !*expanded;
+            }
+        });
+    });
+    ui.add_space(4.0);
+    match *expanded {
+        true => {
+            let row = ui.fonts_mut(|fonts| fonts.row_height(row)) + ui.spacing().item_spacing.y;
+            EXPANDED_ROWS as f32 * row
+        }
+        false => WORDS_HEIGHT,
+    }
+}
+
 fn measurement(ui: &mut Ui, name: &str, value: &str, good: bool) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -15601,6 +15668,33 @@ mod tests {
             // And each line says when it lands, which is what makes it worth
             // reading next to a waveform.
             harness.get_by_label_contains("0:40.00");
+        }
+
+        #[test]
+        fn the_words_and_the_decisions_open_out_to_fifty_lines_when_asked() {
+            // Both panels are a few lines tall so that the tags and the file
+            // under them stay put, and a lyric is read top to bottom: so each
+            // has "expand" at its right, which reads "collapse" once it is
+            // open, and each opens on its own.
+            let (app, _) = with_words("words-expand");
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(420.0, 1_400.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+            assert_eq!(harness.query_all_by_label("expand").count(), 2);
+            assert!(harness.query_by_label("collapse").is_none());
+
+            // The lyric sheet's is the first: it is drawn first.
+            harness.query_all_by_label("expand").next().unwrap().click();
+            harness.run();
+            assert!(harness.state().words_expanded, "the lyric sheet did not open out");
+            assert!(!harness.state().decided_expanded, "the other panel opened with it");
+            harness.get_by_label("collapse");
+
+            harness.get_by_label("collapse").click();
+            harness.run();
+            assert!(!harness.state().words_expanded, "it did not close again");
+            assert_eq!(harness.query_all_by_label("expand").count(), 2);
         }
 
         #[test]
