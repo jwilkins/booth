@@ -857,6 +857,30 @@ So the pass is three steps, each skipped when it has already been taken:
    and matching word-for-word would count a hook sung eight times as eight
    different lines. The group with the most separate airings is the hook.
 
+**Words somebody wrote down are read as lines.** A lyric file — looked up, found
+beside the track, or typed in — is a person's, worded the same each time a line
+comes round and broken where the song breaks, so its repeats are found three
+ways, each only where the one before found nothing:
+
+- **Whole lines, word for word.** Matched loosely, as heard lines are, two
+  different lines a few words apart come back as one: *Praise You*'s "I have to
+  praise you" and "I have to praise you like I should" were one line sung
+  twenty-six times, and *Like a Prayer*'s "just like a prayer, your voice can
+  take me there" took in "your voice can take me there, just like a prayer".
+  Whole lines repeated in eighteen of nineteen lyric files measured on LRCLIB.
+- **The pieces between its punctuation.** The nineteenth was *Bohemian
+  Rhapsody*, where no line comes round whole, but "any way the wind blows" does
+  — once before a comma and once in brackets — and so does "nothing really
+  matters".
+- **Runs of words**, longest first and three words or more. Two words two lines
+  have in common are grammar: on the files measured, "way the", "to me".
+
+A piece or a run is cued where its line starts — a lyric file times lines, not
+words, and a cue at the start of the line a phrase is in plays into it — and
+the lines with none of them in are the lines sung once. Words a recogniser heard
+are read as before, and so are words read before where they came from was
+recorded.
+
 **One cue per line, not one per airing.** A hook sung six times was six cues
 saying the same thing — a player that could jump to one moment of the record,
 with the drops and the breakdowns pushed out of the set entirely. Each of the

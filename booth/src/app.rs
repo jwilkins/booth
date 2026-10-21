@@ -2623,7 +2623,7 @@ impl App {
             return false;
         }
         let lines = lyrics.len();
-        track.refrains = crate::library::refrains_from(&lyrics);
+        track.refrains = crate::library::refrains_from(&lyrics, crate::library::WordsFrom::Server);
         track.lyrics = lyrics;
         track.words_from = crate::library::WordsFrom::Server;
         // Somebody wrote these down, so there is no recogniser's doubt to
@@ -2700,7 +2700,8 @@ impl App {
                     match booth_cli::transcribe::reference::time_words(&texts, &heard_transcript) {
                         Some(timed) => {
                             let placed = crate::library::lyrics_from(&timed);
-                            track.refrains = crate::library::refrains_from(&placed);
+                            track.refrains =
+                                crate::library::refrains_from(&placed, track.words_from);
                             track.lyrics = placed;
                             track.lyrics_aligned = true;
                             if let Some(said) = language.as_deref().filter(|l| !l.trim().is_empty())
@@ -2749,7 +2750,6 @@ impl App {
             // What repeats in them, worked out here and kept: it is shown in
             // two panels that redraw every frame, and it is the thing a DJ
             // recognises a record by months later.
-            track.refrains = crate::library::refrains_from(&lyrics);
             track.lyrics = lyrics;
             // Only where the recogniser said. A realignment moves the times
             // and never the words, so it has nothing new to report about
@@ -2763,6 +2763,11 @@ impl App {
             if confidence.is_some() {
                 track.words_from = WordsFrom::Recogniser;
             }
+            // What repeats in them, worked out here and kept: it is shown in
+            // two panels that redraw every frame, and it is the thing a DJ
+            // recognises a record by months later. After where they came from
+            // is settled, because that decides how their repeats are read.
+            track.refrains = crate::library::refrains_from(&track.lyrics, track.words_from);
             // Both paths that produce this place the words against the stem
             // first, so arriving here is what being placed means.
             track.lyrics_aligned = true;
@@ -2878,7 +2883,7 @@ impl App {
             })
             .collect();
 
-        let words = crate::library::transcript(&track.lyrics);
+        let words = crate::library::words_of(track);
         let sounds = track.sounds.clone();
         // Where the sections start, on the grid, for counting phrases from.
         let sections: Vec<u32> = candidates.iter().map(|candidate| candidate.time_ms).collect();
@@ -2934,6 +2939,11 @@ impl App {
             // went, so the account of why a track's cues are where they are
             // lasted until the next thing was logged.
             track.words_decided = decided;
+            // And what repeats in them, read the way the cues were. Kept from
+            // before a lyric file's lines were read as lines, it would say one
+            // thing in the panel under the cue analysis that says another,
+            // until the words were next taken in.
+            track.refrains = crate::library::refrains_from(&track.lyrics, track.words_from);
         }
         self.prep_changed(id);
         hot
@@ -11726,7 +11736,7 @@ impl App {
 
         let count = lyrics.len();
         let placed = track.lyrics_aligned;
-        track.refrains = crate::library::refrains_from(&lyrics);
+        track.refrains = crate::library::refrains_from(&lyrics, crate::library::WordsFrom::ByHand);
         track.lyrics = lyrics;
         track.words_from = crate::library::WordsFrom::ByHand;
         // Nobody's doubt survives somebody typing the words in.
@@ -16368,7 +16378,8 @@ mod tests {
                         })
                     })
                     .collect();
-                track.refrains = crate::library::refrains_from(&track.lyrics.clone());
+                track.refrains =
+                    crate::library::refrains_from(&track.lyrics.clone(), track.words_from);
             }
             app.rebuild();
             assert!(
@@ -16440,7 +16451,7 @@ mod tests {
                     .collect();
                 track.words_decided = (0..60).map(|i| format!("decision {i}")).collect();
                 // Worked out from the lyric as taking words in does.
-                track.refrains = crate::library::refrains_from(&track.lyrics);
+                track.refrains = crate::library::refrains_from(&track.lyrics, track.words_from);
                 assert!(!track.refrains.is_empty());
             }
             app.rebuild();
@@ -17541,7 +17552,8 @@ mod tests {
                         text: "hold me closer now".into(),
                     })
                     .collect();
-                track.refrains = crate::library::refrains_from(&track.lyrics.clone());
+                track.refrains =
+                    crate::library::refrains_from(&track.lyrics.clone(), track.words_from);
             }
             app.selected = Some(id);
             app.rebuild();

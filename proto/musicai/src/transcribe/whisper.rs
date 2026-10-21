@@ -322,6 +322,7 @@ fn read(json: &str, flavour: Flavour) -> Result<Transcript> {
             .and_then(|r| r.get("language"))
             .and_then(|l| l.as_str())
             .map(str::to_string),
+        written: false,
     })
 }
 

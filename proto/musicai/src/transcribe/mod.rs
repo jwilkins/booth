@@ -51,6 +51,14 @@ pub struct Transcript {
     pub confidence: Option<f32>,
     /// The language it decided it was listening to, as a code like `en`.
     pub language: Option<String>,
+    /// Whether a person wrote these lines down — a lyric file, looked up or
+    /// found beside the track, or typed in — rather than a recogniser hearing
+    /// them.
+    ///
+    /// It decides how repeats are found: see [`Self::refrains`]. A person's
+    /// line is worded the same each time it comes round and broken where the
+    /// song breaks, which is neither of a recogniser's segments.
+    pub written: bool,
 }
 
 /// A line the track returns to, and every time it does.
@@ -145,6 +153,15 @@ pub struct Moment {
 /// whole exercise pointless.
 const SAME: f32 = 0.75;
 
+/// The fewest words a run of words inside written lines has to have to count
+/// as a repeat, when nothing longer repeats.
+///
+/// Three. On *Bohemian Rhapsody*'s lyric file, the one of nineteen measured
+/// here in which no whole line comes round, the two-word runs that repeat are
+/// grammar — "way the", "to me", "the wind" — where the three-word ones are
+/// "nothing really matters" and "let me go". See [`by_runs_of_words`].
+const FEWEST_IN_A_RUN: usize = 3;
+
 /// The fewest words a line can have and still be a hook.
 ///
 /// One word is an ad-lib. "Oh", "yeah" and "hey" are the most repeated tokens
@@ -211,7 +228,31 @@ impl Transcript {
     /// Ties go to the longer line and then to the earlier one: between two
     /// lines sung three times each, the longer is the one somebody wrote a
     /// chorus around and the shorter is a tag on the end of it.
+    ///
+    /// Written lines are read three ways, each only where the one before found
+    /// nothing that comes round: whole lines, then the pieces between their
+    /// punctuation, then runs of words. See [`Self::written_refrains`]. Heard
+    /// lines are read as a recogniser writes them; see [`Self::heard_refrains`].
     pub fn refrains(&self) -> Vec<Refrain> {
+        let mut refrains = match self.written {
+            true => self.written_refrains(),
+            false => self.heard_refrains(),
+        };
+        refrains.sort_by(|a, b| {
+            b.times()
+                .cmp(&a.times())
+                .then(words(&b.text).len().cmp(&words(&a.text).len()))
+                .then(a.at.first().cmp(&b.at.first()))
+        });
+        refrains
+    }
+
+    /// A recogniser's segments, read for repeats.
+    ///
+    /// Matched loosely, because a recogniser writes the same sung line four
+    /// ways — see [`SAME`] — and split where a segment holds a phrase and its
+    /// repeats, because a recogniser runs them together; see [`phrases`].
+    fn heard_refrains(&self) -> Vec<Refrain> {
         let mut groups: Vec<Group> = Vec::new();
         for line in &self.lines {
             for (nth, phrase) in phrases(&line.text).into_iter().enumerate() {
@@ -232,14 +273,46 @@ impl Transcript {
             }
         }
 
-        let mut refrains: Vec<Refrain> = groups.into_iter().map(Group::into_refrain).collect();
-        refrains.sort_by(|a, b| {
-            b.times()
-                .cmp(&a.times())
-                .then(words(&b.text).len().cmp(&words(&a.text).len()))
-                .then(a.at.first().cmp(&b.at.first()))
-        });
-        refrains
+        groups.into_iter().map(Group::into_refrain).collect()
+    }
+
+    /// A lyric file's lines, read for repeats.
+    ///
+    /// Whole lines first, word for word. A person writes a chorus line the
+    /// same way each time it comes round, so a line that differs by a word is
+    /// a different line: matched loosely, as heard lines are, *Praise You*'s
+    /// "I have to praise you" and "I have to praise you like I should" came
+    /// back as one line sung twenty-six times, and *Like a Prayer*'s "just like
+    /// a prayer, your voice can take me there" took in "your voice can take me
+    /// there, just like a prayer". Whole lines repeat in eighteen of the
+    /// nineteen lyric files measured on LRCLIB.
+    ///
+    /// Where no line comes round whole, the pieces between the punctuation of
+    /// each line, which is where the person who wrote it heard the breaks; and
+    /// where none of those does either, the longest runs of words that do —
+    /// see [`by_runs_of_words`]. A piece or a run lands where its line starts:
+    /// a lyric file times lines, not words, and a cue at the start of the line
+    /// a phrase is in plays into it. The lines with none of them in are the
+    /// lines sung once, whole.
+    fn written_refrains(&self) -> Vec<Refrain> {
+        let whole = by_pieces(&self.lines, |text| vec![text]);
+        if whole.iter().any(|(group, _)| group.sung >= MIN_TIMES) {
+            return whole.into_iter().map(|(group, _)| group.into_refrain()).collect();
+        }
+        let between_punctuation = by_pieces(&self.lines, |text| text.split(PUNCTUATION).collect());
+        let repeated = [between_punctuation, by_runs_of_words(&self.lines)]
+            .into_iter()
+            .map(|found| {
+                found.into_iter().filter(|(group, _)| group.sung >= MIN_TIMES).collect::<Vec<_>>()
+            })
+            .find(|repeated| !repeated.is_empty());
+        let Some(repeated) = repeated else {
+            return whole.into_iter().map(|(group, _)| group.into_refrain()).collect();
+        };
+        let inside: Vec<usize> = repeated.iter().flat_map(|(_, lines)| lines.clone()).collect();
+        let once =
+            whole.into_iter().filter(|(_, lines)| !lines.iter().any(|line| inside.contains(line)));
+        repeated.into_iter().chain(once).map(|(group, _)| group.into_refrain()).collect()
     }
 
     /// The lines the track actually comes back to, most repeated first.
@@ -299,11 +372,10 @@ impl Transcript {
             moments.push(Moment { time_ms: first, kind, text: text.clone() });
             // Every time it comes round after that. The words are on the first
             // one, so these carry the same text for the cue set to recognise
-            // them by, and they are returns — markers, never buttons — except
-            // the one where the hook comes back from its longest absence, a
-            // verse's worth at least, which is the drop back in and is offered
-            // as a button. One, not one per chorus: every chorus start is a
-            // moment, and eight buttons on one line is not a map.
+            // them by, and they are returns — markers, never buttons. The one
+            // where the hook comes back from its longest absence, a verse's
+            // worth at least, is marked as the comeback: one, not one per
+            // chorus, because every chorus start is a moment.
             let comeback = (rank == 0)
                 .then(|| {
                     again
@@ -557,6 +629,102 @@ pub(crate) fn spread_in_time<T>(mut items: Vec<(u32, T)>, how_many: usize) -> Ve
     items.into_iter().zip(taken).filter(|(_, kept)| *kept).map(|(item, _)| item).collect()
 }
 
+/// Where a person writing a lyric down breaks a line. Brackets as well as
+/// stops: an ad-lib is written in them, "Mama, ooh (any way the wind blows)".
+const PUNCTUATION: [char; 10] = [',', '.', ';', ':', '!', '?', '\u{2014}', '(', ')', '"'];
+
+/// Written lines grouped word for word, each cut into pieces by `cut`: the
+/// groups, each with the lines it is in, in the order the lines come.
+///
+/// Every piece lands where its line starts. Pieces shorter than a line can be
+/// are left out.
+fn by_pieces<'a>(
+    lines: &'a [Line],
+    cut: impl Fn(&'a str) -> Vec<&'a str>,
+) -> Vec<(Group, Vec<usize>)> {
+    let mut groups: Vec<(Group, Vec<usize>)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        for piece in cut(&line.text) {
+            let said = words(piece);
+            if said.len() < MIN_WORDS {
+                continue;
+            }
+            match groups.iter_mut().find(|(group, _)| group.heard[0].0 == said) {
+                Some((group, found)) => {
+                    group.add(line.start_ms, said, piece, true);
+                    found.push(i);
+                }
+                None => groups.push((Group::new(line.start_ms, said, piece), vec![i])),
+            }
+        }
+    }
+    groups
+}
+
+/// The runs of words that come round in written lines that otherwise do not
+/// repeat: the groups, each with the lines it is in.
+///
+/// Longest first, each run of words taken once, so that "any way the wind
+/// blows" is found as itself and not again as "way the wind" inside it; and
+/// no shorter than [`FEWEST_IN_A_RUN`]. Only the runs that come round are
+/// handed back.
+fn by_runs_of_words(lines: &[Line]) -> Vec<(Group, Vec<usize>)> {
+    /// Where a run of words is: which line, and how many words into it.
+    type Place = (usize, usize);
+
+    let spans: Vec<Vec<(String, std::ops::Range<usize>)>> =
+        lines.iter().map(|line| word_spans(&line.text)).collect();
+    let mut used: Vec<Vec<bool>> = spans.iter().map(|words| vec![false; words.len()]).collect();
+    let longest = spans.iter().map(Vec::len).max().unwrap_or(0);
+    let mut found = Vec::new();
+    for n in (FEWEST_IN_A_RUN..=longest).rev() {
+        // Every run of n words not already inside a longer repeat, and where
+        // it is, in the order first seen.
+        let mut runs: Vec<(Vec<&str>, Vec<Place>)> = Vec::new();
+        let mut index: std::collections::HashMap<Vec<&str>, usize> =
+            std::collections::HashMap::new();
+        for (l, said) in spans.iter().enumerate() {
+            for at in 0..(said.len() + 1).saturating_sub(n) {
+                if used[l][at..at + n].iter().any(|taken| *taken) {
+                    continue;
+                }
+                let key: Vec<&str> =
+                    said[at..at + n].iter().map(|(word, _)| word.as_str()).collect();
+                match index.get(&key) {
+                    Some(&i) => runs[i].1.push((l, at)),
+                    None => {
+                        index.insert(key.clone(), runs.len());
+                        runs.push((key, vec![(l, at)]));
+                    }
+                }
+            }
+        }
+        for (key, places) in runs {
+            // Taken by a run found before it at this length, overlapping it.
+            let places: Vec<Place> = places
+                .into_iter()
+                .filter(|&(l, at)| !used[l][at..at + n].iter().any(|taken| *taken))
+                .collect();
+            let lines_in: Vec<usize> = places.iter().map(|&(l, _)| l).collect();
+            let mut group: Option<Group> = None;
+            for &(l, at) in &places {
+                let text = &lines[l].text[spans[l][at].1.start..spans[l][at + n - 1].1.end];
+                let said: Vec<String> = key.iter().map(|word| word.to_string()).collect();
+                match group.as_mut() {
+                    Some(group) => group.add(lines[l].start_ms, said, text, true),
+                    None => group = Some(Group::new(lines[l].start_ms, said, text)),
+                }
+            }
+            let Some(group) = group.filter(|group| group.sung >= MIN_TIMES) else { continue };
+            for &(l, at) in &places {
+                used[l][at..at + n].iter_mut().for_each(|taken| *taken = true);
+            }
+            found.push((group, lines_in));
+        }
+    }
+    found
+}
+
 /// A segment's phrases, where splitting it finds the same phrase twice.
 ///
 /// A recogniser hands back a segment, not a lyric line, and a segment often
@@ -714,6 +882,92 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    fn written(lines: &[(u32, &str)]) -> Transcript {
+        Transcript { written: true, ..said(lines) }
+    }
+
+    #[test]
+    fn a_lyric_files_lines_are_matched_whole_and_word_for_word() {
+        // Praise You's lyric file: two lines a recogniser's loose match takes
+        // for one, because the shorter is all of the longer but three words.
+        // Written down, a line that differs by a word is a different line.
+        let lines = [
+            (10_000, "I have to praise you"),
+            (20_000, "I have to praise you like I should"),
+            (40_000, "I have to praise you"),
+            (50_000, "I have to praise you like I should"),
+            (70_000, "I have to praise you"),
+        ];
+        let repeated = written(&lines).repeated();
+        let found: Vec<(&str, usize)> =
+            repeated.iter().map(|refrain| (refrain.text.as_str(), refrain.times())).collect();
+        assert_eq!(
+            found,
+            [("I have to praise you", 3), ("I have to praise you like I should", 2)],
+            "{repeated:?}"
+        );
+        assert_eq!(said(&lines).repeated().len(), 1, "heard lines are matched loosely");
+    }
+
+    #[test]
+    fn a_lyric_file_with_no_line_that_comes_round_is_read_between_its_punctuation() {
+        // Bohemian Rhapsody's lyric file, the one of nineteen measured where no
+        // whole line comes round: the phrase that does is inside two lines,
+        // once before a comma and once in brackets. It lands where its lines
+        // start, and the lines it is not in are the lines sung once, whole.
+        let lines = [
+            (10_000, "Easy come, easy go, little high, little low"),
+            (20_000, "Any way the wind blows, doesn't really matter to me"),
+            (90_000, "Mama, ooh (any way the wind blows)"),
+            (150_000, "Nothing really matters to me"),
+        ];
+        let refrains = written(&lines).refrains();
+        let hook = &refrains[0];
+        assert_eq!(hook.text.to_lowercase(), "any way the wind blows", "{refrains:?}");
+        assert_eq!(hook.at, vec![20_000, 90_000], "{refrains:?}");
+        let once: Vec<&str> = refrains[1..].iter().map(|refrain| refrain.text.as_str()).collect();
+        assert_eq!(
+            once,
+            ["Easy come, easy go, little high, little low", "Nothing really matters to me"],
+            "{refrains:?}"
+        );
+        assert!(said(&lines).hook().is_none(), "a recogniser's segments are not cut so");
+    }
+
+    #[test]
+    fn a_lyric_file_with_nothing_repeated_between_its_punctuation_is_read_for_runs_of_words() {
+        // No line and no piece of one comes round, but three words do.
+        let lines = [
+            (10_000, "I never sleep cause sleep is the cousin of death"),
+            (20_000, "beyond the walls of intelligence"),
+            (40_000, "they tell me I never sleep at all"),
+        ];
+        let hook = written(&lines).hook().expect("a run of three words sung twice");
+        assert_eq!(hook.text, "I never sleep");
+        assert_eq!(hook.at, vec![10_000, 40_000]);
+    }
+
+    #[test]
+    fn two_words_in_common_are_not_a_repeat_in_a_lyric_file() {
+        // What two lines that share only two words share is grammar: on the
+        // lyric files measured, "way the", "to me", "the wind".
+        let lines = [(10_000, "walking in the rain tonight"), (40_000, "a light in the window")];
+        assert!(written(&lines).hook().is_none(), "{:?}", written(&lines).refrains());
+    }
+
+    #[test]
+    fn a_run_of_words_is_found_once_and_not_again_inside_itself() {
+        // "any way the wind blows" in two lines, not also "way the wind" and
+        // "the wind blows" as lines of their own.
+        let lines = [
+            (10_000, "so you think any way the wind blows is fine"),
+            (40_000, "I know any way the wind blows we go"),
+        ];
+        let repeated = written(&lines).repeated();
+        let found: Vec<&str> = repeated.iter().map(|refrain| refrain.text.as_str()).collect();
+        assert_eq!(found, ["any way the wind blows"], "{repeated:?}");
     }
 
     #[test]

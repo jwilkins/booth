@@ -335,6 +335,16 @@ pub enum WordsFrom {
 }
 
 impl WordsFrom {
+    /// Whether a person wrote the words down, rather than a recogniser hearing
+    /// them: line for line, so their repeats are read as lines. See
+    /// `booth_cli::transcribe::Transcript::written`.
+    ///
+    /// Not words read before where they came from was recorded: those are
+    /// read the way they always were.
+    pub fn written(self) -> bool {
+        matches!(self, WordsFrom::Server | WordsFrom::Beside | WordsFrom::ByHand)
+    }
+
     /// What to call it on screen.
     pub fn label(self) -> &'static str {
         match self {
@@ -420,8 +430,8 @@ const ENOUGH_TO_SAY: usize = 8;
 ///
 /// The one place this is worked out, so that the stored answer and the words
 /// it came from cannot mean two different things.
-pub fn refrains_from(lyrics: &[Lyric]) -> Vec<Refrain> {
-    transcript(lyrics)
+pub fn refrains_from(lyrics: &[Lyric], from: WordsFrom) -> Vec<Refrain> {
+    booth_cli::transcribe::Transcript { written: from.written(), ..transcript(lyrics) }
         .repeated()
         .into_iter()
         .map(|refrain| Refrain { heard: refrain.times(), text: refrain.text, at: refrain.at })
@@ -474,6 +484,14 @@ pub fn transcript(lyrics: &[Lyric]) -> booth_cli::transcribe::Transcript {
             })
             .collect(),
         ..Default::default()
+    }
+}
+
+/// A track's words, read the way where they came from says to read them.
+pub fn words_of(track: &Track) -> booth_cli::transcribe::Transcript {
+    booth_cli::transcribe::Transcript {
+        written: track.words_from.written(),
+        ..transcript(&track.lyrics)
     }
 }
 
@@ -2037,7 +2055,7 @@ impl Library {
         // track it was handed has been through this.
         for track in &mut library.tracks {
             if track.refrains.is_empty() && !track.lyrics.is_empty() {
-                track.refrains = refrains_from(&track.lyrics);
+                track.refrains = refrains_from(&track.lyrics, track.words_from);
             }
         }
         Ok(library)
@@ -3204,7 +3222,7 @@ mod tests {
         .iter()
         .map(|&(start_ms, text)| Lyric { start_ms, end_ms: start_ms + 2_000, text: text.into() })
         .collect();
-        let refrains = refrains_from(&lyrics);
+        let refrains = refrains_from(&lyrics, WordsFrom::Recogniser);
 
         let comment = words_as_comment(&lyrics, &refrains);
         let lines: Vec<&str> = comment.lines().collect();
@@ -3244,7 +3262,7 @@ mod tests {
                 },
             })
             .collect();
-        let comment = words_as_comment(&lyrics, &refrains_from(&lyrics));
+        let comment = words_as_comment(&lyrics, &refrains_from(&lyrics, WordsFrom::Recogniser));
         assert!(comment.len() > 4_000, "the fixture is not long enough to prove anything");
         assert!(comment.starts_with("134\u{d7} hold me closer now"), "{:?}", &comment[..40]);
     }
@@ -3252,6 +3270,27 @@ mod tests {
     #[test]
     fn a_track_nobody_has_read_the_words_of_gets_no_comment() {
         assert_eq!(words_as_comment(&[], &[]), "");
+    }
+
+    #[test]
+    fn words_somebody_wrote_down_are_read_as_lines_and_words_a_recogniser_heard_are_not() {
+        // Two lines a word apart: one line to a recogniser, which writes the
+        // same sung line several ways, and two to a lyric file, which does not.
+        let lyrics: Vec<Lyric> = [
+            (10_000, "hold me closer now"),
+            (40_000, "hold me closer tonight"),
+            (70_000, "hold me closer now"),
+            (100_000, "hold me closer tonight"),
+        ]
+        .iter()
+        .map(|&(start_ms, text)| Lyric { start_ms, end_ms: start_ms + 2_000, text: text.into() })
+        .collect();
+        for from in [WordsFrom::Server, WordsFrom::Beside, WordsFrom::ByHand] {
+            assert_eq!(refrains_from(&lyrics, from).len(), 2, "{from:?}");
+        }
+        for from in [WordsFrom::Recogniser, WordsFrom::Unsaid] {
+            assert_eq!(refrains_from(&lyrics, from).len(), 1, "{from:?}");
+        }
     }
 
     #[test]
@@ -3273,7 +3312,7 @@ mod tests {
             })
             .collect();
 
-        let refrains = refrains_from(&lyrics);
+        let refrains = refrains_from(&lyrics, WordsFrom::Recogniser);
         assert_eq!(refrains.len(), 2, "only what repeats: {refrains:?}");
         assert_eq!(refrains[0].text, "hold me closer now", "most repeated first: {refrains:?}");
         assert_eq!(refrains[0].times(), 3);

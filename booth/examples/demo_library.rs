@@ -226,7 +226,8 @@ fn fill_in(
         })
         .collect();
     track.lyrics_aligned = true;
-    track.refrains = booth::library::refrains_from(&track.lyrics);
+    track.refrains =
+        booth::library::refrains_from(&track.lyrics, booth::library::WordsFrom::Recogniser);
 }
 
 /// A three-band picture with the shape of the arrangement above.
