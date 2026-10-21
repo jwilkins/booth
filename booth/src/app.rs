@@ -2918,7 +2918,7 @@ impl App {
         // The last bar the grid names, so "End" lands somewhere a player will
         // park rather than wherever the file stops.
         let end = beats.last().copied();
-        let (assembled, reasons) = cues::assemble_with_reasons(start, end, candidates);
+        let (assembled, reasons) = cues::assemble_with_reasons(start, end, &beats, candidates);
         let placed = crate::job::cue_marks(&assembled);
         let hot = placed.iter().filter(|cue| cue.letter != 0).count();
         let mut decided = the_cue_points(&placed, &reasons, &beats, &words);
@@ -13093,7 +13093,7 @@ fn cued_airings(
 /// The buttons, A first, one to a line: what each is for, where it is on the
 /// clock and in the bar, and the line it plays into.
 ///
-/// `A:  vocal - 00:32.00 -  17/1 - “walking through the city”`. Bars and beats
+/// `A:  hook - 00:32.00 -  17/1 - “hold me closer now”`. Bars and beats
 /// count from one, as the transport does; the column is left out where the
 /// track has no grid, rather than counting bars of a tempo nobody measured.
 ///
@@ -13108,11 +13108,13 @@ fn the_cue_points(
 ) -> Vec<String> {
     use crate::library::BEATS_PER_BAR;
 
-    let hot: Vec<(&crate::library::CueMark, &str)> = placed
+    let mut hot: Vec<(&crate::library::CueMark, &str)> = placed
         .iter()
         .filter(|cue| cue.letter != 0)
         .zip(reasons.iter().map(|reason| reason.label()))
         .collect();
+    // By letter, not by time: the hook is A wherever it is in the record.
+    hot.sort_by_key(|(cue, _)| cue.letter);
     // Padded to the longest present, so the times line up under each other in
     // the panel's fixed-width type without "instrumental" setting the width of
     // a track that has none.
@@ -14383,7 +14385,8 @@ mod tests {
                 // 120 BPM from zero, so a bar is two seconds: 20 s is bar 11
                 // and 160 s bar 81, each on its one. The drop has no line
                 // within a couple of seconds of it and the stretch has none
-                // by definition, so those two say no words.
+                // by definition, so those two say no words. The hook is A,
+                // and so first, though it is last in the record.
                 let (mut app, id) = sung(
                     "cue-points",
                     &[
@@ -14399,10 +14402,10 @@ mod tests {
                 assert_eq!(
                     said[..5],
                     [
-                        "A:  line         - 00:20.00 -  11/1 - \u{201c}walking through the city at night\u{201d}",
-                        "B:  drop         - 00:32.00 -  17/1",
-                        "C:  instrumental - 01:44.00 -  53/1",
-                        "D:  hook         - 02:40.00 -  81/1 - \u{201c}hold me closer now\u{201d}",
+                        "A:  hook         - 02:40.00 -  81/1 - \u{201c}hold me closer now\u{201d}",
+                        "B:  line         - 00:20.00 -  11/1 - \u{201c}walking through the city at night\u{201d}",
+                        "C:  drop         - 00:32.00 -  17/1",
+                        "D:  instrumental - 01:44.00 -  53/1",
                         "lines by how often they come round:",
                     ],
                     "{said:#?}"
@@ -14447,12 +14450,14 @@ mod tests {
                 // Two beats and a bit of band before the words on every
                 // airing, none of them on a phrase boundary, so the first
                 // wins: on its bar line, not on the beat before the words.
+                // Three bars into the drop, so that the drop's button two
+                // bars before it does not take the hook's.
                 let (mut app, id) = sung(
                     "bar-line",
                     &[
-                        (35_200, "hold me closer now"),
-                        (95_200, "hold me closer now"),
-                        (155_200, "hold me closer now"),
+                        (39_200, "hold me closer now"),
+                        (99_200, "hold me closer now"),
+                        (159_200, "hold me closer now"),
                     ],
                 );
                 assert!(app.auto_cue(id) > 0, "no cues at all");
@@ -14461,7 +14466,7 @@ mod tests {
                     .iter()
                     .find(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .unwrap_or_else(|| panic!("{cues:?}"));
-                assert_eq!(hook.time_ms, 34_000, "{cues:?}");
+                assert_eq!(hook.time_ms, 38_000, "{cues:?}");
             }
 
             #[test]
@@ -14518,13 +14523,16 @@ mod tests {
                 // Sung straight after another line, with no gap for a beat to
                 // sit in: the cue is the line's own start, off the grid,
                 // rather than the beat before it, which is inside the other.
+                // The line before starts more than two bars earlier, so that
+                // its own button does not take the hook's.
                 let (mut app, id) = sung(
                     "no-gap",
                     &[
-                        (38_600, "walking through the city at night"),
+                        (35_000, "walking through the city at night"),
                         (40_600, "hold me closer now"),
                     ],
                 );
+                app.library.get_mut(id).unwrap().sounds = vec![(35_000, 40_600), (40_600, 42_600)];
                 assert!(app.auto_cue(id) > 0, "no cues at all");
                 let cues = app.library.get(id).unwrap().cues.clone();
                 let line = cues
@@ -14532,6 +14540,34 @@ mod tests {
                     .find(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .unwrap_or_else(|| panic!("{cues:?}"));
                 assert_eq!(line.time_ms, 40_600, "{cues:?}");
+            }
+
+            #[test]
+            fn a_line_sung_once_a_bar_before_the_hook_gives_up_its_button_to_the_hook() {
+                // Of two buttons closer than two bars the earlier keeps its,
+                // except against the hook, which always has one: a verse line
+                // a bar before it stays a marker, and the hook is A.
+                let (mut app, id) = sung(
+                    "verse-then-hook",
+                    &[
+                        (44_000, "walking through the city at night"),
+                        (46_000, "hold me closer now"),
+                        (106_000, "hold me closer now"),
+                    ],
+                );
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let near: Vec<(u8, &str)> = cues
+                    .iter()
+                    .filter(|cue| cue.letter != 0 && (40_000..50_000).contains(&cue.time_ms))
+                    .map(|cue| (cue.letter, cue.label.as_str()))
+                    .collect();
+                assert_eq!(near, [(1, "hold me closer now")], "{cues:?}");
+                assert!(
+                    cues.iter().any(|cue| cue.letter == 0
+                        && cue.label.ends_with("walking through the city at night")),
+                    "the verse line lost its marker: {cues:?}"
+                );
             }
 
             #[test]
