@@ -259,6 +259,15 @@ pub fn from_moment(moment: &crate::transcribe::Moment) -> Candidate {
 /// in — it is the same place, found twice by two different measurements.
 const TOGETHER_MS: u32 = 500;
 
+/// How near two buttons can be, in bars, and still both be worth one.
+///
+/// Two. Pressed, the earlier is at the later inside two bars, which is less
+/// time than it takes to reach for a second button, and a set of eight with
+/// two that close covers seven places. It is the earlier that keeps its
+/// button, because it plays into the later and the later does not play into
+/// it.
+const APART_BARS: usize = 2;
+
 /// Suggest cue points for a track.
 ///
 /// Returns a memory cue at the first downbeat — which is where a player parks
@@ -284,7 +293,7 @@ pub fn suggest(
     // The last beat the grid names, which is the last bar a player will let you
     // park on rather than wherever the file happens to stop.
     let end = beat_times.last().copied();
-    assemble(start, end, candidates)
+    assemble(start, end, beat_times, candidates)
 }
 
 /// A cue at the start of every section the phrase analysis found.
@@ -352,17 +361,26 @@ pub fn instrumental_stretch(grid: &[u32], sung: &[(u32, u32)]) -> Option<Candida
 /// Turn everything worth cueing into the cues a player will actually hold.
 ///
 /// One memory cue at `start_ms`, then the best eight of `candidates` in time
-/// order, lettered A onwards. Moments that land on top of each other are folded
-/// into one, and the survivors are ranked by [`Reason::priority`] — because a
-/// player has eight hot cues and a busy track has more than eight moments, and
-/// which eight it keeps is the whole difference between a useful set of cues
-/// and a wall of markers.
-pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) -> Vec<Cue> {
-    assemble_with_reasons(start_ms, end_ms, candidates).0
+/// order. Moments that land on top of each other are folded into one, and the
+/// survivors are ranked by [`Reason::priority`] — because a player has eight
+/// hot cues and a busy track has more than eight moments, and which eight it
+/// keeps is the whole difference between a useful set of cues and a wall of
+/// markers. No two of the eight are within [`APART_BARS`] of each other on
+/// `grid`, the track's beats; with no grid, nothing is.
+///
+/// The hook is always one of them, and always A; the rest are lettered from B
+/// in time order, or from A on a record with no hook.
+pub fn assemble(
+    start_ms: u32,
+    end_ms: Option<u32>,
+    grid: &[u32],
+    candidates: Vec<Candidate>,
+) -> Vec<Cue> {
+    assemble_with_reasons(start_ms, end_ms, grid, candidates).0
 }
 
-/// [`assemble`], and what each button is for: one [`Reason`] per hot cue, A
-/// first.
+/// [`assemble`], and what each button is for: one [`Reason`] per hot cue, in
+/// the order the hot cues come in the list, which is time order.
 ///
 /// For an account of the cues to say. A cue's comment cannot: a hook's
 /// comment is its line and so is a refrain's, and a drop that a line lands on
@@ -370,8 +388,21 @@ pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) 
 pub fn assemble_with_reasons(
     start_ms: u32,
     end_ms: Option<u32>,
+    grid: &[u32],
     candidates: Vec<Candidate>,
 ) -> (Vec<Cue>, Vec<Reason>) {
+    use super::place::{beats_between, BEATS_PER_BAR};
+
+    // The hook's line, to know its button by where a drop has taken it in and
+    // carries its words.
+    let hook_line = candidates
+        .iter()
+        .find(|candidate| candidate.reason == Reason::Hook && !candidate.memory_only)
+        .and_then(|candidate| candidate.label.clone());
+    let is_hook = |candidate: &Candidate| {
+        candidate.reason == Reason::Hook || (hook_line.is_some() && candidate.label == hook_line)
+    };
+
     let mut kept = fold(rank(candidates));
 
     // Every moment worth cueing becomes a memory cue, whether or not it also
@@ -391,19 +422,52 @@ pub fn assemble_with_reasons(
     // and looked like a cue that had not been set.
     //
     // Taken out before the eight are chosen, not after, or the track would
-    // come out with seven.
-    if let Some(at) =
-        kept.iter().position(|(candidate, _)| candidate.time_ms.abs_diff(start_ms) < TOGETHER_MS)
-    {
+    // come out with seven. Not the hook, on a record that opens on it: the
+    // hook always has a button, and it is always A.
+    if let Some(at) = kept.iter().position(|(candidate, _)| {
+        candidate.time_ms.abs_diff(start_ms) < TOGETHER_MS && !is_hook(candidate)
+    }) {
         kept.remove(at);
     }
     kept.retain(|(candidate, _)| !candidate.memory_only);
 
+    // No two buttons within two bars: the later of the two is left a marker,
+    // and its button goes to whatever is next in line — unless the later is
+    // the hook, which always has a button, and then it is the earlier that
+    // goes. Looked for among the eight rather than among every candidate,
+    // because a line that was never going to be a button has no business
+    // keeping anything off one; and the eight are chosen again each time one
+    // is left out, because the button it frees is filled by the order, and
+    // what fills it can be crowded in its turn.
+    let mut barred = vec![false; kept.len()];
+    let chosen = loop {
+        let chosen = to_the_buttons(&kept, &barred);
+        let crowded = chosen.windows(2).find(|pair| {
+            beats_between(grid, kept[pair[0]].0.time_ms, kept[pair[1]].0.time_ms)
+                .is_some_and(|beats| beats < (APART_BARS * BEATS_PER_BAR) as f32)
+        });
+        match crowded {
+            Some(pair) if is_hook(&kept[pair[1]].0) => barred[pair[0]] = true,
+            Some(pair) => barred[pair[1]] = true,
+            None => break chosen,
+        }
+    };
+
+    // The hook on A, on every record that has one: the same pad for the line
+    // the room sings whichever record is on the deck, so it is never looked
+    // for. The rest from B, in time order.
+    let hook = chosen.iter().position(|&i| is_hook(&kept[i].0));
+    let letter = |n: usize| match hook {
+        Some(hook) if n == hook => 1,
+        Some(hook) if n < hook => n + 2,
+        _ => n + 1,
+    };
+
     let mut reasons = Vec::new();
-    for (letter, (candidate, _)) in to_the_buttons(kept).into_iter().enumerate() {
+    for (n, candidate) in chosen.into_iter().map(|i| &kept[i].0).enumerate() {
         let color = candidate.reason.color();
         cues.push(
-            Cue::hot(letter as u8 + 1, candidate.time_ms)
+            Cue::hot(letter(n) as u8, candidate.time_ms)
                 .with_comment(&candidate.comment())
                 .with_color(color.r, color.g, color.b),
         );
@@ -428,9 +492,10 @@ pub fn assemble_with_reasons(
 /// made-up one says the wrong thing in a booth.
 ///
 /// Takes the list in time order, as [`fold`] leaves it, so that the earliest
-/// moment of a kind is the first match.
-fn to_the_buttons(kept: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
-    let mut taken = vec![false; kept.len()];
+/// moment of a kind is the first match, and hands back the indices of the
+/// eight, in the same order. A candidate `barred` is passed over.
+fn to_the_buttons(kept: &[(Candidate, u32)], barred: &[bool]) -> Vec<usize> {
+    let mut taken = barred.to_vec();
     let mut chosen: Vec<usize> = Vec::new();
     let earliest = |taken: &[bool], wanted: &dyn Fn(&Candidate) -> bool| {
         kept.iter().enumerate().position(|(i, (candidate, _))| !taken[i] && wanted(candidate))
@@ -491,11 +556,7 @@ fn to_the_buttons(kept: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
 
     // Indices in order are moments in order, `kept` being in time order.
     chosen.sort_unstable();
-    kept.into_iter()
-        .enumerate()
-        .filter(|(i, _)| chosen.binary_search(i).is_ok())
-        .map(|(_, entry)| entry)
-        .collect()
+    chosen
 }
 
 /// What a section is called on a marker, in the words a DJ uses about a record.
@@ -1042,7 +1103,7 @@ mod tests {
                 section(56, 72, Kind::Chorus, -8.0),
             ],
         };
-        let marked = marks(&assemble(0, Some(200_000), sections(&structure, &beats(400))));
+        let marked = marks(&assemble(0, Some(200_000), &[], sections(&structure, &beats(400))));
 
         assert!(marked.contains(&"Drop 1 · 40 bars".to_string()), "{marked:?}");
         assert!(marked.contains(&"Drop 2 · 16 bars".to_string()), "{marked:?}");
@@ -1054,7 +1115,7 @@ mod tests {
         // length to report, and inventing one would be worse than the number
         // being absent.
         let candidates = vec![Candidate::new(30_000, Reason::Section(Kind::Chorus))];
-        assert_eq!(marks(&assemble(0, Some(200_000), candidates)), ["Start", "Drop 1", "End"]);
+        assert_eq!(marks(&assemble(0, Some(200_000), &[], candidates)), ["Start", "Drop 1", "End"]);
     }
 
     #[test]
@@ -1069,7 +1130,7 @@ mod tests {
             .collect();
 
         assert_eq!(
-            marks(&assemble(0, Some(200_000), candidates)),
+            marks(&assemble(0, Some(200_000), &[], candidates)),
             ["Start", "Build 1", "Drop 1", "Break 1", "Build 2", "Drop 2", "End"]
         );
     }
@@ -1082,7 +1143,7 @@ mod tests {
             Candidate::new(0, Reason::Section(Kind::Intro)),
             Candidate::new(60_000, Reason::Section(Kind::Intro)),
         ];
-        assert_eq!(marks(&assemble(0, None, candidates)), ["Start", "Intro 2"]);
+        assert_eq!(marks(&assemble(0, None, &[], candidates)), ["Start", "Intro 2"]);
     }
 
     #[test]
@@ -1104,7 +1165,7 @@ mod tests {
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let marks = marks(&assemble(0, None, candidates));
+        let marks = marks(&assemble(0, None, &[], candidates));
         assert_eq!(marks[0], "Start");
         assert_eq!(
             marks.iter().filter(|mark| *mark == "V1 get down").count(),
@@ -1133,7 +1194,7 @@ mod tests {
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let marks = marks(&assemble(0, None, candidates));
+        let marks = marks(&assemble(0, None, &[], candidates));
         assert!(
             marks.iter().all(|mark| !mark.starts_with('V')
                 || mark == "V1 everybody in the room put your hands up"),
@@ -1156,7 +1217,7 @@ mod tests {
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let marks = marks(&assemble(0, None, candidates));
+        let marks = marks(&assemble(0, None, &[], candidates));
         let verses: Vec<&String> = marks.iter().filter(|mark| mark.starts_with('V')).collect();
         assert!(verses.len() >= 2, "{marks:?}");
         assert!(
@@ -1170,7 +1231,7 @@ mod tests {
         // A marker half a second after the outro cue is two markers on one
         // moment, which is one to step over every time.
         let candidates = vec![Candidate::new(200_000, Reason::Section(Kind::Outro))];
-        assert_eq!(marks(&assemble(0, Some(200_100), candidates)), ["Start", "Outro 1"]);
+        assert_eq!(marks(&assemble(0, Some(200_100), &[], candidates)), ["Start", "Outro 1"]);
     }
 
     #[test]
@@ -1185,7 +1246,7 @@ mod tests {
         };
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
-        let cues = assemble(0, None, candidates);
+        let cues = assemble(0, None, &[], candidates);
 
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         let hook = hot.iter().find(|c| c.time_ms == 30_000).expect("no cue on the hook");
@@ -1226,7 +1287,8 @@ mod tests {
             .collect();
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let hot: Vec<Cue> = assemble(0, None, candidates).into_iter().filter(Cue::is_hot).collect();
+        let hot: Vec<Cue> =
+            assemble(0, None, &[], candidates).into_iter().filter(Cue::is_hot).collect();
         let named = |what: &str| hot.iter().filter(|c| c.comment.as_deref() == Some(what)).count();
 
         assert_eq!(named("hold me closer now"), 1, "the hook took more than one slot: {hot:?}");
@@ -1246,7 +1308,7 @@ mod tests {
             (0..10).map(|i| Candidate::new(i * 20_000, Reason::Section(Kind::Chorus))).collect();
         candidates.push(Candidate::named(95_000, Reason::Hook, "hold me closer now"));
 
-        let cues = assemble(0, None, candidates);
+        let cues = assemble(0, None, &[], candidates);
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         assert_eq!(hot.len(), 8);
         assert!(
@@ -1261,7 +1323,7 @@ mod tests {
             Candidate::new(60_000, Reason::Section(Kind::Chorus)),
             Candidate::named(60_200, Reason::Hook, "hold me closer now"),
         ];
-        let cues = assemble(0, None, candidates);
+        let cues = assemble(0, None, &[], candidates);
 
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         assert_eq!(hot.len(), 1, "two markers half a second apart: {hot:?}");
@@ -1312,10 +1374,145 @@ mod tests {
         ];
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let hot = buttons(&assemble(0, None, candidates));
+        let hot = buttons(&assemble(0, None, &[], candidates));
         let sung = hot.iter().filter(|name| VERSE.contains(&name.as_str())).count();
         assert!(sung >= 4, "the spare buttons should have gone to the words: {hot:?}");
         assert!(hot.len() <= HOT_CUES, "{hot:?}");
+    }
+
+    /// A record with nine things worth a button, the hook a bar after the
+    /// first drop.
+    fn the_hook_a_bar_after_the_drop() -> Vec<Candidate> {
+        let words = crate::transcribe::Transcript {
+            lines: vec![line(62_000, "hold me closer now"), line(140_000, "hold me closer now")],
+            ..Default::default()
+        };
+        let mut candidates = vec![
+            Candidate::new(0, Reason::Section(Kind::Intro)),
+            Candidate::new(50_000, Reason::Section(Kind::Up)),
+            Candidate::new(60_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(100_000, Reason::Section(Kind::Down)),
+            Candidate::new(150_000, Reason::Section(Kind::Up)),
+            Candidate::new(160_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(200_000, Reason::Section(Kind::Down)),
+            Candidate::new(220_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(240_000, Reason::Section(Kind::Outro)),
+        ];
+        candidates.extend(words.moments().iter().map(from_moment));
+        candidates
+    }
+
+    #[test]
+    fn of_two_buttons_closer_than_two_bars_the_first_keeps_its_and_the_second_goes_elsewhere() {
+        // A break a bar after the first drop: pressed, the drop is at the
+        // break in a bar, so a button on the break as well is a second button
+        // for one place. The break stays a marker, the first break's button
+        // goes to the next one, and the second break, which was left out,
+        // gets the button the break gave up.
+        let candidates = vec![
+            Candidate::new(50_000, Reason::Section(Kind::Up)),
+            Candidate::new(60_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(62_000, Reason::Section(Kind::Down)),
+            Candidate::new(100_000, Reason::Section(Kind::Down)),
+            Candidate::new(150_000, Reason::Section(Kind::Up)),
+            Candidate::new(160_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(200_000, Reason::Section(Kind::Down)),
+            Candidate::new(220_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(240_000, Reason::Section(Kind::Outro)),
+        ];
+        let cues = assemble(0, None, &beats(600), candidates);
+        let hot: Vec<u32> = cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
+        assert_eq!(
+            hot,
+            vec![50_000, 60_000, 100_000, 150_000, 160_000, 200_000, 220_000, 240_000],
+            "{cues:?}"
+        );
+        assert!(cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 62_000), "{cues:?}");
+    }
+
+    #[test]
+    fn the_hook_keeps_its_button_against_one_a_bar_before_it_and_is_always_a() {
+        // The one exception to the earlier keeping its button: the hook always
+        // has one. The drop a bar before it is left a marker, the first drop's
+        // button goes to the next drop, and the hook is A with the rest from B
+        // in time order.
+        let cues = assemble(0, None, &beats(600), the_hook_a_bar_after_the_drop());
+        let hot: Vec<(u8, u32)> =
+            cues.iter().filter(|cue| cue.is_hot()).map(|cue| (cue.hot_cue, cue.time_ms)).collect();
+        assert_eq!(
+            hot,
+            vec![
+                (2, 50_000),
+                (1, 62_000),
+                (3, 100_000),
+                (4, 150_000),
+                (5, 160_000),
+                (6, 200_000),
+                (7, 220_000),
+                (8, 240_000),
+            ],
+            "{cues:?}"
+        );
+        assert!(cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 60_000), "{cues:?}");
+    }
+
+    #[test]
+    fn without_a_grid_no_two_buttons_are_too_close() {
+        // Bars are the grid's to say. With none, the drop keeps its button a
+        // second before the hook, as it did before the rule.
+        let cues = assemble(0, None, &[], the_hook_a_bar_after_the_drop());
+        assert!(cues.iter().any(|cue| cue.is_hot() && cue.time_ms == 60_000), "{cues:?}");
+        assert!(cues.iter().any(|cue| cue.is_hot() && cue.time_ms == 62_000), "{cues:?}");
+    }
+
+    #[test]
+    fn a_record_that_opens_on_its_hook_still_has_the_hook_on_a() {
+        // A hot cue where the memory cue already is does what loading the track
+        // does, and is left off for that — but not the hook's: the hook always
+        // has a button, and A is where it is.
+        let words = crate::transcribe::Transcript {
+            lines: vec![line(0, "hold me closer now"), line(90_000, "hold me closer now")],
+            ..Default::default()
+        };
+        let mut candidates = vec![Candidate::new(30_000, Reason::Section(Kind::Chorus))];
+        candidates.extend(words.moments().iter().map(from_moment));
+        let hot: Vec<(u8, u32)> = assemble(0, None, &beats(600), candidates)
+            .iter()
+            .filter(|cue| cue.is_hot())
+            .map(|cue| (cue.hot_cue, cue.time_ms))
+            .collect();
+        assert_eq!(hot, vec![(1, 0), (2, 30_000)]);
+    }
+
+    #[test]
+    fn the_first_of_two_keeps_its_button_even_where_the_second_was_chosen_before_it() {
+        // The drop is the first button filled and the build a bar before it
+        // the fifth, but the build is first in the record: pressed, it plays
+        // into the drop, and the drop does not play into it.
+        let candidates = vec![
+            Candidate::new(58_000, Reason::Section(Kind::Up)),
+            Candidate::new(60_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(100_000, Reason::Section(Kind::Down)),
+            Candidate::new(160_000, Reason::Section(Kind::Chorus)),
+        ];
+        let cues = assemble(0, None, &beats(600), candidates);
+        let hot: Vec<u32> = cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
+        assert_eq!(hot, vec![58_000, 100_000, 160_000], "{cues:?}");
+        assert!(cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 60_000), "{cues:?}");
+    }
+
+    #[test]
+    fn two_buttons_two_bars_apart_are_both_kept() {
+        let candidates = vec![
+            Candidate::new(60_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(64_000, Reason::Section(Kind::Down)),
+        ];
+        let hot: Vec<u32> = assemble(0, None, &beats(600), candidates)
+            .iter()
+            .filter(|cue| cue.is_hot())
+            .map(|cue| cue.time_ms)
+            .collect();
+        assert_eq!(hot, vec![60_000, 64_000]);
     }
 
     #[test]
@@ -1349,7 +1546,7 @@ mod tests {
             sections.iter().map(|&(at, kind)| Candidate::new(at, Reason::Section(kind))).collect();
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let hot: Vec<(u32, String)> = assemble(0, None, candidates)
+        let hot: Vec<(u32, String)> = assemble(0, None, &[], candidates)
             .into_iter()
             .filter(Cue::is_hot)
             .map(|cue| (cue.time_ms, cue.comment.unwrap_or_default()))
@@ -1391,7 +1588,7 @@ mod tests {
         candidates
             .push(Candidate { bars: Some(16), ..Candidate::new(200_000, Reason::Instrumental) });
 
-        let cues = assemble(0, None, candidates);
+        let cues = assemble(0, None, &[], candidates);
         let hot: Vec<u32> = cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
         assert_eq!(hot, vec![30_000, 60_000, 64_000, 120_000, 150_000, 180_000, 200_000, 240_000]);
         assert!(
@@ -1453,7 +1650,7 @@ mod tests {
             .collect();
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let hot: Vec<(u32, String)> = assemble(0, None, candidates)
+        let hot: Vec<(u32, String)> = assemble(0, None, &[], candidates)
             .into_iter()
             .filter(Cue::is_hot)
             .map(|cue| (cue.time_ms, cue.comment.unwrap_or_default()))
@@ -1467,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn each_button_comes_back_with_what_it_is_for_in_letter_order() {
+    fn each_button_comes_back_with_what_it_is_for_in_time_order_with_the_hook_on_a() {
         // The second drop reads "drop" and so does the first, and the hook's
         // button reads its line: the comments alone cannot say which button
         // is the hook and which a drop the hook happens to land on.
@@ -1482,7 +1679,7 @@ mod tests {
         ];
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let (cues, reasons) = assemble_with_reasons(0, None, candidates);
+        let (cues, reasons) = assemble_with_reasons(0, None, &[], candidates);
         let hot: Vec<(u8, u32)> =
             cues.iter().filter(|cue| cue.is_hot()).map(|cue| (cue.hot_cue, cue.time_ms)).collect();
         assert_eq!(hot.len(), reasons.len(), "{hot:?} {reasons:?}");
@@ -1491,8 +1688,8 @@ mod tests {
         assert_eq!(
             said,
             vec![
-                (1, 10_000, Reason::Section(Kind::Chorus)),
-                (2, 31_000, Reason::Hook),
+                (2, 10_000, Reason::Section(Kind::Chorus)),
+                (1, 31_000, Reason::Hook),
                 (3, 90_000, Reason::Section(Kind::Down)),
                 (4, 150_000, Reason::Section(Kind::Chorus)),
             ]
@@ -1514,7 +1711,7 @@ mod tests {
         ];
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let hot: Vec<(u32, String)> = assemble(0, None, candidates)
+        let hot: Vec<(u32, String)> = assemble(0, None, &[], candidates)
             .into_iter()
             .filter(Cue::is_hot)
             .map(|cue| (cue.time_ms, cue.comment.unwrap_or_default()))
@@ -1544,7 +1741,7 @@ mod tests {
             .map(|(i, &kind)| Candidate::new(i as u32 * 30_000 + 1_000, Reason::Section(kind)))
             .collect();
 
-        let hot = buttons(&assemble(0, None, candidates));
+        let hot = buttons(&assemble(0, None, &[], candidates));
         assert_eq!(hot.len(), HOT_CUES, "{hot:?}");
     }
 
@@ -1556,7 +1753,7 @@ mod tests {
             Candidate::new(30_000, Reason::Section(Kind::Chorus)),
             Candidate::new(90_000, Reason::Section(Kind::Down)),
         ];
-        let hot = buttons(&assemble(0, None, candidates));
+        let hot = buttons(&assemble(0, None, &[], candidates));
         assert_eq!(hot.len(), 2, "{hot:?}");
     }
 
@@ -1574,11 +1771,11 @@ mod tests {
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let hot = buttons(&assemble(0, None, candidates));
+        let hot = buttons(&assemble(0, None, &[], candidates));
         assert!(hot.iter().any(|name| name == "hold me closer now"), "{hot:?}");
         assert!(hot.iter().any(|name| name == "and the night comes down"), "{hot:?}");
         // And it is still a marker, which costs nothing.
-        let marks = marks(&assemble(0, None, {
+        let marks = marks(&assemble(0, None, &[], {
             let mut again = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
             again.extend(words.moments().iter().map(from_moment));
             again
@@ -1614,7 +1811,7 @@ mod tests {
             Candidate::new(109_640, Reason::Section(Kind::Outro)),
         ];
         candidates.extend(words.moments().iter().map(from_moment));
-        let cues = assemble(40, Some(134_000), candidates);
+        let cues = assemble(40, Some(134_000), &[], candidates);
         let hot: Vec<(u32, String)> = cues
             .iter()
             .filter(|cue| cue.is_hot())
@@ -1650,7 +1847,7 @@ mod tests {
         };
         let mut candidates = vec![Candidate::new(0, Reason::Section(Kind::Intro))];
         candidates.extend(words.moments().iter().map(from_moment));
-        let cues = assemble(0, None, candidates);
+        let cues = assemble(0, None, &[], candidates);
         let times: Vec<u32> =
             cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
         // Every one-off is a candidate and there is room for all of them, so
@@ -1665,7 +1862,7 @@ mod tests {
             Candidate::new(150_000, Reason::Section(Kind::Outro)),
         ];
         candidates.extend(words.moments().iter().map(from_moment));
-        let cues = assemble(0, None, candidates);
+        let cues = assemble(0, None, &[], candidates);
         let lines: Vec<u32> = cues
             .iter()
             .filter(|cue| cue.is_hot())

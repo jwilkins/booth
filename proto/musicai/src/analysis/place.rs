@@ -271,6 +271,23 @@ fn period_at(grid: &[u32], i: usize) -> f32 {
     next.or(before).unwrap_or(1).max(1) as f32
 }
 
+/// How many beats on from one moment a later one is, on the grid, fractions of
+/// a beat included.
+///
+/// `None` where either is off the grid — before its first beat, or where there
+/// is no grid to speak of. Past the last beat the grid names, the last interval
+/// carries on.
+pub fn beats_between(grid: &[u32], from_ms: u32, to_ms: u32) -> Option<f32> {
+    if grid.len() < 2 {
+        return None;
+    }
+    let beats_in = |at_ms: u32| {
+        let i = grid.partition_point(|beat| *beat <= at_ms).checked_sub(1)?;
+        Some(i as f32 + (at_ms - grid[i]) as f32 / period_at(grid, i))
+    };
+    Some(beats_in(to_ms)? - beats_in(from_ms)?)
+}
+
 /// How far into its bar a moment falls, in beats after the bar line: 0.0 is on
 /// the one, 3.8 is a pickup a fifth of a beat before the next one.
 ///
@@ -391,6 +408,16 @@ mod tests {
         let (which, _) = best_airing(&[40_100, 100_100], &grid(), &sung, &[]).unwrap();
         assert_eq!(which, 0);
         assert!(best_airing(&[], &grid(), &sung, &[]).is_none());
+    }
+
+    #[test]
+    fn beats_between_two_moments_count_the_fraction_of_a_beat_and_nothing_off_the_grid() {
+        // A grid of 500 ms beats that starts a second in.
+        let grid: Vec<u32> = (0..100).map(|i| 1_000 + i * 500).collect();
+        assert_eq!(beats_between(&grid, 1_000, 5_000), Some(8.0));
+        assert_eq!(beats_between(&grid, 1_000, 4_750), Some(7.5));
+        assert_eq!(beats_between(&grid, 500, 5_000), None);
+        assert_eq!(beats_between(&[], 1_000, 5_000), None);
     }
 
     #[test]

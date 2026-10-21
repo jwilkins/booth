@@ -894,6 +894,24 @@ kind: a busy arrangement's four were its four loudest sections, and the words'
 four the hook and three verse lines. An instrumental still gets all eight for
 its sections.
 
+**No two buttons closer than two bars.** Pressed, the earlier of two buttons
+that close is at the later before a hand could reach for it, so a set with two
+of them covers seven places with eight buttons. The earlier keeps its button —
+it plays into the later, and the later does not play into it — and the later
+is left a marker, its button going to whatever is next in line. A break a bar
+after the drop is a marker, and the second break, which there was no room for,
+has the button. Measured in the grid's own beats, so a track with no grid has
+no bars to measure and the rule does not apply.
+
+**The hook always has a button, and it is A.** It is the one exception to the
+earlier keeping its button: against the hook, it is the other that goes, so a
+verse line or a drop a bar before the hook is a marker and the hook is cued.
+And it is A on every record, with the rest lettered from B in time order, so
+that the line the room sings is on the same pad whichever record is on the
+deck. A record with no hook is lettered from A in time order. Nor is it left
+off on a record that opens on it, as a hot cue where the memory cue already is
+otherwise would be.
+
 **A track that repeats nothing still comes back cued.** A rap, a live take, a
 record with one verse and no chorus has no hook and no refrains, and its lines
 are what it has, so they fill the spare buttons — spread through the record's
@@ -1021,10 +1039,10 @@ a letterbox.
 Cue Analysis opens with the buttons, one to a line, A first:
 
 ```
-A:  line         - 00:20.00 -  11/1 - “walking through the city at night”
-B:  drop         - 00:32.00 -  17/1
-C:  instrumental - 01:44.00 -  53/1
-D:  hook         - 02:40.00 -  81/1 - “hold me closer now”
+A:  hook         - 02:40.00 -  81/1 - “hold me closer now”
+B:  line         - 00:20.00 -  11/1 - “walking through the city at night”
+C:  drop         - 00:32.00 -  17/1
+D:  instrumental - 01:44.00 -  53/1
 ```
 
 What each button is for, where it is on the clock, the bar and beat it is on —
