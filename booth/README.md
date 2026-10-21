@@ -910,7 +910,15 @@ where the line starts within half a beat of it and nothing is sung between the
 two; on that bar line anyway, where the longer way in is clear of singing, so
 that pressed on another deck's one the words arrive in phrase; on the beat
 before the line, where that beat is not inside the line before; and failing all
-three, on the line's own start, off the grid. Markers stay on the beat before
+three, on the line's own start, off the grid — but only where the stem measured
+singing starting there. A line sung straight on from the one before, in one
+unbroken stretch of singing, has a time that is a lyric file's or the
+recogniser's estimate, and trusted to the millisecond an estimate a word or two
+late cues the line a couple of words in. That line is cued on the beat before
+its time instead: a beat early plays the tail of the line before and then the
+whole line, where late loses the beginning, which is the thing being cued. An
+airing whose start was measured is preferred to one whose start was estimated.
+Markers stay on the beat before
 the words they mark, because a marker is for reading the words where they are
 sung. The half-beat was reasoned from one record and is there to be set from
 the measurements above.

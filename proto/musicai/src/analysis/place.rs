@@ -18,7 +18,16 @@
 //! 3. **The beat before.** The beat at or before the line, where it does not
 //!    fall inside the line before. What every word cue was until now.
 //! 4. **The line itself.** Where even that beat is inside the previous line,
-//!    the one place that clips nothing is the line's own start, off the grid.
+//!    and the stem measured singing starting where the line does, the one
+//!    place that clips nothing is the line's own start, off the grid.
+//! 5. **The beat before, anyway.** Where the line's time is itself inside
+//!    singing — a line sung straight on from the one before, in a stretch the
+//!    stem cannot split into lines — that time is an estimate: a lyric file's,
+//!    or the recogniser's. Trusted to the millisecond, an estimate a word or two
+//!    late cues the line a couple of words in, and the line's opening is the
+//!    thing being cued. So the cue goes on the beat before, as every word cue
+//!    once did: a beat early plays the tail of the line before and then the
+//!    whole line, where a couple of words late loses the line's beginning.
 //!
 //! Among the airings of a line the track comes back to, the button goes to the
 //! airing that reaches the best rung; between airings on the same rung, to the
@@ -52,12 +61,17 @@ pub const ONSET_SLACK_MS: u32 = 40;
 const PHRASE_BARS: usize = 8;
 
 /// Which rung of the ladder a cue reached, best first.
+///
+/// Last is the one where nobody knows where the line begins, which is also
+/// what puts an airing whose start was measured ahead of one whose start was
+/// estimated when [`best_airing`] chooses between them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rung {
     OnTheOne,
     BarBefore,
     BeatBefore,
     Onset,
+    InSinging,
 }
 
 impl Rung {
@@ -68,6 +82,9 @@ impl Rung {
             Rung::BarBefore => "on the bar line before, with a clear way in",
             Rung::BeatBefore => "on the beat before",
             Rung::Onset => "on the line itself, there being no clear beat before it",
+            Rung::InSinging => {
+                "on the beat before, the line being sung straight on from the one before it"
+            }
         }
     }
 }
@@ -100,6 +117,13 @@ pub fn place(onset_ms: u32, grid: &[u32], sung: &[(u32, u32)]) -> Placed {
     }
     if !inside_a_word(sung, grid[beat]) {
         return Placed { time_ms: grid[beat], rung: Rung::BeatBefore };
+    }
+    // The beat before is inside singing too. Only where singing starts at the
+    // line's time is that singing the line before, and the line's time the
+    // place to cue; a time inside the singing is an estimate, and the cue goes
+    // early rather than late on it — see the ladder's fifth rung.
+    if inside_a_word(sung, onset_ms) {
+        return Placed { time_ms: grid[beat], rung: Rung::InSinging };
     }
     Placed { time_ms: onset_ms, rung: Rung::Onset }
 }
@@ -225,11 +249,33 @@ mod tests {
     }
 
     #[test]
-    fn a_line_sung_straight_after_another_is_cued_on_itself_rather_than_inside_the_other() {
-        // No gap at all: the beat before the words is inside the line before.
+    fn a_line_the_stem_measured_starting_right_after_another_is_cued_on_itself() {
+        // The stem says singing starts where the line does, and the beat before
+        // is inside the line before: the line's own start clips neither.
         let sung = [(38_600, 40_600), (40_600, 42_600)];
         let placed = place(40_600, &grid(), &sung);
         assert_eq!(placed, Placed { time_ms: 40_600, rung: Rung::Onset });
+    }
+
+    #[test]
+    fn a_line_whose_time_falls_inside_continuous_singing_is_cued_on_the_beat_before_it() {
+        // One stretch of singing from 38 s to 44 s holds this line and the one
+        // before it, so 41.2 s is a lyric file's or the recogniser's estimate
+        // of where the line starts, not a measurement. Cued at the estimate, a
+        // line timed a word or two late starts a couple of words in; the beat
+        // before keeps its beginning.
+        let placed = place(41_200, &grid(), &[(38_000, 44_000)]);
+        assert_eq!(placed, Placed { time_ms: 41_000, rung: Rung::InSinging });
+    }
+
+    #[test]
+    fn an_airing_whose_start_was_measured_wins_over_one_whose_start_was_estimated() {
+        // The first airing is inside a stretch with the line before it; the
+        // second starts its own stretch. Both have singing on the beat before,
+        // but only the second's beginning is known.
+        let sung = [(38_000, 44_000), (98_600, 100_600), (100_600, 102_600)];
+        let (which, placed) = best_airing(&[41_200, 100_600], &grid(), &sung, &[]).unwrap();
+        assert_eq!((which, placed.rung), (1, Rung::Onset));
     }
 
     #[test]
