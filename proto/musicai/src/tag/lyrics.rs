@@ -231,11 +231,21 @@ pub fn to_lrc(sidecar: &Sidecar) -> String {
         false => tag("by", &format!("{WRITTEN_BY}, {}", sidecar.source.trim())),
     }
 
-    let timed = sidecar.lines.iter().any(|line| line.start_ms > 0);
-    let mut lines: Vec<&Line> = sidecar.lines.iter().collect();
+    out.push_str(&lrc_lines(sidecar.lines));
+    out
+}
+
+/// The lines of an LRC, without its header: `[mm:ss.cc]` and the line, in
+/// time order, or the lines bare where none of them has a time — see
+/// [`to_lrc`]. Also what is put on the clipboard when the words are copied
+/// with their times, so that what is pasted is what a lyric file holds.
+pub fn lrc_lines(lines: &[Line]) -> String {
+    let timed = lines.iter().any(|line| line.start_ms > 0);
+    let mut lines: Vec<&Line> = lines.iter().collect();
     if timed {
         lines.sort_by_key(|line| line.start_ms);
     }
+    let mut out = String::new();
     for line in lines {
         // One line is one line: a break inside the text would read as a lyric
         // with no time on it.

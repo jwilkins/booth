@@ -1060,6 +1060,13 @@ them out to fifty lines, and **collapse** to put them back. A lyric is read top
 to bottom, and reading one through a slot a few lines tall is reading it through
 a letterbox.
 
+Beside **Find the words again**, **Copy** puts the words on the clipboard a line
+to a line, and **Copy with times** puts them there as a lyric file holds them —
+`[01:04.20]` and the line, the same lines Booth writes into the `.lrc` beside
+the track — so that what is pasted into a tagger or a lyric editor is read as
+timed words. Words a server had only as text have no times to copy, and the
+second button is greyed out for them rather than copying a column of zeroes.
+
 Cue Analysis opens with the buttons, one to a line, A first:
 
 ```
