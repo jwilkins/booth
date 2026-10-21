@@ -477,6 +477,17 @@ pub fn named_as_instrumental(name: &str) -> bool {
     said.iter().any(|word| word == "instrumental" || word == "inst")
 }
 
+/// Whether one written-out line is inside another: every word of it, in order
+/// and together, somewhere in a longer line. "praise you" is inside "I have to
+/// praise you like I should"; "me" is not inside "home", because it is words
+/// that are compared and not letters.
+pub fn inside(shorter: &str, longer: &str) -> bool {
+    let (inner, outer) = (words(shorter), words(longer));
+    !inner.is_empty()
+        && inner.len() < outer.len()
+        && outer.windows(inner.len()).any(|run| run == inner.as_slice())
+}
+
 /// Whether two written-out lines are the same sung line.
 ///
 /// The question a cue set asks about its own labels: a hook heard four times is
@@ -714,6 +725,16 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_line_is_inside_another_by_its_words_and_not_its_letters() {
+        assert!(inside("praise you", "I have to praise you like I should"));
+        assert!(inside("Praise you!", "I have to praise you, like I should"));
+        assert!(inside("me", "take me home"));
+        assert!(!inside("me", "home"));
+        assert!(!inside("you praise", "I have to praise you like I should"));
+        assert!(!inside("hold me closer now", "hold me closer now"), "a line is not inside itself");
     }
 
     #[test]

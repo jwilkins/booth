@@ -393,14 +393,26 @@ pub fn assemble_with_reasons(
 ) -> (Vec<Cue>, Vec<Reason>) {
     use super::place::{beats_between, BEATS_PER_BAR};
 
+    use crate::transcribe::inside;
+
     // The hook's line, to know its button by where a drop has taken it in and
-    // carries its words.
+    // carries its words, or where a longer line with the hook inside it has
+    // taken the hook's button — see below.
     let hook_line = candidates
         .iter()
         .find(|candidate| candidate.reason == Reason::Hook && !candidate.memory_only)
         .and_then(|candidate| candidate.label.clone());
     let is_hook = |candidate: &Candidate| {
-        candidate.reason == Reason::Hook || (hook_line.is_some() && candidate.label == hook_line)
+        candidate.reason == Reason::Hook
+            || hook_line.as_deref().is_some_and(|hook| {
+                candidate.label.as_deref().is_some_and(|said| said == hook || inside(hook, said))
+            })
+    };
+    // A button the words put there, which says a line, as against a section
+    // that a line was folded into.
+    let says_a_line = |candidate: &Candidate| {
+        !candidate.reason.is_section()
+            && candidate.label.as_deref().is_some_and(|said| !said.trim().is_empty())
     };
 
     let mut kept = fold(rank(candidates));
@@ -442,6 +454,24 @@ pub fn assemble_with_reasons(
     let mut barred = vec![false; kept.len()];
     let chosen = loop {
         let chosen = to_the_buttons(&kept, &barred);
+        // A line inside another line on the eight: "praise you" and "I have to
+        // praise you like I should". Pressed, the longer plays the shorter, so
+        // the shorter's button goes to something else, as asked — the hook's
+        // too, and then the longer line is the hook's button.
+        let shorter = chosen.iter().copied().find(|&i| {
+            says_a_line(&kept[i].0)
+                && chosen.iter().any(|&j| {
+                    says_a_line(&kept[j].0)
+                        && inside(
+                            kept[i].0.label.as_deref().unwrap_or_default(),
+                            kept[j].0.label.as_deref().unwrap_or_default(),
+                        )
+                })
+        });
+        if let Some(i) = shorter {
+            barred[i] = true;
+            continue;
+        }
         let crowded = chosen.windows(2).find(|pair| {
             beats_between(grid, kept[pair[0]].0.time_ms, kept[pair[1]].0.time_ms)
                 .is_some_and(|beats| beats < (APART_BARS * BEATS_PER_BAR) as f32)
@@ -1454,6 +1484,62 @@ mod tests {
             "{cues:?}"
         );
         assert!(cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 60_000), "{cues:?}");
+    }
+
+    #[test]
+    fn of_two_lines_one_inside_the_other_only_the_longer_has_a_button() {
+        // Praise You: the hook is "praise you", sung most, and a second line
+        // has it inside. Pressed, the longer plays the shorter, so it keeps the
+        // button, takes the hook's place on A, and the hook is markers only.
+        let words = crate::transcribe::Transcript {
+            lines: vec![
+                line(30_000, "praise you"),
+                line(40_000, "I have to praise you like I should"),
+                line(60_000, "praise you"),
+                line(90_000, "praise you"),
+                line(100_000, "I have to praise you like I should"),
+                line(120_000, "praise you"),
+            ],
+            ..Default::default()
+        };
+        let mut candidates = vec![
+            Candidate::new(10_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(70_000, Reason::Section(Kind::Down)),
+            Candidate::new(150_000, Reason::Section(Kind::Chorus)),
+        ];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let cues = assemble(0, None, &[], candidates);
+        let hot: Vec<(u8, u32, String)> = cues
+            .iter()
+            .filter(|cue| cue.is_hot())
+            .map(|cue| (cue.hot_cue, cue.time_ms, cue.comment.clone().unwrap_or_default()))
+            .collect();
+        assert!(!hot.iter().any(|(_, _, said)| said == "praise you"), "{hot:?}");
+        assert!(hot.contains(&(1, 40_000, "I have to praise you like I should".into())), "{hot:?}");
+        assert!(
+            marks(&cues).iter().any(|mark| mark.ends_with(" praise you")),
+            "the hook is still marked where it is sung: {:?}",
+            marks(&cues)
+        );
+    }
+
+    #[test]
+    fn a_drop_that_carries_a_line_keeps_its_button_whatever_lines_it_is_inside() {
+        // The rule is about two buttons for the same words. A drop is a button
+        // for the drop, whatever line landed on it.
+        let words = crate::transcribe::Transcript {
+            lines: vec![
+                line(10_000, "praise you"),
+                line(40_000, "I have to praise you like I should"),
+                line(100_000, "I have to praise you like I should"),
+            ],
+            ..Default::default()
+        };
+        let mut candidates = vec![Candidate::new(10_000, Reason::Section(Kind::Chorus))];
+        candidates.extend(words.moments().iter().map(from_moment));
+        let cues = assemble(0, None, &[], candidates);
+        assert!(cues.iter().any(|cue| cue.is_hot() && cue.time_ms == 10_000), "{cues:?}");
     }
 
     #[test]
