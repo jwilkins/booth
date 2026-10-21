@@ -13022,9 +13022,10 @@ fn heard_start(
 /// every later airing a return, a marker. The button goes instead to the
 /// airing `place::best_airing` picks, and the first airing takes that airing's
 /// place as the return — the two swap times, so the markers are where they
-/// were and only the button moves. The hook's comeback is not in the running:
-/// it is a button already, and the hook on top of it would be one button
-/// where there were two.
+/// were and only the button moves. The hook's comeback is in the running like
+/// any other airing: it is a marker, not a button of its own — a line gets one
+/// button — so if it is where the hook is cued best, the button goes there and
+/// the first airing takes its marker.
 fn cued_airings(
     mut moments: Vec<booth_cli::transcribe::Moment>,
     words: &booth_cli::transcribe::Transcript,
@@ -13042,12 +13043,7 @@ fn cued_airings(
         });
         let Some(button) = button else { continue };
         let text = moments[button].text.clone();
-        let comeback = moments
-            .iter()
-            .find(|moment| moment.kind == MomentKind::Comeback && moment.text == text)
-            .map(|moment| moment.time_ms);
-        let running: Vec<u32> =
-            refrain.at.iter().copied().filter(|at| Some(*at) != comeback).collect();
+        let running: Vec<u32> = refrain.at.clone();
         // Ranked from where each airing's singing starts, so that an airing
         // whose lyric time is late is judged where it is sung.
         let begun: Vec<u32> = running.iter().map(|&at| heard_start(at, words, sung)).collect();
@@ -13056,12 +13052,17 @@ fn cued_airings(
         };
         let best = running[which];
         let marker = moments.iter().position(|moment| {
-            moment.time_ms == best && moment.kind == MomentKind::Return && moment.text == text
+            moment.time_ms == best
+                && matches!(moment.kind, MomentKind::Return | MomentKind::Comeback)
+                && moment.text == text
         });
         let (at, placed) = match (best == first, marker) {
             (true, _) => (first, placed),
             (false, Some(marker)) => {
+                // The first airing takes the marker the button left, as a
+                // plain return: it is not where the hook comes back.
                 moments[marker].time_ms = first;
+                moments[marker].kind = MomentKind::Return;
                 moments[button].time_ms = best;
                 (best, placed)
             }
@@ -14228,25 +14229,26 @@ mod tests {
                 // All three airings place alike, just after the one with a
                 // clear way in, so the button goes to the one on a phrase
                 // boundary: 160 s is bar 64 of the drop that starts at 32 s,
-                // where 40 s is bar 4. The comeback at 100 s is a button of
-                // its own. Two buttons, not one per airing: a line sung three
-                // times used to be three cues saying the same thing, which
-                // left the drops and the breakdowns nowhere to go.
+                // where 40 s is bar 4 and 100 s bar 34. One button, not one
+                // per airing and not a second where the hook comes back: a
+                // line sung three times used to be three cues saying the same
+                // thing, which left the drops and the breakdowns nowhere to go.
                 let with_the_words: Vec<u32> = cues
                     .iter()
                     .filter(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .map(|cue| cue.time_ms)
                     .collect();
-                assert_eq!(with_the_words, vec![100_000, 160_000], "{cues:?}");
+                assert_eq!(with_the_words, vec![160_000], "{cues:?}");
             }
 
             #[test]
             fn the_hook_is_cued_at_the_airing_that_places_best() {
                 // The hook's first airing comes straight off the line before
-                // it, so the beat before it is inside that line; the second
-                // starts clean, just after the one. The button goes to the
-                // second and the first keeps its marker. The third is the
-                // comeback, a button of its own.
+                // it, so the beat before it is inside that line; the other
+                // two start clean, just after the one. The one button goes to
+                // the clean airing on a phrase boundary, the third — where the
+                // hook comes back, which is a marker of its own no longer —
+                // and the first keeps its marker.
                 let (mut app, id) = sung(
                     "best-airing",
                     &[
@@ -14263,7 +14265,7 @@ mod tests {
                     .filter(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .map(|cue| cue.time_ms)
                     .collect();
-                assert_eq!(buttons, vec![100_000, 160_000], "{cues:?}");
+                assert_eq!(buttons, vec![160_000], "{cues:?}");
                 assert!(
                     cues.iter().any(|cue| cue.letter == 0
                         && cue.time_ms == 40_500
