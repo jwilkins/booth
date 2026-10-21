@@ -146,6 +146,24 @@ fn lrclib_returns_words_with_times_on_them() {
 
 #[test]
 #[ignore = "hits the live lrclib service"]
+fn a_lyric_file_with_no_line_that_comes_round_has_its_hook_between_its_punctuation() {
+    // The measurement behind reading a lyric file's repeats in three ways: of
+    // nineteen lyric files, this was the one where no whole line comes round,
+    // and the pieces between its commas and brackets have "any way the wind
+    // blows" twice, at 2:21 and at 5:42.
+    let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
+    let found = client
+        .lookup("Queen", "Bohemian Rhapsody", None)
+        .expect("the request failed")
+        .expect("Bohemian Rhapsody should be in any lyrics database");
+    let written = booth_cli::transcribe::Transcript { written: true, ..found.synced.clone() };
+    let hook = written.hook().expect("no repeat found at all");
+    assert_eq!(hook.text.to_lowercase(), "any way the wind blows", "{:?}", written.refrains());
+    assert_eq!(hook.times(), 2, "{hook:?}");
+}
+
+#[test]
+#[ignore = "hits the live lrclib service"]
 fn lrclib_says_outright_when_a_record_is_an_instrumental() {
     // The answer worth the most here: it saves a stem separation and a pass
     // through the recogniser, and costs one request.

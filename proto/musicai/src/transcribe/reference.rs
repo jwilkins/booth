@@ -142,7 +142,13 @@ pub fn time_words(written: &[String], heard: &Transcript) -> Option<Transcript> 
             text: lines[i].trim().to_string(),
         })
         .collect();
-    Some(Transcript { lines: timed, confidence: None, language: heard.language.clone() })
+    // Written lines, timed by ear: still somebody's lines.
+    Some(Transcript {
+        lines: timed,
+        confidence: None,
+        language: heard.language.clone(),
+        written: true,
+    })
 }
 
 /// Fill in the lines nobody was heard to sing, between the ones somebody was.
@@ -267,6 +273,7 @@ mod tests {
                 .collect(),
             confidence: Some(0.8),
             language: Some("en".into()),
+            written: false,
         }
     }
 
