@@ -6958,7 +6958,21 @@ impl App {
             }
 
             ui.add_space(14.0);
-            pane_label(ui, "What it keeps saying");
+            // The heading opens the lyric sheet out where there is one, and is
+            // a plain heading over the button and the "not read" line where
+            // there is not, since there is nothing yet to open out.
+            let lyrics_height = match track.lyrics.is_empty() {
+                true => {
+                    pane_label(ui, "Lyrics");
+                    None
+                }
+                false => Some(expandable_pane_label(
+                    ui,
+                    "Lyrics",
+                    &mut self.words_expanded,
+                    &theme::sans(theme::SMALL),
+                )),
+            };
             // Here rather than only on the strip under the waveform, because
             // this is the panel the words are read in: somebody looking at
             // "the words have not been read" should be able to do something
@@ -7051,16 +7065,106 @@ impl App {
                      like one.",
                 );
             }
-            // Every line it comes back to, scrolled rather than the first four.
-            // The cap was there because the panel grew with the track and
-            // because four of them is not a lyric sheet — and there is a lyric
-            // sheet below now, so the second reason has somewhere better to
-            // live and the first is what a scroll area is for. The order is
-            // still how often, so the lines worth seeing are the ones in view
-            // without scrolling at all.
+            // The words themselves, which until now were kept and never
+            // shown: a line count, a provenance and four repeated lines, and
+            // the lyric they were all drawn from nowhere on screen. What
+            // reaches a player is a comment shortened to fit a four-kilobyte
+            // row, so the collection is the only place the whole thing is.
+            if let Some(height) = lyrics_height {
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("the-words")
+                    .max_height(height)
+                    // As tall as it says whatever room is left: in this egui a
+                    // scroll area inside the inspector's own is otherwise cut
+                    // to what is left of the window below it, which on a
+                    // track low in the inspector made opening it out do
+                    // nothing at all. It still shrinks to a short lyric.
+                    .min_scrolled_height(height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for line in &track.lyrics {
+                            let said = line.text.trim();
+                            if said.is_empty() {
+                                continue;
+                            }
+                            ui.horizontal_top(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                // The time is the control, not the line: a
+                                // lyric sheet whose every line is a button is
+                                // a lyric sheet nobody can select text in.
+                                if ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(time_text(line.start_ms))
+                                                .font(theme::mono(9.5))
+                                                .color(theme::dim()),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    )
+                                    .on_hover_text("Go to this line")
+                                    .clicked()
+                                {
+                                    self.playhead_ms = Some(line.start_ms);
+                                    self.pending.push(Pending::SeekDeck {
+                                        id: track.id,
+                                        time_ms: line.start_ms,
+                                    });
+                                }
+                                ui.label(
+                                    RichText::new(said).color(theme::text()).size(theme::SMALL),
+                                );
+                            });
+                        }
+                    });
+            }
+
+            // And why the cues are where they are. The pass that places them
+            // says all this as it goes and used to say it only to the log,
+            // which is a record that lasts until the next thing is logged.
+            if !track.words_decided.is_empty() {
+                ui.add_space(14.0);
+                let height = expandable_pane_label(
+                    ui,
+                    "Cue Analysis",
+                    &mut self.decided_expanded,
+                    &theme::mono(9.5),
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("what-the-words-decided")
+                    .max_height(height)
+                    // See the lyric sheet's.
+                    .min_scrolled_height(height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for line in &track.words_decided {
+                            ui.label(
+                                RichText::new(line)
+                                    .font(theme::mono(9.5))
+                                    // The indented lines are the ranking under
+                                    // a heading; the rest are what it did.
+                                    .color(match line.starts_with("  ") {
+                                        true => theme::dim(),
+                                        false => theme::text(),
+                                    }),
+                            );
+                        }
+                    });
+            }
+
+            if !track.refrains.is_empty() {
+            // Every line it comes back to, scrolled rather than the first four,
+            // most often first so the lines worth seeing are the ones in view
+            // without scrolling. Below the account of the cues rather than
+            // above it: the lyric sheet is what is read first, and why the cues
+            // are where they are is what is read next.
+            ui.add_space(14.0);
+            pane_label(ui, "Lyric Frequencies");
             egui::ScrollArea::vertical()
                 .id_salt("what-it-keeps-saying")
                 .max_height(WORDS_HEIGHT)
+                // See the lyric sheet's.
+                .min_scrolled_height(WORDS_HEIGHT)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
             for refrain in &track.refrains {
@@ -7109,90 +7213,6 @@ impl App {
                 );
             }
                 });
-
-            // The words themselves, which until now were kept and never
-            // shown: a line count, a provenance and four repeated lines, and
-            // the lyric they were all drawn from nowhere on screen. What
-            // reaches a player is a comment shortened to fit a four-kilobyte
-            // row, so the collection is the only place the whole thing is.
-            if !track.lyrics.is_empty() {
-                ui.add_space(14.0);
-                let height = expandable_pane_label(
-                    ui,
-                    "The words",
-                    &mut self.words_expanded,
-                    &theme::sans(theme::SMALL),
-                );
-                egui::ScrollArea::vertical()
-                    .id_salt("the-words")
-                    .max_height(height)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        for line in &track.lyrics {
-                            let said = line.text.trim();
-                            if said.is_empty() {
-                                continue;
-                            }
-                            ui.horizontal_top(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                // The time is the control, not the line: a
-                                // lyric sheet whose every line is a button is
-                                // a lyric sheet nobody can select text in.
-                                if ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new(time_text(line.start_ms))
-                                                .font(theme::mono(9.5))
-                                                .color(theme::dim()),
-                                        )
-                                        .sense(egui::Sense::click()),
-                                    )
-                                    .on_hover_text("Go to this line")
-                                    .clicked()
-                                {
-                                    self.playhead_ms = Some(line.start_ms);
-                                    self.pending.push(Pending::SeekDeck {
-                                        id: track.id,
-                                        time_ms: line.start_ms,
-                                    });
-                                }
-                                ui.label(
-                                    RichText::new(said).color(theme::text()).size(theme::SMALL),
-                                );
-                            });
-                        }
-                    });
-            }
-
-            // And why the cues are where they are. The pass that places them
-            // says all this as it goes and used to say it only to the log,
-            // which is a record that lasts until the next thing is logged.
-            if !track.words_decided.is_empty() {
-                ui.add_space(14.0);
-                let height = expandable_pane_label(
-                    ui,
-                    "What the words decided",
-                    &mut self.decided_expanded,
-                    &theme::mono(9.5),
-                );
-                egui::ScrollArea::vertical()
-                    .id_salt("what-the-words-decided")
-                    .max_height(height)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        for line in &track.words_decided {
-                            ui.label(
-                                RichText::new(line)
-                                    .font(theme::mono(9.5))
-                                    // The indented lines are the ranking under
-                                    // a heading; the rest are what it did.
-                                    .color(match line.starts_with("  ") {
-                                        true => theme::dim(),
-                                        false => theme::text(),
-                                    }),
-                            );
-                        }
-                    });
             }
 
             ui.add_space(14.0);
@@ -11608,7 +11628,7 @@ impl App {
         let mut open = true;
         let mut save = false;
         let mut cancel = false;
-        egui::Window::new("The words")
+        egui::Window::new("Lyrics")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -16160,31 +16180,100 @@ mod tests {
             harness.get_by_label_contains("0:40.00");
         }
 
+        /// A track with sixty lines of lyric and sixty lines of account, more
+        /// than either panel shows open, and two lines it comes back to.
+        fn with_a_long_lyric(name: &str) -> App {
+            let (mut app, id) = with_words(name);
+            {
+                let track = app.library.get_mut(id).unwrap();
+                track.lyrics = (0..60u32)
+                    .map(|i| crate::library::Lyric {
+                        start_ms: i * 3_000,
+                        end_ms: i * 3_000 + 2_000,
+                        // A chorus line every thirty seconds, so that there
+                        // is a line it comes back to.
+                        text: match i % 10 {
+                            0 => "hold me closer now".to_string(),
+                            _ => format!("line number {i} of the lyric"),
+                        },
+                    })
+                    .collect();
+                track.words_decided = (0..60).map(|i| format!("decision {i}")).collect();
+                // Worked out from the lyric as taking words in does.
+                track.refrains = crate::library::refrains_from(&track.lyrics);
+                assert!(!track.refrains.is_empty());
+            }
+            app.rebuild();
+            app
+        }
+
         #[test]
-        fn the_words_and_the_decisions_open_out_to_fifty_lines_when_asked() {
-            // Both panels are a few lines tall so that the tags and the file
-            // under them stay put, and a lyric is read top to bottom: so each
-            // has "expand" at its right, which reads "collapse" once it is
-            // open, and each opens on its own.
-            let (app, _) = with_words("words-expand");
+        fn the_lyrics_and_the_cue_analysis_open_out_to_fifty_lines_when_asked() {
+            // What was missed: the toggle toggled and the panel stayed the
+            // size it was, because a scroll area inside the inspector's own is
+            // cut to what is left of the window. So this measures the panel
+            // and not the toggle — by how far the tags under it move — in a
+            // window too short to hold it, which is the case that failed.
             let mut harness = Harness::builder()
-                .with_size(egui::vec2(420.0, 1_400.0))
-                .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+                .with_size(egui::vec2(420.0, 900.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), with_a_long_lyric("expand"));
             harness.run();
+            let under = |harness: &Harness<'_, App>| harness.get_by_label("Add").rect().top();
+            let row = |font: egui::FontId| {
+                let ctx = egui::Context::default();
+                let mut height = 0.0;
+                let _ = ctx.run(Default::default(), |ctx| {
+                    height = ctx.fonts_mut(|fonts| fonts.row_height(&font))
+                        + ctx.style().spacing.item_spacing.y;
+                });
+                height
+            };
             assert_eq!(harness.query_all_by_label("expand").count(), 2);
             assert!(harness.query_by_label("collapse").is_none());
+            let closed = under(&harness);
 
             // The lyric sheet's is the first: it is drawn first.
             harness.query_all_by_label("expand").next().unwrap().click();
             harness.run();
             assert!(harness.state().words_expanded, "the lyric sheet did not open out");
             assert!(!harness.state().decided_expanded, "the other panel opened with it");
-            harness.get_by_label("collapse");
+            let grew = under(&harness) - closed;
+            let wanted = EXPANDED_ROWS as f32 * row(theme::sans(theme::SMALL)) - WORDS_HEIGHT;
+            assert!(
+                (grew - wanted).abs() < 2.0,
+                "the lyric sheet grew {grew:.0} points where fifty rows want {wanted:.0}"
+            );
 
             harness.get_by_label("collapse").click();
             harness.run();
             assert!(!harness.state().words_expanded, "it did not close again");
-            assert_eq!(harness.query_all_by_label("expand").count(), 2);
+            assert!((under(&harness) - closed).abs() < 1.0, "it did not go back to its size");
+
+            // And the account's the same way, by its own rows.
+            harness.query_all_by_label("expand").nth(1).unwrap().click();
+            harness.run();
+            let grew = under(&harness) - closed;
+            let wanted = EXPANDED_ROWS as f32 * row(theme::mono(9.5)) - WORDS_HEIGHT;
+            assert!(
+                (grew - wanted).abs() < 2.0,
+                "the cue analysis grew {grew:.0} points where fifty rows want {wanted:.0}"
+            );
+        }
+
+        #[test]
+        fn the_lyrics_come_first_then_the_cue_analysis_then_the_lyric_frequencies() {
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(420.0, 1_600.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), with_a_long_lyric("order"));
+            harness.run();
+            let top =
+                |heading: &str| harness.get_by_label(&theme::label_text(heading)).rect().top();
+            let (lyrics, analysis, frequencies) =
+                (top("Lyrics"), top("Cue Analysis"), top("Lyric Frequencies"));
+            assert!(
+                lyrics < analysis && analysis < frequencies,
+                "{lyrics} {analysis} {frequencies}"
+            );
         }
 
         #[test]
@@ -16222,8 +16311,14 @@ mod tests {
                 .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
             harness.run();
 
-            assert!(harness.query_by_label("The words").is_none());
-            assert!(harness.query_by_label("What the words decided").is_none());
+            // Headings are drawn spaced out in capitals, so they are looked for
+            // as drawn: asked for as written, these two could never be found.
+            // The lyrics heading stays, over the button that finds the words.
+            harness.get_by_label(&theme::label_text("Lyrics"));
+            harness.get_by_label_contains("the words have not been read");
+            assert!(harness.query_by_label(&theme::label_text("Cue Analysis")).is_none());
+            assert!(harness.query_by_label(&theme::label_text("Lyric Frequencies")).is_none());
+            assert!(harness.query_by_label("expand").is_none(), "nothing to open out");
         }
 
         #[test]
