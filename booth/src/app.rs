@@ -734,6 +734,11 @@ enum Pending {
     AutoCue(u32),
     /// Put one track's path on the clipboard.
     CopyPath(u32),
+    /// Put one track's words on the clipboard, with their times or without.
+    CopyWords {
+        id: u32,
+        times: bool,
+    },
     /// Show the whole track again.
     FitWave,
     /// Re-encode these into something a player opens.
@@ -6982,20 +6987,42 @@ impl App {
             // this is the panel the words are read in: somebody looking at
             // "the words have not been read" should be able to do something
             // about it without going looking for the button that does.
-            if ui
-                .button(match track.lyrics.is_empty() {
-                    true => "Find the words",
-                    false => "Find the words again",
-                })
-                .on_hover_text(
-                    "Look for a lyric file next to the track — an .lrc or a .txt of the \
-                     same name — and failing that ask a lyrics server. Neither needs a \
-                     stem or a recogniser.",
-                )
-                .clicked()
-            {
-                self.pending.push(Pending::FindWords(track.id));
-            }
+            ui.horizontal(|ui| {
+                if ui
+                    .button(match track.lyrics.is_empty() {
+                        true => "Find the words",
+                        false => "Find the words again",
+                    })
+                    .on_hover_text(
+                        "Look for a lyric file next to the track — an .lrc or a .txt of the \
+                         same name — and failing that ask a lyrics server. Neither needs a \
+                         stem or a recogniser.",
+                    )
+                    .clicked()
+                {
+                    self.pending.push(Pending::FindWords(track.id));
+                }
+                if track.lyrics.is_empty() {
+                    return;
+                }
+                if ui.button("Copy").on_hover_text("Put the words on the clipboard").clicked() {
+                    self.pending.push(Pending::CopyWords { id: track.id, times: false });
+                }
+                // Words a server had only as text have no times to copy, and
+                // a column of zeroes would say they all start at once.
+                let timed = track.lyrics.iter().any(|line| line.start_ms > 0);
+                if ui
+                    .add_enabled(timed, egui::Button::new("Copy with times"))
+                    .on_hover_text(
+                        "Put the words on the clipboard with the time of each line, as a \
+                         lyric file has them: [01:04.20] and the line",
+                    )
+                    .on_disabled_hover_text("These words have no times on them")
+                    .clicked()
+                {
+                    self.pending.push(Pending::CopyWords { id: track.id, times: true });
+                }
+            });
             ui.add_space(4.0);
             // The line the room sings is what a DJ recognises a record by
             // months later, long after the file name and the artwork have gone
@@ -7526,6 +7553,31 @@ impl App {
                         ctx.copy_text(path.clone());
                         self.note(format!("copied {path}"), theme::text());
                     }
+                }
+                Pending::CopyWords { id, times } => {
+                    let Some(track) = self.library.get(id) else { continue };
+                    let text = match times {
+                        true => booth_cli::tag::lyrics::lrc_lines(
+                            &crate::library::transcript(&track.lyrics).lines,
+                        ),
+                        // In the order the panel shows them, a line to a line.
+                        false => track
+                            .lyrics
+                            .iter()
+                            .map(|line| line.text.split_whitespace().collect::<Vec<_>>().join(" "))
+                            .filter(|said| !said.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    };
+                    let lines = text.lines().count();
+                    ctx.copy_text(text);
+                    self.note(
+                        match times {
+                            true => format!("copied {} with their times", plural(lines, "line")),
+                            false => format!("copied {}", plural(lines, "line")),
+                        },
+                        theme::text(),
+                    );
                 }
                 Pending::AddTag(id, tag) => {
                     // Matched case-insensitively so that `Peak` joins `peak`
@@ -16499,6 +16551,63 @@ mod tests {
                 vec!["hook: \u{201c}hold me closer now\u{201d}, sung 3 times".into()];
             app.rebuild();
             (app, id)
+        }
+
+        /// What a frame put on the clipboard.
+        fn copied(output: &egui::FullOutput) -> Vec<String> {
+            output
+                .platform_output
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn the_words_are_copied_bare_or_with_their_times_as_a_lyric_file_has_them() {
+            let (app, _) = with_words("copy-words");
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(420.0, 1_200.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+
+            for (button, wanted) in [
+                ("Copy", "hold me closer now\nnothing here but us"),
+                (
+                    "Copy with times",
+                    "[00:40.00]hold me closer now\n[00:44.00]nothing here but us\n",
+                ),
+            ] {
+                harness.get_by_label(button).click();
+                harness.run();
+                let ctx = harness.ctx.clone();
+                harness.state_mut().apply_pending(&ctx);
+                harness.step();
+                assert_eq!(copied(harness.output()), [wanted], "{button}");
+            }
+        }
+
+        #[test]
+        fn words_with_no_times_cannot_be_copied_with_them() {
+            // A server that had the words only as text: every line at zero,
+            // and copying those times would say the lines all start at once.
+            let (mut app, id) = with_words("copy-untimed");
+            for line in &mut app.library.get_mut(id).unwrap().lyrics {
+                line.start_ms = 0;
+                line.end_ms = 0;
+            }
+            app.rebuild();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(420.0, 1_200.0))
+                .build_ui_state(|ui, app: &mut App| app.inspector(ui), app);
+            harness.run();
+            use egui_kittest::kittest::NodeT;
+            let disabled = |label: &str| harness.get_by_label(label).accesskit_node().is_disabled();
+            assert!(disabled("Copy with times"));
+            assert!(!disabled("Copy"));
         }
 
         #[test]
