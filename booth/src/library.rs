@@ -770,23 +770,25 @@ pub struct Track {
     /// shortened copy on a stick is not a record of anything.
     #[serde(default)]
     pub words_decided: Vec<String>,
-    /// Where the vocal stem is singing: each stretch with a voice in it, as
-    /// (from, to) in milliseconds on the record's clock.
+    /// Where the vocal stem is making a sound, split wherever the voice stops
+    /// for a breath: (from, to) in milliseconds on the record's clock — see
+    /// `booth_cli::transcribe::align::sounds`.
     ///
-    /// The measurement that placed the words — see
-    /// `booth_cli::transcribe::align::voiced_spans` — kept rather than thrown
-    /// away once the lines were on it, because it answers the question a cue
-    /// has to answer and the lines cannot: whether anybody is singing at this
-    /// instant. A line's time says where it starts and nothing about the line
-    /// before it running on over the bar, and a cue set inside a word is a cue
-    /// that clips it. Twenty-millisecond frames joined across the gaps between
-    /// words, so a few dozen pairs for a record.
+    /// Kept because it answers two questions a cue has to answer and the
+    /// lines cannot: whether anybody is singing at this instant, and where,
+    /// near the time a line was given, the singing of that line starts. A
+    /// line's time is a lyric file's or the recogniser's, and inside a verse
+    /// sung without a half-second's pause it is an estimate; a cue set on an
+    /// estimate a word or two late starts mid-line. Twenty-millisecond frames
+    /// split at silences of sixty or more, so a few hundred pairs for a record.
     ///
-    /// Empty on a track whose words were placed before this was kept. Those
-    /// take the measurement the next time they are cued, by the same decode
-    /// that placed them — see `App::words_plan`.
+    /// Under its own name rather than `sung`, which held the same measurement
+    /// bridged across half-second gaps and so had no breaths in it. A track
+    /// measured that way, or not at all, has this empty, and takes it the next
+    /// time it is cued, by the same decode that placed its words — see
+    /// `App::words_plan`.
     #[serde(default)]
-    pub sung: Vec<(u32, u32)>,
+    pub sounds: Vec<(u32, u32)>,
     pub loudness_lufs: Option<f64>,
     pub peak_dbtp: Option<f64>,
 
@@ -904,7 +906,7 @@ impl Track {
             downbeat_ms: None,
             beat_marks: Vec::new(),
             words_decided: Vec::new(),
-            sung: Vec::new(),
+            sounds: Vec::new(),
             phrases: Vec::new(),
             cues: Vec::new(),
             lyrics: Vec::new(),
@@ -3138,13 +3140,19 @@ mod tests {
     #[test]
     fn where_the_singing_is_comes_back_with_the_track_and_is_empty_where_never_measured() {
         let mut track = Track::placeholder(1);
-        track.sung = vec![(40_100, 42_000), (99_000, 102_000)];
+        track.sounds = vec![(40_100, 42_000), (99_000, 102_000)];
         let written = serde_json::to_string(&track).expect("a track should serialise");
         let back: Track = serde_json::from_str(&written).expect("and read back");
-        assert_eq!(back.sung, track.sung);
+        assert_eq!(back.sounds, track.sounds);
         // An older collection has no such key, and empty is what sends the
         // track back to the stem for the measurement.
-        assert!(Track::placeholder(2).sung.is_empty());
+        assert!(Track::placeholder(2).sounds.is_empty());
+        // And the coarser measurement it replaces is not taken for it: a
+        // collection that has `sung` comes back with this empty, to be
+        // measured again.
+        let older = written.replace("\"sounds\"", "\"sung\"");
+        let back: Track = serde_json::from_str(&older).expect("an older track should read");
+        assert!(back.sounds.is_empty(), "the coarse measurement was taken for the fine one");
     }
 
     fn spoken(language: &str) -> Track {

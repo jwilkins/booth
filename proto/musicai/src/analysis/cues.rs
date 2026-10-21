@@ -308,7 +308,7 @@ pub const INSTRUMENTAL_BARS: usize = 8;
 /// its bar line, where it is [`INSTRUMENTAL_BARS`] long or longer.
 ///
 /// `grid` is every beat from the first downbeat and `sung` is where the stem
-/// is singing, as `transcribe::align::voiced_spans` measures it. Only the gaps
+/// is singing, as `transcribe::align::sounds` measures it. Only the gaps
 /// between sung stretches are looked at: before the first is the intro and
 /// after the last the outro, which have cues of their own. The cue goes on the
 /// first bar line after the singing stops — or on the first four-bar boundary

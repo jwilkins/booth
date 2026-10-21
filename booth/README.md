@@ -1012,18 +1012,32 @@ is looked for — which is what makes **Look up the words** ask a server rather
 than hand back the last answer.
 
 **Where the singing is** is kept with the words once a stem has been measured:
-the stretches of the stem with a voice in them, to twenty milliseconds. The
-lines say where each starts and nothing about the line before running on over
-the bar, and that is the question a cue has to answer, because a cue set inside
-a word clips it. So the account under the cues says, for every line the track
+the stretches of the stem with a voice in them, to twenty milliseconds, split
+wherever the voice stops for sixty milliseconds or more, so that the breath
+between two lines of a verse is in it. The lines say where each starts and
+nothing about the line before running on over the bar, and inside a verse what
+they say is an estimate; both are questions a cue has to answer, because a cue
+set inside a word clips it. So the account under the cues says, for every line the track
 comes back to, where each airing lands in the bar in beats after the one —
 `0.2` is just after it, `3.8` is a pickup to the next — marking the ones with
 something sung between the one and them, and for every cue, which beat of the
 bar it sits on and whether it falls inside a word. These are measurements
 rather than rules, taken first so that the rules for where a cue goes can be
 set from what records do. A collection whose words were placed before this
-existed takes the measurement the next time those tracks are cued, by the same
-decode that placed them.
+existed, or measured before the breaths were kept, takes the measurement the
+next time those tracks are cued, by the same decode that placed them.
+
+**Where a line starts** is looked for rather than taken from its lyric. A lyric
+timed against another pressing, or a recogniser's segment inside a verse, gives
+a time that was seen a word or two late line after line, and every cue on it
+came in mid-line. So before a line is cued, the breath nearest its time is
+found in the stem: the longest silence of a hundred and fifty milliseconds or
+more within a second and a half before it and three quarters of a second after,
+and never past halfway to the lines either side, whose breaths those are. The
+line is cued from where the singing after that breath starts, by the rules
+below; **Cue Analysis** says where that was and where the lyric said, for every
+line it moved. A line with no breath in reach — a verse delivered without one —
+keeps its lyric time and is cued on the beat before it.
 
 A cue's label is read on the waveform by resting on it: the marker has room
 for a letter or a dot, and "V1 Get Down" is the thing worth reading. **Memory

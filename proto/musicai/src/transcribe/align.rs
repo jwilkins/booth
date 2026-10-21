@@ -63,7 +63,6 @@ const FLOOR_OF_PEAK: f32 = 0.04;
 /// would be guessing at which phrase was meant.
 const REACH_MS: u32 = 30_000;
 
-/// The stretches of a stem that have singing in them, in milliseconds.
 /// Whether a stem has any singing on it at all.
 ///
 /// A separation of an instrumental still produces a vocal stem — what is in it
@@ -107,11 +106,57 @@ fn loudest(audio: &Audio) -> f32 {
 /// here, and it is one number to move if a real stem lands on the wrong side.
 const QUIETEST_VOICE: f32 = 0.01;
 
+/// How long a frame of the level measurement is.
+const FRAME_MS: u32 = 20;
+
+/// A silence shorter than this is inside a word or between two words of a
+/// line, at the finer of the two measurements — see [`sounds`].
+///
+/// Three frames. A sung line's words run into each other or stop for a
+/// consonant, a few tens of milliseconds; a breath between two lines is
+/// longer. What counts as a breath is decided later, by the cue placement,
+/// so this only has to keep the gaps that could be one.
+const WORD_GAP_MS: u32 = 60;
+
+/// The shortest sound kept at the finer resolution: three frames, so that one
+/// frame of bleed in a breath does not split the breath in two.
+const MIN_SOUND_MS: u32 = 60;
+
+/// The stretches of a stem that have singing in them, in milliseconds.
+///
+/// Phrases, not words: silences shorter than half a second are bridged, so a
+/// verse sung without a breath long enough to see is one stretch. That is what
+/// placing a recogniser's lines wants — see [`to_the_voice`] — and it is too
+/// coarse to say where a line inside such a verse begins, which is what
+/// [`sounds`] is for.
 pub fn voiced_spans(audio: &Audio) -> Vec<(u32, u32)> {
-    const FRAME_MS: u32 = 20;
+    match levels(audio) {
+        Some((levels, floor)) => joined(above(&levels, floor), BRIDGE_MS, MIN_VOICED_MS),
+        None => Vec::new(),
+    }
+}
+
+/// The stretches of a stem that have singing in them, split wherever the
+/// voice stops for [`WORD_GAP_MS`] or more.
+///
+/// The same measurement as [`voiced_spans`], against the same floor, without
+/// the half-second bridge. A breath between two lines of a verse is in here
+/// where it is not in the stretches, and the cue placement looks for it there:
+/// a line whose time is a lyric file's or a recogniser's estimate starts after
+/// the breath nearest that time, not at the estimate.
+pub fn sounds(audio: &Audio) -> Vec<(u32, u32)> {
+    match levels(audio) {
+        Some((levels, floor)) => joined(above(&levels, floor), WORD_GAP_MS, MIN_SOUND_MS),
+        None => Vec::new(),
+    }
+}
+
+/// A stem's level in frames of [`FRAME_MS`], and the floor above which a
+/// frame counts as sung. `None` for a stem with nothing in it.
+fn levels(audio: &Audio) -> Option<(Vec<f32>, f32)> {
     let mono = audio.to_mono();
     if mono.is_empty() || audio.sample_rate == 0 {
-        return Vec::new();
+        return None;
     }
     let per_frame = (audio.sample_rate as usize * FRAME_MS as usize / 1000).max(1);
 
@@ -129,10 +174,13 @@ pub fn voiced_spans(audio: &Audio) -> Vec<(u32, u32)> {
     sorted.sort_by(f32::total_cmp);
     let loud = sorted[sorted.len() * 95 / 100];
     if loud <= f32::EPSILON {
-        return Vec::new();
+        return None;
     }
-    let floor = loud * FLOOR_OF_PEAK;
+    Some((levels, loud * FLOOR_OF_PEAK))
+}
 
+/// The runs of frames above the floor, in milliseconds.
+fn above(levels: &[f32], floor: f32) -> Vec<(u32, u32)> {
     let mut spans: Vec<(u32, u32)> = Vec::new();
     let mut open: Option<u32> = None;
     for (at, level) in levels.iter().enumerate() {
@@ -149,18 +197,21 @@ pub fn voiced_spans(audio: &Audio) -> Vec<(u32, u32)> {
     if let Some(from) = open {
         spans.push((from, levels.len() as u32 * FRAME_MS));
     }
+    spans
+}
 
-    // Join what is one phrase with gaps in it, then drop what is too short to
-    // be singing at all. In that order: three clicks in a row are still not a
-    // phrase, and a word split by a breath is.
+/// Join runs with less than `bridge_ms` between them, then drop what is
+/// shorter than `shortest_ms`. In that order: three clicks in a row are still
+/// not a phrase, and a word split by a consonant is.
+fn joined(spans: Vec<(u32, u32)>, bridge_ms: u32, shortest_ms: u32) -> Vec<(u32, u32)> {
     let mut joined: Vec<(u32, u32)> = Vec::with_capacity(spans.len());
     for (from, to) in spans {
         match joined.last_mut() {
-            Some(last) if from.saturating_sub(last.1) < BRIDGE_MS => last.1 = to,
+            Some(last) if from.saturating_sub(last.1) < bridge_ms => last.1 = to,
             _ => joined.push((from, to)),
         }
     }
-    joined.retain(|(from, to)| to.saturating_sub(*from) >= MIN_VOICED_MS);
+    joined.retain(|(from, to)| to.saturating_sub(*from) >= shortest_ms);
     joined
 }
 
@@ -227,6 +278,104 @@ mod tests {
             *sample = level * (2.0 * std::f32::consts::PI * 220.0 * t).sin();
         }
         Audio::new(RATE, vec![plane.clone(), plane]).unwrap()
+    }
+
+    /// A stem of tones at the given (from, to) times in milliseconds, with
+    /// silence between them.
+    fn tones(at: &[(u32, u32)], length_ms: u32) -> Audio {
+        const RATE: u32 = 16_000;
+        let mut plane = vec![0.0f32; (RATE * length_ms / 1000) as usize];
+        for &(from, to) in at {
+            let (from, to) = ((RATE * from / 1000) as usize, (RATE * to / 1000) as usize);
+            for (i, sample) in plane.iter_mut().enumerate().take(to).skip(from) {
+                let t = i as f32 / RATE as f32;
+                *sample = 0.5 * (2.0 * std::f32::consts::PI * 220.0 * t).sin();
+            }
+        }
+        Audio::new(RATE, vec![plane]).unwrap()
+    }
+
+    #[test]
+    fn the_finer_measurement_splits_at_a_breath_and_not_between_two_words() {
+        // Two words forty milliseconds apart, a quarter-second breath, and a
+        // third word. The stretches see one phrase; the sounds see where the
+        // breath is, and nothing between the first two words.
+        let stem = tones(&[(1_000, 1_600), (1_640, 2_200), (2_450, 3_000)], 4_000);
+        assert_eq!(voiced_spans(&stem), vec![(1_000, 3_000)]);
+        assert_eq!(sounds(&stem), vec![(1_000, 2_200), (2_440, 3_000)]);
+    }
+
+    #[test]
+    fn where_a_line_starts_is_found_after_its_breath_whatever_its_lyric_said() {
+        // A measurement of the mechanism on material made for it: forty sung
+        // lines of three to six words, the words a few tens of milliseconds
+        // apart, one line in four with a pause inside it, a breath between
+        // lines, and bleed under all of it at a fortieth of the voice. Each
+        // line's lyric time is thrown off by up to 0.4 s early and 0.7 s late
+        // — a lyric timed against another pressing — and the line's start is
+        // looked for from there, between its neighbours' lyric times.
+        const RATE: u32 = 16_000;
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |below: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % below
+        };
+        let mut words: Vec<(u32, u32)> = Vec::new();
+        let mut starts: Vec<u32> = Vec::new();
+        let mut at = 2_000u32;
+        for line in 0..40 {
+            starts.push(at);
+            let count = 3 + next(4);
+            for word in 0..count {
+                let length = 180 + next(140);
+                words.push((at, at + length));
+                at += length;
+                // A pause inside the line, shorter than a breath, after its
+                // second word on every fourth line; otherwise a consonant's gap.
+                at += match (line % 4, word) {
+                    (0, 1) => 120,
+                    _ => 20 + next(30),
+                };
+            }
+            at += 160 + next(290);
+        }
+        let length_ms = at + 1_000;
+        let mut plane = vec![0.0f32; (RATE * length_ms / 1000) as usize];
+        for (i, sample) in plane.iter_mut().enumerate() {
+            let t = i as f32 / RATE as f32;
+            *sample = 0.0125 * (2.0 * std::f32::consts::PI * 97.0 * t).sin();
+        }
+        for &(from, to) in &words {
+            let (from, to) = ((RATE * from / 1000) as usize, (RATE * to / 1000) as usize);
+            for (i, sample) in plane.iter_mut().enumerate().take(to).skip(from) {
+                let t = i as f32 / RATE as f32;
+                *sample += 0.5 * (2.0 * std::f32::consts::PI * 220.0 * t).sin();
+            }
+        }
+        let found = sounds(&Audio::new(RATE, vec![plane]).unwrap());
+
+        let given: Vec<u32> = starts.iter().map(|&start| start + next(1_100) - 400).collect();
+        let mut off: Vec<i64> = Vec::new();
+        let mut kept = 0;
+        for (i, &time) in given.iter().enumerate() {
+            let before = i.checked_sub(1).map(|b| given[b]);
+            let after = given.get(i + 1).copied();
+            match crate::analysis::place::line_start(time, before, after, &found) {
+                Some(start) => off.push(start as i64 - starts[i] as i64),
+                None => kept += 1,
+            }
+        }
+        let worst = off.iter().map(|o| o.abs()).max().unwrap_or(0);
+        let right = off.iter().filter(|o| o.abs() <= 40).count();
+        let as_given = given.iter().zip(&starts).filter(|(g, s)| g.abs_diff(**s) <= 40).count();
+        eprintln!(
+            "{right} of {} line starts found within 40 ms, worst {worst} ms off, {kept} kept their \
+             lyric time; the lyric times themselves: {as_given} within 40 ms",
+            starts.len()
+        );
+        assert_eq!(right, starts.len(), "{off:?}");
     }
 
     #[test]

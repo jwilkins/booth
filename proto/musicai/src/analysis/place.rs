@@ -29,6 +29,15 @@
 //!    once did: a beat early plays the tail of the line before and then the
 //!    whole line, where a couple of words late loses the line's beginning.
 //!
+//! The line's start that the ladder works from is not taken on trust where it
+//! can be found. A line's time is a lyric file's or the recogniser's, and
+//! inside a verse the stem cannot split into stretches, an estimate: a lyric
+//! timed against another pressing was seen a word or two late, line after
+//! line, and every cue on it came in mid-line. So the ladder starts from
+//! [`line_start`] — where the singing nearest that time starts after a
+//! breath — and only where there is no breath to find does a line keep the
+//! time it was given, and land on the fifth rung.
+//!
 //! Among the airings of a line the track comes back to, the button goes to the
 //! airing that reaches the best rung; between airings on the same rung, to the
 //! one on a phrase boundary, eight bars from the start of its section or four;
@@ -56,6 +65,26 @@ pub const ON_THE_ONE_BEATS: f32 = 0.5;
 /// How far into a sung stretch a cue can sit and still be at its onset rather
 /// than inside its first word: two of the detector's twenty-millisecond frames.
 pub const ONSET_SLACK_MS: u32 = 40;
+
+/// The shortest silence that counts as the breath before a line: 150 ms.
+///
+/// Longer than the gap between two words of a line — a consonant, a few tens
+/// of milliseconds, which the finer measurement mostly bridges anyway — and
+/// shorter than the breath a singer takes between lines. Reasoned rather than
+/// measured on a collection; the account under the cues says, for each line it
+/// cues, where the stem had it starting and where its lyric said, which is
+/// where to set it from.
+pub const MIN_BREATH_MS: u32 = 150;
+
+/// How far before the time a line was given its start is looked for: a second
+/// and a half, a couple of words and then some. Never further than halfway to
+/// the line before, whose start the breaths nearer it belong to.
+pub const REACH_BACK_MS: u32 = 1_500;
+
+/// And how far after: three quarters of a second, or halfway to the line
+/// after. Less than back, because a time given early lands in the silence
+/// before the line rather than inside the one before it.
+pub const REACH_ON_MS: u32 = 750;
 
 /// Bars in a phrase, as a DJ counts them. Half of it is the lesser boundary.
 const PHRASE_BARS: usize = 8;
@@ -99,7 +128,7 @@ pub struct Placed {
 /// Where a cue for a line starting at `onset_ms` goes.
 ///
 /// `grid` is every beat of the track from its first downbeat, in milliseconds,
-/// and `sung` is where the stem is singing, as `transcribe::align::voiced_spans`
+/// and `sung` is where the stem is singing, as `transcribe::align::sounds`
 /// measures it. With no grid, or a line before the grid's first beat, the cue
 /// is the line itself.
 pub fn place(onset_ms: u32, grid: &[u32], sung: &[(u32, u32)]) -> Placed {
@@ -126,6 +155,43 @@ pub fn place(onset_ms: u32, grid: &[u32], sung: &[(u32, u32)]) -> Placed {
         return Placed { time_ms: grid[beat], rung: Rung::InSinging };
     }
     Placed { time_ms: onset_ms, rung: Rung::Onset }
+}
+
+/// Where a line's singing starts, near the time it was given.
+///
+/// The sound in `sounds` that follows the longest silence within reach of
+/// `at_ms`, where that silence is a breath — [`MIN_BREATH_MS`] or more. Within
+/// [`REACH_BACK_MS`] before and [`REACH_ON_MS`] after, and never past halfway
+/// to the lines either side, `before_ms` and `after_ms`, whose starts the
+/// breaths nearer them are. The longest rather than the nearest, because a
+/// singer breathes between lines and pauses inside them, and the deeper of two
+/// silences is the line break more often than not; between two the same
+/// length, the nearer.
+///
+/// `None` where no breath is in reach: a verse delivered without one, or a
+/// stem whose reverb never lets the voice drop below the floor. The line keeps
+/// the time it was given, which [`place`] then treats as the estimate it is.
+pub fn line_start(
+    at_ms: u32,
+    before_ms: Option<u32>,
+    after_ms: Option<u32>,
+    sounds: &[(u32, u32)],
+) -> Option<u32> {
+    let back =
+        before_ms.map_or(REACH_BACK_MS, |b| (at_ms.saturating_sub(b) / 2).min(REACH_BACK_MS));
+    let on = after_ms.map_or(REACH_ON_MS, |a| (a.saturating_sub(at_ms) / 2).min(REACH_ON_MS));
+    let (from, to) = (at_ms.saturating_sub(back), at_ms.saturating_add(on));
+    sounds
+        .iter()
+        .enumerate()
+        .filter(|(_, (start, _))| *start >= from && *start <= to)
+        .map(|(i, &(start, _))| {
+            let quiet_since = i.checked_sub(1).map_or(0, |before| sounds[before].1);
+            (start.saturating_sub(quiet_since), start)
+        })
+        .filter(|(silence, _)| *silence >= MIN_BREATH_MS)
+        .max_by_key(|(silence, start)| (*silence, std::cmp::Reverse(start.abs_diff(at_ms))))
+        .map(|(_, start)| start)
 }
 
 /// Which airing of a line the button goes to, and where.
@@ -321,6 +387,64 @@ mod tests {
         assert_eq!(which, 1);
         assert_eq!(off_the_phrase(40_000, &grid(), &[]), 1);
         assert_eq!(off_the_phrase(42_000, &grid(), &[]), 2);
+    }
+
+    #[test]
+    fn a_line_given_a_late_time_starts_after_the_breath_before_it() {
+        // The line before stops at 40 s, a quarter-second breath, and this one
+        // starts at 40.25 s. Its lyric says 40.65 s: a word or two late.
+        let sounds = [(38_000, 40_000), (40_250, 43_000)];
+        assert_eq!(line_start(40_650, None, None, &sounds), Some(40_250));
+        // And given early, in the breath itself, it is the same place.
+        assert_eq!(line_start(40_100, None, None, &sounds), Some(40_250));
+    }
+
+    #[test]
+    fn a_gap_between_two_words_is_not_a_breath_and_is_not_taken_for_a_line_start() {
+        // Eighty milliseconds is a consonant, not a breath. Nothing in reach,
+        // so the line keeps the time it was given.
+        let sounds = [(38_000, 40_000), (40_080, 43_000)];
+        assert_eq!(line_start(40_400, None, None, &sounds), None);
+    }
+
+    #[test]
+    fn a_breath_nearer_the_line_before_belongs_to_the_line_before() {
+        // The line before starts at 38.8 s after a half-second breath; this one
+        // at 39.8 s after a short one, and its lyric says 40.2 s. Looked for
+        // without a bound, the deeper breath wins and this line is put on the
+        // line before's start. Halfway to the line before is as far back as
+        // this line's start is looked for.
+        let sounds = [(36_000, 38_300), (38_800, 39_600), (39_800, 43_000)];
+        assert_eq!(line_start(40_200, Some(38_800), None, &sounds), Some(39_800));
+        assert_eq!(
+            line_start(40_200, None, None, &sounds),
+            Some(38_800),
+            "with nothing to bound it"
+        );
+    }
+
+    #[test]
+    fn of_two_breaths_in_reach_the_deeper_is_the_line_break() {
+        // A pause inside the line, at 41.2 s, and the breath before it, at
+        // 40.25 s, which is longer.
+        let sounds = [(38_000, 39_900), (40_250, 41_050), (41_220, 43_000)];
+        assert_eq!(line_start(41_400, None, None, &sounds), Some(40_250));
+    }
+
+    #[test]
+    fn a_line_cued_from_where_its_singing_starts_is_cued_before_it_and_not_in_it() {
+        // The whole path: a lyric half a second late inside a verse, a breath
+        // before the line, and a cue on the beat before the breath's end
+        // rather than on the beat before the lyric's time — which was inside
+        // the line.
+        let sounds = [(36_000, 40_400), (40_700, 43_400)];
+        let begins = line_start(41_200, Some(36_000), None, &sounds).unwrap();
+        assert_eq!(begins, 40_700);
+        assert_eq!(
+            place(begins, &grid(), &sounds),
+            Placed { time_ms: 40_500, rung: Rung::BeatBefore }
+        );
+        assert_eq!(place(41_200, &grid(), &sounds).time_ms, 41_000, "inside the line it is for");
     }
 
     #[test]
