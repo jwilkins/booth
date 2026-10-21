@@ -873,14 +873,20 @@ Around them go **where the singing starts** and **the start of every phrase** th
 arrangement analysis found — intro, build, break, drop, outro.
 
 A player holds eight hot cues and a busy track offers more than eight moments,
-so **the buttons are shared rather than ranked against each other**: four to
-the arrangement, four to the words, and then whatever the other kind did not
-want. They are two different ways of finding your place in a record — the drop
-is where the floor moves and the hook is where the room sings — and ranking
-them together produced sets that were all of one or all of the other. Neither
-share is held open: an instrumental gets all eight for its sections. Within
-each share they are ranked, so the hook takes the words' first slot and the
-drop the arrangement's.
+so **the buttons are filled in a fixed order**, the order a DJ remixing a record
+live reaches for them: the first drop; the hook; the first break; the drop back
+in, which is the hook's return after the break or failing that the second drop;
+a way in, the intro or the build before the first drop; a way out, the outro;
+a build before a drop, to ride into it; an instrumental stretch of eight bars
+or more, to lay another record's vocal over; and a second line the room sings.
+A role nothing on the record fills is skipped rather than held open, and whatever
+buttons the roles leave go to the rest by worth — a third drop before a second
+break — with the lines sung once last, spread over the record. Ranking the
+arrangement against the words produced sets that were all of one or all of the
+other, and sharing the buttons half and half fixed that by count rather than by
+kind: a busy arrangement's four were its four loudest sections, and the words'
+four the hook and three verse lines. An instrumental still gets all eight for
+its sections.
 
 **A track that repeats nothing still comes back cued.** A rap, a live take, a
 record with one verse and no chorus has no hook and no refrains, and its lines
@@ -895,10 +901,35 @@ wrong thing in a booth.
 Two moments that land on top of each other become one cue, and it keeps the
 words: a drop that is also where a line falls says which line.
 
-Cues from the words are rounded **down** to the beat rather than to the nearest
-one. A sung line rarely starts on the beat — a pickup is the whole point of a
-pickup — and a hook cue that clips its own first word is one nobody presses
-twice.
+**Where a word cue goes.** A hot cue is pressed live, in time with another
+deck, so it wants to be on the one; and it must never fall inside a word,
+because a cue that clips its own first syllable is one nobody presses twice.
+Those two pull against each other on a line that starts a beat and a half into
+its bar, and they are settled in this order: on the bar line before the line,
+where the line starts within half a beat of it and nothing is sung between the
+two; on that bar line anyway, where the longer way in is clear of singing, so
+that pressed on another deck's one the words arrive in phrase; on the beat
+before the line, where that beat is not inside the line before; and failing all
+three, on the line's own start, off the grid. Markers stay on the beat before
+the words they mark, because a marker is for reading the words where they are
+sung. The half-beat was reasoned from one record and is there to be set from
+the measurements above.
+
+**Which airing gets the button.** A line the track comes back to used to be
+cued where it first landed, whatever that first landing was like. The button
+now goes to the airing that places best by the order above; between airings
+that place alike, to the one on a phrase boundary, eight bars from the start of
+its section or four; and between those, to the earliest. The first airing keeps
+its marker. A chorus that starts on a pickup the first time round often starts
+clean the fourth, and the fourth is the one worth a button.
+
+**The room between the words.** The longest stretch with nothing sung — eight
+bars or more between one line and the next, read off the stem — gets a button
+at its bar line, or at the first four-bar boundary after the singing stops
+where that still leaves the eight, so that a vocal laid over it from the button
+lands in phrase. The intro and the outro are not it; they have cues of their
+own. The marker says how long it is: `Instrumental · 20 bars`. Only a track
+whose words have been read has one, because that is when the stem was measured.
 
 Two things it will not do. **An ad-lib is not a hook**: a line needs at least two
 words, because "yeah" is the most repeated thing in half the vocal stems ever
@@ -971,6 +1002,20 @@ answer: it is read, and never written over. Booth's own carries `[re:Booth]` so
 that it can be told apart, and is passed over when a lyric file beside the track
 is looked for — which is what makes **Look up the words** ask a server rather
 than hand back the last answer.
+
+**Where the singing is** is kept with the words once a stem has been measured:
+the stretches of the stem with a voice in them, to twenty milliseconds. The
+lines say where each starts and nothing about the line before running on over
+the bar, and that is the question a cue has to answer, because a cue set inside
+a word clips it. So the account under the cues says, for every line the track
+comes back to, where each airing lands in the bar in beats after the one —
+`0.2` is just after it, `3.8` is a pickup to the next — marking the ones with
+something sung between the one and them, and for every cue, which beat of the
+bar it sits on and whether it falls inside a word. These are measurements
+rather than rules, taken first so that the rules for where a cue goes can be
+set from what records do. A collection whose words were placed before this
+existed takes the measurement the next time those tracks are cued, by the same
+decode that placed them.
 
 A cue's label is read on the waveform by resting on it: the marker has room
 for a letter or a dot, and "V1 Get Down" is the thing worth reading. **Memory

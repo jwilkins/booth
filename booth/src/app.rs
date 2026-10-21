@@ -2436,6 +2436,12 @@ impl App {
                 && track.lyrics.iter().all(|line| line.start_ms == 0 && line.end_ms == 0);
             let unread = again || track.lyrics.is_empty() || untimed;
             match (unread, track.lyrics_aligned, track.stems.vocals.clone()) {
+                // Words placed before where the singing is was kept with
+                // them. Placing is the same decode as that measurement, so
+                // they are placed again, once — see `Track::sung`.
+                (false, true, Some(vocals)) if track.sung.is_empty() => {
+                    placing.push(job::Realigning { id, vocals, lyrics: track.lyrics.clone() })
+                }
                 // Words already read and already placed: nothing to wait for.
                 (false, true, _) => known.push(id),
                 // Words read before they were placed against the stem. The
@@ -2664,6 +2670,7 @@ impl App {
         lyrics: Vec<crate::library::Lyric>,
         confidence: Option<f32>,
         language: Option<String>,
+        sung: Vec<(u32, u32)>,
     ) -> usize {
         use crate::library::WordsFrom;
         /// What became of the written words, where there were any.
@@ -2676,6 +2683,11 @@ impl App {
         let heard = lyrics.len();
         let written = {
             let Some(track) = self.library.get_mut(id) else { return 0 };
+            // The measurement first, whichever way the words go: where the
+            // stem is singing is true of the record however the lines on it
+            // are settled, and the cues are placed against it rather than
+            // against them.
+            track.sung = sung;
             let has_written = confidence.is_some()
                 && !track.lyrics.is_empty()
                 && !matches!(track.words_from, WordsFrom::Recogniser | WordsFrom::Unsaid);
@@ -2867,10 +2879,26 @@ impl App {
             .collect();
 
         let words = crate::library::transcript(&track.lyrics);
-        for moment in words.moments() {
-            let mut candidate = cues::from_moment(&moment);
-            candidate.time_ms = snap_back(&beats, candidate.time_ms);
+        let sung = track.sung.clone();
+        // Where the sections start, on the grid, for counting phrases from.
+        let sections: Vec<u32> = candidates.iter().map(|candidate| candidate.time_ms).collect();
+        let (moments, chosen) = cued_airings(words.moments(), &words, &beats, &sung, &sections);
+        for moment in &moments {
+            let mut candidate = cues::from_moment(moment);
+            candidate.time_ms = match moment.kind {
+                // A marker is for reading the words where they are sung, so it
+                // stays on the beat before them. A button is for pressing on
+                // the one, so it climbs the ladder — see `place`.
+                booth_cli::transcribe::MomentKind::Return => snap_back(&beats, moment.time_ms),
+                _ => booth_cli::analysis::place::place(moment.time_ms, &beats, &sung).time_ms,
+            };
             candidates.push(candidate);
+        }
+        // And the room between the words: the longest stretch with nothing
+        // sung, for laying another record's vocal over. Only a track whose
+        // words have been read knows where its singing is.
+        if let Some(stretch) = cues::instrumental_stretch(&beats, &sung) {
+            candidates.push(stretch);
         }
 
         let start = track
@@ -2889,7 +2917,7 @@ impl App {
         let end = beats.last().copied();
         let placed = crate::job::cue_marks(&cues::assemble(start, end, candidates));
         let hot = placed.iter().filter(|cue| cue.letter != 0).count();
-        let decided = what_the_words_decided(&words, &before, &placed);
+        let decided = what_the_words_decided(&words, &before, &placed, &beats, &sung, &chosen);
         crate::info!("cueing #{id} {name} from {}", plural(lines, "line"));
         for line in &decided {
             crate::info!("  {line}");
@@ -3380,8 +3408,8 @@ impl App {
                         _ => {}
                     }
                 }
-                Update::Transcribed { id, lyrics, confidence, language } => {
-                    self.take_heard_words(id, lyrics, confidence, language);
+                Update::Transcribed { id, lyrics, confidence, language, sung } => {
+                    self.take_heard_words(id, lyrics, confidence, language, sung);
                     changed = true;
                 }
                 Update::Progress { done, total } => {
@@ -12929,6 +12957,80 @@ fn beat_at(track: &Track, at_ms: u32) -> Option<usize> {
     Some(after.saturating_sub(1))
 }
 
+/// How near the one a line can land and count as on it, in beats, either side:
+/// a pickup a fifth of a beat before the bar line is on the one to a DJ.
+const NEAR_THE_ONE_BEATS: f32 = 0.5;
+
+/// How many airings of a line the account lists before an ellipsis. Enough to
+/// see a pattern in; a hook sung forty times is forty of the same number.
+const AIRINGS_SHOWN: usize = 16;
+
+/// Which airing of a line got its button, for the account under the cues.
+struct Chosen {
+    text: String,
+    /// Which airing, counting the first as zero, out of `of`.
+    airing: usize,
+    of: usize,
+    placed: booth_cli::analysis::place::Placed,
+}
+
+/// Give each line's button to the airing that places best.
+///
+/// `moments()` puts the hook and the refrains where they first land and makes
+/// every later airing a return, a marker. The button goes instead to the
+/// airing `place::best_airing` picks, and the first airing takes that airing's
+/// place as the return — the two swap times, so the markers are where they
+/// were and only the button moves. The hook's comeback is not in the running:
+/// it is a button already, and the hook on top of it would be one button
+/// where there were two.
+fn cued_airings(
+    mut moments: Vec<booth_cli::transcribe::Moment>,
+    words: &booth_cli::transcribe::Transcript,
+    grid: &[u32],
+    sung: &[(u32, u32)],
+    sections: &[u32],
+) -> (Vec<booth_cli::transcribe::Moment>, Vec<Chosen>) {
+    use booth_cli::analysis::place;
+    use booth_cli::transcribe::MomentKind;
+    let mut chosen = Vec::new();
+    for refrain in words.repeated() {
+        let Some(&first) = refrain.at.first() else { continue };
+        let button = moments.iter().position(|moment| {
+            moment.time_ms == first && matches!(moment.kind, MomentKind::Hook | MomentKind::Refrain)
+        });
+        let Some(button) = button else { continue };
+        let text = moments[button].text.clone();
+        let comeback = moments
+            .iter()
+            .find(|moment| moment.kind == MomentKind::Comeback && moment.text == text)
+            .map(|moment| moment.time_ms);
+        let running: Vec<u32> =
+            refrain.at.iter().copied().filter(|at| Some(*at) != comeback).collect();
+        let Some((which, placed)) = place::best_airing(&running, grid, sung, sections) else {
+            continue;
+        };
+        let best = running[which];
+        let marker = moments.iter().position(|moment| {
+            moment.time_ms == best && moment.kind == MomentKind::Return && moment.text == text
+        });
+        let (at, placed) = match (best == first, marker) {
+            (true, _) => (first, placed),
+            (false, Some(marker)) => {
+                moments[marker].time_ms = first;
+                moments[button].time_ms = best;
+                (best, placed)
+            }
+            // Nothing to swap with, which the kinds `moments()` hands out
+            // rule out; the button stays where it is and the account says so.
+            (false, None) => (first, place::place(first, grid, sung)),
+        };
+        let airing = refrain.at.iter().position(|&when| when == at).unwrap_or(0);
+        chosen.push(Chosen { text: refrain.text.clone(), airing, of: refrain.at.len(), placed });
+    }
+    moments.sort_by_key(|moment| moment.time_ms);
+    (moments, chosen)
+}
+
 /// Write down what the words decided, and why.
 ///
 /// A cue placed off a transcript is a cue with a reason, and the reason is the
@@ -12938,8 +13040,12 @@ fn beat_at(track: &Track, at_ms: u32) -> Option<usize> {
 /// that it was put there because a line it heard as something else came round
 /// three times. Without that, a wrong cue is indistinguishable from a bug.
 ///
-/// Three things, in the order they were decided: every line the track comes
-/// back to and how often, which of them the hook is, and what that moved.
+/// Four things, in the order they were decided: every line the track comes
+/// back to and how often, which of them the hook is, where each of those lines
+/// lands in the bar and whether the way in to it is clear, and what all that
+/// moved — each cue with the beat it sits on and whether it falls inside a
+/// word. The last two are measurements rather than decisions, there so that
+/// the rules for placing a cue can be set from what records do.
 ///
 /// Returned rather than logged from inside, so that what it says can be read
 /// back by a test instead of being asserted against a global log buffer that
@@ -12948,7 +13054,11 @@ fn what_the_words_decided(
     words: &booth_cli::transcribe::Transcript,
     before: &[crate::library::CueMark],
     after: &[crate::library::CueMark],
+    grid: &[u32],
+    sung: &[(u32, u32)],
+    chosen: &[Chosen],
 ) -> Vec<String> {
+    use booth_cli::analysis::place::{bar_line_before, in_the_bar, inside_a_word, sung_between};
     /// Enough of the ranking to see where it falls off, without a log that is
     /// one track long. A hook is never far from the top of it.
     const LISTED: usize = 8;
@@ -12986,6 +13096,103 @@ fn what_the_words_decided(
         None => "no line comes round twice, so the cues are the arrangement's alone".to_string(),
     });
 
+    // Where each repeated line lands in the bar, and whether the way in to it
+    // from the one is clear: the two things a cue on a line has to get right —
+    // on the one where it can be, and never inside a word — measured here
+    // before any rule is set on them, so that the rules come from what records
+    // do rather than from what they ought to. Only against a grid.
+    let repeated = words.repeated();
+    if !grid.is_empty() && !repeated.is_empty() {
+        let measured = !sung.is_empty();
+        said.push(match measured {
+            true => "where each line lands in the bar, in beats after the one (* sung over on the \
+                     way in):"
+                .to_string(),
+            false => "where each line lands in the bar, in beats after the one:".to_string(),
+        });
+        for refrain in repeated.iter().take(LISTED) {
+            let (mut near, mut clear) = (0usize, 0usize);
+            let mut landings: Vec<String> = Vec::new();
+            for &at in &refrain.at {
+                let Some(beats) = in_the_bar(grid, at) else { continue };
+                let bar = crate::library::BEATS_PER_BAR as f32;
+                if beats <= NEAR_THE_ONE_BEATS || beats >= bar - NEAR_THE_ONE_BEATS {
+                    near += 1;
+                }
+                let open = bar_line_before(grid, at).is_none_or(|one| !sung_between(sung, one, at));
+                if open {
+                    clear += 1;
+                }
+                if landings.len() < AIRINGS_SHOWN {
+                    let mark = match measured && !open {
+                        true => "*",
+                        false => "",
+                    };
+                    landings.push(format!("{beats:.1}{mark}"));
+                }
+            }
+            if refrain.at.len() > AIRINGS_SHOWN {
+                landings.push("\u{2026}".to_string());
+            }
+            let of = refrain.at.len();
+            let way_in = match measured {
+                true => format!(", clear way in {clear} of {of}"),
+                false => String::new(),
+            };
+            // And which airing got the button, where that was decided here.
+            let cued = chosen
+                .iter()
+                .find(|choice| choice.text == refrain.text)
+                .map(|choice| {
+                    format!(
+                        "; cued at {} from airing {} of {}, {}",
+                        time_text(choice.placed.time_ms),
+                        choice.airing + 1,
+                        choice.of,
+                        choice.placed.rung.said()
+                    )
+                })
+                .unwrap_or_default();
+            said.push(format!(
+                "  \u{201c}{}\u{201d} lands {} \u{2014} near the one {near} of {of}{way_in}{cued}",
+                refrain.text,
+                landings.join(" ")
+            ));
+        }
+        if !measured {
+            said.push(
+                "  (where the singing is has not yet been measured on this track; the next placing \
+                 of its words will)"
+                    .to_string(),
+            );
+        }
+    }
+
+    // And the room between the words, which is a cue of its own.
+    if let Some(stretch) = booth_cli::analysis::cues::instrumental_stretch(grid, sung) {
+        said.push(format!(
+            "nothing sung for {} from {}: room for another record's vocal",
+            plural(stretch.bars.unwrap_or(0) as usize, "bar"),
+            time_text(stretch.time_ms)
+        ));
+    }
+
+    // Which beat of the bar a cue sits on, and whether it is inside a word:
+    // what is worth knowing about a cue that will be pressed live.
+    let placement = |at: u32| -> String {
+        let mut note = String::new();
+        if let Some(beats) = in_the_bar(grid, at) {
+            note.push_str(&match beats.floor() as usize {
+                0 => " \u{b7} on the one".to_string(),
+                n => format!(" \u{b7} beat {}", n + 1),
+            });
+        }
+        if inside_a_word(sung, at) {
+            note.push_str(" \u{b7} mid-word");
+        }
+        note
+    };
+
     let reading = |cue: &crate::library::CueMark| match cue.label.is_empty() {
         true => time_text(cue.time_ms),
         false => format!("{} {}", time_text(cue.time_ms), cue.label),
@@ -13008,10 +13215,19 @@ fn what_the_words_decided(
         }
         match before.iter().find(|old| old.letter == cue.letter) {
             Some(old) if old.time_ms == cue.time_ms && old.label == cue.label => {}
-            Some(old) => {
-                said.push(format!("{} {} \u{2192} {}", cue.name(), reading(old), reading(cue)))
-            }
-            None => said.push(format!("{} set to {}", cue.name(), reading(cue))),
+            Some(old) => said.push(format!(
+                "{} {} \u{2192} {}{}",
+                cue.name(),
+                reading(old),
+                reading(cue),
+                placement(cue.time_ms)
+            )),
+            None => said.push(format!(
+                "{} set to {}{}",
+                cue.name(),
+                reading(cue),
+                placement(cue.time_ms)
+            )),
         }
     }
     for old in before.iter().filter(|old| old.letter != 0) {
@@ -13648,6 +13864,97 @@ mod tests {
                 CueMark { letter, time_ms, label: label.to_string(), color: [0; 3] }
             }
 
+            /// 120 BPM from zero: a beat is 500 ms and the one is every two
+            /// seconds, for four hundred beats.
+            fn grid() -> Vec<u32> {
+                (0..400).map(|i| i * 500).collect()
+            }
+
+            #[test]
+            fn where_each_airing_lands_in_the_bar_is_said_in_beats_after_the_one() {
+                // The hook lands a fifth of a beat after the one the first
+                // time; a beat and a fifth after it the second, with the line
+                // before still being sung across that one; and on it the third.
+                let words = heard(&[
+                    (40_100, "hold me closer now"),
+                    (100_600, "hold me closer now"),
+                    (160_000, "hold me closer now"),
+                ]);
+                let sung = [(40_100, 42_000), (99_000, 102_000), (160_000, 162_000)];
+                let said = what_the_words_decided(&words, &[], &[], &grid(), &sung, &[]);
+                let landing = said
+                    .iter()
+                    .find(|line| line.contains("\u{201d} lands "))
+                    .unwrap_or_else(|| panic!("{said:#?}"));
+                assert!(
+                    landing.contains("\u{201c}hold me closer now\u{201d} lands 0.2 1.2* 0.0"),
+                    "{landing}"
+                );
+                assert!(landing.contains("near the one 2 of 3"), "{landing}");
+                assert!(landing.contains("clear way in 2 of 3"), "{landing}");
+            }
+
+            #[test]
+            fn a_cue_says_which_beat_it_sits_on_and_whether_it_is_inside_a_word() {
+                let words =
+                    heard(&[(40_100, "hold me closer now"), (100_600, "hold me closer now")]);
+                let sung = [(40_100, 42_000), (99_000, 102_000)];
+                let after =
+                    [cue(1, 40_000, "hold me closer now"), cue(2, 100_500, "hold me closer now")];
+                let said = what_the_words_decided(&words, &[], &after, &grid(), &sung, &[]);
+                let a = said
+                    .iter()
+                    .find(|line| line.starts_with("A set to"))
+                    .unwrap_or_else(|| panic!("{said:#?}"));
+                assert!(a.contains("on the one") && !a.contains("mid-word"), "{a}");
+                let b = said
+                    .iter()
+                    .find(|line| line.starts_with("B set to"))
+                    .unwrap_or_else(|| panic!("{said:#?}"));
+                assert!(b.contains("beat 2") && b.contains("mid-word"), "{b}");
+            }
+
+            #[test]
+            fn without_the_singing_measured_the_account_says_so_and_claims_nothing() {
+                let words =
+                    heard(&[(40_100, "hold me closer now"), (100_600, "hold me closer now")]);
+                let said = what_the_words_decided(&words, &[], &[], &grid(), &[], &[]);
+                let landing = said
+                    .iter()
+                    .find(|line| line.contains("\u{201d} lands "))
+                    .unwrap_or_else(|| panic!("{said:#?}"));
+                assert!(!landing.contains('*') && !landing.contains("clear way in"), "{landing}");
+                assert!(
+                    said.iter().any(|line| line.contains("not yet been measured")),
+                    "{said:#?}"
+                );
+            }
+
+            #[test]
+            fn the_account_says_which_airing_got_the_button_and_why() {
+                use booth_cli::analysis::place::{Placed, Rung};
+                let words =
+                    heard(&[(40_600, "hold me closer now"), (100_100, "hold me closer now")]);
+                let sung = [(38_600, 40_600), (40_600, 42_600), (100_100, 102_000)];
+                let chosen = [Chosen {
+                    text: "hold me closer now".into(),
+                    airing: 1,
+                    of: 2,
+                    placed: Placed { time_ms: 100_000, rung: Rung::OnTheOne },
+                }];
+                let said = what_the_words_decided(&words, &[], &[], &grid(), &sung, &chosen);
+                let landing = said
+                    .iter()
+                    .find(|line| line.contains("\u{201d} lands "))
+                    .unwrap_or_else(|| panic!("{said:#?}"));
+                assert!(
+                    landing.contains(
+                        "cued at 1:40.00 from airing 2 of 2, on the one, with a clear way in"
+                    ),
+                    "{landing}"
+                );
+            }
+
             #[test]
             fn the_lines_are_listed_most_repeated_first() {
                 let words = heard(&[
@@ -13658,7 +13965,7 @@ mod tests {
                     (200_000, "and I don't want to go home"),
                     (260_000, "and I don't want to go home"),
                 ]);
-                let said = what_the_words_decided(&words, &[], &[]);
+                let said = what_the_words_decided(&words, &[], &[], &[], &[], &[]);
 
                 let ranking: Vec<&String> =
                     said.iter().filter(|line| line.contains('\u{d7}')).collect();
@@ -13677,7 +13984,7 @@ mod tests {
             fn the_lyric_the_hook_cue_is_for_is_named() {
                 let words =
                     heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
-                let said = what_the_words_decided(&words, &[], &[]);
+                let said = what_the_words_decided(&words, &[], &[], &[], &[], &[]);
                 let hook = said.iter().find(|line| line.starts_with("hook:")).expect("{said:#?}");
                 assert!(hook.contains("hold me closer now"), "{hook}");
                 assert!(hook.contains("sung 2 times"), "{hook}");
@@ -13689,7 +13996,7 @@ mod tests {
                 // Otherwise somebody goes looking for a hook cue that was
                 // never going to be there.
                 let words = heard(&[(40_000, "one line, said once, and then nothing")]);
-                let said = what_the_words_decided(&words, &[], &[]);
+                let said = what_the_words_decided(&words, &[], &[], &[], &[], &[]);
                 assert!(
                     said.iter().any(|line| line.contains("no line comes round twice")),
                     "{said:#?}"
@@ -13703,7 +14010,7 @@ mod tests {
                 let before = [cue(1, 32_000, "drop"), cue(2, 96_000, "break")];
                 let after = [cue(1, 40_000, "hold me closer now"), cue(3, 150_000, "outro")];
 
-                let said = what_the_words_decided(&words, &before, &after);
+                let said = what_the_words_decided(&words, &before, &after, &[], &[], &[]);
                 let moved = said.iter().find(|line| line.starts_with('A')).expect("{said:#?}");
                 assert_eq!(moved, "A 0:32.00 drop \u{2192} 0:40.00 hold me closer now");
                 // A slot that gained a cue, and one that lost one, both said.
@@ -13729,7 +14036,7 @@ mod tests {
                     cue(0, 100_000, "V1 hold me closer now"),
                     cue(1, 40_000, "hold me closer now"),
                 ];
-                let said = what_the_words_decided(&words, &before, &after);
+                let said = what_the_words_decided(&words, &before, &after, &[], &[], &[]);
                 assert!(
                     said.iter().any(|line| line == "\u{2022} 1:40.00 V1 hold me closer now"),
                     "{said:#?}"
@@ -13752,7 +14059,7 @@ mod tests {
                 let words =
                     heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
                 let same = [cue(1, 40_000, "hold me closer now")];
-                let said = what_the_words_decided(&words, &same, &same);
+                let said = what_the_words_decided(&words, &same, &same, &[], &[], &[]);
                 assert!(
                     said.iter().any(|line| line == "every cue is already where the words put it"),
                     "{said:#?}"
@@ -13810,6 +14117,11 @@ mod tests {
                         text: text.to_string(),
                     })
                     .collect();
+                // Read, placed and measured, which is what a track that has
+                // been through the recogniser is from now on: where the
+                // singing is, one stretch per line. A track from before the
+                // measurement existed is made by the test that is about it.
+                track.sung = track.lyrics.iter().map(|line| (line.start_ms, line.end_ms)).collect();
                 app.rebuild();
                 (app, id)
             }
@@ -13839,23 +14151,136 @@ mod tests {
                 assert!(app.auto_cue(id) > 0, "no cues at all");
 
                 let cues = app.library.get(id).unwrap().cues.clone();
-                let hook = cues
-                    .iter()
-                    .find(|cue| cue.label == "hold me closer now")
-                    .unwrap_or_else(|| panic!("the hook was not cued: {cues:?}"));
-                // On the beat before the first word rather than the nearest
-                // one, so the cue cannot land after the word it is for.
-                assert_eq!(hook.time_ms, 40_000);
-                // Where it first lands and where it comes back from its
-                // longest absence, and nowhere else. A line sung three times
-                // used to be three cues saying the same thing, which left the
-                // drops and the breakdowns nowhere to go.
+                // The first airing keeps a marker, on the beat before the
+                // first word rather than the nearest one, so it cannot land
+                // after the word it is for.
+                assert!(
+                    cues.iter().any(|cue| cue.letter == 0
+                        && cue.time_ms == 40_000
+                        && cue.label.ends_with("hold me closer now")),
+                    "the first airing has no marker: {cues:?}"
+                );
+                // All three airings place alike, just after the one with a
+                // clear way in, so the button goes to the one on a phrase
+                // boundary: 160 s is bar 64 of the drop that starts at 32 s,
+                // where 40 s is bar 4. The comeback at 100 s is a button of
+                // its own. Two buttons, not one per airing: a line sung three
+                // times used to be three cues saying the same thing, which
+                // left the drops and the breakdowns nowhere to go.
                 let with_the_words: Vec<u32> = cues
                     .iter()
-                    .filter(|cue| cue.label == "hold me closer now")
+                    .filter(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .map(|cue| cue.time_ms)
                     .collect();
-                assert_eq!(with_the_words, vec![40_000, 100_000], "{cues:?}");
+                assert_eq!(with_the_words, vec![100_000, 160_000], "{cues:?}");
+            }
+
+            #[test]
+            fn the_hook_is_cued_at_the_airing_that_places_best() {
+                // The hook's first airing comes straight off the line before
+                // it, so the beat before it is inside that line; the second
+                // starts clean, just after the one. The button goes to the
+                // second and the first keeps its marker. The third is the
+                // comeback, a button of its own.
+                let (mut app, id) = sung(
+                    "best-airing",
+                    &[
+                        (38_600, "walking through the city at night"),
+                        (40_600, "hold me closer now"),
+                        (100_100, "hold me closer now"),
+                        (160_100, "hold me closer now"),
+                    ],
+                );
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let buttons: Vec<u32> = cues
+                    .iter()
+                    .filter(|cue| cue.letter != 0 && cue.label == "hold me closer now")
+                    .map(|cue| cue.time_ms)
+                    .collect();
+                assert_eq!(buttons, vec![100_000, 160_000], "{cues:?}");
+                assert!(
+                    cues.iter().any(|cue| cue.letter == 0
+                        && cue.time_ms == 40_500
+                        && cue.label.ends_with("hold me closer now")),
+                    "the first airing lost its marker: {cues:?}"
+                );
+            }
+
+            #[test]
+            fn a_line_well_into_its_bar_is_cued_on_the_bar_line_when_the_way_in_is_clear() {
+                // Two beats and a bit of band before the words on every
+                // airing, none of them on a phrase boundary, so the first
+                // wins: on its bar line, not on the beat before the words.
+                let (mut app, id) = sung(
+                    "bar-line",
+                    &[
+                        (35_200, "hold me closer now"),
+                        (95_200, "hold me closer now"),
+                        (155_200, "hold me closer now"),
+                    ],
+                );
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let hook = cues
+                    .iter()
+                    .find(|cue| cue.letter != 0 && cue.label == "hold me closer now")
+                    .unwrap_or_else(|| panic!("{cues:?}"));
+                assert_eq!(hook.time_ms, 34_000, "{cues:?}");
+            }
+
+            #[test]
+            fn a_cue_never_lands_inside_the_line_before() {
+                // Sung straight after another line, with no gap for a beat to
+                // sit in: the cue is the line's own start, off the grid,
+                // rather than the beat before it, which is inside the other.
+                let (mut app, id) = sung(
+                    "no-gap",
+                    &[
+                        (38_600, "walking through the city at night"),
+                        (40_600, "hold me closer now"),
+                    ],
+                );
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let line = cues
+                    .iter()
+                    .find(|cue| cue.letter != 0 && cue.label == "hold me closer now")
+                    .unwrap_or_else(|| panic!("{cues:?}"));
+                assert_eq!(line.time_ms, 40_600, "{cues:?}");
+            }
+
+            #[test]
+            fn the_longest_stretch_with_nothing_sung_gets_a_button_and_says_how_long_it_is() {
+                // Singing until 36.5 s and again from 80 s: twenty bars of
+                // room from the four-bar line at 40 s, which is the one moment
+                // for laying another record's vocal over that nothing else
+                // names.
+                let (mut app, id) = sung(
+                    "instrumental",
+                    &[
+                        (20_000, "walking through the city at night"),
+                        (34_500, "hold me closer now"),
+                        (80_000, "take me home"),
+                    ],
+                );
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let stretch = cues
+                    .iter()
+                    .find(|cue| cue.letter != 0 && cue.label == "instrumental")
+                    .unwrap_or_else(|| panic!("{cues:?}"));
+                assert_eq!(stretch.time_ms, 40_000, "{cues:?}");
+                assert!(
+                    cues.iter()
+                        .any(|cue| cue.letter == 0 && cue.label == "Instrumental \u{b7} 20 bars"),
+                    "{cues:?}"
+                );
+                let said = &app.library.get(id).unwrap().words_decided;
+                assert!(
+                    said.iter().any(|line| line.contains("nothing sung for 20 bars from 0:40.00")),
+                    "{said:#?}"
+                );
             }
 
             #[test]
@@ -14184,7 +14609,10 @@ mod tests {
                             text: "jetzt gehen wir ab".into(),
                         },
                     ];
-                    assert_eq!(app.take_heard_words(id, heard, Some(0.8), Some("de".into())), 2);
+                    assert_eq!(
+                        app.take_heard_words(id, heard, Some(0.8), Some("de".into()), Vec::new()),
+                        2
+                    );
 
                     let track = app.library.get(id).unwrap();
                     assert_eq!(
@@ -14208,7 +14636,10 @@ mod tests {
                 fn hearing_nothing_takes_no_written_words_away_and_calls_nothing_an_instrumental() {
                     let (mut app, id) = sung("heard-nothing", &[]);
                     assert!(app.take_found_words(id, &plain(&["Drei, vier", "Jetzt gehn wir ab"])));
-                    assert_eq!(app.take_heard_words(id, Vec::new(), Some(0.0), None), 2);
+                    assert_eq!(
+                        app.take_heard_words(id, Vec::new(), Some(0.0), None, Vec::new()),
+                        2
+                    );
 
                     let track = app.library.get(id).unwrap();
                     assert_eq!(track.lyrics.len(), 2, "the written words went");
@@ -14227,7 +14658,7 @@ mod tests {
                         end_ms: 42_000,
                         text: "hold me closer now".into(),
                     }];
-                    app.take_heard_words(id, heard, Some(0.8), None);
+                    app.take_heard_words(id, heard, Some(0.8), None, Vec::new());
 
                     let track = app.library.get(id).unwrap();
                     assert_eq!(track.lyrics[0].text, "hold me closer now");
@@ -14251,6 +14682,41 @@ mod tests {
                         "untimed words were not sent to the recogniser"
                     );
                     assert!(plan.placing.is_empty(), "untimed lines were sent to be placed");
+                }
+
+                #[test]
+                fn where_the_singing_is_is_kept_with_the_words() {
+                    let (mut app, id) = sung("measured", &[]);
+                    let heard = vec![crate::library::Lyric {
+                        start_ms: 40_100,
+                        end_ms: 42_000,
+                        text: "hold me closer now".into(),
+                    }];
+                    app.take_heard_words(id, heard, Some(0.9), None, vec![(40_100, 42_000)]);
+                    assert_eq!(app.library.get(id).unwrap().sung, vec![(40_100, 42_000)]);
+                }
+
+                #[test]
+                fn words_placed_before_the_singing_was_kept_go_back_to_the_stem_once_for_it() {
+                    // A collection from before: the words are placed, the stem
+                    // is there, and nothing says where the singing is. One
+                    // decode, the same one that placed the words, and then
+                    // never again.
+                    let (mut app, id) = sung("remeasure", &[(40_000, "hold me closer now")]);
+                    {
+                        let track = app.library.get_mut(id).unwrap();
+                        track.stems.vocals = Some(track.path.with_extension("vocals.wav"));
+                        track.lyrics_aligned = true;
+                        track.sung.clear();
+                    }
+                    let plan = app.words_plan(&[id], false);
+                    assert_eq!(plan.placing.iter().map(|p| p.id).collect::<Vec<_>>(), [id]);
+                    assert!(plan.reading.is_empty() && plan.known.is_empty());
+
+                    app.library.get_mut(id).unwrap().sung = vec![(40_000, 42_000)];
+                    let plan = app.words_plan(&[id], false);
+                    assert_eq!(plan.known, [id]);
+                    assert!(plan.placing.is_empty());
                 }
 
                 #[test]

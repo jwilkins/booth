@@ -770,6 +770,23 @@ pub struct Track {
     /// shortened copy on a stick is not a record of anything.
     #[serde(default)]
     pub words_decided: Vec<String>,
+    /// Where the vocal stem is singing: each stretch with a voice in it, as
+    /// (from, to) in milliseconds on the record's clock.
+    ///
+    /// The measurement that placed the words — see
+    /// `booth_cli::transcribe::align::voiced_spans` — kept rather than thrown
+    /// away once the lines were on it, because it answers the question a cue
+    /// has to answer and the lines cannot: whether anybody is singing at this
+    /// instant. A line's time says where it starts and nothing about the line
+    /// before it running on over the bar, and a cue set inside a word is a cue
+    /// that clips it. Twenty-millisecond frames joined across the gaps between
+    /// words, so a few dozen pairs for a record.
+    ///
+    /// Empty on a track whose words were placed before this was kept. Those
+    /// take the measurement the next time they are cued, by the same decode
+    /// that placed them — see `App::words_plan`.
+    #[serde(default)]
+    pub sung: Vec<(u32, u32)>,
     pub loudness_lufs: Option<f64>,
     pub peak_dbtp: Option<f64>,
 
@@ -887,6 +904,7 @@ impl Track {
             downbeat_ms: None,
             beat_marks: Vec::new(),
             words_decided: Vec::new(),
+            sung: Vec::new(),
             phrases: Vec::new(),
             cues: Vec::new(),
             lyrics: Vec::new(),
@@ -3115,6 +3133,18 @@ mod tests {
 
         // And one with no words at all is not waiting on anything.
         assert!(Track::placeholder(2).lyrics_aligned);
+    }
+
+    #[test]
+    fn where_the_singing_is_comes_back_with_the_track_and_is_empty_where_never_measured() {
+        let mut track = Track::placeholder(1);
+        track.sung = vec![(40_100, 42_000), (99_000, 102_000)];
+        let written = serde_json::to_string(&track).expect("a track should serialise");
+        let back: Track = serde_json::from_str(&written).expect("and read back");
+        assert_eq!(back.sung, track.sung);
+        // An older collection has no such key, and empty is what sends the
+        // track back to the stem for the measurement.
+        assert!(Track::placeholder(2).sung.is_empty());
     }
 
     fn spoken(language: &str) -> Track {
