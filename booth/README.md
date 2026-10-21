@@ -1018,6 +1018,24 @@ them out to fifty lines, and **collapse** to put them back. A lyric is read top
 to bottom, and reading one through a slot a few lines tall is reading it through
 a letterbox.
 
+Cue Analysis opens with the buttons, one to a line, A first:
+
+```
+A:  line         - 00:20.00 -  11/1 - “walking through the city at night”
+B:  drop         - 00:32.00 -  17/1
+C:  instrumental - 01:44.00 -  53/1
+D:  hook         - 02:40.00 -  81/1 - “hold me closer now”
+```
+
+What each button is for, where it is on the clock, the bar and beat it is on —
+counted from one, as the transport counts, and left out on a track with no grid
+— and the line it plays into. That is the answer, and everything under it is
+how it was arrived at, so it comes first: in the panel, and in the log a bug
+report is pasted from. "Plays into" because a button goes on the one before
+what it is for: a drop with a line coming in within a couple of seconds names
+that line, where the line a lyric file says is being sung at that moment is the
+one before, timed to run until the next begins.
+
 Wherever the words came from, they are also written beside the track as
 `<name>.lrc`, the file every player and tagger looks for first, with the artist,
 the title and where the words came from in its header. It is written again

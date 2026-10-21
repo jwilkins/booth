@@ -358,6 +358,20 @@ pub fn instrumental_stretch(grid: &[u32], sung: &[(u32, u32)]) -> Option<Candida
 /// which eight it keeps is the whole difference between a useful set of cues
 /// and a wall of markers.
 pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) -> Vec<Cue> {
+    assemble_with_reasons(start_ms, end_ms, candidates).0
+}
+
+/// [`assemble`], and what each button is for: one [`Reason`] per hot cue, A
+/// first.
+///
+/// For an account of the cues to say. A cue's comment cannot: a hook's
+/// comment is its line and so is a refrain's, and a drop that a line lands on
+/// carries the line.
+pub fn assemble_with_reasons(
+    start_ms: u32,
+    end_ms: Option<u32>,
+    candidates: Vec<Candidate>,
+) -> (Vec<Cue>, Vec<Reason>) {
     let mut kept = fold(rank(candidates));
 
     // Every moment worth cueing becomes a memory cue, whether or not it also
@@ -385,6 +399,7 @@ pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) 
     }
     kept.retain(|(candidate, _)| !candidate.memory_only);
 
+    let mut reasons = Vec::new();
     for (letter, (candidate, _)) in to_the_buttons(kept).into_iter().enumerate() {
         let color = candidate.reason.color();
         cues.push(
@@ -392,8 +407,9 @@ pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) 
                 .with_comment(&candidate.comment())
                 .with_color(color.r, color.g, color.b),
         );
+        reasons.push(candidate.reason);
     }
-    cues
+    (cues, reasons)
 }
 
 /// Which of the candidates get the eight buttons, in time order.
@@ -1448,6 +1464,39 @@ mod tests {
         }
         assert!(!hot.iter().any(|(when, _)| *when == 151_000), "the hook twice: {hot:?}");
         assert_eq!(hot.iter().filter(|(_, name)| name == "drop").count(), 6, "{hot:?}");
+    }
+
+    #[test]
+    fn each_button_comes_back_with_what_it_is_for_in_letter_order() {
+        // The second drop reads "drop" and so does the first, and the hook's
+        // button reads its line: the comments alone cannot say which button
+        // is the hook and which a drop the hook happens to land on.
+        let words = crate::transcribe::Transcript {
+            lines: vec![line(31_000, "hold me closer now"), line(150_200, "hold me closer now")],
+            ..Default::default()
+        };
+        let mut candidates = vec![
+            Candidate::new(10_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(90_000, Reason::Section(Kind::Down)),
+            Candidate::new(150_000, Reason::Section(Kind::Chorus)),
+        ];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let (cues, reasons) = assemble_with_reasons(0, None, candidates);
+        let hot: Vec<(u8, u32)> =
+            cues.iter().filter(|cue| cue.is_hot()).map(|cue| (cue.hot_cue, cue.time_ms)).collect();
+        assert_eq!(hot.len(), reasons.len(), "{hot:?} {reasons:?}");
+        let said: Vec<(u8, u32, Reason)> =
+            hot.iter().zip(&reasons).map(|(&(letter, at), &why)| (letter, at, why)).collect();
+        assert_eq!(
+            said,
+            vec![
+                (1, 10_000, Reason::Section(Kind::Chorus)),
+                (2, 31_000, Reason::Hook),
+                (3, 90_000, Reason::Section(Kind::Down)),
+                (4, 150_000, Reason::Section(Kind::Chorus)),
+            ]
+        );
     }
 
     #[test]
