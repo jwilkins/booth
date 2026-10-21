@@ -45,6 +45,12 @@
 //! button whatever its placing, and a chorus that starts on a pickup the first
 //! time round often starts clean the fourth.
 //!
+//! The first two rungs count as one for this: a line that comes in on beat
+//! three, cued on the one before it with nothing sung between, is as good a
+//! button as a line that comes in on the one, and preferring the second sent
+//! the button to whichever airing happened to start nearest the bar line
+//! rather than to the phrase.
+//!
 //! The half-beat and the two frames below were reasoned from one record's
 //! account, not measured across a collection. The account under the cues
 //! measures every airing of every line — see `booth`'s "What the words
@@ -104,6 +110,21 @@ pub enum Rung {
 }
 
 impl Rung {
+    /// How good a placing it is when choosing between airings, best first.
+    ///
+    /// The two bar-line rungs are the same here. Either way the cue is on the
+    /// one with nothing sung between it and the line, so pressed on another
+    /// deck's one the words arrive in phrase; where in the bar they arrive is
+    /// the record's business, not a reason to prefer one airing over another.
+    pub fn rank(self) -> u8 {
+        match self {
+            Rung::OnTheOne | Rung::BarBefore => 0,
+            Rung::BeatBefore => 1,
+            Rung::Onset => 2,
+            Rung::InSinging => 3,
+        }
+    }
+
     /// How it reads in the account of what the words decided.
     pub fn said(self) -> &'static str {
         match self {
@@ -196,9 +217,10 @@ pub fn line_start(
 
 /// Which airing of a line the button goes to, and where.
 ///
-/// The airing that reaches the best rung; between airings on the same rung,
-/// the one on a phrase boundary — see [`off_the_phrase`] — and between those,
-/// the earliest, which is what the button was before this existed. `sections`
+/// The airing that reaches the best rung, by [`Rung::rank`], so that on the
+/// one and on the bar line before count alike; between airings ranked the
+/// same, the one on a phrase boundary — see [`off_the_phrase`] — and between
+/// those, the earliest, which is what the button was before this existed. `sections`
 /// are where the arrangement's sections start, on the grid. Returns the index
 /// into `airings` with the placing; `None` for no airings.
 pub fn best_airing(
@@ -207,11 +229,9 @@ pub fn best_airing(
     sung: &[(u32, u32)],
     sections: &[u32],
 ) -> Option<(usize, Placed)> {
-    airings
-        .iter()
-        .enumerate()
-        .map(|(i, &at)| (i, place(at, grid, sung)))
-        .min_by_key(|(i, placed)| (placed.rung, off_the_phrase(placed.time_ms, grid, sections), *i))
+    airings.iter().enumerate().map(|(i, &at)| (i, place(at, grid, sung))).min_by_key(
+        |(i, placed)| (placed.rung.rank(), off_the_phrase(placed.time_ms, grid, sections), *i),
+    )
 }
 
 /// How far a moment is from a phrase boundary: 0 on one, 1 on a half-phrase,
@@ -371,6 +391,20 @@ mod tests {
         let (which, _) = best_airing(&[40_100, 100_100], &grid(), &sung, &[]).unwrap();
         assert_eq!(which, 0);
         assert!(best_airing(&[], &grid(), &sung, &[]).is_none());
+    }
+
+    #[test]
+    fn a_line_that_comes_in_on_beat_three_with_a_clear_way_in_is_as_good_as_one_on_the_one() {
+        // The first airing comes in on beat three of bar 24, with nothing sung
+        // since the one, so it is cued on that one; the second comes in on the
+        // one of bar 32. Both are cued on a bar line with a clear way in, both
+        // on a phrase boundary, so the earlier wins, where it used to lose to
+        // the one that started nearer its bar line.
+        let airings = [49_000, 64_000];
+        let sung = [(49_000, 51_000), (64_000, 66_000)];
+        let (which, placed) = best_airing(&airings, &grid(), &sung, &[]).unwrap();
+        assert_eq!((which, placed.time_ms, placed.rung), (0, 48_000, Rung::BarBefore));
+        assert_eq!(place(64_000, &grid(), &sung).rung, Rung::OnTheOne);
     }
 
     #[test]

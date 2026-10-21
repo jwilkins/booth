@@ -865,9 +865,14 @@ lines get a cue at all: the hook, a second line and a tag is already generous,
 and everything past that is a slot taken from a drop. The one exception is the
 hook coming back after it has been away for longer than a chorus takes to come
 round — twenty seconds, which is a verse — because that is the drop back in
-after the break, and the moment a DJ reaches for. It is offered as a button
-below the refrains and above any line sung once; the hook's other returns, and
-every return of a lesser line, stay markers.
+after the break, and the moment a DJ reaches for. It used to be offered a
+button of its own, which put the hook under two of the eight and left a line
+the room sings without one; eight buttons for a live remix want eight
+different places to go. So **a line has one button**, and its returns, the
+comeback among them, are markers. The one way a line is under a second button
+is a drop: where the hook comes back on the drop after the break, that drop's
+button is where it lands, and it reads `drop` rather than the line, because the
+drop is the reason for the button and the hook is already a button of its own.
 
 Around them go **where the singing starts** and **the start of every phrase** the
 arrangement analysis found — intro, build, break, drop, outro.
@@ -875,7 +880,8 @@ arrangement analysis found — intro, build, break, drop, outro.
 A player holds eight hot cues and a busy track offers more than eight moments,
 so **the buttons are filled in a fixed order**, the order a DJ remixing a record
 live reaches for them: the first drop; the hook; the first break; the drop back
-in, which is the hook's return after the break or failing that the second drop;
+in, the second drop, which is where the hook's return after the break lands
+when it lands on one;
 a way in, the intro or the build before the first drop; a way out, the outro;
 a build before a drop, to ride into it; an instrumental stretch of eight bars
 or more, to lay another record's vocal over; and a second line the room sings.
@@ -930,6 +936,14 @@ that place alike, to the one on a phrase boundary, eight bars from the start of
 its section or four; and between those, to the earliest. The first airing keeps
 its marker. A chorus that starts on a pickup the first time round often starts
 clean the fourth, and the fourth is the one worth a button.
+
+The first two rungs count as one here. A line that comes in on beat three, cued
+on the one before it with nothing sung between, is as good a button as a line
+that comes in on the one: pressed on another deck's one, the words arrive where
+the record put them. Ranking the line that starts on the bar line above it sent
+the button to whichever airing happened to start nearest a bar line, which is a
+property of the singer's phrasing rather than of the record, and passed over
+the airing that opens the chorus.
 
 **The room between the words.** The longest stretch with nothing sung — eight
 bars or more between one line and the next, read off the stem — gets a button
@@ -1004,6 +1018,24 @@ them out to fifty lines, and **collapse** to put them back. A lyric is read top
 to bottom, and reading one through a slot a few lines tall is reading it through
 a letterbox.
 
+Cue Analysis opens with the buttons, one to a line, A first:
+
+```
+A:  line         - 00:20.00 -  11/1 - “walking through the city at night”
+B:  drop         - 00:32.00 -  17/1
+C:  instrumental - 01:44.00 -  53/1
+D:  hook         - 02:40.00 -  81/1 - “hold me closer now”
+```
+
+What each button is for, where it is on the clock, the bar and beat it is on —
+counted from one, as the transport counts, and left out on a track with no grid
+— and the line it plays into. That is the answer, and everything under it is
+how it was arrived at, so it comes first: in the panel, and in the log a bug
+report is pasted from. "Plays into" because a button goes on the one before
+what it is for: a drop with a line coming in within a couple of seconds names
+that line, where the line a lyric file says is being sung at that moment is the
+one before, timed to run until the next begins.
+
 Wherever the words came from, they are also written beside the track as
 `<name>.lrc`, the file every player and tagger looks for first, with the artist,
 the title and where the words came from in its header. It is written again
@@ -1075,8 +1107,8 @@ show the whole of a line that long, so the words are on the deck in front of you
 and the number says where in the record you are. Those returns cost no button —
 they are marked as moments that can only ever be memory cues, so they never take
 a slot from a drop and never lend their words to a section they happen to land
-on — except the hook's comeback after a verse's worth of absence, which is a
-button where one is spare.
+on — the hook's comeback after a verse's worth of absence included, which is
+under a button only where a drop is.
 
 ### Installing a recogniser
 

@@ -37,7 +37,8 @@ enum Role {
     Hook,
     /// The first breakdown: where a second record comes in.
     Break,
-    /// The hook coming back after the break, or failing that the second drop.
+    /// The second drop: the record coming back after the break. Where the
+    /// hook comes back on it, the drop is that button and reads "drop".
     DropBackIn,
     /// A way in: the intro, or the build before the first drop.
     MixIn,
@@ -85,8 +86,13 @@ pub enum Reason {
     Hook,
     /// Where another line the track keeps coming back to first lands.
     Refrain,
-    /// The hook coming back after a verse's worth of absence: the drop back
-    /// in. See [`crate::transcribe::MomentKind::Comeback`].
+    /// The hook coming back after a verse's worth of absence. See
+    /// [`crate::transcribe::MomentKind::Comeback`].
+    ///
+    /// A marker, like every other return: a line gets one button, so that
+    /// eight buttons cover eight things. Where it lands on a drop it folds into
+    /// the drop, which is a button of its own, and that is the one way a line
+    /// is under two buttons.
     Comeback,
     /// A line sung once and never again.
     ///
@@ -217,12 +223,12 @@ impl Candidate {
 
     /// Whether this moment's words go onto whatever swallows it in [`fold`].
     ///
-    /// A marker that could never have been a button has nothing to lend, and
-    /// nor has the hook coming back: its words are already on the hook's own
+    /// A marker that could never have been a button has nothing to lend. The
+    /// hook coming back is one: its words are already on the hook's own
     /// button, and a drop that lands where the hook returns should read
     /// "drop", which is what a DJ reaching past the words is reaching for.
     fn lends_words(&self) -> bool {
-        !self.memory_only && self.reason != Reason::Comeback
+        !self.memory_only
     }
 
     fn comment(&self) -> String {
@@ -242,7 +248,7 @@ pub fn from_moment(moment: &crate::transcribe::Moment) -> Candidate {
     };
     let candidate = Candidate::named(moment.time_ms, reason, &moment.text);
     match moment.kind {
-        MomentKind::Return => candidate.memory_only(),
+        MomentKind::Return | MomentKind::Comeback => candidate.memory_only(),
         _ => candidate,
     }
 }
@@ -352,6 +358,20 @@ pub fn instrumental_stretch(grid: &[u32], sung: &[(u32, u32)]) -> Option<Candida
 /// which eight it keeps is the whole difference between a useful set of cues
 /// and a wall of markers.
 pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) -> Vec<Cue> {
+    assemble_with_reasons(start_ms, end_ms, candidates).0
+}
+
+/// [`assemble`], and what each button is for: one [`Reason`] per hot cue, A
+/// first.
+///
+/// For an account of the cues to say. A cue's comment cannot: a hook's
+/// comment is its line and so is a refrain's, and a drop that a line lands on
+/// carries the line.
+pub fn assemble_with_reasons(
+    start_ms: u32,
+    end_ms: Option<u32>,
+    candidates: Vec<Candidate>,
+) -> (Vec<Cue>, Vec<Reason>) {
     let mut kept = fold(rank(candidates));
 
     // Every moment worth cueing becomes a memory cue, whether or not it also
@@ -379,6 +399,7 @@ pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) 
     }
     kept.retain(|(candidate, _)| !candidate.memory_only);
 
+    let mut reasons = Vec::new();
     for (letter, (candidate, _)) in to_the_buttons(kept).into_iter().enumerate() {
         let color = candidate.reason.color();
         cues.push(
@@ -386,8 +407,9 @@ pub fn assemble(start_ms: u32, end_ms: Option<u32>, candidates: Vec<Candidate>) 
                 .with_comment(&candidate.comment())
                 .with_color(color.r, color.g, color.b),
         );
+        reasons.push(candidate.reason);
     }
-    cues
+    (cues, reasons)
 }
 
 /// Which of the candidates get the eight buttons, in time order.
@@ -427,9 +449,9 @@ fn to_the_buttons(kept: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
             Role::Hook => earliest(&taken, &is(Reason::Hook)),
             Role::Break => earliest(&taken, &is(Reason::Section(Kind::Down))),
             // The first drop is taken by now, so the earliest drop left is
-            // the second.
-            Role::DropBackIn => earliest(&taken, &is(Reason::Comeback))
-                .or_else(|| earliest(&taken, &is(Reason::Section(Kind::Chorus)))),
+            // the second. Not the hook coming back: that is the hook's line
+            // again, and a line gets one button unless the other is a drop.
+            Role::DropBackIn => earliest(&taken, &is(Reason::Section(Kind::Chorus))),
             Role::MixIn => earliest(&taken, &|candidate: &Candidate| {
                 matches!(candidate.reason, Reason::Section(Kind::Intro | Kind::Up))
                     && first_drop.is_none_or(|drop| candidate.time_ms < drop)
@@ -1168,16 +1190,15 @@ mod tests {
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
         let hook = hot.iter().find(|c| c.time_ms == 30_000).expect("no cue on the hook");
         assert_eq!(hook.comment.as_deref(), Some("hold me closer now"));
-        // Twice — the hook and its comeback — not once per airing. Eight cues
-        // spent three times over on the same words leaves the drops nowhere
-        // to go; the one return worth a button of its own is the hook coming
-        // back from its longest absence.
+        // Once, not once per airing, and not again where it comes back from
+        // its longest absence: eight cues spent more than once on the same
+        // words is eight cues covering fewer than eight things.
         let with_the_words: Vec<u32> = hot
             .iter()
             .filter(|c| c.comment.as_deref() == hook.comment.as_deref())
             .map(|c| c.time_ms)
             .collect();
-        assert_eq!(with_the_words, vec![30_000, 90_000], "{hot:?}");
+        assert_eq!(with_the_words, vec![30_000], "{hot:?}");
     }
 
     #[test]
@@ -1303,8 +1324,8 @@ mod tests {
         // back after a long break, a second, shorter line — between lines sung
         // as often, the longer is the hook — and a verse of one-off lines. The
         // eight are the build in, the drop, the hook, the refrain, the break,
-        // the second build, the hook back and the outro — and not the second
-        // drop, which the hook's return already is, nor any verse line.
+        // the second build, the second drop and the outro — and not the hook
+        // again where it comes back, nor any verse line.
         let mut lines = vec![
             line(64_000, "hold me closer now"),
             line(70_000, "take me home"),
@@ -1335,7 +1356,7 @@ mod tests {
             .collect();
         assert_eq!(
             hot.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
-            vec![30_000, 60_000, 64_000, 70_000, 120_000, 150_000, 184_000, 240_000],
+            vec![30_000, 60_000, 64_000, 70_000, 120_000, 150_000, 180_000, 240_000],
             "{hot:?}"
         );
     }
@@ -1372,7 +1393,7 @@ mod tests {
 
         let cues = assemble(0, None, candidates);
         let hot: Vec<u32> = cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
-        assert_eq!(hot, vec![30_000, 60_000, 64_000, 120_000, 150_000, 184_000, 200_000, 240_000]);
+        assert_eq!(hot, vec![30_000, 60_000, 64_000, 120_000, 150_000, 180_000, 200_000, 240_000]);
         assert!(
             marks(&cues).iter().any(|mark| mark == "Instrumental \u{b7} 16 bars"),
             "{:?}",
@@ -1412,11 +1433,12 @@ mod tests {
 
     #[test]
     fn a_busy_arrangement_cannot_push_the_words_out() {
-        // Nine drops, and a record with a hook, its comeback and a refrain:
-        // the words' three are in the eight whatever the arrangement offers,
+        // Nine drops, and a record with a hook that comes back and a refrain:
+        // the words' two are in the eight whatever the arrangement offers,
         // because the set is incomplete without them. Sharing the buttons
         // half and half used to see to that by count; the order does it by
-        // kind, and gives the arrangement the other five rather than four.
+        // kind, and gives the arrangement the other six. The hook coming back
+        // is a marker: a line gets one button.
         let words = crate::transcribe::Transcript {
             lines: vec![
                 line(31_000, "hold me closer now"),
@@ -1437,11 +1459,68 @@ mod tests {
             .map(|cue| (cue.time_ms, cue.comment.unwrap_or_default()))
             .collect();
         assert_eq!(hot.len(), HOT_CUES, "{hot:?}");
-        for (at, what) in [(31_000, "the hook"), (151_000, "its comeback"), (37_000, "the refrain")]
-        {
+        for (at, what) in [(31_000, "the hook"), (37_000, "the refrain")] {
             assert!(hot.iter().any(|(when, _)| *when == at), "{what} has no button: {hot:?}");
         }
-        assert_eq!(hot.iter().filter(|(_, name)| name == "drop").count(), 5, "{hot:?}");
+        assert!(!hot.iter().any(|(when, _)| *when == 151_000), "the hook twice: {hot:?}");
+        assert_eq!(hot.iter().filter(|(_, name)| name == "drop").count(), 6, "{hot:?}");
+    }
+
+    #[test]
+    fn each_button_comes_back_with_what_it_is_for_in_letter_order() {
+        // The second drop reads "drop" and so does the first, and the hook's
+        // button reads its line: the comments alone cannot say which button
+        // is the hook and which a drop the hook happens to land on.
+        let words = crate::transcribe::Transcript {
+            lines: vec![line(31_000, "hold me closer now"), line(150_200, "hold me closer now")],
+            ..Default::default()
+        };
+        let mut candidates = vec![
+            Candidate::new(10_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(90_000, Reason::Section(Kind::Down)),
+            Candidate::new(150_000, Reason::Section(Kind::Chorus)),
+        ];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let (cues, reasons) = assemble_with_reasons(0, None, candidates);
+        let hot: Vec<(u8, u32)> =
+            cues.iter().filter(|cue| cue.is_hot()).map(|cue| (cue.hot_cue, cue.time_ms)).collect();
+        assert_eq!(hot.len(), reasons.len(), "{hot:?} {reasons:?}");
+        let said: Vec<(u8, u32, Reason)> =
+            hot.iter().zip(&reasons).map(|(&(letter, at), &why)| (letter, at, why)).collect();
+        assert_eq!(
+            said,
+            vec![
+                (1, 10_000, Reason::Section(Kind::Chorus)),
+                (2, 31_000, Reason::Hook),
+                (3, 90_000, Reason::Section(Kind::Down)),
+                (4, 150_000, Reason::Section(Kind::Chorus)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_hook_coming_back_on_a_drop_is_under_that_drops_button() {
+        // The one way a line is under two buttons: where the hook comes back on
+        // a drop, the drop is a button of its own, and reads "drop".
+        let words = crate::transcribe::Transcript {
+            lines: vec![line(31_000, "hold me closer now"), line(150_200, "hold me closer now")],
+            ..Default::default()
+        };
+        let mut candidates = vec![
+            Candidate::new(10_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(90_000, Reason::Section(Kind::Down)),
+            Candidate::new(150_000, Reason::Section(Kind::Chorus)),
+        ];
+        candidates.extend(words.moments().iter().map(from_moment));
+
+        let hot: Vec<(u32, String)> = assemble(0, None, candidates)
+            .into_iter()
+            .filter(Cue::is_hot)
+            .map(|cue| (cue.time_ms, cue.comment.unwrap_or_default()))
+            .collect();
+        assert!(hot.contains(&(31_000, "hold me closer now".into())), "{hot:?}");
+        assert!(hot.contains(&(150_000, "drop".into())), "{hot:?}");
     }
 
     #[test]
@@ -1508,12 +1587,13 @@ mod tests {
     }
 
     #[test]
-    fn a_record_shaped_like_the_report_cues_the_hook_coming_back_and_not_its_first_verse() {
+    fn a_record_shaped_like_the_report_cues_its_hook_once_and_not_its_first_verse() {
         // The report: a verse of one-off lines in the first forty seconds, a
         // chorus from forty-five, a break, the chorus back at a hundred and
         // four, an outro. The arrangement found only an intro, the break and
         // the outro. What came back was three buttons on the first twenty
-        // seconds of the verse and none on the hook coming back.
+        // seconds of the verse. The hook is cued once; where it comes back
+        // after the break is a marker, there being no drop there for it to be.
         let verse: Vec<u32> = vec![
             1_740, 5_520, 9_280, 12_590, 14_430, 19_220, 24_700, 27_070, 28_130, 33_610, 39_770,
         ];
@@ -1541,11 +1621,14 @@ mod tests {
             .map(|cue| (cue.time_ms, cue.comment.clone().unwrap_or_default()))
             .collect();
 
+        let hook: Vec<u32> =
+            hot.iter().filter(|(_, name)| name == "oh we are moving").map(|(at, _)| *at).collect();
+        assert_eq!(hook, vec![45_790], "the hook once: {hot:?}");
         assert!(
-            hot.iter().any(|(at, name)| *at == 104_040 && name == "oh we are moving"),
-            "the hook coming back after the break has no button: {hot:?}"
+            marks(&cues).iter().filter(|mark| mark.ends_with("oh we are moving")).count() >= 8,
+            "every airing is still a marker: {:?}",
+            marks(&cues)
         );
-        assert!(hot.iter().any(|(at, _)| *at == 45_790), "the hook itself: {hot:?}");
         assert!(hot.iter().any(|(at, _)| *at == 76_760), "the break: {hot:?}");
         let early_lines = hot.iter().filter(|(at, _)| *at < 20_000 && verse.contains(at)).count();
         assert!(early_lines <= 1, "the first twenty seconds took {early_lines} buttons: {hot:?}");

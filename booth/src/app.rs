@@ -2918,9 +2918,11 @@ impl App {
         // The last bar the grid names, so "End" lands somewhere a player will
         // park rather than wherever the file stops.
         let end = beats.last().copied();
-        let placed = crate::job::cue_marks(&cues::assemble(start, end, candidates));
+        let (assembled, reasons) = cues::assemble_with_reasons(start, end, candidates);
+        let placed = crate::job::cue_marks(&assembled);
         let hot = placed.iter().filter(|cue| cue.letter != 0).count();
-        let decided = what_the_words_decided(&words, &before, &placed, &beats, &sounds, &chosen);
+        let mut decided = the_cue_points(&placed, &reasons, &beats, &words);
+        decided.extend(what_the_words_decided(&words, &before, &placed, &beats, &sounds, &chosen));
         crate::info!("cueing #{id} {name} from {}", plural(lines, "line"));
         for line in &decided {
             crate::info!("  {line}");
@@ -12969,7 +12971,11 @@ fn beat_at(track: &Track, at_ms: u32) -> Option<usize> {
     if !track.has_grid || track.bpm <= 0.0 {
         return None;
     }
-    let beats = beat_times(track);
+    beat_in(&beat_times(track), at_ms)
+}
+
+/// [`beat_at`], against a grid already worked out: `None` for no grid.
+fn beat_in(beats: &[u32], at_ms: u32) -> Option<usize> {
     if beats.is_empty() {
         return None;
     }
@@ -13022,9 +13028,10 @@ fn heard_start(
 /// every later airing a return, a marker. The button goes instead to the
 /// airing `place::best_airing` picks, and the first airing takes that airing's
 /// place as the return — the two swap times, so the markers are where they
-/// were and only the button moves. The hook's comeback is not in the running:
-/// it is a button already, and the hook on top of it would be one button
-/// where there were two.
+/// were and only the button moves. The hook's comeback is in the running like
+/// any other airing: it is a marker, not a button of its own — a line gets one
+/// button — so if it is where the hook is cued best, the button goes there and
+/// the first airing takes its marker.
 fn cued_airings(
     mut moments: Vec<booth_cli::transcribe::Moment>,
     words: &booth_cli::transcribe::Transcript,
@@ -13042,12 +13049,7 @@ fn cued_airings(
         });
         let Some(button) = button else { continue };
         let text = moments[button].text.clone();
-        let comeback = moments
-            .iter()
-            .find(|moment| moment.kind == MomentKind::Comeback && moment.text == text)
-            .map(|moment| moment.time_ms);
-        let running: Vec<u32> =
-            refrain.at.iter().copied().filter(|at| Some(*at) != comeback).collect();
+        let running: Vec<u32> = refrain.at.clone();
         // Ranked from where each airing's singing starts, so that an airing
         // whose lyric time is late is judged where it is sung.
         let begun: Vec<u32> = running.iter().map(|&at| heard_start(at, words, sung)).collect();
@@ -13056,12 +13058,17 @@ fn cued_airings(
         };
         let best = running[which];
         let marker = moments.iter().position(|moment| {
-            moment.time_ms == best && moment.kind == MomentKind::Return && moment.text == text
+            moment.time_ms == best
+                && matches!(moment.kind, MomentKind::Return | MomentKind::Comeback)
+                && moment.text == text
         });
         let (at, placed) = match (best == first, marker) {
             (true, _) => (first, placed),
             (false, Some(marker)) => {
+                // The first airing takes the marker the button left, as a
+                // plain return: it is not where the hook comes back.
                 moments[marker].time_ms = first;
+                moments[marker].kind = MomentKind::Return;
                 moments[button].time_ms = best;
                 (best, placed)
             }
@@ -13081,6 +13088,93 @@ fn cued_airings(
     }
     moments.sort_by_key(|moment| moment.time_ms);
     (moments, chosen)
+}
+
+/// The buttons, A first, one to a line: what each is for, where it is on the
+/// clock and in the bar, and the line it plays into.
+///
+/// `A:  vocal - 00:32.00 -  17/1 - “walking through the city”`. Bars and beats
+/// count from one, as the transport does; the column is left out where the
+/// track has no grid, rather than counting bars of a tempo nobody measured.
+///
+/// First in the account because it is the answer and the rest is how it was
+/// arrived at: whoever opens the panel wants the eight before the reasoning,
+/// and a log pasted into a bug report says what came out before it says why.
+fn the_cue_points(
+    placed: &[crate::library::CueMark],
+    reasons: &[booth_cli::analysis::cues::Reason],
+    grid: &[u32],
+    words: &booth_cli::transcribe::Transcript,
+) -> Vec<String> {
+    use crate::library::BEATS_PER_BAR;
+
+    let hot: Vec<(&crate::library::CueMark, &str)> = placed
+        .iter()
+        .filter(|cue| cue.letter != 0)
+        .zip(reasons.iter().map(|reason| reason.label()))
+        .collect();
+    // Padded to the longest present, so the times line up under each other in
+    // the panel's fixed-width type without "instrumental" setting the width of
+    // a track that has none.
+    let wide = hot.iter().map(|(_, kind)| kind.chars().count()).max().unwrap_or(0);
+    hot.iter()
+        .map(|&(cue, kind)| {
+            let total = cue.time_ms / 1000;
+            let mut said = format!(
+                "{}:  {kind:<wide$} - {:02}:{:02}.{:02}",
+                cue.name(),
+                total / 60,
+                total % 60,
+                (cue.time_ms % 1000) / 10
+            );
+            if let Some(beat) = beat_in(grid, cue.time_ms) {
+                let bar = format!("{}/{}", beat / BEATS_PER_BAR + 1, beat % BEATS_PER_BAR + 1);
+                said.push_str(&format!(" - {bar:>5}"));
+            }
+            if let Some(line) = plays_into(cue, kind, words) {
+                said.push_str(&format!(" - \u{201c}{line}\u{201d}"));
+            }
+            said
+        })
+        .collect()
+}
+
+/// The line a button plays into, for the list of them.
+///
+/// A cue placed from the words carries its line as its label, and so does a
+/// drop a line was folded into. Any other is a section, and what it plays
+/// into is the line starting within a couple of seconds after it, or failing
+/// that the line it lands inside. That way round, not the other: a button goes
+/// on the one before what it is for, and a lyric file's line runs until the
+/// next one starts, so the line "covering" a cue on the bar before a line is
+/// the line before, whose last word has long been sung.
+fn plays_into<'a>(
+    cue: &'a crate::library::CueMark,
+    kind: &str,
+    words: &'a booth_cli::transcribe::Transcript,
+) -> Option<&'a str> {
+    /// About a bar at the tempos this is used at, as `library::sung_at` has
+    /// it: a line further from a cue than that is not what the cue is for.
+    const REACH_MS: u32 = 2_000;
+
+    let label = cue.label.trim();
+    if !label.is_empty() && label != kind {
+        return Some(label);
+    }
+    let at = cue.time_ms;
+    let coming = words
+        .lines
+        .iter()
+        .filter(|line| line.start_ms >= at && line.start_ms - at <= REACH_MS)
+        .min_by_key(|line| line.start_ms - at);
+    let covering = || {
+        words
+            .lines
+            .iter()
+            .rev()
+            .find(|line| line.start_ms <= at && at < line.end_ms.max(line.start_ms))
+    };
+    coming.or_else(covering).map(|line| line.text.trim()).filter(|said| !said.is_empty())
 }
 
 /// Write down what the words decided, and why.
@@ -14119,6 +14213,50 @@ mod tests {
             }
 
             #[test]
+            fn a_section_cue_on_the_bar_before_a_line_plays_into_that_line_not_the_one_before() {
+                // Timed as a lyric file is, each line running until the next
+                // starts, so the line "covering" the bar line before the
+                // second is the first, which has finished being sung.
+                use booth_cli::analysis::cues::Reason;
+                use booth_cli::analysis::structure::Kind;
+                let words = booth_cli::transcribe::Transcript {
+                    lines: vec![
+                        booth_cli::transcribe::Line {
+                            start_ms: 30_000,
+                            end_ms: 39_000,
+                            text: "the line before".into(),
+                        },
+                        booth_cli::transcribe::Line {
+                            start_ms: 39_000,
+                            end_ms: 45_000,
+                            text: "the line it is for".into(),
+                        },
+                    ],
+                    ..Default::default()
+                };
+                let placed = [cue(0, 0, "Start"), cue(1, 38_000, "drop"), cue(2, 42_000, "break")];
+                let reasons = [Reason::Section(Kind::Chorus), Reason::Section(Kind::Down)];
+                let said = the_cue_points(&placed, &reasons, &grid(), &words);
+                assert_eq!(
+                    said,
+                    [
+                        "A:  drop  - 00:38.00 -  20/1 - \u{201c}the line it is for\u{201d}",
+                        // Inside a line with none coming: the one it is in.
+                        "B:  break - 00:42.00 -  22/1 - \u{201c}the line it is for\u{201d}",
+                    ]
+                );
+            }
+
+            #[test]
+            fn without_a_grid_the_buttons_are_listed_without_bars() {
+                use booth_cli::analysis::cues::Reason;
+                let words = heard(&[(41_000, "hold me closer now")]);
+                let placed = [cue(1, 41_000, "hold me closer now")];
+                let said = the_cue_points(&placed, &[Reason::Hook], &[], &words);
+                assert_eq!(said, ["A:  hook - 00:41.00 - \u{201c}hold me closer now\u{201d}"]);
+            }
+
+            #[test]
             fn a_cue_that_did_not_move_is_not_reported_as_having_moved() {
                 let words =
                     heard(&[(40_000, "hold me closer now"), (100_000, "hold me closer now")]);
@@ -14228,25 +14366,57 @@ mod tests {
                 // All three airings place alike, just after the one with a
                 // clear way in, so the button goes to the one on a phrase
                 // boundary: 160 s is bar 64 of the drop that starts at 32 s,
-                // where 40 s is bar 4. The comeback at 100 s is a button of
-                // its own. Two buttons, not one per airing: a line sung three
-                // times used to be three cues saying the same thing, which
-                // left the drops and the breakdowns nowhere to go.
+                // where 40 s is bar 4 and 100 s bar 34. One button, not one
+                // per airing and not a second where the hook comes back: a
+                // line sung three times used to be three cues saying the same
+                // thing, which left the drops and the breakdowns nowhere to go.
                 let with_the_words: Vec<u32> = cues
                     .iter()
                     .filter(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .map(|cue| cue.time_ms)
                     .collect();
-                assert_eq!(with_the_words, vec![100_000, 160_000], "{cues:?}");
+                assert_eq!(with_the_words, vec![160_000], "{cues:?}");
+            }
+
+            #[test]
+            fn the_cue_analysis_opens_with_the_buttons_a_first_with_what_each_is_and_where() {
+                // 120 BPM from zero, so a bar is two seconds: 20 s is bar 11
+                // and 160 s bar 81, each on its one. The drop has no line
+                // within a couple of seconds of it and the stretch has none
+                // by definition, so those two say no words.
+                let (mut app, id) = sung(
+                    "cue-points",
+                    &[
+                        (20_000, "walking through the city at night"),
+                        (40_100, "hold me closer now"),
+                        (100_100, "hold me closer now"),
+                        (160_100, "hold me closer now"),
+                    ],
+                );
+                app.auto_cue(id);
+
+                let said = &app.library.get(id).unwrap().words_decided;
+                assert_eq!(
+                    said[..5],
+                    [
+                        "A:  line         - 00:20.00 -  11/1 - \u{201c}walking through the city at night\u{201d}",
+                        "B:  drop         - 00:32.00 -  17/1",
+                        "C:  instrumental - 01:44.00 -  53/1",
+                        "D:  hook         - 02:40.00 -  81/1 - \u{201c}hold me closer now\u{201d}",
+                        "lines by how often they come round:",
+                    ],
+                    "{said:#?}"
+                );
             }
 
             #[test]
             fn the_hook_is_cued_at_the_airing_that_places_best() {
                 // The hook's first airing comes straight off the line before
-                // it, so the beat before it is inside that line; the second
-                // starts clean, just after the one. The button goes to the
-                // second and the first keeps its marker. The third is the
-                // comeback, a button of its own.
+                // it, so the beat before it is inside that line; the other
+                // two start clean, just after the one. The one button goes to
+                // the clean airing on a phrase boundary, the third — where the
+                // hook comes back, which is a marker of its own no longer —
+                // and the first keeps its marker.
                 let (mut app, id) = sung(
                     "best-airing",
                     &[
@@ -14263,7 +14433,7 @@ mod tests {
                     .filter(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .map(|cue| cue.time_ms)
                     .collect();
-                assert_eq!(buttons, vec![100_000, 160_000], "{cues:?}");
+                assert_eq!(buttons, vec![160_000], "{cues:?}");
                 assert!(
                     cues.iter().any(|cue| cue.letter == 0
                         && cue.time_ms == 40_500

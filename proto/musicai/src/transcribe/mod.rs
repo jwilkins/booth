@@ -108,13 +108,13 @@ pub enum MomentKind {
     Return,
     /// The hook coming back from its longest absence, a verse's worth at
     /// least — see [`COMEBACK_MS`] — which is the drop back in after the
-    /// break, and the moment a DJ reaches for.
+    /// break.
     ///
-    /// Worth a button where one is spare, which a return inside a chorus is
-    /// not: a hook sung every eight seconds is one moment coming round, and a
-    /// hook that has been gone half a minute is the record starting again.
-    /// One per record, so a chorus that comes round four times is still one
-    /// line and one comeback, not five buttons saying the same thing.
+    /// Told apart from the other returns so that the cue set can find it, and
+    /// marked like them: a line gets one button, so that the eight cover eight
+    /// things rather than the hook twice. Where it lands on a drop the drop
+    /// is the button, and that is the one place the hook's line is under two.
+    /// One per record.
     Comeback,
     /// A line that is sung once and never comes back.
     ///
