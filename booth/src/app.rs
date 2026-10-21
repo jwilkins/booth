@@ -2438,8 +2438,8 @@ impl App {
             match (unread, track.lyrics_aligned, track.stems.vocals.clone()) {
                 // Words placed before where the singing is was kept with
                 // them. Placing is the same decode as that measurement, so
-                // they are placed again, once — see `Track::sung`.
-                (false, true, Some(vocals)) if track.sung.is_empty() => {
+                // they are placed again, once — see `Track::sounds`.
+                (false, true, Some(vocals)) if track.sounds.is_empty() => {
                     placing.push(job::Realigning { id, vocals, lyrics: track.lyrics.clone() })
                 }
                 // Words already read and already placed: nothing to wait for.
@@ -2670,7 +2670,7 @@ impl App {
         lyrics: Vec<crate::library::Lyric>,
         confidence: Option<f32>,
         language: Option<String>,
-        sung: Vec<(u32, u32)>,
+        sounds: Vec<(u32, u32)>,
     ) -> usize {
         use crate::library::WordsFrom;
         /// What became of the written words, where there were any.
@@ -2687,7 +2687,7 @@ impl App {
             // stem is singing is true of the record however the lines on it
             // are settled, and the cues are placed against it rather than
             // against them.
-            track.sung = sung;
+            track.sounds = sounds;
             let has_written = confidence.is_some()
                 && !track.lyrics.is_empty()
                 && !matches!(track.words_from, WordsFrom::Recogniser | WordsFrom::Unsaid);
@@ -2879,25 +2879,28 @@ impl App {
             .collect();
 
         let words = crate::library::transcript(&track.lyrics);
-        let sung = track.sung.clone();
+        let sounds = track.sounds.clone();
         // Where the sections start, on the grid, for counting phrases from.
         let sections: Vec<u32> = candidates.iter().map(|candidate| candidate.time_ms).collect();
-        let (moments, chosen) = cued_airings(words.moments(), &words, &beats, &sung, &sections);
+        let (moments, chosen) = cued_airings(words.moments(), &words, &beats, &sounds, &sections);
         for moment in &moments {
             let mut candidate = cues::from_moment(moment);
+            // From where the stem has the line's singing start, not from the
+            // time its lyric gave it, which inside a verse is an estimate.
+            let begins = heard_start(moment.time_ms, &words, &sounds);
             candidate.time_ms = match moment.kind {
                 // A marker is for reading the words where they are sung, so it
                 // stays on the beat before them. A button is for pressing on
                 // the one, so it climbs the ladder — see `place`.
-                booth_cli::transcribe::MomentKind::Return => snap_back(&beats, moment.time_ms),
-                _ => booth_cli::analysis::place::place(moment.time_ms, &beats, &sung).time_ms,
+                booth_cli::transcribe::MomentKind::Return => snap_back(&beats, begins),
+                _ => booth_cli::analysis::place::place(begins, &beats, &sounds).time_ms,
             };
             candidates.push(candidate);
         }
         // And the room between the words: the longest stretch with nothing
         // sung, for laying another record's vocal over. Only a track whose
         // words have been read knows where its singing is.
-        if let Some(stretch) = cues::instrumental_stretch(&beats, &sung) {
+        if let Some(stretch) = cues::instrumental_stretch(&beats, &sounds) {
             candidates.push(stretch);
         }
 
@@ -2917,7 +2920,7 @@ impl App {
         let end = beats.last().copied();
         let placed = crate::job::cue_marks(&cues::assemble(start, end, candidates));
         let hot = placed.iter().filter(|cue| cue.letter != 0).count();
-        let decided = what_the_words_decided(&words, &before, &placed, &beats, &sung, &chosen);
+        let decided = what_the_words_decided(&words, &before, &placed, &beats, &sounds, &chosen);
         crate::info!("cueing #{id} {name} from {}", plural(lines, "line"));
         for line in &decided {
             crate::info!("  {line}");
@@ -3408,8 +3411,8 @@ impl App {
                         _ => {}
                     }
                 }
-                Update::Transcribed { id, lyrics, confidence, language, sung } => {
-                    self.take_heard_words(id, lyrics, confidence, language, sung);
+                Update::Transcribed { id, lyrics, confidence, language, sounds } => {
+                    self.take_heard_words(id, lyrics, confidence, language, sounds);
                     changed = true;
                 }
                 Update::Progress { done, total } => {
@@ -12991,7 +12994,26 @@ struct Chosen {
     /// Which airing, counting the first as zero, out of `of`.
     airing: usize,
     of: usize,
+    /// The time the airing's lyric gave it, and where the stem has its singing
+    /// start — the same where the stem has no breath to say otherwise.
+    given: u32,
+    begins: u32,
     placed: booth_cli::analysis::place::Placed,
+}
+
+/// Where the singing of the line given `at_ms` starts, by the stem's breaths
+/// — see `place::line_start` — or `at_ms` where there is no breath in reach.
+/// The lines either side bound the search, so that a breath nearer one of
+/// them is taken for that line's.
+fn heard_start(
+    at_ms: u32,
+    words: &booth_cli::transcribe::Transcript,
+    sounds: &[(u32, u32)],
+) -> u32 {
+    let starts = words.lines.iter().map(|line| line.start_ms);
+    let before = starts.clone().filter(|&start| start < at_ms).max();
+    let after = starts.filter(|&start| start > at_ms).min();
+    booth_cli::analysis::place::line_start(at_ms, before, after, sounds).unwrap_or(at_ms)
 }
 
 /// Give each line's button to the airing that places best.
@@ -13026,7 +13048,10 @@ fn cued_airings(
             .map(|moment| moment.time_ms);
         let running: Vec<u32> =
             refrain.at.iter().copied().filter(|at| Some(*at) != comeback).collect();
-        let Some((which, placed)) = place::best_airing(&running, grid, sung, sections) else {
+        // Ranked from where each airing's singing starts, so that an airing
+        // whose lyric time is late is judged where it is sung.
+        let begun: Vec<u32> = running.iter().map(|&at| heard_start(at, words, sung)).collect();
+        let Some((which, placed)) = place::best_airing(&begun, grid, sung, sections) else {
             continue;
         };
         let best = running[which];
@@ -13042,10 +13067,17 @@ fn cued_airings(
             }
             // Nothing to swap with, which the kinds `moments()` hands out
             // rule out; the button stays where it is and the account says so.
-            (false, None) => (first, place::place(first, grid, sung)),
+            (false, None) => (first, place::place(heard_start(first, words, sung), grid, sung)),
         };
         let airing = refrain.at.iter().position(|&when| when == at).unwrap_or(0);
-        chosen.push(Chosen { text: refrain.text.clone(), airing, of: refrain.at.len(), placed });
+        chosen.push(Chosen {
+            text: refrain.text.clone(),
+            airing,
+            of: refrain.at.len(),
+            given: at,
+            begins: heard_start(at, words, sung),
+            placed,
+        });
     }
     moments.sort_by_key(|moment| moment.time_ms);
     (moments, chosen)
@@ -13164,8 +13196,18 @@ fn what_the_words_decided(
                 .iter()
                 .find(|choice| choice.text == refrain.text)
                 .map(|choice| {
+                    // Where the stem moved the line, say so, and by how much:
+                    // that is what tells a late lyric from a late cue.
+                    let moved = match choice.begins == choice.given {
+                        true => String::new(),
+                        false => format!(
+                            " (sung from {}, where its lyric says {})",
+                            time_text(choice.begins),
+                            time_text(choice.given)
+                        ),
+                    };
                     format!(
-                        "; cued at {} from airing {} of {}, {}",
+                        "; cued at {} from airing {} of {}{moved}, {}",
                         time_text(choice.placed.time_ms),
                         choice.airing + 1,
                         choice.of,
@@ -13960,6 +14002,8 @@ mod tests {
                     text: "hold me closer now".into(),
                     airing: 1,
                     of: 2,
+                    given: 100_100,
+                    begins: 100_100,
                     placed: Placed { time_ms: 100_000, rung: Rung::OnTheOne },
                 }];
                 let said = what_the_words_decided(&words, &[], &[], &grid(), &sung, &chosen);
@@ -14141,7 +14185,8 @@ mod tests {
                 // been through the recogniser is from now on: where the
                 // singing is, one stretch per line. A track from before the
                 // measurement existed is made by the test that is about it.
-                track.sung = track.lyrics.iter().map(|line| (line.start_ms, line.end_ms)).collect();
+                track.sounds =
+                    track.lyrics.iter().map(|line| (line.start_ms, line.end_ms)).collect();
                 app.rebuild();
                 (app, id)
             }
@@ -14263,7 +14308,7 @@ mod tests {
                         (41_200, "hold me closer now"),
                     ],
                 );
-                app.library.get_mut(id).unwrap().sung = vec![(36_000, 43_200)];
+                app.library.get_mut(id).unwrap().sounds = vec![(36_000, 43_200)];
                 assert!(app.auto_cue(id) > 0, "no cues at all");
                 let cues = app.library.get(id).unwrap().cues.clone();
                 let line = cues
@@ -14271,6 +14316,31 @@ mod tests {
                     .find(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .unwrap_or_else(|| panic!("{cues:?}"));
                 assert_eq!(line.time_ms, 41_000, "{cues:?}");
+            }
+
+            #[test]
+            fn a_line_whose_lyric_is_late_is_cued_from_the_breath_before_it() {
+                // The report: cues mid-line on a lyric timed against another
+                // pressing. The stem has the line before stopping at 40.4 s,
+                // a breath, and this line starting at 40.7 s; its lyric says
+                // 41.2 s, half a second late. The cue goes on the beat before
+                // the singing starts, not the beat before the lyric's time,
+                // which was inside the line.
+                let (mut app, id) = sung(
+                    "late-lyric",
+                    &[
+                        (36_000, "walking through the city at night"),
+                        (41_200, "hold me closer now"),
+                    ],
+                );
+                app.library.get_mut(id).unwrap().sounds = vec![(36_000, 40_400), (40_700, 43_400)];
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let line = cues
+                    .iter()
+                    .find(|cue| cue.letter != 0 && cue.label == "hold me closer now")
+                    .unwrap_or_else(|| panic!("{cues:?}"));
+                assert_eq!(line.time_ms, 40_500, "{cues:?}");
             }
 
             #[test]
@@ -14737,7 +14807,7 @@ mod tests {
                         text: "hold me closer now".into(),
                     }];
                     app.take_heard_words(id, heard, Some(0.9), None, vec![(40_100, 42_000)]);
-                    assert_eq!(app.library.get(id).unwrap().sung, vec![(40_100, 42_000)]);
+                    assert_eq!(app.library.get(id).unwrap().sounds, vec![(40_100, 42_000)]);
                 }
 
                 #[test]
@@ -14751,13 +14821,13 @@ mod tests {
                         let track = app.library.get_mut(id).unwrap();
                         track.stems.vocals = Some(track.path.with_extension("vocals.wav"));
                         track.lyrics_aligned = true;
-                        track.sung.clear();
+                        track.sounds.clear();
                     }
                     let plan = app.words_plan(&[id], false);
                     assert_eq!(plan.placing.iter().map(|p| p.id).collect::<Vec<_>>(), [id]);
                     assert!(plan.reading.is_empty() && plan.known.is_empty());
 
-                    app.library.get_mut(id).unwrap().sung = vec![(40_000, 42_000)];
+                    app.library.get_mut(id).unwrap().sounds = vec![(40_000, 42_000)];
                     let plan = app.words_plan(&[id], false);
                     assert_eq!(plan.known, [id]);
                     assert!(plan.placing.is_empty());
