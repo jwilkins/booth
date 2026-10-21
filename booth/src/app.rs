@@ -14230,6 +14230,30 @@ mod tests {
             }
 
             #[test]
+            fn a_line_sung_straight_on_from_the_one_before_is_cued_before_its_estimated_start() {
+                // The stem heard one unbroken stretch of singing across both
+                // lines, so the second line's time is the lyric's estimate and
+                // not a measurement. The cue goes on the beat before it rather
+                // than on it, so that an estimate a word or two late does not
+                // start the line a couple of words in.
+                let (mut app, id) = sung(
+                    "estimated",
+                    &[
+                        (36_000, "walking through the city at night"),
+                        (41_200, "hold me closer now"),
+                    ],
+                );
+                app.library.get_mut(id).unwrap().sung = vec![(36_000, 43_200)];
+                assert!(app.auto_cue(id) > 0, "no cues at all");
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let line = cues
+                    .iter()
+                    .find(|cue| cue.letter != 0 && cue.label == "hold me closer now")
+                    .unwrap_or_else(|| panic!("{cues:?}"));
+                assert_eq!(line.time_ms, 41_000, "{cues:?}");
+            }
+
+            #[test]
             fn a_cue_never_lands_inside_the_line_before() {
                 // Sung straight after another line, with no gap for a beat to
                 // sit in: the cue is the line's own start, off the grid,
