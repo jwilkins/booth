@@ -927,6 +927,15 @@ after the drop is a marker, and the second break, which there was no room for,
 has the button. Measured in the grid's own beats, so a track with no grid has
 no bars to measure and the rule does not apply.
 
+**A line inside another line has no button of its own.** "Praise you" and "I
+have to praise you like I should" on two buttons is two buttons for one set of
+words: pressed, the longer plays the shorter. So the longer keeps its button
+and the shorter's goes to whatever is next in line, its airings staying
+markers. Compared as words, not letters — "me" is not inside "home" — and only
+between buttons the words put there: a drop a line landed on is a button for
+the drop. Where the shorter is the hook, the longer line is the hook's button
+from then on, so it is the one on A.
+
 **The hook always has a button, and it is A.** It is the one exception to the
 earlier keeping its button: against the hook, it is the other that goes, so a
 verse line or a drop a bar before the hook is a marker and the hook is cued.
