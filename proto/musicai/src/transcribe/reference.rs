@@ -67,24 +67,36 @@ pub fn time_words(written: &[String], heard: &Transcript) -> Option<Transcript> 
 
     let mut segments: Vec<&Line> = heard.lines.iter().collect();
     segments.sort_by_key(|line| line.start_ms);
-    let heard_words: Vec<Heard> = segments
-        .iter()
-        .enumerate()
-        .flat_map(|(segment, line)| {
-            let said = words(&line.text);
-            let count = said.len().max(1) as u32;
-            let span = line.end_ms.saturating_sub(line.start_ms);
-            // The recogniser says when a segment starts and ends, not when each
-            // word in it falls; spreading them evenly is the best guess there
-            // is, and only the first word in a segment is placed by anything
-            // better.
-            said.into_iter().enumerate().map(move |(i, word)| Heard {
-                word,
-                segment,
-                at_ms: line.start_ms + span * i as u32 / count,
+    // Each word at its own time where the recogniser gave one: a segment can
+    // be half a minute of a verse, and spread evenly across it a word lands
+    // seconds from where it was sung. See `Transcript::words`.
+    let timed = !heard.words.is_empty();
+    let heard_words: Vec<Heard> = match timed {
+        true => heard
+            .words
+            .iter()
+            .flat_map(|word| words(&word.text).into_iter().map(|said| (said, word.start_ms)))
+            .map(|(word, at_ms)| Heard { word, segment: 0, at_ms })
+            .collect(),
+        false => segments
+            .iter()
+            .enumerate()
+            .flat_map(|(segment, line)| {
+                let said = words(&line.text);
+                let count = said.len().max(1) as u32;
+                let span = line.end_ms.saturating_sub(line.start_ms);
+                // The recogniser says when a segment starts and ends, not when
+                // each word in it falls; spreading them evenly is the best
+                // guess there is, and only the first word in a segment is
+                // placed by anything better.
+                said.into_iter().enumerate().map(move |(i, word)| Heard {
+                    word,
+                    segment,
+                    at_ms: line.start_ms + span * i as u32 / count,
+                })
             })
-        })
-        .collect();
+            .collect(),
+    };
     let written_words: Vec<Written> = lines
         .iter()
         .enumerate()
@@ -114,11 +126,16 @@ pub fn time_words(written: &[String], heard: &Transcript) -> Option<Transcript> 
             continue;
         }
         let heard = &heard_words[h];
-        let at = match segment_taken[heard.segment] {
-            false => segments[heard.segment].start_ms,
-            true => heard.at_ms,
+        // A word with its own time is placed by it. Only a guessed place is
+        // bettered by the segment's start.
+        let at = match (timed, segment_taken.get(heard.segment).copied()) {
+            (true, _) => heard.at_ms,
+            (false, Some(false)) => segments[heard.segment].start_ms,
+            (false, _) => heard.at_ms,
         };
-        segment_taken[heard.segment] = true;
+        if let Some(taken) = segment_taken.get_mut(heard.segment) {
+            *taken = true;
+        }
         anchors[line] = Some(at);
     }
     // The anchors came from a monotonic alignment, but a segment start taken
@@ -148,6 +165,7 @@ pub fn time_words(written: &[String], heard: &Transcript) -> Option<Transcript> 
         confidence: None,
         language: heard.language.clone(),
         written: true,
+        words: Vec::new(),
     })
 }
 
@@ -274,6 +292,7 @@ mod tests {
             confidence: Some(0.8),
             language: Some("en".into()),
             written: false,
+            words: Vec::new(),
         }
     }
 
@@ -283,6 +302,53 @@ mod tests {
 
     fn starts(transcript: &Transcript) -> Vec<u32> {
         transcript.lines.iter().map(|line| line.start_ms).collect()
+    }
+
+    #[test]
+    fn written_lines_inside_one_long_segment_are_timed_by_the_words_heard_in_it() {
+        // The report: a verse the recogniser heard as one segment from 3 s to
+        // 33 s, with the hook sung at 7 s inside it. Spread evenly across the
+        // segment its words land seconds from where they were sung; at their
+        // own times, the hook's line is where the hook is.
+        let sung = [
+            (3_200, "hey there bankroll"),
+            (5_000, "slow it down"),
+            (7_000, "hold me closer now tonight"),
+            (9_500, "shake it all around the room"),
+            (20_000, "never coming for the drama"),
+            (30_000, "slow it down"),
+        ];
+        let mut heard = heard(&[(
+            3_000,
+            33_000,
+            &sung.iter().map(|(_, said)| *said).collect::<Vec<_>>().join(" "),
+        )]);
+        let written: Vec<String> = sung.iter().map(|(_, said)| said.to_string()).collect();
+        let spread = time_words(&written, &heard).unwrap();
+        heard.words = sung
+            .iter()
+            .flat_map(|&(at, said)| {
+                said.split(' ').enumerate().map(move |(i, word)| crate::transcribe::Word {
+                    start_ms: at + i as u32 * 250,
+                    end_ms: at + i as u32 * 250 + 200,
+                    text: word.to_string(),
+                })
+            })
+            .collect();
+        let timed = time_words(&written, &heard).unwrap();
+
+        let hook = |transcript: &Transcript| {
+            transcript
+                .lines
+                .iter()
+                .find(|line| line.text == "hold me closer now tonight")
+                .unwrap()
+                .start_ms
+        };
+        assert_eq!(hook(&timed), 7_000, "{timed:?}");
+        assert!(hook(&spread).abs_diff(7_000) > 2_000, "the fixture shows nothing: {spread:?}");
+        let starts: Vec<u32> = timed.lines.iter().map(|line| line.start_ms).collect();
+        assert_eq!(starts, sung.map(|(at, _)| at), "{timed:?}");
     }
 
     #[test]

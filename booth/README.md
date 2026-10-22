@@ -1054,6 +1054,25 @@ few words to say the heard times are these words' times, what was heard is
 taken instead and the log says so. The same happens to lines typed in by hand
 without times.
 
+**Each heard word has a time of its own.** A recogniser's line is a segment, and
+a segment can be half a minute of a verse: written lines timed by it used to
+spread the segment's words evenly across it, which on a rap verse with pauses
+in it is seconds from where they were sung. whisper.cpp times every token, and
+those times are where the words start — on its own sample, behind six seconds
+of silence and read through the cut, the first word came back at 6.32 s where
+its sound starts at 6.33, and the words after the two long pauses at 9.32 and
+14.19 where theirs start at 9.29 and 14.19. A written line now takes the time of
+the first of its words that was heard. Read whole, without the cut, the same
+words came back seconds early, the way the first segment does, so a stem read
+whole lends its lines and not its words.
+
+**A stretch of a lyric file stamped alike was never timed.** A file came back
+from a server with seventeen lines at `[00:03.52]` across the first half-minute
+and the hook among them, and the hook's button went to 3.5 s where it is sung
+at 7. A line with the time of the line before is now a time it is sung and not
+a place it lands, so nothing is cued there; and words with such a stretch in
+them go through the recogniser to be timed, like words with no times at all.
+
 The words are kept in the collection once they have been heard, so cueing the
 same track again is instant and costs no stem render and no recogniser. The
 memory cue the grid is anchored to is never moved, but the hot cues are replaced

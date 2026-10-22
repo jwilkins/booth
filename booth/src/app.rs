@@ -2438,7 +2438,8 @@ impl App {
             // transcript is what gives them times — see `take_heard_words` —
             // where a realignment would stack them all on the first word sung.
             let untimed = !track.lyrics.is_empty()
-                && track.lyrics.iter().all(|line| line.start_ms == 0 && line.end_ms == 0);
+                && (track.lyrics.iter().all(|line| line.start_ms == 0 && line.end_ms == 0)
+                    || crate::library::stacked(&track.lyrics));
             let unread = again || track.lyrics.is_empty() || untimed;
             match (unread, track.lyrics_aligned, track.stems.vocals.clone()) {
                 // Words placed before where the singing is was kept with
@@ -2676,6 +2677,7 @@ impl App {
         confidence: Option<f32>,
         language: Option<String>,
         sounds: Vec<(u32, u32)>,
+        words: Vec<booth_cli::transcribe::Word>,
     ) -> usize {
         use crate::library::WordsFrom;
         /// What became of the written words, where there were any.
@@ -2701,7 +2703,12 @@ impl App {
                 true => {
                     let texts: Vec<String> =
                         track.lyrics.iter().map(|line| line.text.clone()).collect();
-                    let heard_transcript = crate::library::transcript(&lyrics);
+                    // Timed word by word where the recogniser said when each
+                    // word was: see `Transcript::words`.
+                    let heard_transcript = booth_cli::transcribe::Transcript {
+                        words,
+                        ..crate::library::transcript(&lyrics)
+                    };
                     match booth_cli::transcribe::reference::time_words(&texts, &heard_transcript) {
                         Some(timed) => {
                             let placed = crate::library::lyrics_from(&timed);
@@ -3398,11 +3405,14 @@ impl App {
                         .library
                         .get(id)
                         .map(|track| {
+                            // Not where lines share the line before's time:
+                            // those were not timed, and the stem is what can.
                             let timed = verdict == Verdict::Keep
                                 && track
                                     .lyrics
                                     .iter()
-                                    .any(|line| line.start_ms > 0 || line.end_ms > 0);
+                                    .any(|line| line.start_ms > 0 || line.end_ms > 0)
+                                && !crate::library::stacked(&track.lyrics);
                             (timed, track.instrumental)
                         })
                         .unwrap_or((false, false));
@@ -3428,8 +3438,8 @@ impl App {
                         _ => {}
                     }
                 }
-                Update::Transcribed { id, lyrics, confidence, language, sounds } => {
-                    self.take_heard_words(id, lyrics, confidence, language, sounds);
+                Update::Transcribed { id, lyrics, confidence, language, sounds, words } => {
+                    self.take_heard_words(id, lyrics, confidence, language, sounds, words);
                     changed = true;
                 }
                 Update::Progress { done, total } => {
@@ -14992,7 +15002,14 @@ mod tests {
                         },
                     ];
                     assert_eq!(
-                        app.take_heard_words(id, heard, Some(0.8), Some("de".into()), Vec::new()),
+                        app.take_heard_words(
+                            id,
+                            heard,
+                            Some(0.8),
+                            Some("de".into()),
+                            Vec::new(),
+                            Vec::new()
+                        ),
                         2
                     );
 
@@ -15019,7 +15036,14 @@ mod tests {
                     let (mut app, id) = sung("heard-nothing", &[]);
                     assert!(app.take_found_words(id, &plain(&["Drei, vier", "Jetzt gehn wir ab"])));
                     assert_eq!(
-                        app.take_heard_words(id, Vec::new(), Some(0.0), None, Vec::new()),
+                        app.take_heard_words(
+                            id,
+                            Vec::new(),
+                            Some(0.0),
+                            None,
+                            Vec::new(),
+                            Vec::new()
+                        ),
                         2
                     );
 
@@ -15040,7 +15064,7 @@ mod tests {
                         end_ms: 42_000,
                         text: "hold me closer now".into(),
                     }];
-                    app.take_heard_words(id, heard, Some(0.8), None, Vec::new());
+                    app.take_heard_words(id, heard, Some(0.8), None, Vec::new(), Vec::new());
 
                     let track = app.library.get(id).unwrap();
                     assert_eq!(track.lyrics[0].text, "hold me closer now");
@@ -15074,7 +15098,14 @@ mod tests {
                         end_ms: 42_000,
                         text: "hold me closer now".into(),
                     }];
-                    app.take_heard_words(id, heard, Some(0.9), None, vec![(40_100, 42_000)]);
+                    app.take_heard_words(
+                        id,
+                        heard,
+                        Some(0.9),
+                        None,
+                        vec![(40_100, 42_000)],
+                        Vec::new(),
+                    );
                     assert_eq!(app.library.get(id).unwrap().sounds, vec![(40_100, 42_000)]);
                 }
 
@@ -15238,6 +15269,115 @@ mod tests {
                     track.stems.vocals = Some(track.path.with_extension("vocals.wav"));
                     app.rebuild();
                     (app, id)
+                }
+
+                /// The report's lyric file: a stretch of it stamped alike,
+                /// the hook among those lines, and the rest timed.
+                fn stamped_alike() -> Vec<crate::library::Lyric> {
+                    [
+                        (120, "who is cooking up tonight"),
+                        (3_520, "hey there bankroll"),
+                        (3_520, "slow it down"),
+                        (3_520, "hold me closer now tonight"),
+                        (3_520, "shake it all around the room"),
+                        (35_250, "never coming for the drama"),
+                        (40_720, "hold me closer now tonight"),
+                    ]
+                    .iter()
+                    .map(|&(start_ms, text)| crate::library::Lyric {
+                        start_ms,
+                        end_ms: start_ms + 2_000,
+                        text: text.into(),
+                    })
+                    .collect()
+                }
+
+                #[test]
+                fn words_with_a_stretch_stamped_alike_are_read_off_the_stem_to_be_timed() {
+                    // Cued as they stood, the hook's button went to 3.5 s,
+                    // the time seventeen lines shared, and the hook was sung
+                    // at 7. Only the stem can say when those lines were sung,
+                    // so they wait for the recogniser like words with no
+                    // times at all.
+                    let (mut app, id) = read_already("stacked");
+                    let track = app.library.get_mut(id).unwrap();
+                    track.lyrics = stamped_alike();
+                    track.words_from = WordsFrom::Server;
+                    track.lyrics_aligned = true;
+                    // Nameless, so that the plan goes straight to the
+                    // recogniser rather than asking a server first.
+                    track.artist.clear();
+                    app.rebuild();
+
+                    let plan = app.words_plan(&[id], false);
+                    assert_eq!(plan.reading.iter().map(|read| read.id).collect::<Vec<_>>(), [id]);
+                    assert!(plan.known.is_empty(), "cued from the stacked times as they stood");
+                }
+
+                #[test]
+                fn a_stretch_stamped_alike_is_timed_word_by_word_from_what_was_heard() {
+                    // The recogniser heard the verse as one segment from 3 s
+                    // to 33 s, the hook inside it at 7 s. Its word times give
+                    // each written line its own.
+                    let (mut app, id) = read_already("stacked-heard");
+                    {
+                        let track = app.library.get_mut(id).unwrap();
+                        track.lyrics = stamped_alike();
+                        track.words_from = WordsFrom::Server;
+                    }
+                    let sung = [
+                        (120, "who is cooking up tonight"),
+                        (3_200, "hey there bankroll"),
+                        (5_000, "slow it down"),
+                        (7_000, "hold me closer now tonight"),
+                        (9_500, "shake it all around the room"),
+                        (35_250, "never coming for the drama"),
+                        (40_720, "hold me closer now tonight"),
+                    ];
+                    let heard = vec![
+                        crate::library::Lyric {
+                            start_ms: 120,
+                            end_ms: 33_000,
+                            text: sung[..5]
+                                .iter()
+                                .map(|(_, said)| *said)
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        },
+                        crate::library::Lyric {
+                            start_ms: 35_250,
+                            end_ms: 43_000,
+                            text: sung[5..]
+                                .iter()
+                                .map(|(_, said)| *said)
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        },
+                    ];
+                    let words: Vec<booth_cli::transcribe::Word> = sung
+                        .iter()
+                        .flat_map(|&(at, said)| {
+                            said.split(' ').enumerate().map(move |(i, word)| {
+                                booth_cli::transcribe::Word {
+                                    start_ms: at + i as u32 * 250,
+                                    end_ms: at + i as u32 * 250 + 200,
+                                    text: word.to_string(),
+                                }
+                            })
+                        })
+                        .collect();
+                    app.take_heard_words(id, heard, Some(0.9), None, Vec::new(), words);
+
+                    let starts: Vec<u32> = app
+                        .library
+                        .get(id)
+                        .unwrap()
+                        .lyrics
+                        .iter()
+                        .map(|line| line.start_ms)
+                        .collect();
+                    assert_eq!(starts, sung.map(|(at, _)| at));
+                    assert!(!crate::library::stacked(&app.library.get(id).unwrap().lyrics));
                 }
 
                 #[test]
