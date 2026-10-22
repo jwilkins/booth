@@ -29,10 +29,31 @@ pub struct Line {
     pub text: String,
 }
 
+/// One word a recogniser heard, and when it began and ended.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Word {
+    pub start_ms: u32,
+    pub end_ms: u32,
+    pub text: String,
+}
+
 /// What was sung, and when.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Transcript {
     pub lines: Vec<Line>,
+    /// Every word the recogniser heard, in order, each with a time of its own,
+    /// where it gave them and they can be trusted; empty otherwise.
+    ///
+    /// A line's time is where its segment starts, and a segment can be half a
+    /// minute of a verse: timing somebody's written lines by it spread each
+    /// segment's words evenly across it, which on a rap verse with pauses in
+    /// it is seconds out. whisper.cpp times every token, and on its own
+    /// sample the token times are where the words start — 0.32 s for a word
+    /// the audio has starting at 0.33, 3.30 for one at 3.29, 8.19 for one at
+    /// 8.19. They are only kept where the recogniser was handed the record
+    /// cut to its sung stretches, because behind six seconds of silence the
+    /// same tokens came back seconds early: see [`whisper::transcribe_mix`].
+    pub words: Vec<Word>,
     /// How sure the recogniser was of what it wrote, from 0 to 1, or `None`
     /// from one that did not say.
     ///
@@ -254,7 +275,8 @@ impl Transcript {
     /// repeats, because a recogniser runs them together; see [`phrases`].
     fn heard_refrains(&self) -> Vec<Refrain> {
         let mut groups: Vec<Group> = Vec::new();
-        for line in &self.lines {
+        let untimed = shares_its_time(&self.lines);
+        for (line, untimed) in self.lines.iter().zip(untimed) {
             for (nth, phrase) in phrases(&line.text).into_iter().enumerate() {
                 let said = words(&phrase);
                 if said.len() < MIN_WORDS {
@@ -265,10 +287,10 @@ impl Transcript {
                 // never placed, because the recogniser timed the segment and
                 // not the phrases in it, and a cue on a guess at where a
                 // phrase began is worse than no cue there at all.
-                let placed = nth == 0;
+                let placed = nth == 0 && !untimed;
                 match groups.iter_mut().find(|group| group.matches(&said)) {
                     Some(group) => group.add(line.start_ms, said, &phrase, placed),
-                    None => groups.push(Group::new(line.start_ms, said, &phrase)),
+                    None => groups.push(Group::new(line.start_ms, said, &phrase, placed)),
                 }
             }
         }
@@ -325,9 +347,10 @@ impl Transcript {
         self.refrains().into_iter().filter(|refrain| refrain.times() >= MIN_TIMES).collect()
     }
 
-    /// The line the track repeats most, if any line is repeated at all.
+    /// The line the track repeats most, if any line is repeated at all and
+    /// lands somewhere to be cued. See [`shares_its_time`].
     pub fn hook(&self) -> Option<Refrain> {
-        self.repeated().into_iter().next()
+        self.repeated().into_iter().find(|refrain| !refrain.at.is_empty())
     }
 
     /// Where the singing starts.
@@ -362,6 +385,11 @@ impl Transcript {
         // slots in when the arrangement wants them.
         let (repeated, once): (Vec<Refrain>, Vec<Refrain>) =
             self.refrains().into_iter().partition(|line| line.times() >= MIN_TIMES);
+        // A line heard only where its time is the line before's has nowhere
+        // to be cued, and is not the hook for the cues' purposes: the hook is
+        // the most repeated line that has. See `shares_its_time`.
+        let repeated: Vec<Refrain> =
+            repeated.into_iter().filter(|line| !line.at.is_empty()).collect();
         for (rank, line) in repeated.iter().take(LINES).enumerate() {
             let text = comment(&line.text);
             let kind = match rank {
@@ -465,8 +493,14 @@ struct Group {
 }
 
 impl Group {
-    fn new(at: u32, said: Vec<String>, text: &str) -> Self {
-        Self { heard: vec![(said, tidy(text))], last_seen: at, at: vec![at], sung: 1 }
+    /// A group's first hearing: an airing where it was `placed`, and only a
+    /// hearing where it was not.
+    fn new(at: u32, said: Vec<String>, text: &str, placed: bool) -> Self {
+        let at_first = match placed {
+            true => vec![at],
+            false => Vec::new(),
+        };
+        Self { heard: vec![(said, tidy(text))], last_seen: at, at: at_first, sung: 1 }
     }
 
     /// Whether a line belongs here. Compared against every wording already in
@@ -491,7 +525,9 @@ impl Group {
         // is one airing; so is a recogniser that has lost its place and is
         // emitting the same line every second, which would otherwise read as an
         // airing every four seconds for as long as it kept going.
-        if at.saturating_sub(self.last_seen) >= APART_MS {
+        // The first place it lands is an airing however soon after a hearing
+        // that was not placed.
+        if self.at.is_empty() || at.saturating_sub(self.last_seen) >= APART_MS {
             self.at.push(at);
             self.sung += 1;
         }
@@ -629,6 +665,24 @@ pub(crate) fn spread_in_time<T>(mut items: Vec<(u32, T)>, how_many: usize) -> Ve
     items.into_iter().zip(taken).filter(|(_, kept)| *kept).map(|(item, _)| item).collect()
 }
 
+/// Which lines carry the time of the line before them rather than a time of
+/// their own: true for every line after the first of a run stamped alike.
+///
+/// Such a line was not timed. Reported on a lyric with seventeen lines at
+/// 00:03.52 across the first half-minute of the record, the hook among them:
+/// its first airing was taken to be at 3.5 seconds, the button went there,
+/// and the line was sung well after it. A line whose time is the line
+/// before's is still a line that was sung, so it counts towards how often
+/// a line comes round; it is never a place a line lands. The first of the
+/// run keeps the time, which was written for it.
+pub fn shares_its_time(lines: &[Line]) -> Vec<bool> {
+    let mut untimed = vec![false; lines.len()];
+    for i in 1..lines.len() {
+        untimed[i] = lines[i].start_ms == lines[i - 1].start_ms;
+    }
+    untimed
+}
+
 /// Where a person writing a lyric down breaks a line. Brackets as well as
 /// stops: an ad-lib is written in them, "Mama, ooh (any way the wind blows)".
 const PUNCTUATION: [char; 10] = [',', '.', ';', ':', '!', '?', '\u{2014}', '(', ')', '"'];
@@ -643,18 +697,20 @@ fn by_pieces<'a>(
     cut: impl Fn(&'a str) -> Vec<&'a str>,
 ) -> Vec<(Group, Vec<usize>)> {
     let mut groups: Vec<(Group, Vec<usize>)> = Vec::new();
+    let untimed = shares_its_time(lines);
     for (i, line) in lines.iter().enumerate() {
         for piece in cut(&line.text) {
             let said = words(piece);
             if said.len() < MIN_WORDS {
                 continue;
             }
+            let placed = !untimed[i];
             match groups.iter_mut().find(|(group, _)| group.heard[0].0 == said) {
                 Some((group, found)) => {
-                    group.add(line.start_ms, said, piece, true);
+                    group.add(line.start_ms, said, piece, placed);
                     found.push(i);
                 }
-                None => groups.push((Group::new(line.start_ms, said, piece), vec![i])),
+                None => groups.push((Group::new(line.start_ms, said, piece, placed), vec![i])),
             }
         }
     }
@@ -675,6 +731,7 @@ fn by_runs_of_words(lines: &[Line]) -> Vec<(Group, Vec<usize>)> {
     let spans: Vec<Vec<(String, std::ops::Range<usize>)>> =
         lines.iter().map(|line| word_spans(&line.text)).collect();
     let mut used: Vec<Vec<bool>> = spans.iter().map(|words| vec![false; words.len()]).collect();
+    let untimed = shares_its_time(lines);
     let longest = spans.iter().map(Vec::len).max().unwrap_or(0);
     let mut found = Vec::new();
     for n in (FEWEST_IN_A_RUN..=longest).rev() {
@@ -710,9 +767,10 @@ fn by_runs_of_words(lines: &[Line]) -> Vec<(Group, Vec<usize>)> {
             for &(l, at) in &places {
                 let text = &lines[l].text[spans[l][at].1.start..spans[l][at + n - 1].1.end];
                 let said: Vec<String> = key.iter().map(|word| word.to_string()).collect();
+                let placed = !untimed[l];
                 match group.as_mut() {
-                    Some(group) => group.add(lines[l].start_ms, said, text, true),
-                    None => group = Some(Group::new(lines[l].start_ms, said, text)),
+                    Some(group) => group.add(lines[l].start_ms, said, text, placed),
+                    None => group = Some(Group::new(lines[l].start_ms, said, text, placed)),
                 }
             }
             let Some(group) = group.filter(|group| group.sung >= MIN_TIMES) else { continue };
@@ -968,6 +1026,51 @@ mod tests {
         let repeated = written(&lines).repeated();
         let found: Vec<&str> = repeated.iter().map(|refrain| refrain.text.as_str()).collect();
         assert_eq!(found, ["any way the wind blows"], "{repeated:?}");
+    }
+
+    /// The report's shape: an intro line, then the first half-minute's lines
+    /// all stamped alike, the hook among them, and the record timed from
+    /// there.
+    fn stamped_alike() -> Vec<(u32, &'static str)> {
+        vec![
+            (120, "who is cooking up tonight"),
+            (3_520, "hey"),
+            (3_520, "slow it down"),
+            (3_520, "hold me closer now tonight"),
+            (3_520, "shake it all around the room"),
+            (3_520, "slow it down"),
+            (3_520, "hold me closer now tonight"),
+            (35_250, "never coming for the drama"),
+            (38_570, "slow it down"),
+            (40_720, "hold me closer now tonight"),
+            (46_920, "slow it down"),
+            (49_070, "hold me closer now tonight"),
+        ]
+    }
+
+    #[test]
+    fn a_line_stamped_with_the_time_of_the_line_before_is_heard_and_not_placed() {
+        for transcript in [said(&stamped_alike()), written(&stamped_alike())] {
+            let hook = transcript.hook().expect("a line sung four times");
+            assert_eq!(hook.text, "hold me closer now tonight", "{hook:?}");
+            assert_eq!(hook.times(), 4, "every time it is sung counts: {hook:?}");
+            assert_eq!(hook.at, vec![40_720, 49_070], "{hook:?}");
+            let moments = transcript.moments();
+            assert!(
+                !moments.iter().any(|moment| moment.time_ms == 3_520),
+                "nothing is cued at a time seventeen lines share: {moments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_of_a_run_of_lines_stamped_alike_keeps_its_time() {
+        let transcript = written(&[
+            (3_520, "slow it down"),
+            (3_520, "shake it all around the room"),
+            (40_000, "slow it down"),
+        ]);
+        assert_eq!(transcript.hook().unwrap().at, vec![3_520, 40_000]);
     }
 
     #[test]

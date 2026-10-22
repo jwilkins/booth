@@ -386,6 +386,11 @@ pub enum Update {
         /// Where the stem is singing, measured on the way — see
         /// [`crate::library::Track::sounds`]. Empty where no stem was decoded.
         sounds: Vec<(u32, u32)>,
+        /// Every word heard, each at its own time, for timing written lines
+        /// by — see `booth_cli::transcribe::Transcript::words`. Not kept with
+        /// the track: a word per entry is a collection several times the size
+        /// for something used once, here, while it is in hand.
+        words: Vec<booth_cli::transcribe::Word>,
     },
     /// One row's waveform, measured from its own audio.
     Drawn {
@@ -1946,6 +1951,7 @@ fn realign(tracks: Vec<Realigning>, reporter: &Channel) -> anyhow::Result<()> {
                     confidence: None,
                     language: None,
                     sounds: booth_cli::transcribe::align::sounds(&audio),
+                    words: Vec::new(),
                 });
             }
             // Not a failure worth stopping for: the stem has moved or will not
@@ -2009,6 +2015,7 @@ fn transcribe(
                     confidence: transcript.confidence,
                     language: transcript.language.clone(),
                     sounds,
+                    words: transcript.words,
                 });
             }
             Err(e) => {

@@ -31,7 +31,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::audio::resample::resample;
 use crate::audio::Audio;
 
-use super::{Line, Transcript};
+use super::{Line, Transcript, Word};
 
 /// What the models are trained on, and all whisper.cpp will accept.
 pub const SPEECH_RATE: u32 = 16_000;
@@ -125,7 +125,7 @@ pub fn transcribe_audio(
     // own timing is wrong on a stem in a way that is measurable and fixable,
     // and the fixing needs the audio — which nothing downstream has, because
     // what is kept in a collection is the words. See [`super::align`].
-    Ok(super::align::aligned(recognise(audio, config, on_progress)?, audio))
+    Ok(uncut(super::align::aligned(recognise(audio, config, on_progress)?, audio)))
 }
 
 /// What the recogniser made of a record, and what it was handed to make it.
@@ -168,7 +168,7 @@ pub fn transcribe_mix(
     }
     let spans = super::align::voiced_spans(stem);
     let Some(cut) = super::cut::Cut::of(mix, &spans) else {
-        let transcript = super::align::aligned(recognise(stem, config, on_progress)?, stem);
+        let transcript = uncut(super::align::aligned(recognise(stem, config, on_progress)?, stem));
         return Ok(Heard { transcript, handed: Handed::WholeStem });
     };
     let mut transcript = cut.put_back(recognise(&cut.audio, config, on_progress)?);
@@ -178,6 +178,22 @@ pub fn transcribe_mix(
     super::align::to_the_voice(&mut transcript, &spans);
     let handed = Handed::Stretches { stretches: cut.stretches(), share: cut.share() };
     Ok(Heard { transcript, handed })
+}
+
+/// A transcript of audio handed over whole, without its word times.
+///
+/// Measured on whisper.cpp's own sample behind six seconds of silence: the
+/// segment came back starting at zero, as the README describes, and so did
+/// the words in it — the first at 0.00 where it is sung at 6.33, one at 6.34
+/// where it is sung at 9.29 — righting themselves only towards the end of the
+/// segment. Lines are put back on the voice by [`super::align`]; a word's
+/// error is not a shift that could be undone, so the words are dropped, and
+/// timing written lines by this transcript falls back on its segments. Cut to
+/// its sung stretches the recogniser never sees a silence that long, and the
+/// words are kept: see `word_times` in the tests.
+fn uncut(mut transcript: Transcript) -> Transcript {
+    transcript.words.clear();
+    transcript
 }
 
 /// Say so if the recogniser is not set up, before any audio is looked at.
@@ -236,6 +252,10 @@ fn recognise(audio: &Audio, config: &Config, on_progress: &dyn Fn(u8)) -> Result
                 .arg(&speech)
                 .arg("--output_format")
                 .arg("json")
+                // A time for every word, which whisper.cpp's full JSON has
+                // without asking: see `Transcript::words`.
+                .arg("--word_timestamps")
+                .arg("True")
                 .arg("--output_dir")
                 .arg(&config.work_dir);
             if let Some(model) = &config.model {
@@ -287,11 +307,13 @@ fn read(json: &str, flavour: Flavour) -> Result<Transcript> {
     })?;
 
     let mut lines = Vec::with_capacity(segments.len());
+    let mut words = Vec::new();
     for segment in segments {
         let text = segment.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
         if !is_speech(&text) {
             continue;
         }
+        words.extend(words_of(segment, flavour));
         let (start_ms, end_ms) = match flavour {
             // whisper.cpp gives milliseconds outright.
             Flavour::Cpp => {
@@ -323,7 +345,68 @@ fn read(json: &str, flavour: Flavour) -> Result<Transcript> {
             .and_then(|l| l.as_str())
             .map(str::to_string),
         written: false,
+        words,
     })
+}
+
+/// A segment's words, each with its own time.
+///
+/// whisper.cpp times tokens, and a token is a word or a piece of one: " fell"
+/// and "ow", or "," after " Americans". A token with a space in front starts
+/// a word and the ones without carry it on, and its markers — `[_BEG_]`,
+/// `[_TT_550]` — are not words at all. OpenAI's gives words outright when
+/// asked, in seconds.
+fn words_of(segment: &serde_json::Value, flavour: Flavour) -> Vec<Word> {
+    let mut words: Vec<Word> = Vec::new();
+    match flavour {
+        Flavour::Cpp => {
+            let tokens = segment.get("tokens").and_then(|t| t.as_array());
+            for token in tokens.into_iter().flatten() {
+                let text = token.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if text.starts_with("[_") {
+                    continue;
+                }
+                let offsets = token.get("offsets");
+                let at = |name: &str| {
+                    offsets.and_then(|o| o.get(name)).and_then(|v| v.as_u64()).unwrap_or(0) as u32
+                };
+                match (text.starts_with(' '), words.last_mut()) {
+                    (false, Some(word)) => {
+                        word.text.push_str(text);
+                        // A comma's time is the pause after the word, which
+                        // is not more of the word.
+                        if text.chars().any(char::is_alphanumeric) {
+                            word.end_ms = at("to").max(word.end_ms);
+                        }
+                    }
+                    _ => words.push(Word {
+                        start_ms: at("from"),
+                        end_ms: at("to").max(at("from")),
+                        text: text.trim().to_string(),
+                    }),
+                }
+            }
+        }
+        Flavour::Python => {
+            let said = segment.get("words").and_then(|w| w.as_array());
+            for word in said.into_iter().flatten() {
+                let at = |name: &str| {
+                    let seconds = word.get(name).and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
+                    (seconds * 1000.0).round() as u32
+                };
+                let text = word.get("word").and_then(|w| w.as_str()).unwrap_or("").trim();
+                words.push(Word {
+                    start_ms: at("start"),
+                    end_ms: at("end").max(at("start")),
+                    text: text.to_string(),
+                });
+            }
+        }
+    }
+    // Punctuation on its own is not a word, and a pause the recogniser wrote
+    // as one is not a place anything was sung.
+    words.retain(|word| word.text.chars().any(char::is_alphanumeric));
+    words
 }
 
 /// How sure the recogniser was, from 0 to 1, out of whatever it said about
@@ -544,6 +627,65 @@ mod tests {
         assert_eq!(transcript.lines[0].end_ms, 12_500);
         assert_eq!(transcript.lines[0].text, "Hold me closer now");
         assert_eq!(transcript.lines[1].start_ms, 40_000);
+    }
+
+    #[test]
+    fn whisper_cpp_tokens_come_back_as_words_each_at_its_own_time() {
+        // Shaped like whisper.cpp's full JSON, which is what Booth asks for:
+        // a word in two tokens, a comma on the end of one, and its markers.
+        let json = r#"{"transcription": [{
+            "offsets": {"from": 0, "to": 11000},
+            "text": " And so my fellow Americans, ask",
+            "tokens": [
+                {"text": "[_BEG_]", "offsets": {"from": 0, "to": 0}},
+                {"text": " And", "offsets": {"from": 320, "to": 370}},
+                {"text": " so", "offsets": {"from": 370, "to": 530}},
+                {"text": " fell", "offsets": {"from": 850, "to": 1200}},
+                {"text": "ow", "offsets": {"from": 1200, "to": 1590}},
+                {"text": " Americans", "offsets": {"from": 1590, "to": 2100}},
+                {"text": ",", "offsets": {"from": 2850, "to": 3300}},
+                {"text": " ask", "offsets": {"from": 3300, "to": 4140}},
+                {"text": "[_TT_550]", "offsets": {"from": 11000, "to": 11000}}
+            ]}]}"#;
+        let words: Vec<(u32, u32, String)> = read(json, Flavour::Cpp)
+            .unwrap()
+            .words
+            .into_iter()
+            .map(|word| (word.start_ms, word.end_ms, word.text))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                (320, 370, "And".to_string()),
+                (370, 530, "so".to_string()),
+                (850, 1_590, "fellow".to_string()),
+                // The comma's time is the pause after, not more of the word.
+                (1_590, 2_100, "Americans,".to_string()),
+                (3_300, 4_140, "ask".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_whisper_words_come_back_in_milliseconds() {
+        let json = r#"{"segments": [{"start": 0.0, "end": 2.0, "text": " And so",
+            "words": [{"word": " And", "start": 0.32, "end": 0.37},
+                      {"word": " so", "start": 0.37, "end": 0.53}]}]}"#;
+        let words: Vec<(u32, String)> = read(json, Flavour::Python)
+            .unwrap()
+            .words
+            .into_iter()
+            .map(|word| (word.start_ms, word.text))
+            .collect();
+        assert_eq!(words, [(320, "And".to_string()), (370, "so".to_string())]);
+    }
+
+    #[test]
+    fn words_in_what_is_not_speech_are_not_words() {
+        let json = r#"{"transcription": [{"offsets": {"from": 0, "to": 3000},
+            "text": " [Music]",
+            "tokens": [{"text": " [Music]", "offsets": {"from": 0, "to": 3000}}]}]}"#;
+        assert!(read(json, Flavour::Cpp).unwrap().words.is_empty());
     }
 
     #[test]

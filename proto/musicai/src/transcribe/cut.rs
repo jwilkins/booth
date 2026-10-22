@@ -184,6 +184,14 @@ impl Cut {
             line.start_ms = start;
             line.end_ms = end;
         }
+        // And every word, by the same map: a word is a moment in the cut like
+        // a line is.
+        for word in &mut transcript.words {
+            let start = self.start_back(word.start_ms);
+            let end = self.end_back(word.end_ms).max(start);
+            word.start_ms = start;
+            word.end_ms = end;
+        }
         transcript
     }
 
@@ -283,6 +291,22 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_word_goes_back_onto_the_records_clock_the_way_a_line_does() {
+        let cut = Cut::of(&record(60), &[(10_000, 12_000), (40_000, 42_000)]).unwrap();
+        // A word in the second piece of the cut, a second into its singing.
+        let second = cut.pieces[1];
+        let in_cut = second.at_ms + (40_000 - second.from_ms) + 1_000;
+        let mut transcript = Transcript::default();
+        transcript.words.push(crate::transcribe::Word {
+            start_ms: in_cut,
+            end_ms: in_cut + 300,
+            text: "closer".into(),
+        });
+        let back = cut.put_back(transcript);
+        assert_eq!((back.words[0].start_ms, back.words[0].end_ms), (41_000, 41_300));
     }
 
     #[test]

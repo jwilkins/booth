@@ -487,6 +487,13 @@ pub fn transcript(lyrics: &[Lyric]) -> booth_cli::transcribe::Transcript {
     }
 }
 
+/// Whether some of these lines carry the time of the line before rather than
+/// one of their own: a lyric file with a stretch of it never timed, which the
+/// recogniser is what can time. See `booth_cli::transcribe::shares_its_time`.
+pub fn stacked(lyrics: &[Lyric]) -> bool {
+    booth_cli::transcribe::shares_its_time(&transcript(lyrics).lines).contains(&true)
+}
+
 /// A track's words, read the way where they came from says to read them.
 pub fn words_of(track: &Track) -> booth_cli::transcribe::Transcript {
     booth_cli::transcribe::Transcript {
