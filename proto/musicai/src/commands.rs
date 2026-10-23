@@ -103,7 +103,7 @@ pub fn anlz(args: &AnlzArgs, reporter: &dyn Reporter) -> Result<()> {
 fn write_analysis(args: &AnlzArgs, path: &Path) -> Result<Vec<String>> {
     let audio = decode_file(path)?;
     let waveforms = waveform::analyze(&audio);
-    let listened = analysis::analyze_at(&audio, args.bpm);
+    let listened = analysis::analyze_drawn(&audio, args.bpm, &waveforms.band_detail);
     if !listened.found_beats() {
         bail!("no beat could be found; pass --bpm to say what the tempo is");
     }

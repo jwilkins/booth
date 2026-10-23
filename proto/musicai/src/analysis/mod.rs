@@ -13,6 +13,7 @@
 //! installed; the classifier is run by whoever has the weights.
 
 pub mod cues;
+pub mod energy;
 pub mod features;
 pub mod key;
 pub mod place;
@@ -74,6 +75,15 @@ pub fn analyze(audio: &Audio) -> TrackAnalysis {
 /// they are, not where they fall, and putting them in the wrong place is how a
 /// grid ends up half a beat out for the whole track.
 pub fn analyze_at(audio: &Audio, bpm: Option<f64>) -> TrackAnalysis {
+    analyze_drawn(audio, bpm, &crate::export::waveform::analyze(audio).band_detail)
+}
+
+/// The same, for a caller that has drawn the track's three-band picture
+/// already, which is where the cues find the main drop and the main break.
+/// Drawing it takes about as long as the rest of the analysis put together —
+/// 370 ms against 600 on a five-minute track — so a caller that wants the
+/// picture anyway draws it once.
+pub fn analyze_drawn(audio: &Audio, bpm: Option<f64>, bands: &[u8]) -> TrackAnalysis {
     let measured = features::extract(audio);
     let beats = tempo::detect_at(&measured, bpm);
     let times: Vec<u32> = beats.grid.beats.iter().map(|b| b.time_ms).collect();
@@ -82,7 +92,7 @@ pub fn analyze_at(audio: &Audio, bpm: Option<f64>) -> TrackAnalysis {
     // first heard one, so this is 0 to 3 beats in, and nothing downstream can
     // work it out from the times alone.
     let bar_phase = beats.grid.beats.iter().position(|beat| beat.number == 1).unwrap_or(0);
-    let cues = cues::suggest(&measured, &times, &structure, bar_phase);
+    let cues = cues::suggest(&measured, bands, &times, &structure, bar_phase);
     let key = key::detect(audio);
     let intensity = peak_intensity(&measured);
 

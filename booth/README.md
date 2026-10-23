@@ -912,38 +912,68 @@ button of its own, which put the hook under two of the eight and left a line
 the room sings without one; eight buttons for a live remix want eight
 different places to go. So **a line has one button**, and its returns, the
 comeback among them, are markers. The one way a line is under a second button
-is a drop: where the hook comes back on the drop after the break, that drop's
-button is where it lands, and it reads `drop` rather than the line, because the
-drop is the reason for the button and the hook is already a button of its own.
+is C, the hook sung in a drop: see the letters below.
 
 Around them go **where the singing starts** and **the start of every phrase** the
 arrangement analysis found — intro, build, break, drop, outro.
 
-A player holds eight hot cues and a busy track offers more than eight moments,
-so **the buttons are filled in a fixed order**, the order a DJ remixing a record
-live reaches for them: the first drop; the hook; the first break; the drop back
-in, the second drop, which is where the hook's return after the break lands
-when it lands on one;
-a way in, the intro or the build before the first drop; a way out, the outro;
-a build before a drop, to ride into it; an instrumental stretch of eight bars
-or more, to lay another record's vocal over; and a second line the room sings.
-A role nothing on the record fills is skipped rather than held open, and whatever
-buttons the roles leave go to the rest by worth — a third drop before a second
-break — with the lines sung once last, spread over the record. Ranking the
-arrangement against the words produced sets that were all of one or all of the
-other, and sharing the buttons half and half fixed that by count rather than by
-kind: a busy arrangement's four were its four loudest sections, and the words'
-four the hook and three verse lines. An instrumental still gets all eight for
-its sections.
+**A to D mean the same on every record.** A hand that has learnt where the
+drop is on one record reaches for the same pad on the next, so the first four
+letters are kept for four things a DJ remixing live reaches for, and each is
+left empty on a record that has none of it rather than given to something else,
+which would put the hand on the wrong moment:
+
+- **A, the hook**, sung outside a drop — the line the room sings, where the
+  least is playing under it, so that it can be laid over another record.
+- **B, the main break**, the deepest of the record's breaks, where a second
+  record has the most room.
+- **C, the hook in a drop**, the best airing of the hook inside one, if it is at
+  least eight bars from D. Nearer, the two pads play into the same moment.
+- **D, the main drop**, the drop with the most energy in it.
+
+E to H are the rest, in time order, filled by what a set needs next: a way in,
+the intro or the build before the first drop; a way out, the outro; a build
+before a drop, to ride into it; an instrumental stretch of eight bars or more,
+to lay another record's vocal over; and a second line the room sings. A role
+nothing on the record fills is skipped, whatever buttons the roles leave go to
+the rest by worth — a third drop before a second break — and the lines sung
+once go last, spread over the record. An instrumental, with no hook, leaves A
+and C empty and gives E to H to its sections.
+
+**The main drop and the main break are found by how much each bar plays**, not
+by what the arrangement analysis called its sections. The arrangement can miss
+a section — on one record whose chorus came back after its break it found an
+intro, the break and an outro, and nothing where the chorus returned — and D on
+every record cannot rest on a name that can be missing. So the bars are measured
+again, off the three-band picture every track already has: how loud each bar is,
+and how hard its low end hits, together. A drop is eight bars or more in the top
+half of the record's own range, bridging a bar or two with the kick taken out; a
+break is what lies between two drops, if it lasts as long, so the intro and the
+outro are not breaks. The names then only say where a section starts: a drop
+the energy finds within two bars of a section is that section, and one with no
+section near it is cued where its first bar is.
+
+Both halves of the measure are needed. A pad held through a breakdown is nearly
+as loud as the drop either side — on a record made for the measurement, 3 dB
+under, and in the picture, which scales each band on its own, louder — and
+hi-hats on their own are nearly as busy as a drop, counted by onsets. What a
+drop has that neither has is the kick. On that made record, sixteen bars of
+hats, a drop, a pad breakdown, a louder drop with a lead and sixteen bars of
+hats, this finds both drops, the louder as D, and the breakdown as B, where
+loudness alone read the breakdown as the drop and onsets alone read the hats as
+drops too. The command line and the app read the same picture, so they agree
+on D.
 
 **No two buttons closer than two bars.** Pressed, the earlier of two buttons
 that close is at the later before a hand could reach for it, so a set with two
-of them covers seven places with eight buttons. The earlier keeps its button —
-it plays into the later, and the later does not play into it — and the later
-is left a marker, its button going to whatever is next in line. A break a bar
-after the drop is a marker, and the second break, which there was no room for,
-has the button. Measured in the grid's own beats, so a track with no grid has
-no bars to measure and the rule does not apply.
+of them covers seven places with eight buttons. Between A to D and the rest, the
+letter keeps its button; between two of A to D, A, then D, then B, then C; and
+between two of the rest, the earlier — it plays into the later, and the later
+does not play into it. The other is left a marker, and its button goes to
+whatever is next in line, or stays empty if it was one of A to D: a hook sung a
+bar before the main drop is A, and D is left empty rather than a bar from it.
+Measured in the grid's own beats, so a track with no grid has no bars to
+measure and the rule does not apply.
 
 **A line inside another line has no button of its own.** "Praise you" and "I
 have to praise you like I should" on two buttons is two buttons for one set of
@@ -954,13 +984,10 @@ between buttons the words put there: a drop a line landed on is a button for
 the drop. Where the shorter is the hook, the longer line is the hook's button
 from then on, so it is the one on A.
 
-**The hook always has a button, and it is A.** It is the one exception to the
-earlier keeping its button: against the hook, it is the other that goes, so a
-verse line or a drop a bar before the hook is a marker and the hook is cued.
-And it is A on every record, with the rest lettered from B in time order, so
-that the line the room sings is on the same pad whichever record is on the
-deck. A record with no hook is lettered from A in time order. Nor is it left
-off on a record that opens on it, as a hot cue where the memory cue already is
+**The hook always has a button, and it is A.** Against the hook, it is the
+other that goes, so a verse line or a drop a bar before the hook is a marker and
+the hook is cued. A record with no hook leaves A empty. Nor is the hook left off
+on a record that opens on it, as a hot cue where the memory cue already is
 otherwise would be.
 
 **A track that repeats nothing still comes back cued.** A rap, a live take, a
@@ -1113,13 +1140,16 @@ the track — so that what is pasted into a tagger or a lyric editor is read as
 timed words. Words a server had only as text have no times to copy, and the
 second button is greyed out for them rather than copying a column of zeroes.
 
-Cue Analysis opens with the buttons, one to a line, A first:
+Cue Analysis opens with the buttons, one to a line, A first, and A to D
+listed even when they are empty, with what they would have been for:
 
 ```
 A:  hook         - 02:40.00 -  81/1 - “hold me closer now”
-B:  line         - 00:20.00 -  11/1 - “walking through the city at night”
-C:  drop         - 00:32.00 -  17/1
-D:  instrumental - 01:44.00 -  53/1
+B:  —            - no break
+C:  —            - the hook is not sung in a drop clear of D
+D:  drop         - 00:32.00 -  17/1
+E:  line         - 00:20.00 -  11/1 - “walking through the city at night”
+F:  instrumental - 01:44.00 -  53/1
 ```
 
 What each button is for, where it is on the clock, the bar and beat it is on —

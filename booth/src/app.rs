@@ -2881,8 +2881,20 @@ impl App {
     /// the grid is anchored to, and moving it would move every bar line in the
     /// track.
     fn auto_cue(&mut self, id: u32) -> usize {
+        let bands = self
+            .library
+            .get(id)
+            .and_then(|track| crate::library::cached_waveform(id, &track.sources()));
+        self.auto_cue_from(id, bands.as_deref())
+    }
+
+    /// [`Self::auto_cue`], with the three-band picture the main drop and break
+    /// are found in handed over rather than read from where the collection
+    /// keeps it — which is a folder of the user's, and no place for a test.
+    fn auto_cue_from(&mut self, id: u32, bands: Option<&[u8]>) -> usize {
         use booth_cli::analysis::cues::{self, Candidate, Reason};
         use booth_cli::analysis::structure::Kind;
+        use booth_cli::transcribe::MomentKind;
 
         let Some(track) = self.library.get(id) else { return 0 };
         let beats = beat_times(track);
@@ -2895,21 +2907,56 @@ impl App {
             })
             .collect();
 
+        // Where the sections start, on the grid, for counting phrases from —
+        // before the energy adds a drop the arrangement missed, which is a
+        // place a section starts but not one a phrase is counted from.
+        let sections: Vec<u32> = candidates.iter().map(|candidate| candidate.time_ms).collect();
+
+        // The main drop and the main break by how much each bar plays, read
+        // off the picture the collection keeps — see `energy`. No picture, no
+        // measurement: the first section named each, as before.
+        let shape = bands
+            .map(|bands| {
+                booth_cli::analysis::energy::shape(&booth_cli::analysis::energy::bars(
+                    bands, &beats,
+                ))
+            })
+            .unwrap_or_default();
+        cues::mark_the_main_ones(&mut candidates, &beats, &shape);
+        let main_drop = candidates
+            .iter()
+            .find(|candidate| candidate.main && candidate.reason == Reason::Section(Kind::Chorus))
+            .map(|candidate| candidate.time_ms);
+        let drops = drop_spans(track, &beats, &shape);
+
         let words = crate::library::words_of(track);
         let sounds = track.sounds.clone();
-        // Where the sections start, on the grid, for counting phrases from.
-        let sections: Vec<u32> = candidates.iter().map(|candidate| candidate.time_ms).collect();
-        let (moments, chosen) = cued_airings(words.moments(), &words, &beats, &sounds, &sections);
+        let hook = Hook { drops: &drops, main_drop };
+        let (moments, chosen, hook_in_a_drop) =
+            cued_airings(words.moments(), &words, &beats, &sounds, &sections, &hook);
         for moment in &moments {
             let mut candidate = cues::from_moment(moment);
             // From where the stem has the line's singing start, not from the
             // time its lyric gave it, which inside a verse is an estimate.
             let begins = heard_start(moment.time_ms, &words, &sounds);
+            // Button C: the hook's airing in a drop, a button rather than the
+            // marker every other return is.
+            if hook_in_a_drop.as_ref().is_some_and(|(at, text)| {
+                *at == moment.time_ms && *text == moment.text && moment.kind != MomentKind::Hook
+            }) {
+                candidate = Candidate::named(
+                    booth_cli::analysis::place::place(begins, &beats, &sounds).time_ms,
+                    Reason::Comeback,
+                    &moment.text,
+                );
+                candidates.push(candidate);
+                continue;
+            }
             candidate.time_ms = match moment.kind {
                 // A marker is for reading the words where they are sung, so it
                 // stays on the beat before them. A button is for pressing on
                 // the one, so it climbs the ladder — see `place`.
-                booth_cli::transcribe::MomentKind::Return => snap_back(&beats, begins),
+                MomentKind::Return | MomentKind::Comeback => snap_back(&beats, begins),
                 _ => booth_cli::analysis::place::place(begins, &beats, &sounds).time_ms,
             };
             candidates.push(candidate);
@@ -13106,41 +13153,117 @@ fn heard_start(
     booth_cli::analysis::place::line_start(at_ms, before, after, sounds).unwrap_or(at_ms)
 }
 
-/// Give each line's button to the airing that places best.
+/// Where a record's drops are, as spans on its clock, for saying whether the
+/// hook is sung inside one: the drops the energy found — see `energy` — or,
+/// where nothing measured that, the sections named drops.
+fn drop_spans(
+    track: &Track,
+    grid: &[u32],
+    shape: &booth_cli::analysis::energy::Shape,
+) -> Vec<(u32, u32)> {
+    use booth_cli::analysis::place::BEATS_PER_BAR;
+    if shape.drops.is_empty() {
+        return track
+            .phrases
+            .iter()
+            .filter(|phrase| phrase.kind == "drop")
+            .map(|phrase| (phrase.start_ms, phrase.end_ms))
+            .collect();
+    }
+    let at = |bar: usize| grid.get(bar * BEATS_PER_BAR).copied();
+    shape
+        .drops
+        .iter()
+        .filter_map(|run| Some((at(run.from)?, at(run.to).unwrap_or(u32::MAX))))
+        .collect()
+}
+
+/// What deciding the hook's two buttons needs to know about the record.
+struct Hook<'a> {
+    /// Where the drops are — see [`drop_spans`].
+    drops: &'a [(u32, u32)],
+    /// Where the main drop starts: button D.
+    main_drop: Option<u32>,
+}
+
+/// Give each line's button to the airing that places best, and the hook a
+/// second where it is sung in a drop.
 ///
 /// `moments()` puts the hook and the refrains where they first land and makes
 /// every later airing a return, a marker. The button goes instead to the
 /// airing `place::best_airing` picks, and the first airing takes that airing's
 /// place as the return — the two swap times, so the markers are where they
-/// were and only the button moves. The hook's comeback is in the running like
-/// any other airing: it is a marker, not a button of its own — a line gets one
-/// button — so if it is where the hook is cued best, the button goes there and
-/// the first airing takes its marker.
+/// were and only the button moves.
+///
+/// The hook's button, A, goes to the airing that places best outside a drop:
+/// the hook as the room sings it over the verse or the build, where the drop
+/// is D's. A hook sung only in drops has A on its first airing not within two
+/// bars of D, so that the two are two places. And the hook's airing that
+/// places best inside a drop, at least [`cues::HOOK_IN_A_DROP_BARS`] from D,
+/// is handed back by its time and words for button C.
 fn cued_airings(
     mut moments: Vec<booth_cli::transcribe::Moment>,
     words: &booth_cli::transcribe::Transcript,
     grid: &[u32],
     sung: &[(u32, u32)],
     sections: &[u32],
-) -> (Vec<booth_cli::transcribe::Moment>, Vec<Chosen>) {
-    use booth_cli::analysis::place;
+    hook: &Hook,
+) -> (Vec<booth_cli::transcribe::Moment>, Vec<Chosen>, Option<(u32, String)>) {
+    use booth_cli::analysis::cues;
+    use booth_cli::analysis::place::{self, beats_between, BEATS_PER_BAR};
     use booth_cli::transcribe::MomentKind;
+    let in_a_drop = |at: u32| hook.drops.iter().any(|&(from, to)| (from..to).contains(&at));
+    let bars_from_d = |at: u32| match hook.main_drop {
+        Some(d) => beats_between(grid, d.min(at), d.max(at))
+            .map(|beats| beats / BEATS_PER_BAR as f32)
+            .unwrap_or(f32::MAX),
+        None => f32::MAX,
+    };
     let mut chosen = Vec::new();
+    let mut hook_in_a_drop = None;
     for refrain in words.repeated() {
         let Some(&first) = refrain.at.first() else { continue };
         let button = moments.iter().position(|moment| {
             moment.time_ms == first && matches!(moment.kind, MomentKind::Hook | MomentKind::Refrain)
         });
         let Some(button) = button else { continue };
+        let is_hook = moments[button].kind == MomentKind::Hook;
         let text = moments[button].text.clone();
-        let running: Vec<u32> = refrain.at.clone();
         // Ranked from where each airing's singing starts, so that an airing
         // whose lyric time is late is judged where it is sung.
-        let begun: Vec<u32> = running.iter().map(|&at| heard_start(at, words, sung)).collect();
-        let Some((which, placed)) = place::best_airing(&begun, grid, sung, sections) else {
+        let begun = |at: &u32| heard_start(*at, words, sung);
+        let outside: Vec<u32> =
+            refrain.at.iter().copied().filter(|at| !in_a_drop(begun(at))).collect();
+        let running: Vec<u32> = match (is_hook, outside.is_empty()) {
+            (true, false) => outside,
+            // Only ever sung in a drop: the first airing clear of D.
+            (true, true) => refrain
+                .at
+                .iter()
+                .copied()
+                .find(|at| bars_from_d(begun(at)) >= cues::APART_BARS as f32)
+                .or(Some(first))
+                .into_iter()
+                .collect(),
+            (false, _) => refrain.at.clone(),
+        };
+        let begins: Vec<u32> = running.iter().map(begun).collect();
+        let Some((which, placed)) = place::best_airing(&begins, grid, sung, sections) else {
             continue;
         };
         let best = running[which];
+        if is_hook {
+            let in_drops: Vec<u32> = refrain
+                .at
+                .iter()
+                .copied()
+                .filter(|&at| at != best && in_a_drop(begun(&at)))
+                .filter(|at| bars_from_d(begun(at)) >= cues::HOOK_IN_A_DROP_BARS as f32)
+                .collect();
+            let begins: Vec<u32> = in_drops.iter().map(begun).collect();
+            hook_in_a_drop = place::best_airing(&begins, grid, sung, sections)
+                .map(|(which, _)| (in_drops[which], text.clone()));
+        }
         let marker = moments.iter().position(|moment| {
             moment.time_ms == best
                 && matches!(moment.kind, MomentKind::Return | MomentKind::Comeback)
@@ -13171,7 +13294,7 @@ fn cued_airings(
         });
     }
     moments.sort_by_key(|moment| moment.time_ms);
-    (moments, chosen)
+    (moments, chosen, hook_in_a_drop)
 }
 
 /// The buttons, A first, one to a line: what each is for, where it is on the
@@ -13180,6 +13303,11 @@ fn cued_airings(
 /// `A:  hook - 00:32.00 -  17/1 - “hold me closer now”`. Bars and beats
 /// count from one, as the transport does; the column is left out where the
 /// track has no grid, rather than counting bars of a tempo nobody measured.
+///
+/// A to D are listed whether or not they are set, each empty one saying what
+/// it is for: on a record with no break, "B: — no break" is the answer to why
+/// B does nothing, where a list that skipped from A to C would leave it to be
+/// worked out.
 ///
 /// First in the account because it is the answer and the rest is how it was
 /// arrived at: whoever opens the panel wants the eight before the reasoning,
@@ -13191,19 +13319,20 @@ fn the_cue_points(
     words: &booth_cli::transcribe::Transcript,
 ) -> Vec<String> {
     use crate::library::BEATS_PER_BAR;
+    use booth_cli::analysis::cues::Slot;
 
-    let mut hot: Vec<(&crate::library::CueMark, &str)> = placed
+    let hot: Vec<(&crate::library::CueMark, &str)> = placed
         .iter()
         .filter(|cue| cue.letter != 0)
         .zip(reasons.iter().map(|reason| reason.label()))
         .collect();
-    // By letter, not by time: the hook is A wherever it is in the record.
-    hot.sort_by_key(|(cue, _)| cue.letter);
     // Padded to the longest present, so the times line up under each other in
     // the panel's fixed-width type without "instrumental" setting the width of
     // a track that has none.
-    let wide = hot.iter().map(|(_, kind)| kind.chars().count()).max().unwrap_or(0);
-    hot.iter()
+    let wide = hot.iter().map(|(_, kind)| kind.chars().count()).max().unwrap_or(1);
+
+    let mut said: Vec<(u8, String)> = hot
+        .iter()
         .map(|&(cue, kind)| {
             let total = cue.time_ms / 1000;
             let mut said = format!(
@@ -13220,9 +13349,24 @@ fn the_cue_points(
             if let Some(line) = plays_into(cue, kind, words) {
                 said.push_str(&format!(" - \u{201c}{line}\u{201d}"));
             }
-            said
+            (cue.letter, said)
         })
-        .collect()
+        .collect();
+    for slot in Slot::ALL {
+        if hot.iter().any(|(cue, _)| cue.letter == slot.letter()) {
+            continue;
+        }
+        let (name, why) = match slot {
+            Slot::Hook => ('A', "no line comes round to be the hook"),
+            Slot::MainBreak => ('B', "no break"),
+            Slot::HookInADrop => ('C', "the hook is not sung in a drop clear of D"),
+            Slot::MainDrop => ('D', "no drop"),
+        };
+        said.push((slot.letter(), format!("{name}:  {:<wide$} - {why}", "\u{2014}")));
+    }
+    // By letter, not by time: the hook is A wherever it is in the record.
+    said.sort_by_key(|(letter, _)| *letter);
+    said.into_iter().map(|(_, line)| line).collect()
 }
 
 /// The line a button plays into, for the list of them.
@@ -14555,15 +14699,17 @@ mod tests {
                     ],
                     ..Default::default()
                 };
-                let placed = [cue(0, 0, "Start"), cue(1, 38_000, "drop"), cue(2, 42_000, "break")];
+                let placed = [cue(0, 0, "Start"), cue(4, 38_000, "drop"), cue(2, 42_000, "break")];
                 let reasons = [Reason::Section(Kind::Chorus), Reason::Section(Kind::Down)];
                 let said = the_cue_points(&placed, &reasons, &grid(), &words);
                 assert_eq!(
                     said,
                     [
-                        "A:  drop  - 00:38.00 -  20/1 - \u{201c}the line it is for\u{201d}",
+                        "A:  \u{2014}     - no line comes round to be the hook",
                         // Inside a line with none coming: the one it is in.
                         "B:  break - 00:42.00 -  22/1 - \u{201c}the line it is for\u{201d}",
+                        "C:  \u{2014}     - the hook is not sung in a drop clear of D",
+                        "D:  drop  - 00:38.00 -  20/1 - \u{201c}the line it is for\u{201d}",
                     ]
                 );
             }
@@ -14574,7 +14720,23 @@ mod tests {
                 let words = heard(&[(41_000, "hold me closer now")]);
                 let placed = [cue(1, 41_000, "hold me closer now")];
                 let said = the_cue_points(&placed, &[Reason::Hook], &[], &words);
-                assert_eq!(said, ["A:  hook - 00:41.00 - \u{201c}hold me closer now\u{201d}"]);
+                assert_eq!(said[0], "A:  hook - 00:41.00 - \u{201c}hold me closer now\u{201d}");
+            }
+
+            #[test]
+            fn a_to_d_are_listed_when_empty_and_say_what_they_are_for() {
+                use booth_cli::analysis::cues::Reason;
+                let words = heard(&[(41_000, "hold me closer now")]);
+                let placed = [cue(1, 41_000, "hold me closer now")];
+                let said = the_cue_points(&placed, &[Reason::Hook], &[], &words);
+                assert_eq!(
+                    said[1..],
+                    [
+                        "B:  \u{2014}    - no break",
+                        "C:  \u{2014}    - the hook is not sung in a drop clear of D",
+                        "D:  \u{2014}    - no drop",
+                    ]
+                );
             }
 
             #[test]
@@ -14705,7 +14867,9 @@ mod tests {
                 // and 160 s bar 81, each on its one. The drop has no line
                 // within a couple of seconds of it and the stretch has none
                 // by definition, so those two say no words. The hook is A,
-                // and so first, though it is last in the record.
+                // and so first, though it is last in the record. There is no
+                // break, and the hook's one airing in the drop is four bars
+                // from D, so B and C say why they are empty.
                 let (mut app, id) = sung(
                     "cue-points",
                     &[
@@ -14722,10 +14886,10 @@ mod tests {
                     said[..5],
                     [
                         "A:  hook         - 02:40.00 -  81/1 - \u{201c}hold me closer now\u{201d}",
-                        "B:  line         - 00:20.00 -  11/1 - \u{201c}walking through the city at night\u{201d}",
-                        "C:  drop         - 00:32.00 -  17/1",
-                        "D:  instrumental - 01:44.00 -  53/1",
-                        "lines by how often they come round:",
+                        "B:  \u{2014}            - no break",
+                        "C:  \u{2014}            - the hook is not sung in a drop clear of D",
+                        "D:  drop         - 00:32.00 -  17/1",
+                        "E:  line         - 00:20.00 -  11/1 - \u{201c}walking through the city at night\u{201d}",
                     ],
                     "{said:#?}"
                 );
@@ -14767,10 +14931,10 @@ mod tests {
             #[test]
             fn a_line_well_into_its_bar_is_cued_on_the_bar_line_when_the_way_in_is_clear() {
                 // Two beats and a bit of band before the words on every
-                // airing, none of them on a phrase boundary, so the first
-                // wins: on its bar line, not on the beat before the words.
-                // Three bars into the drop, so that the drop's button two
-                // bars before it does not take the hook's.
+                // airing, none of them on a phrase boundary. The first is in
+                // the drop, which runs from 32 s to 64 s, and A is the hook
+                // outside a drop, so the second wins: on its bar line, not on
+                // the beat before the words.
                 let (mut app, id) = sung(
                     "bar-line",
                     &[
@@ -14785,7 +14949,7 @@ mod tests {
                     .iter()
                     .find(|cue| cue.letter != 0 && cue.label == "hold me closer now")
                     .unwrap_or_else(|| panic!("{cues:?}"));
-                assert_eq!(hook.time_ms, 38_000, "{cues:?}");
+                assert_eq!((hook.letter, hook.time_ms), (1, 98_000), "{cues:?}");
             }
 
             #[test]
@@ -14865,20 +15029,22 @@ mod tests {
             fn a_line_sung_once_a_bar_before_the_hook_gives_up_its_button_to_the_hook() {
                 // Of two buttons closer than two bars the earlier keeps its,
                 // except against the hook, which always has one: a verse line
-                // a bar before it stays a marker, and the hook is A.
+                // a bar before it stays a marker, and the hook is A. Both
+                // after the drop, which ends at 64 s, because A is the hook
+                // outside a drop.
                 let (mut app, id) = sung(
                     "verse-then-hook",
                     &[
-                        (44_000, "walking through the city at night"),
-                        (46_000, "hold me closer now"),
-                        (106_000, "hold me closer now"),
+                        (84_000, "walking through the city at night"),
+                        (86_000, "hold me closer now"),
+                        (146_000, "hold me closer now"),
                     ],
                 );
                 assert!(app.auto_cue(id) > 0, "no cues at all");
                 let cues = app.library.get(id).unwrap().cues.clone();
                 let near: Vec<(u8, &str)> = cues
                     .iter()
-                    .filter(|cue| cue.letter != 0 && (40_000..50_000).contains(&cue.time_ms))
+                    .filter(|cue| cue.letter != 0 && (80_000..90_000).contains(&cue.time_ms))
                     .map(|cue| (cue.letter, cue.label.as_str()))
                     .collect();
                 assert_eq!(near, [(1, "hold me closer now")], "{cues:?}");
@@ -14886,6 +15052,62 @@ mod tests {
                     cues.iter().any(|cue| cue.letter == 0
                         && cue.label.ends_with("walking through the city at night")),
                     "the verse line lost its marker: {cues:?}"
+                );
+            }
+
+            /// A three-band picture of the `sung` fixture's five minutes:
+            /// quiet, with its loudest stretch from bar `from` for `bars`.
+            fn loud_from(from: usize, bars: usize) -> Vec<u8> {
+                // 150 columns a second and two seconds a bar, and in the loud
+                // bars a kick: the low band up to full for the first eight
+                // columns of every beat.
+                let column = |bar: usize| bar * 300;
+                let mut bands = vec![20u8; column(150) * 3];
+                for at in column(from)..column(from + bars) {
+                    let low = if at % 75 < 8 { 127 } else { 60 };
+                    bands[at * 3..at * 3 + 3].copy_from_slice(&[low, 100, 100]);
+                }
+                bands
+            }
+
+            #[test]
+            fn the_hook_sung_in_a_drop_clear_of_d_is_c_and_outside_a_drop_is_a() {
+                // The picture has the record loud and kicking from bar 60 to 92,
+                // 2:00 to 3:04: that is the drop, and D, wherever the
+                // arrangement analysis put its own drop. The hook sung at
+                // 1:40 is outside it and is A; sung at 2:40, twenty bars
+                // into it, it is C.
+                let (mut app, id) = sung(
+                    "hook-in-a-drop",
+                    &[
+                        (100_100, "hold me closer now"),
+                        (160_100, "hold me closer now"),
+                        (250_100, "hold me closer now"),
+                    ],
+                );
+                app.auto_cue_from(id, Some(&loud_from(60, 32)));
+                let cues = app.library.get(id).unwrap().cues.clone();
+                let lettered =
+                    |n: u8| cues.iter().find(|cue| cue.letter == n).map(|cue| cue.time_ms);
+                assert_eq!(lettered(4), Some(120_000), "{cues:?}");
+                assert_eq!(lettered(1), Some(100_000), "{cues:?}");
+                assert_eq!(lettered(3), Some(160_000), "{cues:?}");
+            }
+
+            #[test]
+            fn the_hook_in_a_drop_within_eight_bars_of_d_is_not_c() {
+                // The same, the hook sung four bars into the main drop: C is
+                // a press of D a few bars late, and is left empty.
+                let (mut app, id) = sung(
+                    "hook-near-d",
+                    &[(100_100, "hold me closer now"), (128_100, "hold me closer now")],
+                );
+                app.auto_cue_from(id, Some(&loud_from(60, 32)));
+                let cues = app.library.get(id).unwrap().cues.clone();
+                assert!(!cues.iter().any(|cue| cue.letter == 3), "{cues:?}");
+                assert!(
+                    cues.iter().any(|cue| cue.letter == 4 && cue.time_ms == 120_000),
+                    "{cues:?}"
                 );
             }
 
