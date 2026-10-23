@@ -1202,18 +1202,36 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             // them rather than preparing everything again.
             let began = std::time::Instant::now();
             let outcome = booth_cli::commands::export(&args, reporter);
-            match &outcome {
-                Ok(rows) => crate::info!(
-                    "wrote {at} in {:.1}s — {} rows on the drive",
-                    began.elapsed().as_secs_f64(),
-                    rows.len()
-                ),
-                Err(e) => crate::error!(
-                    "writing {at} failed after {:.1}s: {e:#}",
-                    began.elapsed().as_secs_f64()
-                ),
-            }
-            let _ = reporter.tx.send(Update::Wrote(outcome?));
+            let rows = match outcome {
+                Ok(rows) => {
+                    crate::info!(
+                        "wrote {at} in {:.1}s — {} rows on the drive",
+                        began.elapsed().as_secs_f64(),
+                        rows.len()
+                    );
+                    rows
+                }
+                Err(e) => {
+                    crate::error!(
+                        "writing {at} failed after {:.1}s: {e:#}",
+                        began.elapsed().as_secs_f64()
+                    );
+                    // A file that failed is still a failure, and the sheet
+                    // says so. But the rest of the drive was written and
+                    // verified, and its rows are what the next write carries
+                    // — without them every track that did land is prepared
+                    // again, and a record that never heard of them would
+                    // leave them off the database the write after that.
+                    let Some(partial) = e.downcast_ref::<booth_cli::commands::PartialWrite>()
+                    else {
+                        return Err(e);
+                    };
+                    let _ = reporter.tx.send(Update::Wrote(partial.rows.clone()));
+                    (reporter.wake)();
+                    return Err(e);
+                }
+            };
+            let _ = reporter.tx.send(Update::Wrote(rows));
             (reporter.wake)();
             Ok(())
         }

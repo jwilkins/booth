@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Speed — Booth</title>
+<meta name="description" content="How long Booth takes to write a USB drive, add one track to it, and read it back — measured, dated, and shown beside what rekordbox users report.">
+<link rel="stylesheet" href="booth.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%2312161A'/><rect x='3' y='4' width='2' height='8' fill='%23E2A03F'/><rect x='7' y='2' width='2' height='12' fill='%23E2A03F'/><rect x='11' y='6' width='2' height='4' fill='%23E2A03F'/></svg>">
+<style>
+  /* Only this page has numbers that arrive after the HTML does. */
+  .num{font-variant-numeric:tabular-nums}
+  table.doc td.num,table.doc th.num{text-align:right;padding-right:0;padding-left:14px}
+  .unmeasured{color:var(--ink-3);font-style:italic}
+  .vs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:28px;margin:26px 0}
+  .vs .side{border-top:1px solid var(--rule);padding-top:14px}
+  .vs .side .who{font-family:var(--sans);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+  .vs .side b{display:block;font-family:var(--sans);font-size:30px;font-weight:800;letter-spacing:-.01em;margin:6px 0 4px}
+  .vs .side span{font-size:15px;color:var(--ink-2)}
+  @media (max-width:860px){.vs{grid-template-columns:1fr}}
+</style>
+
+<div class="bar"><div class="wrap bar-in">
+  <a class="brand" href="./">Booth<span>.</span></a>
+  <nav>
+    <a href="./">Home</a>
+    <a href="#latest">The numbers</a>
+    <a href="#against">Versus rekordbox</a>
+    <a href="#how">How it is measured</a>
+    <a href="#yours">On your stick</a>
+    <a href="progress.html">Progress</a>
+    <a href="https://github.com/jwilkins/booth">Source</a>
+  </nav>
+</div></div>
+
+<header class="hero"><div class="wrap">
+  <p class="eyebrow" id="eyebrow">Speed · measured, not claimed</p>
+  <h1>Adding one track<br>should take seconds.<br><em>Here is how many.</em></h1>
+  <p class="standfirst">The number that decides whether a night goes well is not how long the first
+  write of a drive takes — that happens at home, once — but how long adding a track to it takes at
+  five to midnight. rekordbox users report hours. These are Booth's figures, taken by the test suite
+  and republished with every measurement, so the claim is a number with a date on it.</p>
+  <div class="facts" style="margin-top:38px" id="facts">
+    <div class="fact"><b class="num" data-fact="add_one">…</b><span>to add one track to the largest drive measured</span></div>
+    <div class="fact"><b class="num" data-fact="databases_only">…</b><span>to rewrite both databases after a playlist edit</span></div>
+    <div class="fact"><b class="num" data-fact="read_back">…</b><span>to check the whole drive on the way out</span></div>
+    <div class="fact"><b class="num" data-fact="tracks">…</b><span>tracks on that drive</span></div>
+  </div>
+</div></header>
+
+<section id="latest"><div class="wrap">
+  <span class="snum">01 — The latest measurement</span>
+  <h2>Write it, add to it, read it back</h2>
+  <div class="col">
+    <p class="lede" id="taken">Loading the last measurement…</p>
+    <p>Every row is one drive: written from nothing, then written again with nothing changed but the
+    databases, then written once more with one track added, then read back the way the dock reads a
+    stick that has just been plugged in — both databases walked, every analysis file checked, every
+    track's cues and grid read.</p>
+  </div>
+  <div class="tablewrap">
+    <table class="doc" id="runs">
+      <thead><tr>
+        <th>Tracks on the drive</th>
+        <th class="num">First write</th>
+        <th class="num">of which preparing</th>
+        <th class="num">Databases alone</th>
+        <th class="num">Add one track</th>
+        <th class="num">Read it all back</th>
+        <th class="num">Analysis files</th>
+      </tr></thead>
+      <tbody><tr><td colspan="7" class="unmeasured">No measurement has been published yet.</td></tr></tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p><b>Preparing</b> is decoding a record and listening to it — tempo, grid, key, phrases, cues,
+    waveforms — and it scales with how long the records are. The records here are short on
+    purpose, so that the drive is what is being timed; a real record takes longer to listen to and
+    exactly as long to put on the stick. <b>Databases alone</b> is a write that changes nothing but
+    the two databases: a playlist reordered, a track taken off. <b>Add one track</b> is a full
+    drive carried as it is, one file prepared, both databases rebuilt and read back.</p>
+    <p class="caution callout" id="medium-note">The medium these were taken on is named above the
+    table. A runner's disk is not a USB stick, and a stick's small-file write speed is the thing
+    rekordbox's own forum blames most. The figure that counts is the one taken on a real stick —
+    <a href="#yours">here is how to take it</a>.</p>
+  </div>
+</div></section>
+
+<section id="against"><div class="wrap">
+  <span class="snum">02 — Versus rekordbox</span>
+  <h2>The same job, as its own users describe it</h2>
+  <div class="col">
+    <p class="lede">rekordbox's Sync overwrites the whole data set on the stick every time, so
+    adding one track costs what writing the drive cost. These are not benchmarks of rekordbox —
+    nobody publishes those — but what DJs reported on AlphaTheta's own forum, with the threads
+    linked so the comparison can be checked.</p>
+  </div>
+  <div class="vs">
+    <div class="side">
+      <div class="who">rekordbox, as reported</div>
+      <b>~4 hours</b>
+      <span>to Sync to USB, and &ldquo;still a really long time&rdquo; after only adding one track
+      to a playlist — rekordbox 7.2.7, macOS,
+      <a href="https://community.pioneerdj.com/hc/en-us/community/posts/55385125316249-Rekordbox-taking-hours-to-sync-to-USB-even-with-small-changes">February 2026</a>.
+      AlphaTheta's reply: Sync overwrites everything on the USB.</span>
+    </div>
+    <div class="side">
+      <div class="who">Booth, measured</div>
+      <b class="num" data-fact="add_one">…</b>
+      <span>to add one track to a drive of <span class="num" data-fact="tracks">…</span> tracks,
+      both databases rebuilt and read back, on the medium named above.</span>
+    </div>
+    <div class="side">
+      <div class="who">rekordbox, as reported</div>
+      <b>~1 hour</b>
+      <span>to export a few hundred tracks, and nearly 30 minutes to import a few hot cues back off
+      the stick —
+      <a href="https://community.pioneerdj.com/hc/en-us/community/posts/63366897508889-Slow-USB-imports-and-exports">October 2026</a>,
+      the same complaint as
+      <a href="https://community.pioneerdj.com/hc/en-us/community/posts/22979785961241-Rekordbox-Unbearably-Slow-Especially-Deleting-and-Exporting">a thread that ran from 2017 to 2021</a>.</span>
+    </div>
+    <div class="side">
+      <div class="who">Booth, measured</div>
+      <b class="num" data-fact="read_back">…</b>
+      <span>to read a drive of <span class="num" data-fact="tracks">…</span> tracks back in full: both
+      databases, every analysis file, every track's cues.</span>
+    </div>
+  </div>
+  <div class="col">
+    <p>Two things make the difference, and neither is clever. A second write carries every row the
+    drive already has and prepares only what changed, so the cost of adding a track is the cost of
+    one track. And both databases are built from one description of the drive and written in one
+    pass, so there is no reconciliation step and nothing to re-walk — the read-back afterwards is
+    a check, not a repair.</p>
+  </div>
+</div></section>
+
+<section id="how"><div class="wrap">
+  <span class="snum">03 — How it is measured</span>
+  <h2>By the test suite, in release, with the clock on the outside</h2>
+  <div class="col">
+    <p>The measurement is a test —
+    <a href="https://github.com/jwilkins/booth/blob/main/proto/musicai/tests/speed.rs"><code>proto/musicai/tests/speed.rs</code></a>
+    — that builds drives of several sizes from synthetic records, times each phase with a wall
+    clock around the same calls the window makes, and writes what it saw to
+    <a href="speed.json"><code>speed.json</code></a>. This page reads that file; nothing on it is
+    typed in by hand.</p>
+    <p>A smaller version of the same test runs with every build and makes the structural claim by
+    counting rather than timing: adding one track to a drive copies that one track and nothing the
+    drive already has, and rewriting the databases copies nothing. A timing would depend on the
+    machine — the first write prepares its tracks in parallel and the second prepares one, so the
+    more cores, the closer the two times come — and a count does not.</p>
+    <p>The <a href="https://github.com/jwilkins/booth/blob/main/.github/workflows/speed.yml">speed
+    workflow</a> takes the published measurement on a GitHub-hosted runner whenever the code that
+    writes a drive changes, and once a week so the date never goes stale. Its disk is a fast one
+    and not a stick, which is why the medium is printed beside the numbers.</p>
+  </div>
+</div></section>
+
+<section id="yours"><div class="wrap">
+  <span class="snum">04 — On your own stick</span>
+  <h2>The number that counts is yours</h2>
+  <div class="col">
+    <p class="lede">Point the same test at a mounted drive and it measures that drive. The result is
+    the same file this page reads, so committing it publishes it.</p>
+    <pre>scripts/speed.sh /Volumes/STICK          # macOS
+scripts/speed.sh /media/$USER/STICK      # Linux
+BOOTH_SPEED_SIZES=50,500 scripts/speed.sh /Volumes/STICK</pre>
+    <p>It is a release build and several minutes of writing drives. Everything it writes goes under
+    a <code>booth-speed-N</code> folder on the drive and is removed afterwards; nothing already on
+    the stick is touched.</p>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <p>Booth is free software under the <a href="https://github.com/jwilkins/booth/blob/main/LICENSE">Booth Public Source License</a>.
+  The figures on this page are the test suite's and are republished with each measurement; the
+  rekordbox figures are its users' own reports, linked where they were made.</p>
+</div></footer>
+
+<script>
+// The numbers come from speed.json, written by the measurement and committed
+// beside this page. With scripting off, or no file yet, the page still says
+// what is measured and how — it just has no figures in it.
+(() => {
+  const fmt = (s) => {
+    if (s == null || Number.isNaN(s)) return "—";
+    if (s < 1) return `${Math.round(s * 1000)} ms`;
+    if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)} s`;
+    const m = Math.floor(s / 60);
+    const r = Math.round(s - m * 60);
+    return `${m} min ${r} s`;
+  };
+  const cell = (text, cls) => {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (cls) td.className = cls;
+    return td;
+  };
+
+  fetch("speed.json", { cache: "no-store" })
+    .then((answer) => (answer.ok ? answer.json() : null))
+    .then((data) => {
+      if (!data || !Array.isArray(data.runs) || !data.runs.length) return;
+      const runs = [...data.runs].sort((a, b) => a.tracks - b.tracks);
+      const largest = runs[runs.length - 1];
+
+      const when = new Date(data.measured_at * 1000);
+      const date = when.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+      const sha = (data.git || "").slice(0, 7);
+      document.getElementById("eyebrow").textContent =
+        `Speed · measured ${date}${sha ? ` · ${sha}` : ""} · ${data.profile} build`;
+      document.getElementById("taken").textContent =
+        `Taken ${date} on ${data.medium}: ${data.os}/${data.arch}, ${data.cpus} CPUs, a ${data.profile} build` +
+        `${sha ? ` of ${sha}` : ""}. Each record is ${largest.track_seconds} seconds long.`;
+
+      const body = document.querySelector("#runs tbody");
+      body.replaceChildren();
+      for (const run of runs) {
+        const tr = document.createElement("tr");
+        const th = document.createElement("th");
+        th.scope = "row";
+        th.textContent = `${run.tracks} tracks, ${(run.audio_bytes / 1048576).toFixed(0)} MB of audio`;
+        tr.append(
+          th,
+          cell(fmt(run.full_s), "num"),
+          cell(fmt(run.prepare_s), "num"),
+          cell(fmt(run.databases_only_s), "num"),
+          cell(fmt(run.add_one_s), "num"),
+          cell(fmt(run.read_back_s), "num"),
+          cell(`${run.analysis_files} · ${(run.analysis_bytes / 1048576).toFixed(1)} MB`, "num"),
+        );
+        body.append(tr);
+      }
+
+      const facts = {
+        add_one: fmt(largest.add_one_s),
+        databases_only: fmt(largest.databases_only_s),
+        read_back: fmt(largest.read_back_s),
+        tracks: `${largest.tracks}`,
+      };
+      for (const el of document.querySelectorAll("[data-fact]")) {
+        el.textContent = facts[el.getAttribute("data-fact")] ?? "—";
+      }
+    })
+    .catch(() => {
+      /* No file, or nothing answering. The page already says so. */
+    });
+})();
+</script>

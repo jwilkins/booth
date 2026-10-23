@@ -774,8 +774,41 @@ pub fn preflight(
         checks.push(mountable(kind, player));
     }
 
+    // -- files FAT32 cannot hold at all
+    //
+    // An image is always FAT32, and a stick usually is, because it is the one
+    // format every deck since 2009 mounts. Its ceiling is a byte under 4 GiB a
+    // file, and a 24-bit 96 kHz WAV of a long record, or a recorded set, is
+    // past it. The copy fails a long way into the write, after the preparation
+    // that cost the most; this says so before any of it.
+    let fat32 = is_image || formatted.is_some_and(is_fat);
+    if fat32 {
+        let too_big: Vec<&&Track> = tracks.iter().filter(|t| t.bytes >= FAT32_FILE_LIMIT).collect();
+        if !too_big.is_empty() {
+            checks.push(Check {
+                level: Level::Bad,
+                text: format!(
+                    "{} files are 4 GB or larger, which FAT32 cannot hold \u{2014} they will fail \
+                     to copy. Re-encode them, or use an exFAT stick for a booth that mounts one",
+                    too_big.len()
+                ),
+            });
+        }
+    }
+
     checks.push(space(plan, destination, is_image));
     checks
+}
+
+/// The first size FAT32 cannot hold: 4 GiB. A file has to be at least a byte
+/// under it, because the size field in a directory entry is 32 bits, and that
+/// is the whole of the reason.
+pub const FAT32_FILE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Whether a filesystem name, as [`filesystem`] reports one, is FAT.
+fn is_fat(kind: &str) -> bool {
+    let name = kind.to_ascii_lowercase();
+    ["msdos", "vfat", "fat", "fat32", "fat16"].contains(&name.as_str())
 }
 
 /// Whether a file would land on a path a player will not follow, asked with the
@@ -919,7 +952,7 @@ pub fn filesystem(_path: &Path) -> Option<String> {
 /// guessed at.
 fn mountable(kind: &str, player: booth_cli::compat::Player) -> Check {
     let name = kind.to_ascii_lowercase();
-    let fat = ["msdos", "vfat", "fat", "fat32", "fat16"].contains(&name.as_str());
+    let fat = is_fat(kind);
     let hfs = name.starts_with("hfs") || name == "apfs";
     let exfat = name.contains("exfat");
     let ntfs = name.contains("ntfs");
@@ -1880,6 +1913,48 @@ mod tests {
         assert!(text.contains("beat grid"), "{text}");
         assert!(text.contains("cannot open"), "{text}");
         assert_eq!(checks.iter().map(|c| c.level).max().unwrap(), Level::Bad);
+    }
+
+    #[test]
+    fn a_file_fat32_cannot_hold_is_refused_before_the_write_rather_than_during_it() {
+        use booth_cli::compat::Player;
+        const FAT32_SAYS: &str = "which FAT32 cannot hold";
+        // A recorded set as a 24-bit WAV: past the 4 GiB a FAT32 directory
+        // entry can describe. On a FAT32 stick the copy fails after the
+        // preparation; this is the line that saves the preparation.
+        let (mut library, ids) = library_with(2);
+        library.get_mut(ids[0]).unwrap().bytes = FAT32_FILE_LIMIT + 1;
+        let drive = drive_for(&library, &[]);
+        let plan = plan(&library, &drive);
+        let said = |is_image: bool, formatted: Option<&str>| {
+            preflight(&library, &plan, Path::new("/tmp"), is_image, Player::Cdj3000, formatted)
+                .iter()
+                // By what the check says rather than by "4 GB", which the
+                // free-space line can say too: "64.4 GB free" did, on a CI
+                // runner.
+                .filter(|check| check.text.contains(FAT32_SAYS))
+                .map(|check| format!("{:?} {}", check.level, check.text))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // On a FAT32 stick, and in an image, which is always FAT32.
+        let stick = said(false, Some("vfat"));
+        assert!(stick.starts_with("Bad 1 files are 4 GB or larger"), "{stick}");
+        assert!(stick.contains("exFAT"), "and say what would hold it: {stick}");
+        assert_eq!(said(true, None), stick, "an image is FAT32 whatever the host is");
+
+        // exFAT holds it, and a CDJ-3000 mounts exFAT: nothing to say.
+        assert_eq!(said(false, Some("exfat")), "", "exFAT has no such ceiling");
+        // A stick whose format is not known is not accused of one.
+        assert_eq!(said(false, None), "");
+
+        // The ceiling is the ceiling: a file one byte under it goes on.
+        library.get_mut(ids[0]).unwrap().bytes = FAT32_FILE_LIMIT - 1;
+        let smaller = super::plan(&library, &drive);
+        let under =
+            preflight(&library, &smaller, Path::new("/tmp"), false, Player::Cdj3000, Some("vfat"));
+        assert!(under.iter().all(|check| !check.text.contains(FAT32_SAYS)), "{under:#?}");
     }
 
     #[test]
