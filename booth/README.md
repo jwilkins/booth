@@ -161,7 +161,7 @@ drive by itself.
 Every batch job has a single-track twin. The prep editor under the waveform has
 **Analyse**, **Look up tags**, **Render stems** and **Cue from the words** for
 whatever is selected, and right-clicking any row offers the same four plus play,
-copy-into-library, copy the path, and remove.
+**Guess genre**, copy-into-library, copy the path, and remove.
 
 A job that has already been done says so: the button reads **Re-analyse** rather
 than **Analyse**, because the honest answer to "will this take twenty minutes"
@@ -1311,6 +1311,20 @@ is left alone; a tag that says something else is put to you in a sheet, and the
 collection and the file follow your answer. A tag that says exactly what the
 model said on an earlier pass is Booth's own earlier answer, and is replaced
 without asking.
+
+**Your answer is kept.** Once you have chosen a track's genre in that sheet, an
+analysis leaves it alone and asks nothing, whatever the model hears. It used to
+ask every time: keeping the file's genre left a tag and a hearing that still
+disagreed, which is the same question again. Closing the sheet without
+answering is not an answer, and those tracks are asked about next time.
+
+**Guess genre**, on a row's right-click menu, is how a genre is heard again on
+purpose: the model listens to that one track and nothing else is measured or
+changed — twenty seconds or so for a five-minute record, whether or not
+analyses are set to listen. A track with no genre takes what is heard. One whose genre the guess
+agrees with keeps it, now with the model's confidence. One with a different
+genre — its tag, or an answer you gave — is put to you in the same sheet, as
+**Keep what it has** or **Use what was heard**, and that answer is kept in turn.
 
 What it says is the model's opinion, not a measurement. It learned how Discogs
 users file records, so it draws the distinctions that community draws

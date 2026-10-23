@@ -251,15 +251,42 @@ pub fn decide_genre(track: &Track, file_says: &str, heard: &str) -> GenreDecisio
     GenreDecision::Ask
 }
 
-/// A track whose file says one genre while the model heard another.
+/// What to do with a genre heard on purpose, from **Guess genre**, given the
+/// genre the track has now. Nothing is kept or written without asking, except
+/// where there is nothing to overwrite.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GuessDecision {
+    /// The track has no genre: the guess fills it.
+    Fill,
+    /// The guess is the genre it has.
+    Agrees,
+    /// The guess would overwrite a genre: asked.
+    Ask,
+}
+
+pub fn decide_guess(has: &str, heard: &str) -> GuessDecision {
+    if has.trim().is_empty() {
+        GuessDecision::Fill
+    } else if simplify(has) == simplify(heard) {
+        GuessDecision::Agrees
+    } else {
+        GuessDecision::Ask
+    }
+}
+
+/// A track whose genre says one thing while the model heard another.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenreQuestion {
     pub id: u32,
-    /// What the file's tag says.
+    /// What the file's tag says, or for a guess, the genre the track has.
     pub file_says: String,
     /// What the model heard, and how surely.
     pub heard: String,
     pub confidence: f32,
+    /// Asked from **Guess genre** rather than from an analysis: keeping
+    /// `file_says` leaves the track as it was, where after an analysis it
+    /// means taking the file's tag into the collection.
+    pub guessed: bool,
 }
 
 /// Which answer to a genre question was taken.
@@ -463,6 +490,18 @@ mod tests {
         track.genre = genre.into();
         track.genre_confidence = 0.6;
         track
+    }
+
+    #[test]
+    fn a_guess_fills_an_empty_genre_and_asks_before_overwriting_one() {
+        assert_eq!(decide_guess("", "Techno"), GuessDecision::Fill);
+        assert_eq!(decide_guess("  ", "Techno"), GuessDecision::Fill);
+        assert_eq!(decide_guess("techno", "Techno"), GuessDecision::Agrees);
+        assert_eq!(
+            decide_guess("Electronic---Techno", "Electronic — Techno"),
+            GuessDecision::Agrees
+        );
+        assert_eq!(decide_guess("House", "Techno"), GuessDecision::Ask);
     }
 
     /// A record whose genre came in from the file's tag.
