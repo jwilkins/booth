@@ -2372,6 +2372,36 @@ fn rekordbox_database(path: &Path) -> Result<PathBuf> {
     bail!("no rekordbox database under {}", path.display())
 }
 
+/// What each generation of player will see on a drive. See [`crate::audit`].
+///
+/// A drive with neither database on it is an error rather than a report of
+/// two missing files: it is almost always the wrong folder.
+pub fn audit(args: &crate::cli::AuditArgs, reporter: &dyn Reporter) -> Result<()> {
+    use crate::report::Event;
+
+    let audit = crate::audit::audit(&args.drive, args.onelibrary_key.as_deref());
+    if matches!(
+        (&audit.legacy, &audit.onelibrary),
+        (crate::audit::Found::Missing, crate::audit::Found::Missing)
+    ) {
+        bail!(
+            "{} holds neither {} nor a OneLibrary database: point at the drive's top folder, the \
+             one with PIONEER in it",
+            args.drive.display(),
+            crate::audit::LEGACY_PATH
+        );
+    }
+    reporter.event(Event::Heading(format!("{}", args.drive.display())));
+    for line in audit.lines() {
+        reporter.event(Event::Line(line));
+    }
+    reporter.event(Event::Summary(match audit.is_clean() {
+        true => "every player sees the same drive, and everything on it loads".into(),
+        false => "see above for what differs between players".into(),
+    }));
+    Ok(())
+}
+
 pub fn rekordbox(args: &crate::cli::RekordboxCommand, reporter: &dyn Reporter) -> Result<()> {
     use crate::cli::RekordboxCommand;
     use crate::report::Event;

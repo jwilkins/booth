@@ -27,6 +27,7 @@ fn run() -> Result<()> {
         Some(Command::Genre(args)) => commands::genre(args, &reporter),
         Some(Command::Anlz(args)) => commands::anlz(args, &reporter),
         Some(Command::Export(args)) => commands::export(args, &reporter).map(|_| ()),
+        Some(Command::Audit(args)) => commands::audit(args, &reporter),
         Some(Command::Normalize(args)) => commands::normalize(args, &reporter),
         Some(Command::Run(args)) => commands::run(args, &reporter),
         Some(Command::Stems(args)) => commands::stems(args, &reporter),

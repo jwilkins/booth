@@ -276,6 +276,10 @@ pub struct App {
     /// "which track is that", which is as many lines as the write has changes.
     /// Putting the second inside the first made the sheet a scroll either way.
     details: bool,
+    /// What each player sees on a drive, once the audit of it is back: the
+    /// drive's name, the audit's lines, and whether it found nothing. See
+    /// `booth_cli::audit`.
+    audited: Option<(String, Vec<String>, bool)>,
     /// Set while the settings sheet is open.
     settings: bool,
     /// Whether the inspector's lyric sheet is opened out to [`EXPANDED_ROWS`]
@@ -923,6 +927,7 @@ impl App {
             plan: Plan::default(),
             sheet: false,
             details: false,
+            audited: None,
             settings: false,
             words_expanded: false,
             decided_expanded: false,
@@ -3202,6 +3207,19 @@ impl App {
                         checked.orphans = paths;
                     }
                 }
+                Update::Audited { drive, lines, clean } => {
+                    let label = self
+                        .library
+                        .drives
+                        .iter()
+                        .find(|known| known.path == drive)
+                        .map(|known| known.label.clone())
+                        .unwrap_or_else(|| drive.display().to_string());
+                    for line in &lines {
+                        crate::info!("{label}: {line}");
+                    }
+                    self.audited = Some((label, lines, clean));
+                }
                 Update::Hashed { id, file, audio } => {
                     if let Some(track) = self.library.get_mut(id) {
                         track.file_hash = file;
@@ -4269,6 +4287,9 @@ impl eframe::App for App {
         // After the sheet, so it sits over it rather than under it.
         if self.details {
             self.details_window(ctx);
+        }
+        if self.audited.is_some() {
+            self.audit_window(ctx);
         }
         if self.settings {
             self.settings_sheet(ctx);
@@ -12472,6 +12493,7 @@ impl App {
         let mut open = true;
         let mut forget = false;
         let mut details = false;
+        let mut audit = false;
         // Toggled here rather than applied in place: the sheet is drawing a
         // clone of the drive, and the plan under it was worked out before this
         // frame. Read back after the window closes, so one change redraws once.
@@ -12637,6 +12659,22 @@ impl App {
                         {
                             details = true;
                         }
+                        if ui
+                            .add_enabled(!drive.is_image, egui::Button::new("What each player sees"))
+                            .on_hover_text(
+                                "Read both databases off the drive as it is now and say what a \
+                                 CDJ-3000X, a CDJ-3000 and the nexus lines will each browse: a \
+                                 playlist one shows and another does not, audio that is not on \
+                                 the stick, files a player will not open, missing analysis. It \
+                                 changes nothing.",
+                            )
+                            .on_disabled_hover_text(
+                                "An image is read back by the write itself; mount it to ask this.",
+                            )
+                            .clicked()
+                        {
+                            audit = true;
+                        }
                     });
                     ui.horizontal(|ui| {
                         ui.add_space(74.0);
@@ -12751,6 +12789,13 @@ impl App {
         if details {
             self.details = true;
         }
+        if audit {
+            crate::info!("checking what each player sees on {}", drive.path.display());
+            self.start(Job::Audit {
+                drive: drive.path.clone(),
+                key: self.config.onelibrary_key().map(str::to_string),
+            });
+        }
         if forget {
             self.forget_drive_contents();
         }
@@ -12853,6 +12898,64 @@ impl App {
             });
         if !open {
             self.details = false;
+        }
+    }
+
+    /// What each player sees on a drive: the audit's lines, as it said them.
+    fn audit_window(&mut self, ctx: &egui::Context) {
+        let Some((label, lines, clean)) = self.audited.clone() else { return };
+        let mut open = true;
+        egui::Window::new(format!("WHAT EACH PLAYER SEES \u{2192} {label}"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(680.0)
+            .default_height(440.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(match clean {
+                            true => "Every player sees the same drive, and everything on it loads.",
+                            false => {
+                                "A CDJ-3000 reads export.pdb and a CDJ-3000X reads \
+                                 exportLibrary.db, and neither falls back to the other. Syncing \
+                                 this drive from Booth writes both from one description."
+                            }
+                        })
+                        .color(if clean { theme::go() } else { theme::dim() })
+                        .size(theme::SMALL),
+                    );
+                    if ui.button("Copy").on_hover_text("Put all of it on the clipboard.").clicked()
+                    {
+                        ui.ctx().copy_text(lines.join("\n"));
+                    }
+                });
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    for line in &lines {
+                        // The audit indents what it found under the database
+                        // or player it is about.
+                        let found = line.starts_with("  ");
+                        let fine = line.trim() == "everything on it loads";
+                        let color = match (found, fine) {
+                            (true, true) => theme::go(),
+                            (true, false) => theme::amber(),
+                            _ => theme::text(),
+                        };
+                        ui.label(RichText::new(line).font(theme::mono(11.0)).color(color));
+                    }
+                });
+            });
+        if !open {
+            self.audited = None;
         }
     }
 
@@ -19330,6 +19433,39 @@ mod tests {
             harness.get_by_label("Details").click();
             harness.run();
             assert!(harness.state().details, "the Details button did not open the window");
+        }
+
+        #[test]
+        fn the_audit_button_reads_the_drive_and_shows_what_each_player_sees() {
+            // A drive that is not mounted has neither database on it, which
+            // is still an answer: every player is told it shows no library.
+            let mut app = a_drive_up_to_date("audit");
+            app.sheet = true;
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.sync_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+            harness.get_by_label("What each player sees").click();
+            harness.run();
+
+            let started = std::time::Instant::now();
+            while harness.state().audited.is_none() && started.elapsed().as_secs() < 10 {
+                harness.state_mut().collect();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let (label, lines, clean) =
+                harness.state().audited.clone().expect("no audit came back");
+            assert_eq!(label, "USB");
+            assert!(!clean);
+            assert!(lines.iter().any(|line| line == "export.pdb: not on the drive"), "{lines:#?}");
+            assert!(
+                lines.iter().any(|line| line.contains("shows no library at all")),
+                "{lines:#?}"
+            );
         }
 
         #[test]

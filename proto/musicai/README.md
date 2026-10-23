@@ -578,6 +578,19 @@ rounds against the players, each one a field a real export carries that this did
 account is in [`docs/onelibrary-gist.md`](../../docs/onelibrary-gist.md), §6. What has not
 been tried is a club.
 
+```sh
+booth-cli audit /Volumes/USB
+```
+
+says what each generation of player will see on a drive, written by this or by anything
+else: what is in each database, where the two disagree — a playlist only one of them
+has, tracks a playlist lists on one side and not the other — and, per player, audio that
+is not on the stick, files it will not open and analysis files it reads that are missing.
+It reads and changes nothing. It reads `export.pdb` with its own reader, checked against
+`rekordcrate` on drives this writes and on two rekordbox exports; on the larger of those,
+rekordcrate 0.3.0 finds 6,637 playlist entries and this finds all 7,440, the rest being
+on pages that hold more than 255 rows.
+
 ## Trying it on a player
 
 The nearest thing to a CDJ that is not a CDJ is
