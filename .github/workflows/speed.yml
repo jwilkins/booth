@@ -1,0 +1,83 @@
+name: Speed
+
+# How long a drive takes to write, add to and read back — measured, and the
+# numbers committed to site/speed.json for the Pages workflow to publish. The
+# site stays plain files: nothing is built at publish time, and the page shows
+# whatever the last measurement committed.
+#
+# Runs when the code that writes or reads a drive changes, once a week so the
+# published date never goes stale, and by hand. Not on every push: it is a
+# release build and several minutes of writing drives, and a number that moves
+# with the runner's mood on every commit would say less than one taken weekly.
+#
+# A GitHub runner's disk is not a USB stick, and the page says so beside the
+# numbers. The measurement that counts is the one run against a real stick
+# with `scripts/speed.sh /Volumes/STICK`, committed by hand on the same file.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "proto/musicai/src/export/**"
+      - "proto/musicai/src/commands.rs"
+      - "proto/musicai/src/rekordbox/**"
+      - "proto/musicai/tests/speed.rs"
+      - ".github/workflows/speed.yml"
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+# The commit back needs the first. The second is for asking the Pages workflow
+# to run afterwards: a push made with the workflow's own token starts no other
+# workflow, so the page would otherwise show the old numbers until something
+# else touched the site.
+permissions:
+  contents: write
+  actions: write
+
+# One measurement at a time, and one already running is left to finish: two
+# committing the same file race each other.
+concurrency:
+  group: speed
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Only the engine crate is built — the window and its dependencies have
+      # no part in writing a drive, and the GUI's audio output would need ALSA
+      # headers the runner does not carry.
+      - name: Measure
+        run: scripts/speed.sh
+        env:
+          BOOTH_SPEED_MEDIUM: "a GitHub-hosted Ubuntu runner's disk (not a USB stick)"
+
+      - name: Commit the measurement
+        run: |
+          git config user.name "booth speed"
+          git config user.email "speed@users.noreply.github.com"
+          git add site/speed.json
+          if git diff --cached --quiet; then
+            echo "nothing changed"
+            exit 0
+          fi
+          git commit -m "Measure how long a drive takes to write, add to and read back
+
+          Taken by the speed workflow on a GitHub-hosted runner, from
+          ${GITHUB_SHA}. The page at site/speed.html shows it."
+          git push
+          echo "committed=yes" >> "$GITHUB_OUTPUT"
+        id: commit
+
+      - name: Publish the site
+        if: steps.commit.outputs.committed == 'yes'
+        run: gh workflow run pages.yml --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}

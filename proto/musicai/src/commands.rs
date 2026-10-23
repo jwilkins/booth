@@ -301,7 +301,15 @@ pub fn export(
     reporter: &dyn Reporter,
 ) -> Result<Vec<(PathBuf, crate::export::pdb::Track)>> {
     let began = std::time::Instant::now();
-    let files = discover::collect(&args.input.inputs, args.input.recursive)?;
+    // Nothing to prepare is not nothing to do. A playlist that lost a track,
+    // or gained one already on the drive, changes both databases and not one
+    // audio file — and a write given only rows to carry is that write. Asking
+    // the discoverer for files it was not given would refuse it as "no audio
+    // files found", which is how taking a track off a drive used to fail.
+    let files = match args.input.inputs.is_empty() && !args.already.is_empty() {
+        true => Vec::new(),
+        false => discover::collect(&args.input.inputs, args.input.recursive)?,
+    };
     report::detail(
         reporter,
         format!(
@@ -444,6 +452,18 @@ pub fn export(
                 bytes.len()
             ),
         );
+        // The newer players' database is built *before* the legacy one is
+        // written, not after. Both come from the one `database` above, so they
+        // cannot disagree about what is on the drive — but only if both land.
+        // Built in between, a failure here would have left a new `export.pdb`
+        // beside last week's `exportLibrary.db`: a CDJ-3000 and a CDJ-3000X
+        // looking at the same stick and seeing two different drives, which is
+        // the failure that firmware 3.30 turned into a room full of DJs with
+        // no playlists. Nothing is written until both are in hand.
+        let onelibrary = match args.no_onelibrary {
+            true => None,
+            false => build_onelibrary(args, &database, reporter)?,
+        };
 
         match &destination {
             None => lines.push(format!(
@@ -475,17 +495,37 @@ pub fn export(
             }
         }
 
-        // The same library again, in the format the newer players read. Both
-        // are built from the one `database` above, so the two files on the
-        // drive cannot disagree about what is on it — which is the failure
-        // that firmware 3.30 turned into a room full of DJs with no playlists.
-        if args.no_onelibrary {
-            lines.push(format!(
-                "left {} off the drive, as asked: only the legacy database is on it",
-                crate::export::onelibrary::DRIVE_PATH
-            ));
-        } else {
-            lines.extend(write_onelibrary(args, &database, destination.as_ref(), reporter)?);
+        // The same library again, in the format the newer players read.
+        match onelibrary {
+            Some(built) => {
+                lines.push(put_onelibrary(&built, &database, destination.as_ref(), reporter)?)
+            }
+            None => {
+                lines.push(match args.no_onelibrary {
+                    true => format!(
+                        "left {} off the drive, as asked: only the legacy database is on it",
+                        crate::export::onelibrary::DRIVE_PATH
+                    ),
+                    false => crate::rekordbox::no_onelibrary_key(),
+                });
+                // Not writing one is not the same as leaving one there. A
+                // drive that carried a OneLibrary last week and gets only a
+                // legacy database this week is a drive a CDJ-3000X will
+                // browse as it was last week, with no error and no sign — the
+                // very thing a third-party exporter was caught doing. So a
+                // database this write is not replacing comes off, and the
+                // line says so, because the drive now works on fewer players
+                // than it did.
+                if let Some(destination) = &destination {
+                    if destination.remove(crate::export::onelibrary::DRIVE_PATH)? {
+                        lines.push(format!(
+                            "removed the {} an earlier write left: it described a drive that no \
+                             longer exists, and a CDJ-3000X reads nothing else",
+                            crate::export::onelibrary::DRIVE_PATH
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -513,9 +553,43 @@ pub fn export(
     );
     let mut outcome = Outcome::new(files.len(), failures);
     outcome.cancelled = reporter.cancelled();
-    outcome.report(reporter)?;
-    Ok(made)
+    let (processed, failed) = (outcome.processed, outcome.failures.len());
+    match outcome.report(reporter) {
+        Ok(()) => Ok(made),
+        // The rows go back with the error rather than being dropped with it.
+        // Forty-nine files landed, their database is on the drive and verified,
+        // and the one that did not is the reason for the error — a caller that
+        // forgets the forty-nine prepares them all again next time, and a
+        // drive record that never heard of them carries nothing on the write
+        // after that.
+        Err(_) if failed > 0 => Err(PartialWrite { rows: made, failed, processed }.into()),
+        Err(e) => Err(e),
+    }
 }
+
+/// A write that put most of what it was given on the drive, and not all of it.
+///
+/// The error [`export`] returns when some files failed. The drive is in a
+/// consistent state — the databases describe exactly the files that landed, and
+/// were read back — so the rows are as good as any other write's and are
+/// carried here for the next one. The files that failed were each reported to
+/// the reporter as they failed; this only counts them.
+#[derive(Debug)]
+pub struct PartialWrite {
+    /// The drive's rows and the files they were made from, as a successful
+    /// write returns them.
+    pub rows: Vec<(PathBuf, pdb::Track)>,
+    pub failed: usize,
+    pub processed: usize,
+}
+
+impl std::fmt::Display for PartialWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} of {} files failed", self.failed, self.processed)
+    }
+}
+
+impl std::error::Error for PartialWrite {}
 
 /// One track's worth of drive: the row that describes it, and the files that
 /// have to land on the drive for that row to mean anything.
@@ -631,32 +705,33 @@ impl Prepared {
     }
 }
 
-/// Where this export is going, and — for an image — how big it needs to be.
-///
-/// The size has to be settled before a byte is written, so it is estimated from
-/// the audio plus a couple of megabytes a track for the analysis. That is
-/// generous for anything under about half an hour long.
-/// Write the OneLibrary database beside the legacy one, when there is a key
-/// for it.
+/// A OneLibrary database built and not yet written: the bytes, and the key
+/// that opens them for the read-back.
+struct BuiltOneLibrary {
+    key: String,
+    bytes: Vec<u8>,
+}
+
+/// Build the OneLibrary database, when there is a key for it.
 ///
 /// A drive without it is the drive this program used to write, which the
 /// CDJ-3000X and the other newer players read nothing at all of. A drive with
 /// it is one a CDJ-3000X has browsed.
 ///
-/// No key is not a failure: a build can be made without one, so this reports
-/// what was not written and why, and the
-/// export carries on.
-fn write_onelibrary(
+/// No key is not a failure: a build can be made without one, so this returns
+/// nothing and the caller says what was not written and why. Building is kept
+/// apart from writing so that the legacy database is not put on the drive
+/// until this one is ready to follow it.
+fn build_onelibrary(
     args: &ExportArgs,
     database: &pdb::Database,
-    destination: Option<&Destination>,
     reporter: &dyn Reporter,
-) -> Result<Vec<String>> {
+) -> Result<Option<BuiltOneLibrary>> {
     use crate::export::onelibrary;
 
     let Some(key) = crate::rekordbox::onelibrary_key(args.onelibrary_key.as_deref()) else {
         report::detail(reporter, "no OneLibrary key, so only the legacy database goes on");
-        return Ok(vec![crate::rekordbox::no_onelibrary_key()]);
+        return Ok(None);
     };
 
     // What the drive calls itself. An image is formatted with a label; a
@@ -682,28 +757,41 @@ fn write_onelibrary(
             bytes.len()
         ),
     );
+    Ok(Some(BuiltOneLibrary { key, bytes }))
+}
+
+/// Put a built OneLibrary database on the drive and read it back, to the same
+/// standard the legacy database is held to.
+fn put_onelibrary(
+    built: &BuiltOneLibrary,
+    database: &pdb::Database,
+    destination: Option<&Destination>,
+    reporter: &dyn Reporter,
+) -> Result<String> {
+    use crate::export::onelibrary;
+
     let Some(destination) = destination else {
-        return Ok(vec![format!(
+        return Ok(format!(
             "would write {}: {} tracks, {} bytes",
             onelibrary::DRIVE_PATH,
             database.tracks.len(),
-            bytes.len()
-        )]);
+            built.bytes.len()
+        ));
     };
 
     let writing = std::time::Instant::now();
-    destination.write(onelibrary::DRIVE_PATH, &bytes)?;
+    destination.write(onelibrary::DRIVE_PATH, &built.bytes)?;
     report::detail(reporter, format!("wrote {} in {}", onelibrary::DRIVE_PATH, took(writing)));
     // Off the drive again, keyed again, counted again — the same standard the
     // legacy database is held to.
     let checking = std::time::Instant::now();
-    let summary = onelibrary::inspect(&destination.read(onelibrary::DRIVE_PATH)?, &key)
+    let summary = onelibrary::inspect(&destination.read(onelibrary::DRIVE_PATH)?, &built.key)
         .context("the OneLibrary database did not read back off the drive")?;
     report::detail(
         reporter,
         format!("read {} back and opened it in {}", onelibrary::DRIVE_PATH, took(checking)),
     );
-    Ok(vec![format!(
+    Ok(format!(
         "wrote {} to {}: {} tables, {} tracks, {} playlists, verified — a CDJ-3000X browses \
          these",
         onelibrary::DRIVE_PATH,
@@ -711,9 +799,14 @@ fn write_onelibrary(
         summary.tables,
         summary.tracks,
         summary.playlists
-    )])
+    ))
 }
 
+/// Where this export is going, and — for an image — how big it needs to be.
+///
+/// The size has to be settled before a byte is written, so it is estimated from
+/// the audio plus a couple of megabytes a track for the analysis. That is
+/// generous for anything under about half an hour long.
 fn open_destination(
     args: &ExportArgs,
     files: &[PathBuf],
@@ -748,12 +841,18 @@ fn open_destination(
 
 /// How long a step took, for the detail lines. Milliseconds under ten seconds,
 /// and seconds above it, because "94318 ms" is a number nobody reads as a
-/// minute and a half.
+/// minute and a half. Under ten milliseconds the fraction is kept: copying a
+/// small file and writing its analysis take well under one, and a line that
+/// says "0 ms" for each is a line the speed measurement cannot add up.
 fn took(since: std::time::Instant) -> String {
-    let ms = since.elapsed().as_millis();
-    match ms {
-        0..=9_999 => format!("{ms} ms"),
-        _ => format!("{:.1} s", ms as f64 / 1000.0),
+    let elapsed = since.elapsed();
+    let ms = elapsed.as_secs_f64() * 1000.0;
+    if ms < 10.0 {
+        format!("{ms:.2} ms")
+    } else if ms < 10_000.0 {
+        format!("{} ms", elapsed.as_millis())
+    } else {
+        format!("{:.1} s", ms / 1000.0)
     }
 }
 

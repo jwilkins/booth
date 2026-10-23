@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+pub mod drive;
+
 use std::f32::consts::TAU;
 use std::path::{Path, PathBuf};
 use std::process::Command;

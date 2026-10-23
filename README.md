@@ -59,6 +59,11 @@ with a free key.
   Music on the stick the collection does not have is copied in, and a track the collection
   names but the disk has lost is put back — because the stick that could fix it will not be
   there for ever.
+- **Adds a track in seconds, not hours.** A second write carries every row the drive already has
+  and prepares only what changed, so adding one track to a full stick costs one track. rekordbox's
+  Sync rewrites the whole stick; its users report hours. Booth's figures are measured by the test
+  suite and published, dated, on the [speed page](https://jwilkins.github.io/booth/speed.html) —
+  and `scripts/speed.sh /Volumes/STICK` takes them on your own drive.
 - **Says what will be slow before the night does.** A quarantined file, one still sitting in
   Downloads, or one inside Dropbox or iCloud is seconds to open rather than milliseconds. Booth
   says so at import and takes the quarantine flag off when you ask.
@@ -197,6 +202,14 @@ cargo test --workspace
 `cargo build` builds only Booth. Everything is offline: what would talk to AcoustID or
 MusicBrainz is `#[ignore]`d and run on purpose. `.github/workflows/ci.yml` runs the suite,
 clippy with warnings as errors, and a format check on every push.
+
+Two sets of tests are about drives in the field rather than drives in the abstract.
+`proto/musicai/tests/field_reports.rs` turns bug reports against rekordbox and against other
+tools that write these drives — a stale OneLibrary left beside a fresh legacy database, ratings
+on the wrong scale, a playlist missing the tracks that failed — into claims about a drive this
+writes. `proto/musicai/tests/speed.rs` times a drive being written, added to and read back; its
+always-on half makes the structural claim as a ratio, and its `#[ignore]`d half is the
+measurement `scripts/speed.sh` publishes to `site/speed.json`.
 
 Each crate's README says what its own tests cover. The short version: the drive writer's output is
 read back by [`rekordcrate`](https://github.com/Holzhaus/rekordcrate), a separate implementation

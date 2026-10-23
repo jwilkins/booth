@@ -130,6 +130,21 @@ impl DriveImage {
         Ok(bytes)
     }
 
+    /// Take a file out of the image. `Ok(false)` when it was not there.
+    ///
+    /// An image is made from nothing every time, so in practice there is never
+    /// anything to remove; this exists so that a folder and an image answer the
+    /// same calls, which is what keeps the two from growing separate rules.
+    pub fn remove(&self, on_drive: &str) -> Result<bool> {
+        let path = on_drive.trim_start_matches('/');
+        let root = self.fs.root_dir();
+        if root.open_file(path).is_err() {
+            return Ok(false);
+        }
+        root.remove(path).with_context(|| format!("removing {on_drive} from the image"))?;
+        Ok(true)
+    }
+
     /// Everything in a directory, by name.
     pub fn list(&self, on_drive: &str) -> Result<Vec<String>> {
         let trimmed = on_drive.trim_start_matches('/').trim_end_matches('/');
@@ -347,6 +362,28 @@ impl Destination {
                 std::fs::read(&at).with_context(|| format!("reading back {}", at.display()))
             }
             Destination::Image(image) => image.lock().unwrap().read(on_drive),
+        }
+    }
+
+    /// Take a file off the drive, if it is there. `Ok(true)` when something was
+    /// removed, `Ok(false)` when there was nothing to remove.
+    ///
+    /// The one thing a write ever removes is a database it is not replacing: a
+    /// `exportLibrary.db` left from an earlier write when this one carries no
+    /// key for a new one. A CDJ-3000X reads nothing else on the stick, so a
+    /// stale one is a player showing a drive that no longer exists, with no
+    /// error — which is exactly how the firmware 3.30 week went.
+    pub fn remove(&self, on_drive: &str) -> Result<bool> {
+        match self {
+            Destination::Directory(root) => {
+                let at = root.join(on_drive.trim_start_matches('/'));
+                match std::fs::remove_file(&at) {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(e) => Err(e).with_context(|| format!("removing {}", at.display())),
+                }
+            }
+            Destination::Image(image) => image.lock().unwrap().remove(on_drive),
         }
     }
 
