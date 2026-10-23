@@ -1918,6 +1918,7 @@ mod tests {
     #[test]
     fn a_file_fat32_cannot_hold_is_refused_before_the_write_rather_than_during_it() {
         use booth_cli::compat::Player;
+        const FAT32_SAYS: &str = "which FAT32 cannot hold";
         // A recorded set as a 24-bit WAV: past the 4 GiB a FAT32 directory
         // entry can describe. On a FAT32 stick the copy fails after the
         // preparation; this is the line that saves the preparation.
@@ -1928,7 +1929,10 @@ mod tests {
         let said = |is_image: bool, formatted: Option<&str>| {
             preflight(&library, &plan, Path::new("/tmp"), is_image, Player::Cdj3000, formatted)
                 .iter()
-                .filter(|check| check.text.contains("4 GB"))
+                // By what the check says rather than by "4 GB", which the
+                // free-space line can say too: "64.4 GB free" did, on a CI
+                // runner.
+                .filter(|check| check.text.contains(FAT32_SAYS))
                 .map(|check| format!("{:?} {}", check.level, check.text))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -1950,7 +1954,7 @@ mod tests {
         let smaller = super::plan(&library, &drive);
         let under =
             preflight(&library, &smaller, Path::new("/tmp"), false, Player::Cdj3000, Some("vfat"));
-        assert!(under.iter().all(|check| !check.text.contains("4 GB")), "{under:#?}");
+        assert!(under.iter().all(|check| !check.text.contains(FAT32_SAYS)), "{under:#?}");
     }
 
     #[test]
