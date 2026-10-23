@@ -284,7 +284,7 @@ pub fn stacked(peaks: [f32; 3], colors: [Color32; 3]) -> [(f32, Color32); 3] {
 /// `None` when there is no grid to count against, or when the phrase does not
 /// hold a whole bar: a section labelled "0" says less than one with no number
 /// at all.
-fn bars_of(phrase: &Phrase, beat_ms: &[u32]) -> Option<usize> {
+pub fn bars_of(phrase: &Phrase, beat_ms: &[u32]) -> Option<usize> {
     let bars = beat_ms
         .iter()
         .step_by(BEATS_PER_BAR)
@@ -737,17 +737,36 @@ fn time_at(rect: Rect, wave: &Waveform<'_>, x: f32) -> u32 {
 }
 
 /// Which cue the pointer is over, if any, by its place in the list drawn.
+///
+/// By height as well as across. Hot cues hang from the top and memory cues
+/// from the bottom, but each line runs nearly the full height of the panel, so
+/// a hot cue and a memory cue on one bar — a section's marker and its button,
+/// which is most hot cues — are drawn on top of each other and only the flags
+/// tell them apart. So a cue is taken hold of by its flag's end: in the top
+/// third only a hot cue, in the bottom third only a memory cue, and in the
+/// middle either, the hot cue first, because that is the button that gets
+/// pressed and so the one more often worth moving.
 fn cue_under(at: egui::Pos2, rect: Rect, wave: &Waveform<'_>) -> Option<usize> {
     if wave.duration_secs <= 0.0 {
         return None;
     }
-    wave.cues
-        .iter()
-        .enumerate()
-        .map(|(index, cue)| (index, cue_x(rect, wave, cue.time_ms)))
-        .filter(|(_, x)| (x - at.x).abs() <= GRAB)
-        .min_by(|a, b| (a.1 - at.x).abs().total_cmp(&(b.1 - at.x).abs()))
-        .map(|(index, _)| index)
+    let third = rect.height() / 3.0;
+    let (hot, memory) = match at.y {
+        y if y < rect.top() + third => (true, false),
+        y if y > rect.bottom() - third => (false, true),
+        _ => (true, true),
+    };
+    let nearest = |memory: bool| {
+        wave.cues
+            .iter()
+            .enumerate()
+            .filter(|(_, cue)| (cue.letter == 0) == memory)
+            .map(|(index, cue)| (index, (cue_x(rect, wave, cue.time_ms) - at.x).abs()))
+            .filter(|(_, off)| *off <= GRAB)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(index, _)| index)
+    };
+    hot.then(|| nearest(false)).flatten().or_else(|| memory.then(|| nearest(true)).flatten())
 }
 
 /// Where a moment in the track falls on the panel.
@@ -2074,6 +2093,34 @@ mod tests {
 
         let on_the_first = egui::pos2(cue_x(rect, &wave, 0), 50.0);
         assert_eq!(cue_under(on_the_first, rect, &wave), Some(0));
+    }
+
+    #[test]
+    fn a_hot_cue_is_taken_from_the_top_a_memory_cue_from_the_bottom_and_the_hot_cue_between() {
+        // A section's marker and its button on one bar, drawn as one line.
+        let cues = [marked(0, 60_000, "Drop 1"), marked(4, 60_000, "drop")];
+        let wave = Waveform { cues: &cues, duration_secs: 120.0, ..wave(&[]) };
+        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 90.0));
+        let x = cue_x(rect, &wave, 60_000);
+
+        assert_eq!(cue_under(egui::pos2(x, 5.0), rect, &wave), Some(1), "the top");
+        assert_eq!(cue_under(egui::pos2(x, 85.0), rect, &wave), Some(0), "the bottom");
+        assert_eq!(cue_under(egui::pos2(x, 45.0), rect, &wave), Some(1), "the middle");
+    }
+
+    #[test]
+    fn a_cue_is_not_taken_from_the_edge_the_other_kind_hangs_from() {
+        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 90.0));
+
+        let memory = [marked(0, 60_000, "Drop 1")];
+        let alone = Waveform { cues: &memory, duration_secs: 120.0, ..wave(&[]) };
+        let x = cue_x(rect, &alone, 60_000);
+        assert_eq!(cue_under(egui::pos2(x, 5.0), rect, &alone), None, "a memory cue from the top");
+        assert_eq!(cue_under(egui::pos2(x, 45.0), rect, &alone), Some(0), "alone in the middle");
+
+        let hot = [marked(1, 60_000, "")];
+        let alone = Waveform { cues: &hot, duration_secs: 120.0, ..wave(&[]) };
+        assert_eq!(cue_under(egui::pos2(x, 85.0), rect, &alone), None, "a hot cue from the bottom");
     }
 
     #[test]

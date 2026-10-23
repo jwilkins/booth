@@ -226,6 +226,20 @@ starting a track mid-bar is a different mistake from starting it four
 milliseconds early. A track with no grid can still be marked up: the cue is what
 you are sure of.
 
+**A cue is taken hold of by the end it hangs from**: a hot cue from the top
+third of the waveform, a memory cue from the bottom third, and in the middle
+either, the hot cue first. The lines run nearly the full height, so a
+section's marker and its button on the same bar are one line, and grabbing it
+took the memory cue, which comes first in the list. **A cue named for the words is renamed
+for where it lands**: dragged onto another line it is called by that line, and
+dragged along its own it is called from the word it is now on — "closer now"
+for a cue moved past "hold me" — which is what pressing it plays. A memory
+cue keeps its verse number on the same line and takes the number a line
+already has. Nothing keeps a time for every word, so which word is an
+estimate: the line's words spread over the singing measured inside it, by how
+long each is written. A cue named for the arrangement, "drop", or for nothing,
+keeps its name, and so does one dragged to where nothing is sung.
+
 **Resting on a block says what that section is and why.** Not all five at once
 — a strip that explained every name would be a paragraph nobody reads, and the
 question somebody actually has is "why is that bit a break". So it gives the
@@ -243,7 +257,11 @@ good many boundaries right and some plainly wrong, and a wrong one is worth
 less than none — it is a lie about where the drop is, on the strip a player
 draws. So **drag a boundary** to move it, snapped to the bar like the memory
 cue: a section that starts three beats into a bar is a section in the wrong
-place however carefully it was dragged. **Right-click a block** to rename it —
+place however carefully it was dragged. The cues marking that section go with
+it, the hot cue called `drop` and the memory cue called `Drop 1 · 32 bars`,
+whose bar count is said again for its new length and for the section before;
+a cue named for what is sung there stays with the singing, and Start, which the
+bars are counted from, stays where it is. **Right-click a block** to rename it —
 every name is offered, not just the ones the track already uses, because a menu
 listing only what is there cannot correct anything — or to **split** it where
 the pointer is, or **join** it to the one before. Splitting is how a boundary
