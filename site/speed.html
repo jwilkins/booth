@@ -97,10 +97,11 @@
   <div class="vs">
     <div class="side">
       <div class="who">rekordbox, as reported</div>
-      <b>4 hours</b>
-      <span>to Sync after adding one track to a playlist — rekordbox 7.2.7, macOS,
+      <b>~4 hours</b>
+      <span>to Sync to USB, and &ldquo;still a really long time&rdquo; after only adding one track
+      to a playlist — rekordbox 7.2.7, macOS,
       <a href="https://community.pioneerdj.com/hc/en-us/community/posts/55385125316249-Rekordbox-taking-hours-to-sync-to-USB-even-with-small-changes">February 2026</a>.
-      The reply explains that Sync rewrites everything.</span>
+      AlphaTheta's reply: Sync overwrites everything on the USB.</span>
     </div>
     <div class="side">
       <div class="who">Booth, measured</div>
@@ -143,10 +144,11 @@
     clock around the same calls the window makes, and writes what it saw to
     <a href="speed.json"><code>speed.json</code></a>. This page reads that file; nothing on it is
     typed in by hand.</p>
-    <p>A smaller version of the same test runs with every build and makes the structural claim as a
-    ratio rather than a budget: adding one track must cost less than half of writing the drive, and
-    so must rewriting the databases alone. A ratio holds on a laptop and on a loaded runner alike,
-    and a regression that made the second write rewrite everything would still fail it.</p>
+    <p>A smaller version of the same test runs with every build and makes the structural claim by
+    counting rather than timing: adding one track to a drive copies that one track and nothing the
+    drive already has, and rewriting the databases copies nothing. A timing would depend on the
+    machine — the first write prepares its tracks in parallel and the second prepares one, so the
+    more cores, the closer the two times come — and a count does not.</p>
     <p>The <a href="https://github.com/jwilkins/booth/blob/main/.github/workflows/speed.yml">speed
     workflow</a> takes the published measurement on a GitHub-hosted runner whenever the code that
     writes a drive changes, and once a week so the date never goes stale. Its disk is a fast one

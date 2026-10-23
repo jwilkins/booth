@@ -280,11 +280,11 @@ fn a_rating_reads_as_the_same_stars_from_both_databases() {
     assert_eq!(shown[0].rating, 4, "four stars, in both, on the 0–5 scale: {shown:#?}");
 }
 
-// Found writing the tests above, and the cousin of the forum's "four hours to
-// add one track": a sync whose only change was taking a track off a drive was
-// refused outright — "no audio files found" — because the writer asked for
-// files to prepare and there were none. Nothing to prepare is not nothing to
-// do: both databases change, and no audio file does.
+// Found writing the tests above, and the cousin of the forum's four-hour sync
+// that adding one track did not shorten: a sync whose only change was taking a
+// track off a drive was refused outright — "no audio files found" — because
+// the writer asked for files to prepare and there were none. Nothing to
+// prepare is not nothing to do: both databases change, and no audio file does.
 #[test]
 fn a_sync_that_only_takes_a_track_off_prepares_nothing_and_rewrites_both_databases() {
     let scratch = Scratch::new("removal-only");

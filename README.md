@@ -208,8 +208,8 @@ Two sets of tests are about drives in the field rather than drives in the abstra
 tools that write these drives — a stale OneLibrary left beside a fresh legacy database, ratings
 on the wrong scale, a playlist missing the tracks that failed — into claims about a drive this
 writes. `proto/musicai/tests/speed.rs` times a drive being written, added to and read back; its
-always-on half makes the structural claim as a ratio, and its `#[ignore]`d half is the
-measurement `scripts/speed.sh` publishes to `site/speed.json`.
+always-on half makes the structural claim by counting what a second write copies, and its
+`#[ignore]`d half is the measurement `scripts/speed.sh` publishes to `site/speed.json`.
 
 Each crate's README says what its own tests cover. The short version: the drive writer's output is
 read back by [`rekordcrate`](https://github.com/Holzhaus/rekordcrate), a separate implementation

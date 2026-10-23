@@ -3,15 +3,16 @@
 //! The number that decides whether a night goes well is not how long the
 //! first write of a drive takes — that happens at home, once — but how long
 //! adding one track to it takes at five to midnight. rekordbox's answer, from
-//! its own forum, is hours: its Sync rewrites the whole stick, and a DJ who
-//! added one track in February 2026 waited four of them. This measures Booth's
+//! its own forum, is hours: its Sync rewrites the whole stick, and a DJ whose
+//! sync took about four of them in February 2026 found that adding one track
+//! to a playlist "still takes a really long time". This measures Booth's
 //! answer, and the measurement is published (`site/speed.html`) so the claim is
 //! a number with a date on it rather than an adjective.
 //!
-//! Two tests. The first always runs and makes the structural claim — that the
-//! second write costs a fraction of the first — as a ratio, because a ratio
-//! holds on a laptop and on a loaded CI runner alike and an absolute budget
-//! does not. The second is `#[ignore]`d and is the measurement: it writes
+//! Two tests. The first always runs and makes the structural claim — that a
+//! second write puts on the drive only what changed — by counting what it
+//! copied, because no timing of it holds from one machine to the next: see
+//! the test. The second is `#[ignore]`d and is the measurement: it writes
 //! drives of several sizes and puts what it saw in a JSON file for the site.
 //! `scripts/speed.sh` runs it; so does the `speed` workflow.
 //!
@@ -79,6 +80,12 @@ struct Run {
     onelibrary_open_s: f64,
     analysis_check_s: f64,
     cues_read_s: f64,
+    /// How many audio files the databases-only write and the one-more-track
+    /// write put on the drive: what the always-on test counts.
+    #[serde(skip)]
+    copied_databases_only: usize,
+    #[serde(skip)]
+    copied_add_one: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,6 +123,12 @@ fn seconds_in(line: &str) -> f64 {
 /// The sum of the steps whose detail lines contain `marker`.
 fn phase(details: &[String], marker: &str) -> f64 {
     details.iter().filter(|line| line.contains(marker)).map(|line| seconds_in(line)).sum()
+}
+
+/// How many audio files a write put on the drive: the writer says so once a
+/// file, "… copied 1234 bytes to …".
+fn copies(details: &[String]) -> usize {
+    details.iter().filter(|line| line.contains(": copied ")).count()
 }
 
 /// A drive's worth of records: one song, copied under `n` names. Copied rather
@@ -183,8 +196,10 @@ fn measure(where_: &Path, n: usize, seconds: f32) -> Run {
     let began = Instant::now();
     let mut again = args(&drive, Vec::new(), &tracks);
     again.already = rows.clone();
-    commands::export(&again, &Collected::new()).expect("the databases-only write failed");
+    let said = Collected::new();
+    commands::export(&again, &said).expect("the databases-only write failed");
     let databases_only_s = began.elapsed().as_secs_f64();
+    let copied_databases_only = copies(&said.details());
 
     // One more track on a full drive.
     let one_more = scratch.path("one-more.flac");
@@ -194,8 +209,10 @@ fn measure(where_: &Path, n: usize, seconds: f32) -> Run {
     let began = Instant::now();
     let mut adding = args(&drive, vec![one_more], &playlist);
     adding.already = rows;
-    commands::export(&adding, &Collected::new()).expect("adding one track failed");
+    let said = Collected::new();
+    commands::export(&adding, &said).expect("adding one track failed");
     let add_one_s = began.elapsed().as_secs_f64();
+    let copied_add_one = copies(&said.details());
 
     // Reading it back, as the dock does when the stick is plugged in.
     let key = booth_cli::rekordbox::onelibrary_key(None).expect("this build carries a key");
@@ -255,6 +272,8 @@ fn measure(where_: &Path, n: usize, seconds: f32) -> Run {
         onelibrary_open_s,
         analysis_check_s,
         cues_read_s,
+        copied_databases_only,
+        copied_add_one,
     }
 }
 
@@ -263,7 +282,7 @@ fn where_to_write() -> PathBuf {
 }
 
 #[test]
-fn adding_one_track_to_a_drive_costs_a_fraction_of_writing_it() {
+fn adding_one_track_to_a_drive_copies_that_track_and_nothing_it_already_has() {
     // Twelve short records, which is enough for the two databases and
     // thirty-six analysis files to be real work, and few enough that this runs
     // with the rest of the suite.
@@ -271,24 +290,21 @@ fn adding_one_track_to_a_drive_costs_a_fraction_of_writing_it() {
     eprintln!("{run:#?}");
 
     // The claim. rekordbox's Sync rewrites the whole stick to add a track;
-    // this carries every row it already has and prepares one file. Half is a
-    // deliberately loose line — the honest figure is nearer a twelfth — so
-    // that a loaded machine does not fail it, and a regression that made the
-    // second write rewrite everything would still be caught.
-    assert!(
-        run.add_one_s < run.full_s / 2.0,
-        "adding one track took {:.2}s against {:.2}s for the whole drive",
-        run.add_one_s,
-        run.full_s
-    );
-    assert!(
-        run.databases_only_s < run.full_s / 2.0,
-        "rewriting the databases alone took {:.2}s against {:.2}s for the whole drive",
-        run.databases_only_s,
-        run.full_s
-    );
+    // this carries every row it already has and puts one file on. Counted
+    // rather than timed. It was a ratio — adding a track under half the time
+    // of writing the drive — and a ratio of these two depends on the machine:
+    // the first write prepares its twelve tracks in parallel and the second
+    // prepares one, so the more cores, the nearer the two come. Measured in a
+    // debug build, adding a track cost 0.10 of writing the drive on one worker
+    // thread, 0.21 on two and 0.36 on four, and on that line past half at
+    // about eight — a laptop's worth of cores.
+    assert_eq!(run.copied_add_one, 1, "adding one track copied more than that track");
+    assert_eq!(run.copied_databases_only, 0, "rewriting the databases copied audio");
     // And reading the whole drive back is cheaper than writing it, which is
-    // the condition for checking a stick on the way out of the door.
+    // the condition for checking a stick on the way out of the door. Reading
+    // is serial and cheap — 0.14 s here, nearly all of it opening the
+    // OneLibrary database — and a write is never less than one track prepared
+    // and both databases built.
     assert!(run.read_back_s < run.full_s, "{run:#?}");
 }
 
