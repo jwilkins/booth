@@ -8085,6 +8085,11 @@ impl App {
                     if moved > 0 {
                         crate::debug!("took {} with the boundary", plural(moved, "cue"));
                     }
+                    // Both sections either side of the boundary are a
+                    // different length now.
+                    for phrase in &track.phrases[at.saturating_sub(1)..=*at] {
+                        recount_bars(&mut track.cues, phrase, &beats);
+                    }
                 }
             }
             self.prep_changed(id);
@@ -8123,8 +8128,15 @@ impl App {
             snap_to(&beats, time_ms, if letter == 0 { crate::library::BEATS_PER_BAR } else { 1 });
 
         let Some(track) = self.library.get_mut(id) else { return };
+        let Some(cue) = track.cues.get(at) else { return };
+        let renamed =
+            renamed_for_the_words(cue, &track.cues, snapped, &track.lyrics, &track.sounds);
         let Some(cue) = track.cues.get_mut(at) else { return };
         cue.time_ms = snapped;
+        if let Some(label) = renamed {
+            crate::debug!("cue moved onto other words: {:?} -> {label:?}", cue.label);
+            cue.label = label;
+        }
         track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
         self.prep_changed(id);
     }
@@ -13478,9 +13490,12 @@ fn what_the_words_decided(
 /// moment, and the cue is the one somebody presses in a booth.
 ///
 /// Only the cues that mark the section, which is what the name says: a cue
-/// called "drop" or "break" is about the arrangement. One named for what is
-/// sung there — a hook, a vocal entry — is about a moment in the music that has
-/// not moved, and dragging it along would put it somewhere nothing happens.
+/// called "drop" or "break" is about the arrangement, and so is the memory cue
+/// called "Drop 2 · 32 bars" under it. One named for what is sung there — a
+/// hook, a vocal entry — is about a moment in the music that has not moved, and
+/// dragging it along would put it somewhere nothing happens. Nor is Start,
+/// which is not the first section's marker but where the grid's bars are
+/// counted from.
 ///
 /// `within` is how close a cue has to be to count as marking the boundary. A
 /// beat: a section cue is snapped to the bar and so is the line, so they should
@@ -13494,13 +13509,213 @@ fn drag_cues(cues: &mut [crate::library::CueMark], from: u32, to: u32, within: u
     }
     let mut moved = 0;
     for cue in cues.iter_mut() {
-        let marks_a_section = crate::library::Phrase::KINDS.contains(&cue.label.as_str());
-        if marks_a_section && cue.time_ms.abs_diff(from) <= within {
+        if marks_a_section(&cue.label) && cue.time_ms.abs_diff(from) <= within {
             cue.time_ms = to;
             moved += 1;
         }
     }
     moved
+}
+
+/// What a cue named for what is sung is called once it has moved to `at_ms`,
+/// if that is different.
+///
+/// A cue placed from the words is named for them — the line itself on a hot
+/// cue, `V2` and the line on a memory cue — and the name is about a moment.
+/// Dragged onto another line, or along to another word of its own, it was
+/// naming words it no longer plays into. So it takes the words it lands on:
+/// the whole line, from in front of it or on its first word, or the rest of the
+/// line from the word it is now on, which is what pressing it plays.
+///
+/// A cue not named for words keeps its name: "Drop 1" is the arrangement's or
+/// somebody's own. So does one moved to where nothing is sung, whose words are
+/// still the nearest thing to what it is for.
+fn renamed_for_the_words(
+    cue: &crate::library::CueMark,
+    cues: &[crate::library::CueMark],
+    at_ms: u32,
+    lyrics: &[crate::library::Lyric],
+    sounds: &[(u32, u32)],
+) -> Option<String> {
+    let memory = cue.letter == 0;
+    let (number, said) = match memory {
+        true => verse_numbered(&cue.label)?,
+        false => (0, cue.label.trim()),
+    };
+    // What a hot cue is for, where it is not for a line: "drop", "hook". A
+    // line can end on the same word — "let the beat drop" — and the cue is
+    // still the arrangement's.
+    if !memory && (marks_a_section(said) || REASONS.contains(&said)) {
+        return None;
+    }
+    // Named for the words if what it says is a line, or the end of one, which
+    // is what a cue moved along a line before is called.
+    let was = lyrics.iter().find(|line| ends_with_words(&line.text, said))?;
+    let (line, from) = words_at(lyrics, sounds, at_ms)?;
+    let now = line.text.split_whitespace().skip(from).collect::<Vec<_>>().join(" ");
+    if plain_words(&now) == plain_words(said) {
+        return None;
+    }
+    if !memory {
+        return Some(now);
+    }
+    // The verse number says which of the record's lines this is: kept on the
+    // same line, the one another marker already gives the new line, or the
+    // next one free.
+    let number = match plain_words(&was.text) == plain_words(&line.text) {
+        true => number,
+        false => cues
+            .iter()
+            .filter(|other| other.letter == 0)
+            .filter_map(|other| verse_numbered(&other.label))
+            .find(|(_, other)| ends_with_words(&line.text, other))
+            .map(|(number, _)| number)
+            .unwrap_or_else(|| {
+                1 + cues
+                    .iter()
+                    .filter_map(|other| verse_numbered(&other.label).map(|(number, _)| number))
+                    .max()
+                    .unwrap_or(0)
+            }),
+    };
+    Some(format!("V{number} {now}"))
+}
+
+/// What the analysis calls a hot cue that is not for a line, besides the
+/// sections: see `booth_cli::analysis::cues::Reason::label`.
+const REASONS: [&str; 5] = ["vocal", "hook", "refrain", "line", "instrumental"];
+
+/// A memory cue's name split into its verse number and its words, `V2 Get
+/// Down` into 2 and "Get Down", or `None` for any other name.
+fn verse_numbered(label: &str) -> Option<(usize, &str)> {
+    let (number, said) = label.trim().split_once(' ')?;
+    let number = number.strip_prefix('V')?.parse().ok()?;
+    Some((number, said.trim()))
+}
+
+/// The words of a line, for comparing two: lower case, and without the
+/// punctuation a lyric file and a recogniser disagree about.
+fn plain_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| word.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Whether `said` is the line, or the last few words of it.
+fn ends_with_words(line: &str, said: &str) -> bool {
+    let said = plain_words(said);
+    !said.is_empty() && plain_words(line).ends_with(&said)
+}
+
+/// The line a cue at `at_ms` plays into, and which of its words it starts on.
+///
+/// The line sung at that moment, or one starting within a couple of seconds,
+/// as [`crate::library::sung_at`] reads a cue — a cue in front of a line is
+/// for that line, from its first word.
+fn words_at<'a>(
+    lyrics: &'a [crate::library::Lyric],
+    sounds: &[(u32, u32)],
+    at_ms: u32,
+) -> Option<(&'a crate::library::Lyric, usize)> {
+    /// As `sung_at` has it: about a bar at the tempos this is used at.
+    const REACH_MS: u32 = 2_000;
+
+    let sung = lyrics.iter().find(|line| line.start_ms <= at_ms && at_ms < line.end_ms);
+    if let Some(line) = sung {
+        let starts = word_starts(line, sounds);
+        let from = (0..starts.len()).min_by_key(|&word| starts[word].abs_diff(at_ms))?;
+        return Some((line, from));
+    }
+    lyrics
+        .iter()
+        .filter(|line| line.start_ms >= at_ms && line.start_ms - at_ms <= REACH_MS)
+        .min_by_key(|line| line.start_ms)
+        .filter(|line| !line.text.trim().is_empty())
+        .map(|line| (line, 0))
+}
+
+/// Where each word of a line starts, as near as the line and the stem can say.
+///
+/// Nothing keeps a time for every word, so this is an estimate: the line's
+/// words spread over the singing inside it — the stretches of the stem with a
+/// voice in them, the breaths between left out — each word taking as long as
+/// it is written. A breath is where a line pauses, so a word after one is not
+/// pulled into the silence, and a long word takes longer to sing than "a".
+/// Across the line's whole span where the stem was not measured.
+fn word_starts(line: &crate::library::Lyric, sounds: &[(u32, u32)]) -> Vec<u32> {
+    let words: Vec<&str> = line.text.split_whitespace().collect();
+    let mut sung: Vec<(u32, u32)> = sounds
+        .iter()
+        .map(|&(from, to)| (from.max(line.start_ms), to.min(line.end_ms)))
+        .filter(|(from, to)| to > from)
+        .collect();
+    if sung.is_empty() {
+        sung.push((line.start_ms, line.end_ms.max(line.start_ms)));
+    }
+    let singing: u32 = sung.iter().map(|(from, to)| to - from).sum();
+    // A word and the space after it, so that "a" is not given no time at all.
+    let weight = |word: &str| word.chars().count() as u32 + 1;
+    let whole: u32 = words.iter().map(|word| weight(word)).sum::<u32>().max(1);
+
+    let mut starts = Vec::with_capacity(words.len());
+    let mut before = 0;
+    for word in &words {
+        // How far into the singing this word starts, then where that is.
+        let mut into = (u64::from(singing) * u64::from(before) / u64::from(whole)) as u32;
+        let mut at = sung[0].0;
+        for &(from, to) in &sung {
+            at = from + into.min(to - from);
+            if into < to - from {
+                break;
+            }
+            into -= to - from;
+        }
+        starts.push(at);
+        before += weight(word);
+    }
+    starts
+}
+
+/// Whether a cue is called for a section of the arrangement.
+///
+/// A hot cue by its kind alone, `drop`; a memory cue by its kind and which of
+/// them it is, `Drop 2`, and how long it runs, `Drop 2 · 32 bars` — the names
+/// the analysis gives them. The whole name and not its first word, because a
+/// line can start with one: "Drop it low" is a lyric.
+fn marks_a_section(label: &str) -> bool {
+    let label = label.trim();
+    if crate::library::Phrase::KINDS.contains(&label) {
+        return true;
+    }
+    let named = label.split(" \u{b7} ").next().unwrap_or(label);
+    match named.split(' ').collect::<Vec<_>>()[..] {
+        [kind, count] => {
+            crate::library::Phrase::KINDS.iter().any(|known| kind.eq_ignore_ascii_case(known))
+                && count.parse::<u32>().is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// Say how many bars a section runs for again, on the memory cue that marks
+/// it, after one of its ends has moved.
+///
+/// Only where the name says so already, `Drop 1 · 40 bars`: a name without a
+/// length is one the analysis gave no length to, and adding one would be
+/// changing what kind of name it is.
+fn recount_bars(
+    cues: &mut [crate::library::CueMark],
+    phrase: &crate::library::Phrase,
+    beats: &[u32],
+) {
+    let Some(bars) = crate::wave::bars_of(phrase, beats) else { return };
+    for cue in cues.iter_mut().filter(|cue| cue.letter == 0 && cue.time_ms == phrase.start_ms) {
+        let Some((named, _)) = cue.label.split_once(" \u{b7} ") else { continue };
+        if marks_a_section(named) {
+            cue.label = format!("{named} \u{b7} {bars} bars");
+        }
+    }
 }
 
 /// Whether this is a row this program draws a picture for at all.
@@ -13867,6 +14082,38 @@ mod tests {
                 let mut cues = vec![cue(1, 32_000, "drop")];
                 assert_eq!(drag_cues(&mut cues, 32_000, 32_000, 500), 0);
                 assert_eq!(cues[0].time_ms, 32_000);
+            }
+
+            #[test]
+            fn the_memory_cue_marking_a_section_goes_with_its_boundary_and_says_its_new_length() {
+                // The drop ran 32 s to 96 s, 32 bars at 120 BPM. Its start
+                // dragged to 40 s, it runs 28, and the marker under it was
+                // left behind saying 32.
+                let (mut app, id) = with_a_drop("memory");
+                let track = app.library.get_mut(id).unwrap();
+                track.cues.push(cue(0, 32_000, "Drop 1 \u{b7} 32 bars"));
+                track.cues.push(cue(0, 96_000, "Break 1 \u{b7} 32 bars"));
+                assert!(app.edit_phrase(id, PhraseEdit::Move { at: 1, time_ms: 40_000 }));
+
+                let cues = &app.library.get(id).unwrap().cues;
+                let drop = cues.iter().find(|c| c.label.starts_with("Drop 1")).unwrap();
+                assert_eq!((drop.time_ms, drop.label.as_str()), (40_000, "Drop 1 \u{b7} 28 bars"));
+                let others = cues.iter().filter(|c| c.letter == 0 && c.time_ms != 40_000);
+                assert_eq!(
+                    others.map(|c| (c.time_ms, c.label.as_str())).collect::<Vec<_>>(),
+                    [(0, ""), (96_000, "Break 1 \u{b7} 32 bars")],
+                    "the anchor or the far boundary's marker moved"
+                );
+            }
+
+            #[test]
+            fn a_cue_is_a_sections_by_its_whole_name_not_its_first_word() {
+                for named in ["drop", "Drop 2", "Break 1 \u{b7} 16 bars", "intro 1"] {
+                    assert!(marks_a_section(named), "{named}");
+                }
+                for not in ["Drop it low", "drop the bass now", "V1 Drop it", "Start", ""] {
+                    assert!(!marks_a_section(not), "{not}");
+                }
             }
         }
 
@@ -14899,6 +15146,118 @@ mod tests {
                 let moved = cues.iter().find(|cue| cue.label == "Drop 1").unwrap();
                 assert_eq!(anchor.time_ms, 0, "the anchor moved instead of the one dragged");
                 assert!(moved.time_ms > 60_000, "the one dragged did not move: {moved:?}");
+            }
+
+            /// Put a cue on the track, drag it to `to`, and say what it is
+            /// called once it lands.
+            fn dragged(
+                app: &mut App,
+                id: u32,
+                letter: u8,
+                from: u32,
+                label: &str,
+                to: u32,
+            ) -> String {
+                let track = app.library.get_mut(id).unwrap();
+                track.cues.push(CueMark {
+                    letter,
+                    time_ms: from,
+                    label: label.into(),
+                    color: [0; 3],
+                });
+                track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
+                let at = track
+                    .cues
+                    .iter()
+                    .position(|cue| cue.letter == letter && cue.time_ms == from)
+                    .unwrap();
+                app.move_cue(id, at, to);
+                let cues = &app.library.get(id).unwrap().cues;
+                let cue = cues.iter().find(|cue| cue.letter == letter && cue.time_ms == to);
+                cue.expect("the cue is not where it was dragged").label.clone()
+            }
+
+            #[test]
+            fn a_cue_dragged_onto_another_line_is_named_for_that_line() {
+                let (mut app, id) = sung(
+                    "onto another",
+                    &[(40_000, "hold me closer now"), (60_000, "nothing here but us")],
+                );
+                // A beat in front of the second line, which is for that line.
+                let label = dragged(&mut app, id, 1, 40_000, "hold me closer now", 59_500);
+                assert_eq!(label, "nothing here but us");
+            }
+
+            #[test]
+            fn a_cue_dragged_along_its_line_is_named_from_the_word_it_lands_on() {
+                // The line runs 40 s to 42 s and its words share the two
+                // seconds by how long each is written: "closer" from about
+                // 40.84 s and "now" from about 41.58 s.
+                let (mut app, id) = sung("along", &[(40_000, "hold me closer now")]);
+                let label = dragged(&mut app, id, 1, 40_000, "hold me closer now", 41_000);
+                assert_eq!(label, "closer now");
+
+                // And back to the top of the line, the whole of it again.
+                let at =
+                    app.library.get(id).unwrap().cues.iter().position(|c| c.letter == 1).unwrap();
+                app.move_cue(id, at, 40_000);
+                assert_eq!(labels(&app, id), ["hold me closer now"]);
+            }
+
+            #[test]
+            fn a_marker_dragged_onto_a_line_another_marker_names_takes_that_ones_verse_number() {
+                let (mut app, id) = sung(
+                    "verse numbers",
+                    &[
+                        (40_000, "hold me closer now"),
+                        (60_000, "nothing here but us"),
+                        (80_000, "hold me closer now"),
+                        (100_000, "one more time tonight"),
+                    ],
+                );
+                let track = app.library.get_mut(id).unwrap();
+                track.cues.push(CueMark {
+                    letter: 0,
+                    time_ms: 40_000,
+                    label: "V1 hold me closer now".into(),
+                    color: [0; 3],
+                });
+                let label = dragged(&mut app, id, 0, 60_000, "V2 nothing here but us", 80_000);
+                assert_eq!(label, "V1 hold me closer now");
+
+                // Onto a line no marker names, the next number free.
+                let label = dragged(&mut app, id, 0, 60_000, "V2 nothing here but us", 100_000);
+                assert_eq!(label, "V3 one more time tonight");
+            }
+
+            #[test]
+            fn a_cue_named_for_the_arrangement_keeps_its_name_wherever_it_is_dragged() {
+                let (mut app, id) = sung("arrangement", &[(40_000, "let the beat drop")]);
+                assert_eq!(dragged(&mut app, id, 1, 32_000, "drop", 40_000), "drop");
+                assert_eq!(dragged(&mut app, id, 0, 32_000, "Drop 1", 40_000), "Drop 1");
+            }
+
+            #[test]
+            fn a_cue_dragged_to_where_nothing_is_sung_keeps_its_words() {
+                // Ten seconds from the next line is not in front of it.
+                let (mut app, id) = sung(
+                    "nothing sung",
+                    &[(40_000, "hold me closer now"), (60_000, "nothing here but us")],
+                );
+                let label = dragged(&mut app, id, 1, 40_000, "hold me closer now", 50_000);
+                assert_eq!(label, "hold me closer now");
+            }
+
+            #[test]
+            fn a_word_after_a_breath_is_put_after_the_breath() {
+                // Sung for a second, a two-second breath, and a second more:
+                // the words share the two seconds of singing, and "now", whose
+                // share falls past the first second, starts after the breath
+                // rather than in it.
+                let line =
+                    Lyric { start_ms: 40_000, end_ms: 44_000, text: "hold me closer now".into() };
+                let starts = word_starts(&line, &[(40_000, 41_000), (43_000, 44_000)]);
+                assert_eq!(starts, [40_000, 40_526, 40_842, 43_578]);
             }
 
             #[test]
