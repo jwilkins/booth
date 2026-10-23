@@ -19,27 +19,68 @@ use super::structure::{Kind, Structure};
 /// A player has eight hot cues, A through H.
 const HOT_CUES: usize = 8;
 
-/// What a button is for, in the order the eight are filled.
+/// The four buttons that mean the same thing on every record, so that they
+/// are pressed without being looked for: A the hook, B the main break, C the
+/// hook in a drop, D the main drop.
+///
+/// Each is held for what it is for, and left empty on a record that has none:
+/// a hook on C one night and on A the next is a button that has to be read
+/// before it is pressed, which is the thing fixing them is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    /// The line the room sings, where it is sung outside a drop.
+    Hook,
+    /// The deepest break: where a second record has the most room.
+    MainBreak,
+    /// The hook again, inside a drop, at least [`HOOK_IN_A_DROP_BARS`] from
+    /// the main drop.
+    HookInADrop,
+    /// The drop with the most energy.
+    MainDrop,
+}
+
+impl Slot {
+    /// The button: 1 for A.
+    pub fn letter(self) -> u8 {
+        match self {
+            Slot::Hook => 1,
+            Slot::MainBreak => 2,
+            Slot::HookInADrop => 3,
+            Slot::MainDrop => 4,
+        }
+    }
+
+    /// Which keeps its button when two would be within [`APART_BARS`]: lower
+    /// first. The hook always; then the main drop, the main break, and the
+    /// hook in a drop.
+    fn precedence(self) -> u8 {
+        match self {
+            Slot::Hook => 0,
+            Slot::MainDrop => 1,
+            Slot::MainBreak => 2,
+            Slot::HookInADrop => 3,
+        }
+    }
+
+    /// All four, A first.
+    pub const ALL: [Slot; 4] = [Slot::Hook, Slot::MainBreak, Slot::HookInADrop, Slot::MainDrop];
+}
+
+/// How far the hook in a drop has to be from the main drop, in bars, to have
+/// button C. Eight, a phrase: nearer than that, C is a press of D a few bars
+/// late.
+pub const HOOK_IN_A_DROP_BARS: usize = 8;
+
+/// What the other four buttons, E to H, are for, in the order they are filled.
 ///
 /// A fixed order rather than a ranking, because what a DJ remixing a record
-/// live reaches for is a set: the drop, the hook, the break, the drop back in,
-/// a way in, a way out, the build before the drop, and a second line the room
-/// sings. Ranking the arrangement against the words produced sets that were
-/// all of one or all of the other, and sharing the buttons half and half
-/// between them fixed that by count and not by kind — a busy arrangement's
-/// four were its four loudest sections, and the words' four the hook and three
-/// verse lines. A role nothing on the record fills is skipped, not held open.
+/// live reaches for is a set: a way in, a way out, the build before the drop,
+/// and a second line the room sings. Ranking the arrangement against the
+/// words produced sets that were all of one or all of the other. A role
+/// nothing on the record fills is skipped, and the button goes to the rest by
+/// worth — a drop other than the main one before a second break.
 #[derive(Clone, Copy, Debug)]
 enum Role {
-    /// The first drop: where the floor moves.
-    FirstDrop,
-    /// The line the room sings.
-    Hook,
-    /// The first breakdown: where a second record comes in.
-    Break,
-    /// The second drop: the record coming back after the break. Where the
-    /// hook comes back on it, the drop is that button and reads "drop".
-    DropBackIn,
     /// A way in: the intro, or the build before the first drop.
     MixIn,
     /// A way out: the outro.
@@ -53,19 +94,10 @@ enum Role {
 }
 
 /// The roles, in the order they are filled. See [`Role`]. One more than there
-/// are buttons: a record with every one of them to offer fills the eight
-/// before the last is reached, and most records are missing several.
-const ORDER: [Role; HOT_CUES + 1] = [
-    Role::FirstDrop,
-    Role::Hook,
-    Role::Break,
-    Role::DropBackIn,
-    Role::MixIn,
-    Role::MixOut,
-    Role::PreDrop,
-    Role::Instrumental,
-    Role::Refrain,
-];
+/// are buttons for them: a record with every one of them to offer fills the
+/// four before the last is reached, and most records are missing several.
+const ORDER: [Role; HOT_CUES - Slot::ALL.len() + 1] =
+    [Role::MixIn, Role::MixOut, Role::PreDrop, Role::Instrumental, Role::Refrain];
 /// How long the voice has to keep going before its arrival counts, in seconds.
 /// Shorter than this is a vocal stab, not an entry.
 const MIN_VOCAL_SECONDS: f64 = 1.0;
@@ -86,13 +118,10 @@ pub enum Reason {
     Hook,
     /// Where another line the track keeps coming back to first lands.
     Refrain,
-    /// The hook coming back after a verse's worth of absence. See
+    /// The hook again, inside a drop: button C, the one way a line is under
+    /// two buttons — see [`Slot::HookInADrop`]. A marker where it is the hook
+    /// coming back anywhere else; see
     /// [`crate::transcribe::MomentKind::Comeback`].
-    ///
-    /// A marker, like every other return: a line gets one button, so that
-    /// eight buttons cover eight things. Where it lands on a drop it folds into
-    /// the drop, which is a button of its own, and that is the one way a line
-    /// is under two buttons.
     Comeback,
     /// A line sung once and never again.
     ///
@@ -115,8 +144,7 @@ impl Reason {
             Reason::Vocal => "vocal",
             Reason::Hook => "hook",
             Reason::Refrain => "refrain",
-            // The hook, back: what a DJ calls it is the same thing.
-            Reason::Comeback => "hook",
+            Reason::Comeback => "hook in drop",
             Reason::Line => "line",
             Reason::Instrumental => "instrumental",
         }
@@ -197,11 +225,14 @@ pub struct Candidate {
     /// round for the fourth time — says so here rather than being ranked
     /// against the drops and losing every time by a different margin.
     pub memory_only: bool,
+    /// Whether this is the record's main drop or its main break: see
+    /// [`mark_the_main_ones`].
+    pub main: bool,
 }
 
 impl Candidate {
     pub fn new(time_ms: u32, reason: Reason) -> Self {
-        Self { time_ms, reason, label: None, bars: None, memory_only: false }
+        Self { time_ms, reason, label: None, bars: None, memory_only: false, main: false }
     }
 
     pub fn named(time_ms: u32, reason: Reason, label: &str) -> Self {
@@ -212,6 +243,7 @@ impl Candidate {
             label: (!label.is_empty()).then(|| label.to_string()),
             bars: None,
             memory_only: false,
+            main: false,
         }
     }
 
@@ -229,6 +261,12 @@ impl Candidate {
     /// "drop", which is what a DJ reaching past the words is reaching for.
     fn lends_words(&self) -> bool {
         !self.memory_only
+    }
+
+    /// Whether this is button C's moment: the hook in a drop, offered as a
+    /// button rather than marked.
+    fn is_hook_in_a_drop(&self) -> bool {
+        self.reason == Reason::Comeback && !self.memory_only
     }
 
     fn comment(&self) -> String {
@@ -266,14 +304,17 @@ const TOGETHER_MS: u32 = 500;
 /// two that close covers seven places. It is the earlier that keeps its
 /// button, because it plays into the later and the later does not play into
 /// it.
-const APART_BARS: usize = 2;
+pub const APART_BARS: usize = 2;
 
 /// Suggest cue points for a track.
 ///
 /// Returns a memory cue at the first downbeat — which is where a player parks
 /// when the track loads — followed by up to eight hot cues in time order.
+/// `bands` is the track's three-band picture, which the main drop and the main
+/// break are found in: see [`super::energy::bars`].
 pub fn suggest(
     features: &Features,
+    bands: &[u8],
     beat_times: &[u32],
     structure: &Structure,
     bar_phase: usize,
@@ -286,6 +327,11 @@ pub fn suggest(
     for at in vocal_entries(features, beat_times, structure) {
         candidates.push(Candidate::new(at, Reason::Vocal));
     }
+    // The main drop and the main break, by how much each bar plays — from the
+    // first downbeat, which is where the bars are counted from.
+    let bars = &beat_times[bar_phase.min(beat_times.len())..];
+    let shape = super::energy::shape(&super::energy::bars(bands, bars));
+    mark_the_main_ones(&mut candidates, bars, &shape);
 
     // The memory cue is where the track begins as far as a player is
     // concerned, and a player counts in bars from it.
@@ -294,6 +340,71 @@ pub fn suggest(
     // park on rather than wherever the file happens to stop.
     let end = beat_times.last().copied();
     assemble(start, end, beat_times, candidates)
+}
+
+/// How near a section's start a drop or a break found by energy has to begin to
+/// be that section, in bars. The arrangement analysis says exactly where a
+/// section starts, from how the sound changes; the energy says which section
+/// it is, bar by bar, and a bar or two either side is the same boundary seen
+/// two ways.
+const SAME_START_BARS: usize = 2;
+
+/// Mark the record's main drop and main break among `candidates`, by `shape`.
+///
+/// Each is the section that starts within [`SAME_START_BARS`] of where the
+/// energy says it does, whatever the arrangement analysis called it — a
+/// section it named a break that plays like the loudest part of the record is
+/// the drop — or a new cue at that bar line where no section starts near it,
+/// which is the drop the analysis missed. Where the energy found none, the
+/// first section named a drop, or a break, is taken: the most there is to go
+/// on. `grid` is every beat from the first downbeat. A kind already marked is
+/// left as it is.
+pub fn mark_the_main_ones(
+    candidates: &mut Vec<Candidate>,
+    grid: &[u32],
+    shape: &super::energy::Shape,
+) {
+    use super::place::{beats_between, BEATS_PER_BAR};
+    for (kind, run) in [(Kind::Chorus, shape.main_drop()), (Kind::Down, shape.main_break())] {
+        if candidates
+            .iter()
+            .any(|candidate| candidate.main && candidate.reason == Reason::Section(kind))
+        {
+            continue;
+        }
+        let Some(run) = run else {
+            let first = candidates
+                .iter_mut()
+                .find(|candidate| candidate.reason == Reason::Section(kind) && !candidate.main);
+            if let Some(first) = first {
+                first.main = true;
+            }
+            continue;
+        };
+        let Some(&at) = grid.get(run.from * BEATS_PER_BAR) else { continue };
+        let near = |candidate: &Candidate| {
+            beats_between(grid, candidate.time_ms.min(at), candidate.time_ms.max(at))
+                .is_some_and(|beats| beats <= (SAME_START_BARS * BEATS_PER_BAR) as f32)
+        };
+        let section = candidates
+            .iter_mut()
+            .filter(|candidate| candidate.reason.is_section() && !candidate.main && near(candidate))
+            .min_by_key(|candidate| candidate.time_ms.abs_diff(at));
+        match section {
+            Some(section) => {
+                if section.reason != Reason::Section(kind) {
+                    section.reason = Reason::Section(kind);
+                    section.bars = u16::try_from(run.bars()).ok();
+                }
+                section.main = true;
+            }
+            None => candidates.push(Candidate {
+                bars: u16::try_from(run.bars()).ok(),
+                main: true,
+                ..Candidate::new(at, Reason::Section(kind))
+            }),
+        }
+    }
 }
 
 /// A cue at the start of every section the phrase analysis found.
@@ -408,6 +519,22 @@ pub fn assemble_with_reasons(
                 candidate.label.as_deref().is_some_and(|said| said == hook || inside(hook, said))
             })
     };
+    // Which of the fixed four a moment is for, if any. The hook before the
+    // main drop: where the two landed on one moment, it is the hook's button,
+    // the hook taking precedence over everything.
+    let slot = |candidate: &Candidate| -> Option<Slot> {
+        if candidate.is_hook_in_a_drop() {
+            return Some(Slot::HookInADrop);
+        }
+        if is_hook(candidate) {
+            return Some(Slot::Hook);
+        }
+        match (candidate.main, candidate.reason) {
+            (true, Reason::Section(Kind::Down)) => Some(Slot::MainBreak),
+            (true, Reason::Section(Kind::Chorus)) => Some(Slot::MainDrop),
+            _ => None,
+        }
+    };
     // A button the words put there, which says a line, as against a section
     // that a line was folded into.
     let says_a_line = |candidate: &Candidate| {
@@ -415,6 +542,10 @@ pub fn assemble_with_reasons(
             && candidate.label.as_deref().is_some_and(|said| !said.trim().is_empty())
     };
 
+    // Nothing said which drop and which break are the main ones — nothing
+    // measured how much the record plays — so the first of each.
+    let mut candidates = candidates;
+    mark_the_main_ones(&mut candidates, grid, &super::energy::Shape::default());
     let mut kept = fold(rank(candidates));
 
     // Every moment worth cueing becomes a memory cue, whether or not it also
@@ -434,32 +565,37 @@ pub fn assemble_with_reasons(
     // and looked like a cue that had not been set.
     //
     // Taken out before the eight are chosen, not after, or the track would
-    // come out with seven. Not the hook, on a record that opens on it: the
-    // hook always has a button, and it is always A.
+    // come out with seven. Not one of the fixed four, on a record that opens
+    // on it: those are on their buttons on every record.
     if let Some(at) = kept.iter().position(|(candidate, _)| {
-        candidate.time_ms.abs_diff(start_ms) < TOGETHER_MS && !is_hook(candidate)
+        candidate.time_ms.abs_diff(start_ms) < TOGETHER_MS && slot(candidate).is_none()
     }) {
         kept.remove(at);
     }
     kept.retain(|(candidate, _)| !candidate.memory_only);
+    let slots: Vec<Option<Slot>> = kept.iter().map(|(candidate, _)| slot(candidate)).collect();
 
-    // No two buttons within two bars: the later of the two is left a marker,
-    // and its button goes to whatever is next in line — unless the later is
-    // the hook, which always has a button, and then it is the earlier that
-    // goes. Looked for among the eight rather than among every candidate,
-    // because a line that was never going to be a button has no business
-    // keeping anything off one; and the eight are chosen again each time one
-    // is left out, because the button it frees is filled by the order, and
-    // what fills it can be crowded in its turn.
+    // No two buttons within two bars: of the two, the one that matters less
+    // is left a marker — the fixed four in their order, A, D, B, C, and any
+    // of them over the rest; between two of the rest, the later — and a
+    // button the rest lose goes to whatever is next in line. Looked for among
+    // the eight rather than among every candidate, because a line that was
+    // never going to be a button has no business keeping anything off one;
+    // and the eight are chosen again each time one is left out, because what
+    // fills the button it frees can be crowded in its turn. One of the four
+    // that loses leaves its letter empty.
+    let precedence = |i: usize| slots[i].map_or(u8::MAX, Slot::precedence);
     let mut barred = vec![false; kept.len()];
     let chosen = loop {
-        let chosen = to_the_buttons(&kept, &barred);
+        let chosen = to_the_buttons(&kept, &slots, &barred);
         // A line inside another line on the eight: "praise you" and "I have to
         // praise you like I should". Pressed, the longer plays the shorter, so
         // the shorter's button goes to something else, as asked — the hook's
-        // too, and then the longer line is the hook's button.
+        // too, and then the longer line is the hook's button. Not the hook in
+        // a drop: that is the hook again by design, the one line with two.
         let shorter = chosen.iter().copied().find(|&i| {
             says_a_line(&kept[i].0)
+                && slots[i] != Some(Slot::HookInADrop)
                 && chosen.iter().any(|&j| {
                     says_a_line(&kept[j].0)
                         && inside(
@@ -477,27 +613,27 @@ pub fn assemble_with_reasons(
                 .is_some_and(|beats| beats < (APART_BARS * BEATS_PER_BAR) as f32)
         });
         match crowded {
-            Some(pair) if is_hook(&kept[pair[1]].0) => barred[pair[0]] = true,
+            Some(pair) if precedence(pair[0]) > precedence(pair[1]) => barred[pair[0]] = true,
             Some(pair) => barred[pair[1]] = true,
             None => break chosen,
         }
     };
 
-    // The hook on A, on every record that has one: the same pad for the line
-    // the room sings whichever record is on the deck, so it is never looked
-    // for. The rest from B, in time order.
-    let hook = chosen.iter().position(|&i| is_hook(&kept[i].0));
-    let letter = |n: usize| match hook {
-        Some(hook) if n == hook => 1,
-        Some(hook) if n < hook => n + 2,
-        _ => n + 1,
-    };
-
+    // The fixed four on their own letters; the rest from E, in time order.
+    let mut rest = Slot::ALL.len() as u8;
     let mut reasons = Vec::new();
-    for (n, candidate) in chosen.into_iter().map(|i| &kept[i].0).enumerate() {
+    for i in chosen {
+        let candidate = &kept[i].0;
+        let letter = match slots[i] {
+            Some(slot) => slot.letter(),
+            None => {
+                rest += 1;
+                rest
+            }
+        };
         let color = candidate.reason.color();
         cues.push(
-            Cue::hot(letter(n) as u8, candidate.time_ms)
+            Cue::hot(letter, candidate.time_ms)
                 .with_comment(&candidate.comment())
                 .with_color(color.r, color.g, color.b),
         );
@@ -508,25 +644,55 @@ pub fn assemble_with_reasons(
 
 /// Which of the candidates get the eight buttons, in time order.
 ///
-/// Each [`Role`] in [`ORDER`] takes the moment that fills it, where the record
-/// has one. Whatever buttons the roles leave go to the rest by worth — a third
-/// drop before a second break — with the lines sung once last, spread over the
-/// record rather than taken from its front: taken from the front, three
-/// buttons went to the first twenty seconds of a verse while the rest of the
-/// record had none, which is a map of a verse.
+/// The fixed four first, each the earliest moment for it — see [`Slot`].
+/// Then the other four: each [`Role`] in [`ORDER`] takes the moment that
+/// fills it, where the record has one, and whatever buttons the roles leave go
+/// to the rest by worth — a drop other than the main one before a second break
+/// — with the lines sung once last, spread over the record rather than taken
+/// from its front: taken from the front, three buttons went to the first
+/// twenty seconds of a verse while the rest of the record had none, which is a
+/// map of a verse.
 ///
-/// Nothing is held open. A track with nine sections and no words gets eight
-/// sections; an instrumental gets its eight and nothing is left blank that
-/// could have been filled. What *is* left blank is what nothing was found for,
-/// which is the honest answer — an empty button says "nothing here" and a
-/// made-up one says the wrong thing in a booth.
+/// What is left blank is what nothing was found for, which is the honest
+/// answer — an empty button says "nothing here" and a made-up one says the
+/// wrong thing in a booth. The fixed four stay empty rather than go to the
+/// rest, so that B is the break or nothing on every record.
 ///
 /// Takes the list in time order, as [`fold`] leaves it, so that the earliest
 /// moment of a kind is the first match, and hands back the indices of the
 /// eight, in the same order. A candidate `barred` is passed over.
-fn to_the_buttons(kept: &[(Candidate, u32)], barred: &[bool]) -> Vec<usize> {
+fn to_the_buttons(
+    kept: &[(Candidate, u32)],
+    slots: &[Option<Slot>],
+    barred: &[bool],
+) -> Vec<usize> {
     let mut taken = barred.to_vec();
     let mut chosen: Vec<usize> = Vec::new();
+    // The hook's button goes to the longest line with the hook in it — "I
+    // have to praise you like I should" over "praise you", because pressed it
+    // plays both — and between alike, to the earliest.
+    let words =
+        |i: usize| kept[i].0.label.as_deref().map_or(0, |said| said.split_whitespace().count());
+    for slot in Slot::ALL {
+        let mut open = (0..kept.len()).filter(|&i| !taken[i] && slots[i] == Some(slot));
+        let pick = match slot {
+            Slot::Hook => open.min_by_key(|&i| (std::cmp::Reverse(words(i)), i)),
+            _ => open.next(),
+        };
+        if let Some(i) = pick {
+            chosen.push(i);
+        }
+    }
+    // Whatever is for one of the four, picked or not, is not for the rest: a
+    // second hook is not a refrain.
+    for (i, slot) in slots.iter().enumerate() {
+        if slot.is_some() {
+            taken[i] = true;
+        }
+    }
+    let room = HOT_CUES - Slot::ALL.len();
+    let mut others: Vec<usize> = Vec::new();
+
     let earliest = |taken: &[bool], wanted: &dyn Fn(&Candidate) -> bool| {
         kept.iter().enumerate().position(|(i, (candidate, _))| !taken[i] && wanted(candidate))
     };
@@ -539,14 +705,10 @@ fn to_the_buttons(kept: &[(Candidate, u32)], barred: &[bool]) -> Vec<usize> {
         .find(|(candidate, _)| candidate.reason == Reason::Section(Kind::Chorus))
         .map(|(candidate, _)| candidate.time_ms);
     for role in ORDER {
+        if others.len() == room {
+            break;
+        }
         let pick = match role {
-            Role::FirstDrop => earliest(&taken, &is(Reason::Section(Kind::Chorus))),
-            Role::Hook => earliest(&taken, &is(Reason::Hook)),
-            Role::Break => earliest(&taken, &is(Reason::Section(Kind::Down))),
-            // The first drop is taken by now, so the earliest drop left is
-            // the second. Not the hook coming back: that is the hook's line
-            // again, and a line gets one button unless the other is a drop.
-            Role::DropBackIn => earliest(&taken, &is(Reason::Section(Kind::Chorus))),
             Role::MixIn => earliest(&taken, &|candidate: &Candidate| {
                 matches!(candidate.reason, Reason::Section(Kind::Intro | Kind::Up))
                     && first_drop.is_none_or(|drop| candidate.time_ms < drop)
@@ -558,10 +720,7 @@ fn to_the_buttons(kept: &[(Candidate, u32)], barred: &[bool]) -> Vec<usize> {
         };
         if let Some(i) = pick {
             taken[i] = true;
-            chosen.push(i);
-        }
-        if chosen.len() == HOT_CUES {
-            break;
+            others.push(i);
         }
     }
 
@@ -573,18 +732,19 @@ fn to_the_buttons(kept: &[(Candidate, u32)], barred: &[bool]) -> Vec<usize> {
     rest.sort_by(|&a, &b| {
         kept[b].1.cmp(&kept[a].1).then(kept[a].0.time_ms.cmp(&kept[b].0.time_ms))
     });
-    for i in rest.into_iter().take(HOT_CUES.saturating_sub(chosen.len())) {
+    for i in rest.into_iter().take(room.saturating_sub(others.len())) {
         taken[i] = true;
-        chosen.push(i);
+        others.push(i);
     }
-    let room = HOT_CUES.saturating_sub(chosen.len());
+    let left = room.saturating_sub(others.len());
     let lines: Vec<(u32, usize)> = (0..kept.len())
         .filter(|&i| !taken[i] && kept[i].0.reason == Reason::Line)
         .map(|i| (kept[i].0.time_ms, i))
         .collect();
-    chosen.extend(crate::transcribe::spread_in_time(lines, room).into_iter().map(|(_, i)| i));
+    others.extend(crate::transcribe::spread_in_time(lines, left).into_iter().map(|(_, i)| i));
 
     // Indices in order are moments in order, `kept` being in time order.
+    chosen.extend(others);
     chosen.sort_unstable();
     chosen
 }
@@ -740,7 +900,12 @@ fn fold(ranked: Vec<(Candidate, u32)>) -> Vec<(Candidate, u32)> {
             kept.push((candidate, priority));
             continue;
         };
-        if last.time_ms.abs_diff(candidate.time_ms) >= TOGETHER_MS {
+        // The hook in a drop is not folded into the drop it lands on: it has
+        // a button of its own, C, where the drop has D or one of the rest.
+        if last.time_ms.abs_diff(candidate.time_ms) >= TOGETHER_MS
+            || last.is_hook_in_a_drop()
+            || candidate.is_hook_in_a_drop()
+        {
             kept.push((candidate, priority));
             continue;
         }
@@ -962,7 +1127,7 @@ mod tests {
             ],
         };
         let audio = with_voice(4.0, 10.0, 10.0);
-        let cues = suggest(&features::extract(&audio), &beats(128), &structure, 0);
+        let cues = suggest(&features::extract(&audio), &[], &beats(128), &structure, 0);
 
         // The first section is the memory cue rather than a hot one: the
         // player already parks at the top of the record, so a hot cue there is
@@ -986,8 +1151,13 @@ mod tests {
                 section(16, 24, Kind::Chorus, -8.0),
             ],
         };
-        let cues =
-            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(128), &structure, 0);
+        let cues = suggest(
+            &features::extract(&with_voice(4.0, 10.0, 10.0)),
+            &[],
+            &beats(128),
+            &structure,
+            0,
+        );
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
 
         // The intro is on the memory cue, where the player parks anyway.
@@ -1002,8 +1172,13 @@ mod tests {
     #[test]
     fn the_first_cue_a_player_parks_on_is_a_memory_cue() {
         let structure = Structure { sections: vec![section(0, 8, Kind::Intro, -20.0)] };
-        let cues =
-            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(64), &structure, 0);
+        let cues = suggest(
+            &features::extract(&with_voice(4.0, 10.0, 10.0)),
+            &[],
+            &beats(64),
+            &structure,
+            0,
+        );
         assert!(!cues[0].is_hot());
         assert_eq!(cues[0].time_ms, 0);
         assert_eq!(cues[0].kind, CueKind::Point);
@@ -1015,7 +1190,7 @@ mod tests {
         let audio = with_voice(20.0, 10.0, 20.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &beats(80), &structure, 0);
+        let cues = suggest(&f, &[], &beats(80), &structure, 0);
 
         let vocal = cues.iter().find(|c| c.comment.as_deref() == Some("vocal"));
         let vocal = vocal.unwrap_or_else(|| panic!("no vocal cue in {cues:?}"));
@@ -1028,7 +1203,7 @@ mod tests {
         let audio = with_voice(20.0, 100.0, 100.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &beats(80), &structure, 0);
+        let cues = suggest(&f, &[], &beats(80), &structure, 0);
         assert!(cues.iter().all(|c| c.comment.as_deref() != Some("vocal")), "{cues:?}");
     }
 
@@ -1037,7 +1212,7 @@ mod tests {
         let audio = with_voice(20.0, 10.3, 20.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &beats(80), &structure, 0);
+        let cues = suggest(&f, &[], &beats(80), &structure, 0);
         for cue in &cues {
             assert_eq!(cue.time_ms % BEAT_MS, 0, "a cue at {} ms is off the grid", cue.time_ms);
         }
@@ -1063,18 +1238,33 @@ mod tests {
             .map(|(i, &kind)| section(i * 8, (i + 1) * 8, kind, -10.0))
             .collect();
         let structure = Structure { sections };
-        let cues =
-            suggest(&features::extract(&with_voice(4.0, 10.0, 10.0)), &beats(400), &structure, 0);
+        let cues = suggest(
+            &features::extract(&with_voice(4.0, 10.0, 10.0)),
+            &[],
+            &beats(400),
+            &structure,
+            0,
+        );
 
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
-        assert_eq!(hot.len(), 8, "a player has eight hot cues");
-        // All three drops survived; the builds are what got dropped.
-        assert_eq!(hot.iter().filter(|c| c.comment.as_deref() == Some("drop")).count(), 3);
-        assert!(hot.iter().filter(|c| c.comment.as_deref() == Some("build")).count() < 3);
-        // And they are lettered in time order.
-        for pair in hot.windows(2) {
-            assert!(pair[0].hot_cue < pair[1].hot_cue);
-            assert!(pair[0].time_ms <= pair[1].time_ms);
+        // No words, so no hook on A and none in a drop on C: six, not eight,
+        // so that B and D are what they are on every other record.
+        assert_eq!(hot.len(), 6, "{hot:?}");
+        let letter = |n: u8| hot.iter().find(|c| c.hot_cue == n).and_then(|c| c.comment.clone());
+        assert_eq!((letter(1), letter(3)), (None, None), "{hot:?}");
+        assert_eq!(letter(2).as_deref(), Some("break"), "{hot:?}");
+        assert_eq!(letter(4).as_deref(), Some("drop"), "{hot:?}");
+        // D, and of E to H the way in, the way out, the build before a drop
+        // and the second drop: four buttons are not room for a third.
+        assert_eq!(
+            hot.iter().filter(|c| c.comment.as_deref() == Some("drop")).count(),
+            2,
+            "{hot:?}"
+        );
+        // And E to H are in time order.
+        let rest: Vec<&&Cue> = hot.iter().filter(|c| c.hot_cue > 4).collect();
+        for pair in rest.windows(2) {
+            assert!(pair[0].hot_cue < pair[1].hot_cue && pair[0].time_ms < pair[1].time_ms);
         }
     }
 
@@ -1098,7 +1288,7 @@ mod tests {
 
         // Half-second beats, so skipping one beat is 500 ms.
         for (phase, expected) in [(0usize, 0u32), (1, 500), (2, 1_000), (3, 1_500)] {
-            let cues = suggest(&features, &times, &Structure::default(), phase);
+            let cues = suggest(&features, &[], &times, &Structure::default(), phase);
             let start = cues.iter().find(|cue| !cue.is_hot()).expect("no memory cue at all");
             assert_eq!(
                 start.time_ms, expected,
@@ -1114,7 +1304,7 @@ mod tests {
         // followed by the first of the next.
         let times = beats(64);
         let features = features::extract(&with_voice(4.0, 10.0, 10.0));
-        let cues = suggest(&features, &times, &Structure::default(), 4);
+        let cues = suggest(&features, &[], &times, &Structure::default(), 4);
         let start = cues.iter().find(|cue| !cue.is_hot()).unwrap();
         assert_eq!(start.time_ms, 0, "a phase of four is a phase of none");
     }
@@ -1340,9 +1530,12 @@ mod tests {
 
         let cues = assemble(0, None, &[], candidates);
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
-        assert_eq!(hot.len(), 8);
+        // A, the main drop on D, and four of the rest: no break for B, and
+        // nothing for C without the hook in a drop.
+        assert_eq!(hot.len(), 6, "{hot:?}");
         assert!(
-            hot.iter().any(|c| c.comment.as_deref() == Some("hold me closer now")),
+            hot.iter()
+                .any(|c| c.hot_cue == 1 && c.comment.as_deref() == Some("hold me closer now")),
             "the hook was dropped for a drop: {hot:?}"
         );
     }
@@ -1434,112 +1627,161 @@ mod tests {
 
     #[test]
     fn of_two_buttons_closer_than_two_bars_the_first_keeps_its_and_the_second_goes_elsewhere() {
-        // A break a bar after the first drop: pressed, the drop is at the
-        // break in a bar, so a button on the break as well is a second button
-        // for one place. The break stays a marker, the first break's button
-        // goes to the next one, and the second break, which was left out,
-        // gets the button the break gave up.
+        // Between two of the rest, E to H: a build and a drop a bar after it.
+        // Pressed, the build is at the drop in a bar, so a button on the drop
+        // as well is a second button for one place. The drop stays a marker,
+        // and its button goes to the break next in line.
         let candidates = vec![
-            Candidate::new(50_000, Reason::Section(Kind::Up)),
             Candidate::new(60_000, Reason::Section(Kind::Chorus)),
-            Candidate::new(62_000, Reason::Section(Kind::Down)),
             Candidate::new(100_000, Reason::Section(Kind::Down)),
-            Candidate::new(150_000, Reason::Section(Kind::Up)),
-            Candidate::new(160_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(140_000, Reason::Section(Kind::Up)),
+            Candidate::new(142_000, Reason::Section(Kind::Chorus)),
             Candidate::new(200_000, Reason::Section(Kind::Down)),
             Candidate::new(220_000, Reason::Section(Kind::Chorus)),
             Candidate::new(240_000, Reason::Section(Kind::Outro)),
         ];
         let cues = assemble(0, None, &beats(600), candidates);
-        let hot: Vec<u32> = cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
+        let hot: Vec<(u8, u32)> =
+            cues.iter().filter(|cue| cue.is_hot()).map(|cue| (cue.hot_cue, cue.time_ms)).collect();
         assert_eq!(
             hot,
-            vec![50_000, 60_000, 100_000, 150_000, 160_000, 200_000, 220_000, 240_000],
+            vec![(4, 60_000), (2, 100_000), (5, 140_000), (6, 200_000), (7, 220_000), (8, 240_000)],
             "{cues:?}"
         );
-        assert!(cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 62_000), "{cues:?}");
+        assert!(cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 142_000), "{cues:?}");
     }
 
     #[test]
-    fn the_hook_keeps_its_button_against_one_a_bar_before_it_and_is_always_a() {
-        // The one exception to the earlier keeping its button: the hook always
-        // has one. The drop a bar before it is left a marker, the first drop's
-        // button goes to the next drop, and the hook is A with the rest from B
-        // in time order.
+    fn the_hook_keeps_its_button_against_the_main_drop_a_bar_before_it_and_d_is_left_empty() {
+        // The hook over everything, the main drop included: D a bar before A
+        // is a second button for one place. D is left empty rather than given
+        // to another drop, so that D is the main drop or nothing on every
+        // record.
         let cues = assemble(0, None, &beats(600), the_hook_a_bar_after_the_drop());
         let hot: Vec<(u8, u32)> =
             cues.iter().filter(|cue| cue.is_hot()).map(|cue| (cue.hot_cue, cue.time_ms)).collect();
         assert_eq!(
             hot,
-            vec![
-                (2, 50_000),
-                (1, 62_000),
-                (3, 100_000),
-                (4, 150_000),
-                (5, 160_000),
-                (6, 200_000),
-                (7, 220_000),
-                (8, 240_000),
-            ],
+            vec![(5, 50_000), (1, 62_000), (2, 100_000), (6, 150_000), (7, 160_000), (8, 240_000)],
             "{cues:?}"
         );
         assert!(cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 60_000), "{cues:?}");
     }
 
-    #[test]
-    fn of_two_lines_one_inside_the_other_only_the_longer_has_a_button() {
-        // Praise You: the hook is "praise you", sung most, and a second line
-        // has it inside. Pressed, the longer plays the shorter, so it keeps the
-        // button, takes the hook's place on A, and the hook is markers only.
-        let words = crate::transcribe::Transcript {
-            lines: vec![
-                line(30_000, "praise you"),
-                line(40_000, "I have to praise you like I should"),
-                line(60_000, "praise you"),
-                line(90_000, "praise you"),
-                line(100_000, "I have to praise you like I should"),
-                line(120_000, "praise you"),
-            ],
-            ..Default::default()
-        };
-        let mut candidates = vec![
-            Candidate::new(10_000, Reason::Section(Kind::Chorus)),
-            Candidate::new(70_000, Reason::Section(Kind::Down)),
-            Candidate::new(150_000, Reason::Section(Kind::Chorus)),
-        ];
-        candidates.extend(words.moments().iter().map(from_moment));
+    /// Bars at these levels, `count` of each, for [`super::super::energy::shape`].
+    fn played(parts: &[(f32, usize)]) -> Vec<f32> {
+        parts.iter().flat_map(|&(level, count)| std::iter::repeat_n(level, count)).collect()
+    }
 
-        let cues = assemble(0, None, &[], candidates);
-        let hot: Vec<(u8, u32, String)> = cues
+    #[test]
+    fn the_louder_of_two_drops_is_d_and_the_deeper_of_two_breaks_is_b() {
+        // 500 ms beats, so a bar is two seconds: drops at bars 16 and 64, the
+        // second louder; breaks at bars 48 and 96, the second deeper.
+        let grid = beats(600);
+        let shape = super::super::energy::shape(&played(&[
+            (20.0, 16),
+            (80.0, 32),
+            (40.0, 16),
+            (95.0, 32),
+            (10.0, 16),
+            (80.0, 16),
+            (20.0, 16),
+        ]));
+        let mut candidates = vec![
+            Candidate::new(32_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(96_000, Reason::Section(Kind::Down)),
+            Candidate::new(128_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(192_000, Reason::Section(Kind::Down)),
+            Candidate::new(224_000, Reason::Section(Kind::Chorus)),
+        ];
+        mark_the_main_ones(&mut candidates, &grid, &shape);
+        let hot: Vec<(u8, u32)> = assemble(0, None, &grid, candidates)
             .iter()
             .filter(|cue| cue.is_hot())
-            .map(|cue| (cue.hot_cue, cue.time_ms, cue.comment.clone().unwrap_or_default()))
+            .map(|cue| (cue.hot_cue, cue.time_ms))
             .collect();
-        assert!(!hot.iter().any(|(_, _, said)| said == "praise you"), "{hot:?}");
-        assert!(hot.contains(&(1, 40_000, "I have to praise you like I should".into())), "{hot:?}");
-        assert!(
-            marks(&cues).iter().any(|mark| mark.ends_with(" praise you")),
-            "the hook is still marked where it is sung: {:?}",
-            marks(&cues)
+        assert!(hot.contains(&(4, 128_000)), "{hot:?}");
+        assert!(hot.contains(&(2, 192_000)), "{hot:?}");
+    }
+
+    #[test]
+    fn a_section_named_a_break_that_plays_like_the_drop_is_the_drop() {
+        // The arrangement called the stretch from bar 48 a break; it is the
+        // loudest part of the record, so it is D, and its marker says drop.
+        let grid = beats(600);
+        let shape = super::super::energy::shape(&played(&[(20.0, 48), (90.0, 32), (20.0, 32)]));
+        let mut candidates = vec![
+            Candidate::new(0, Reason::Section(Kind::Intro)),
+            Candidate::new(97_000, Reason::Section(Kind::Down)),
+        ];
+        mark_the_main_ones(&mut candidates, &grid, &shape);
+        assert_eq!(
+            (candidates[1].reason, candidates[1].main),
+            (Reason::Section(Kind::Chorus), true),
+            "{candidates:?}"
         );
     }
 
     #[test]
-    fn a_drop_that_carries_a_line_keeps_its_button_whatever_lines_it_is_inside() {
-        // The rule is about two buttons for the same words. A drop is a button
-        // for the drop, whatever line landed on it.
+    fn a_drop_the_arrangement_missed_is_found_by_its_energy_and_is_d() {
+        // No section starts anywhere near bar 48, where the record is loudest:
+        // the analysis missed the drop, and the energy puts D on its bar line.
+        let grid = beats(600);
+        let shape = super::super::energy::shape(&played(&[(20.0, 48), (90.0, 32), (20.0, 32)]));
+        let mut candidates = vec![
+            Candidate::new(0, Reason::Section(Kind::Intro)),
+            Candidate::new(200_000, Reason::Section(Kind::Outro)),
+        ];
+        mark_the_main_ones(&mut candidates, &grid, &shape);
+        let hot: Vec<(u8, u32)> = assemble(0, None, &grid, candidates)
+            .iter()
+            .filter(|cue| cue.is_hot())
+            .map(|cue| (cue.hot_cue, cue.time_ms))
+            .collect();
+        assert!(hot.contains(&(4, 96_000)), "{hot:?}");
+    }
+
+    #[test]
+    fn the_hook_in_a_drop_is_c_and_keeps_its_own_moment_on_the_drop_it_lands_on() {
+        // The hook on A in a verse, and again on the first bar of a drop that
+        // is not the main one: C, at its own time, where folding it into the
+        // drop would have left the hook in a drop with no button.
         let words = crate::transcribe::Transcript {
-            lines: vec![
-                line(10_000, "praise you"),
-                line(40_000, "I have to praise you like I should"),
-                line(100_000, "I have to praise you like I should"),
-            ],
+            lines: vec![line(30_000, "hold me closer now"), line(90_000, "hold me closer now")],
             ..Default::default()
         };
-        let mut candidates = vec![Candidate::new(10_000, Reason::Section(Kind::Chorus))];
+        let mut candidates = vec![
+            Candidate::new(10_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(50_000, Reason::Section(Kind::Down)),
+            Candidate::new(90_000, Reason::Section(Kind::Chorus)),
+        ];
         candidates.extend(words.moments().iter().map(from_moment));
-        let cues = assemble(0, None, &[], candidates);
-        assert!(cues.iter().any(|cue| cue.is_hot() && cue.time_ms == 10_000), "{cues:?}");
+        candidates.push(Candidate::named(90_200, Reason::Comeback, "hold me closer now"));
+        let hot: Vec<(u8, u32, String)> = assemble(0, None, &[], candidates)
+            .iter()
+            .filter(|cue| cue.is_hot())
+            .map(|cue| (cue.hot_cue, cue.time_ms, cue.comment.clone().unwrap_or_default()))
+            .collect();
+        assert!(hot.contains(&(1, 30_000, "hold me closer now".into())), "{hot:?}");
+        assert!(hot.contains(&(3, 90_200, "hold me closer now".into())), "{hot:?}");
+        assert!(hot.contains(&(4, 10_000, "drop".into())), "{hot:?}");
+        assert!(hot.contains(&(2, 50_000, "break".into())), "{hot:?}");
+    }
+
+    #[test]
+    fn the_hook_in_a_drop_gives_way_to_the_break_a_bar_before_it() {
+        // The four in their order — A, D, B, C — when two are too close.
+        let mut candidates = vec![
+            Candidate::new(10_000, Reason::Section(Kind::Chorus)),
+            Candidate::new(50_000, Reason::Section(Kind::Down)),
+        ];
+        candidates.push(Candidate::named(52_000, Reason::Comeback, "hold me closer now"));
+        let hot: Vec<u8> = assemble(0, None, &beats(600), candidates)
+            .iter()
+            .filter(|cue| cue.is_hot())
+            .map(|cue| cue.hot_cue)
+            .collect();
+        assert_eq!(hot, [4, 2], "C is left empty");
     }
 
     #[test]
@@ -1567,14 +1809,14 @@ mod tests {
             .filter(|cue| cue.is_hot())
             .map(|cue| (cue.hot_cue, cue.time_ms))
             .collect();
-        assert_eq!(hot, vec![(1, 0), (2, 30_000)]);
+        assert_eq!(hot, vec![(1, 0), (4, 30_000)]);
     }
 
     #[test]
-    fn the_first_of_two_keeps_its_button_even_where_the_second_was_chosen_before_it() {
-        // The drop is the first button filled and the build a bar before it
-        // the fifth, but the build is first in the record: pressed, it plays
-        // into the drop, and the drop does not play into it.
+    fn the_main_drop_keeps_its_button_over_a_build_a_bar_before_it() {
+        // Of two within two bars the earlier keeps its button, except where
+        // the later is one of the fixed four: D is the main drop on every
+        // record, so the build gives way.
         let candidates = vec![
             Candidate::new(58_000, Reason::Section(Kind::Up)),
             Candidate::new(60_000, Reason::Section(Kind::Chorus)),
@@ -1583,8 +1825,8 @@ mod tests {
         ];
         let cues = assemble(0, None, &beats(600), candidates);
         let hot: Vec<u32> = cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
-        assert_eq!(hot, vec![58_000, 100_000, 160_000], "{cues:?}");
-        assert!(cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 60_000), "{cues:?}");
+        assert_eq!(hot, vec![60_000, 100_000, 160_000], "{cues:?}");
+        assert!(cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 58_000), "{cues:?}");
     }
 
     #[test]
@@ -1602,13 +1844,14 @@ mod tests {
     }
 
     #[test]
-    fn the_eight_are_filled_in_the_order_a_live_remix_reaches_for_them() {
+    fn the_buttons_are_lettered_by_what_they_are_for_and_the_rest_by_what_a_remix_reaches_for() {
         // Everything on offer: six sections past the start, a hook that comes
         // back after a long break, a second, shorter line — between lines sung
-        // as often, the longer is the hook — and a verse of one-off lines. The
-        // eight are the build in, the drop, the hook, the refrain, the break,
-        // the second build, the second drop and the outro — and not the hook
-        // again where it comes back, nor any verse line.
+        // as often, the longer is the hook — and a verse of one-off lines. A
+        // is the hook, B the break, D the first drop, and E to H the build in,
+        // the refrain, the second build and the outro — not the hook again
+        // where it comes back, the second drop nor any verse line. C is empty:
+        // nothing offered it the hook in a drop.
         let mut lines = vec![
             line(64_000, "hold me closer now"),
             line(70_000, "take me home"),
@@ -1632,14 +1875,22 @@ mod tests {
             sections.iter().map(|&(at, kind)| Candidate::new(at, Reason::Section(kind))).collect();
         candidates.extend(words.moments().iter().map(from_moment));
 
-        let hot: Vec<(u32, String)> = assemble(0, None, &[], candidates)
+        let hot: Vec<(u8, u32)> = assemble(0, None, &[], candidates)
             .into_iter()
             .filter(Cue::is_hot)
-            .map(|cue| (cue.time_ms, cue.comment.unwrap_or_default()))
+            .map(|cue| (cue.hot_cue, cue.time_ms))
             .collect();
         assert_eq!(
-            hot.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
-            vec![30_000, 60_000, 64_000, 70_000, 120_000, 150_000, 180_000, 240_000],
+            hot,
+            vec![
+                (5, 30_000),
+                (4, 60_000),
+                (1, 64_000),
+                (6, 70_000),
+                (2, 120_000),
+                (7, 150_000),
+                (8, 240_000)
+            ],
             "{hot:?}"
         );
     }
@@ -1647,8 +1898,8 @@ mod tests {
     #[test]
     fn an_instrumental_stretch_takes_its_button_before_a_second_line() {
         // The same record with eight bars of nothing sung at 200 s: the
-        // stretch is the eighth role and the refrain the ninth, so the
-        // refrain is what gives way.
+        // stretch comes before the refrain in the order the rest are filled,
+        // so the refrain is what gives way.
         let mut lines = vec![
             line(64_000, "hold me closer now"),
             line(70_000, "take me home"),
@@ -1676,7 +1927,7 @@ mod tests {
 
         let cues = assemble(0, None, &[], candidates);
         let hot: Vec<u32> = cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
-        assert_eq!(hot, vec![30_000, 60_000, 64_000, 120_000, 150_000, 180_000, 200_000, 240_000]);
+        assert_eq!(hot, vec![30_000, 60_000, 64_000, 120_000, 150_000, 200_000, 240_000]);
         assert!(
             marks(&cues).iter().any(|mark| mark == "Instrumental \u{b7} 16 bars"),
             "{:?}",
@@ -1741,16 +1992,18 @@ mod tests {
             .filter(Cue::is_hot)
             .map(|cue| (cue.time_ms, cue.comment.unwrap_or_default()))
             .collect();
-        assert_eq!(hot.len(), HOT_CUES, "{hot:?}");
+        // A, D and four of the rest: no break on the record, and the hook's
+        // return is not given C by the assembly — the window does that.
+        assert_eq!(hot.len(), 6, "{hot:?}");
         for (at, what) in [(31_000, "the hook"), (37_000, "the refrain")] {
             assert!(hot.iter().any(|(when, _)| *when == at), "{what} has no button: {hot:?}");
         }
         assert!(!hot.iter().any(|(when, _)| *when == 151_000), "the hook twice: {hot:?}");
-        assert_eq!(hot.iter().filter(|(_, name)| name == "drop").count(), 6, "{hot:?}");
+        assert_eq!(hot.iter().filter(|(_, name)| name == "drop").count(), 4, "{hot:?}");
     }
 
     #[test]
-    fn each_button_comes_back_with_what_it_is_for_in_time_order_with_the_hook_on_a() {
+    fn each_button_comes_back_with_what_it_is_for_in_time_order_and_on_the_letter_for_it() {
         // The second drop reads "drop" and so does the first, and the hook's
         // button reads its line: the comments alone cannot say which button
         // is the hook and which a drop the hook happens to land on.
@@ -1774,10 +2027,10 @@ mod tests {
         assert_eq!(
             said,
             vec![
-                (2, 10_000, Reason::Section(Kind::Chorus)),
+                (4, 10_000, Reason::Section(Kind::Chorus)),
                 (1, 31_000, Reason::Hook),
-                (3, 90_000, Reason::Section(Kind::Down)),
-                (4, 150_000, Reason::Section(Kind::Chorus)),
+                (2, 90_000, Reason::Section(Kind::Down)),
+                (5, 150_000, Reason::Section(Kind::Chorus)),
             ]
         );
     }
@@ -1807,9 +2060,10 @@ mod tests {
     }
 
     #[test]
-    fn an_instrumental_gets_every_button_for_its_arrangement() {
-        // Nothing is held open. There are no words to fill the roles that
-        // want them, so the arrangement has every button.
+    fn an_instrumental_leaves_the_hooks_letters_empty_and_the_arrangement_has_the_rest() {
+        // A and C are the hook's and an instrumental has none, so they are
+        // empty: B is the break and D the drop on this record as on every
+        // other, and the arrangement has the four after them.
         let kinds = [
             Kind::Intro,
             Kind::Up,
@@ -1827,8 +2081,9 @@ mod tests {
             .map(|(i, &kind)| Candidate::new(i as u32 * 30_000 + 1_000, Reason::Section(kind)))
             .collect();
 
-        let hot = buttons(&assemble(0, None, &[], candidates));
-        assert_eq!(hot.len(), HOT_CUES, "{hot:?}");
+        let cues = assemble(0, None, &[], candidates);
+        let letters: Vec<u8> = cues.iter().filter(|c| c.is_hot()).map(|c| c.hot_cue).collect();
+        assert_eq!(letters, [5, 6, 4, 2, 7, 8], "{cues:?}");
     }
 
     #[test]
@@ -1915,7 +2170,10 @@ mod tests {
         assert!(hot.iter().any(|(at, _)| *at == 76_760), "the break: {hot:?}");
         let early_lines = hot.iter().filter(|(at, _)| *at < 20_000 && verse.contains(at)).count();
         assert!(early_lines <= 1, "the first twenty seconds took {early_lines} buttons: {hot:?}");
-        assert_eq!(hot.len(), HOT_CUES, "{hot:?}");
+        // A, B and four of the rest. The arrangement analysis found no drop,
+        // so D is empty here: in the window the energy finds it — see
+        // `mark_the_main_ones`.
+        assert_eq!(hot.len(), 6, "{hot:?}");
     }
 
     #[test]
@@ -1936,16 +2194,15 @@ mod tests {
         let cues = assemble(0, None, &[], candidates);
         let times: Vec<u32> =
             cues.iter().filter(|cue| cue.is_hot()).map(|cue| cue.time_ms).collect();
-        // Every one-off is a candidate and there is room for all of them, so
-        // this case takes them all; the spread shows when there is not.
-        assert_eq!(times.len(), 8, "{times:?}");
+        // Four buttons after the fixed four, and eight lines for them: the
+        // spread shows.
+        assert_eq!(times.len(), 4, "{times:?}");
+        assert_ne!(times, vec![10_000, 15_000, 20_000, 25_000], "the first four by the clock");
 
         let mut candidates = vec![
             Candidate::new(0, Reason::Section(Kind::Intro)),
             Candidate::new(60_000, Reason::Section(Kind::Chorus)),
             Candidate::new(90_000, Reason::Section(Kind::Down)),
-            Candidate::new(120_000, Reason::Section(Kind::Chorus)),
-            Candidate::new(150_000, Reason::Section(Kind::Outro)),
         ];
         candidates.extend(words.moments().iter().map(from_moment));
         let cues = assemble(0, None, &[], candidates);
@@ -1974,8 +2231,13 @@ mod tests {
 
     #[test]
     fn a_track_with_no_beats_gets_no_cues() {
-        let cues =
-            suggest(&features::extract(&with_voice(4.0, 1.0, 3.0)), &[], &Structure::default(), 0);
+        let cues = suggest(
+            &features::extract(&with_voice(4.0, 1.0, 3.0)),
+            &[],
+            &[],
+            &Structure::default(),
+            0,
+        );
         assert!(cues.is_empty());
     }
 }

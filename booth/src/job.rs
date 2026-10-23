@@ -605,8 +605,8 @@ pub fn analyze_file(
     genre: Option<&booth_cli::analysis::style::Classifier>,
 ) -> anyhow::Result<Analyzed> {
     let audio = decode_file(path)?;
-    let analysis = analysis::analyze(&audio);
     let waveform = booth_cli::export::waveform::analyze(&audio);
+    let analysis = analysis::analyze_drawn(&audio, None, &waveform.band_detail);
     let loudness = booth_cli::loudness::measure(&audio).ok();
     // A model that fails on one track costs that track its genre and nothing
     // else: the grid, the cues and the picture are the analysis, and this is
