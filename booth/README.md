@@ -169,6 +169,22 @@ is different for a first pass and a re-run. Re-analysing is the same code path
 as analysing — there is no separate re-do, which is how the two would come to
 disagree.
 
+**Long work does not hold up the track in front of you.** There are two workers.
+One takes the long work — analysis, stems, words, tags, a sync — a job at a time,
+in the order it was asked for, and the queue indicator reports it. The other
+takes what the window is waiting on to play or show one track: decoding it for
+the deck, drawing its waveform, measuring its stems' loudness, measuring its
+grid again. The two run side by side, so a track can be auditioned, its cues
+moved and its grid corrected while a batch of stems renders, where before the
+decode for the deck sat in the queue behind the whole batch. Measured here on
+four cores, with an analysis keeping every one of them busy, a five-minute
+record decoded in 0.9 s, the same as with nothing else running. The per-track
+buttons — **Re-analyse**, **Render stems** and the rest — stay pressable while
+long work runs, and what they ask for waits its turn in the queue, which the
+indicator counts. The one thing held back is a stem whose kit is being rendered
+at that moment: it is not drawn or played until the kit lands, because its file
+is still being written.
+
 **Hold shift and every verb on the batch strip turns round**: Analyse becomes
 Re-analyse, Identify becomes Re-identify, Stems becomes Re-stem and Words
 becomes Re-read, each acting on everything showing rather than only the tracks

@@ -15,7 +15,7 @@ use booth_cli::cli::ExportArgs;
 use eframe::egui::{self, Color32, RichText, Ui};
 
 use crate::config::{Config, OnExternal};
-use crate::job::{self, Adoptable, Job, Retag, Runner, Update};
+use crate::job::{self, Adoptable, Job, Lane, Retag, Runner, Update};
 use crate::library::{now, plural, Drive, Library, Playlist, SavedQuery, Track, Written};
 use crate::player::Player;
 use crate::query::{self, Context, Paint, Query};
@@ -254,11 +254,24 @@ pub struct App {
     /// The log window, and what it is showing.
     log: Arc<LogWindow>,
 
+    /// The long work, one job at a time: see [`Lane::Background`].
     runner: Option<Runner>,
     /// Work waiting for the runner. Jobs chain — an import that turns up
     /// external files queues the copy behind itself — and a queue is the only
     /// honest way to say so.
     queued: VecDeque<Job>,
+    /// What the window is waiting on to play or show the track in hand, on a
+    /// worker of its own so that it never waits behind the long work: see
+    /// [`Lane::Foreground`].
+    foreground: Option<Runner>,
+    foreground_queued: VecDeque<Job>,
+    /// The track the foreground worker is decoding, when that is what it is
+    /// doing: a decode that fails says so by failing the job, and the deck
+    /// waiting for it has to hear about it.
+    decoding: Option<u32>,
+    /// Tracks a separation has been asked for and not yet delivered: their
+    /// stems are being written, so nothing reads them until the kit lands.
+    separating: std::collections::HashSet<u32>,
     progress: Option<(usize, usize)>,
     /// How far into the file in hand, for work slow enough that finishing it
     /// is not soon enough to report.
@@ -917,6 +930,10 @@ impl App {
             loading: None,
             runner: None,
             queued: VecDeque::new(),
+            foreground: None,
+            foreground_queued: VecDeque::new(),
+            decoding: None,
+            separating: std::collections::HashSet::new(),
             progress: None,
             step: None,
             drive: 0,
@@ -1803,15 +1820,44 @@ impl App {
 
     // -- jobs --------------------------------------------------------------
 
-    /// Queue a job, and run it if nothing else is.
+    /// Queue a job on its lane, and run it if nothing else on that lane is.
     fn start(&mut self, job: Job) {
-        crate::debug!("queued {} ({} waiting)", job.name(), self.queued.len());
-        self.queued.push_back(job);
+        match job.lane() {
+            Lane::Background => {
+                crate::debug!("queued {} ({} waiting)", job.name(), self.queued.len());
+                self.queued.push_back(job);
+            }
+            Lane::Foreground => {
+                // Only the last track asked for is worth decoding: two clicks
+                // in a row are a change of mind, and hearing the first one
+                // arrive after the second would be the deck disagreeing with
+                // the browser.
+                if matches!(job, Job::Decode { .. }) {
+                    self.foreground_queued.retain(|queued| !matches!(queued, Job::Decode { .. }));
+                }
+                crate::debug!(
+                    "queued {} in the foreground ({} waiting)",
+                    job.name(),
+                    self.foreground_queued.len()
+                );
+                self.foreground_queued.push_back(job);
+            }
+        }
         self.pump();
     }
 
-    /// Start the next job if the runner is free.
+    /// Start the next job on each lane whose worker is free.
     fn pump(&mut self) {
+        if self.foreground.is_none() {
+            if let Some(job) = self.foreground_queued.pop_front() {
+                crate::debug!("started {} in the foreground", job.name());
+                self.decoding = match &job {
+                    Job::Decode { id, .. } => Some(*id),
+                    _ => None,
+                };
+                self.foreground = Some(Runner::start(job, self.wake.clone()));
+            }
+        }
         if self.running() {
             return;
         }
@@ -1820,6 +1866,19 @@ impl App {
         self.started = Some(std::time::Instant::now());
         self.progress = Some((0, 0));
         self.runner = Some(Runner::start(job, self.wake.clone()));
+    }
+
+    /// Whether the foreground worker has something in hand. A job asked for
+    /// meanwhile waits a few seconds rather than minutes.
+    fn foreground_busy(&self) -> bool {
+        self.foreground.is_some()
+    }
+
+    /// Whether a track's stems are being written now, so that reading them —
+    /// to draw them, to measure them, to play one — would read half a file.
+    /// `track` is the record or one of its stem rows.
+    fn rendering(&self, track: &Track) -> bool {
+        self.separating.contains(&track.parent.unwrap_or(track.id))
     }
 
     fn import(&mut self, paths: Vec<PathBuf>) {
@@ -2207,6 +2266,7 @@ impl App {
                 self.remeasured.remove(&companion);
             }
         }
+        self.separating.extend(ids.iter().copied());
         self.ensure_local(&ids);
         self.start(Job::Separate {
             tracks: waiting,
@@ -3057,8 +3117,23 @@ impl App {
     }
 
     fn collect(&mut self) {
-        let Some(runner) = &self.runner else { return };
-        let updates = runner.drain();
+        if self.runner.is_none() && self.foreground.is_none() {
+            return;
+        }
+        // Both lanes' news, each marked with where it came from: the two
+        // workers report the same kinds of update, and what a progress count
+        // or a finish means depends on whose it is.
+        let mut updates: Vec<(Lane, Update)> = Vec::new();
+        if let Some(runner) = &self.foreground {
+            updates.extend(runner.drain().into_iter().map(|update| (Lane::Foreground, update)));
+        }
+        if let Some(runner) = &self.runner {
+            updates.extend(runner.drain().into_iter().map(|update| (Lane::Background, update)));
+        }
+        let mut foreground_finished = false;
+        // A grid measured again is the one foreground result that is the
+        // collection's rather than a cache's, so it is saved when it lands.
+        let mut regridded = false;
         // Taken once, before the loop: an import looks for a kit already on
         // disk for every file it finds, and the collection is borrowed by then.
         let stems_in = self.config.stems_location();
@@ -3080,7 +3155,31 @@ impl App {
         // once at the end of the batch rather than once per track.
         let mut paced = false;
 
-        for update in updates {
+        for (lane, update) in updates {
+            // The foreground's own bookkeeping, which is not the queue
+            // indicator's: that reports the long work, and a decode finishing
+            // is not "done" in the sense somebody waiting on stems means it.
+            if lane == Lane::Foreground {
+                match update {
+                    Update::Progress { .. } | Update::Step { .. } => continue,
+                    Update::Done(result) => {
+                        foreground_finished = true;
+                        if let Err(message) = result {
+                            crate::error!("in the foreground: {message}");
+                            self.note(message, theme::alert());
+                            // The track the deck was waiting for will not
+                            // arrive. Before, it waited for good.
+                            if self.decoding.is_some()
+                                && self.loading.map(|(id, _)| id) == self.decoding
+                            {
+                                self.loading = None;
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             match update {
                 Update::Imported(record) => {
                     let id = self.library.add(&record.path);
@@ -3102,6 +3201,12 @@ impl App {
                     changed = true;
                 }
                 Update::Decoded { id, sound } => {
+                    // Asked for and then replaced by another click before it
+                    // landed: the deck plays what was asked for last.
+                    if self.loading.is_some_and(|(wanted, _)| wanted != id) {
+                        crate::debug!("decoded #{id}, which is no longer the one wanted");
+                        continue;
+                    }
                     crate::debug!(
                         "decoded #{id}: {:.1}s, {} Hz, {} ch",
                         sound.duration_secs(),
@@ -3378,6 +3483,7 @@ impl App {
                     }
                     self.prep_changed(id);
                     changed = true;
+                    regridded = true;
                 }
                 Update::Separated { id, kit, took_secs } => {
                     // Read before it is moved in, because what happens next
@@ -3388,6 +3494,17 @@ impl App {
                         self.library.get(id).map(|track| (track.duration_secs, track.path.clone()));
                     if let Some(track) = self.library.get_mut(id) {
                         track.stems = kit;
+                    }
+                    // Its stems can be read again, and are drawn and measured
+                    // afresh when next looked at.
+                    self.separating.remove(&id);
+                    self.re_enveloped.remove(&id);
+                    for role in crate::library::Role::PARTS {
+                        let companion = crate::library::companion_id(id, role);
+                        self.remeasured.remove(&companion);
+                        if self.selected == Some(companion) {
+                            self.waveform = None;
+                        }
                     }
                     // So the next batch can say how long it will take. Timed
                     // here rather than guessed from the hardware, because the
@@ -3498,8 +3615,12 @@ impl App {
                 Update::Step { percent } => self.step = Some(percent),
                 Update::Line(text) => self.note(text, theme::text()),
                 Update::Failed { path, message } => {
-                    // Whatever failed, nothing is arriving for the deck now.
-                    self.loading = None;
+                    // A failure on the foreground is the decode the deck was
+                    // waiting for, so nothing is arriving for it now. One on
+                    // the long work is about some other file.
+                    if lane == Lane::Foreground {
+                        self.loading = None;
+                    }
                     crate::error!("{}: {message}", path.display());
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                     self.note(
@@ -3533,6 +3654,16 @@ impl App {
             }
         }
 
+        if foreground_finished {
+            if let Some(runner) = &mut self.foreground {
+                runner.join();
+            }
+            self.foreground = None;
+            self.decoding = None;
+            if regridded {
+                self.save();
+            }
+        }
         if finished {
             if let Some(runner) = &mut self.runner {
                 runner.join();
@@ -3540,6 +3671,10 @@ impl App {
             self.runner = None;
             self.progress = None;
             self.step = None;
+            // Whatever the separation delivered has been folded in, and what
+            // it did not — a track that failed, a run that was stopped — is
+            // no longer being written either.
+            self.separating.clear();
             if let Some(checked) = &mut self.checked {
                 checked.running = false;
                 // Worst first, and then in the order the collection is in, so
@@ -4893,6 +5028,11 @@ impl App {
                         if let Some(percent) = self.step {
                             text.push_str(&format!(" · {percent}%"));
                         }
+                        // Work asked for meanwhile is queued rather than
+                        // refused, so the queue is worth seeing the length of.
+                        if !self.queued.is_empty() {
+                            text.push_str(&format!(" · {} waiting", self.queued.len()));
+                        }
                         if ui
                             .add(egui::Button::new(
                                 RichText::new("stop").font(theme::mono(10.5)).color(theme::dim()),
@@ -6118,21 +6258,24 @@ impl App {
         // with a stem render.
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            let busy = self.runner.is_some();
+            // Asked for while the long work runs, these wait their turn behind
+            // it rather than being refused: they are the queue's to order, and
+            // a button greyed out for the length of a stem render was a track
+            // nobody could do anything with for the length of a stem render.
+            let behind = self.runner.as_ref().map(|runner| runner.name);
             let there = track.path.exists();
-            let reason = if !there {
-                Some("the file is not where it was")
-            } else if busy {
-                Some("something is already running")
-            } else {
-                None
-            };
+            let reason = (!there).then_some("the file is not where it was");
 
             let offer = |ui: &mut Ui, label: &str, hint: &str| {
                 let button = ui.add_enabled(reason.is_none(), egui::Button::new(label));
-                match reason {
-                    Some(why) => button.on_disabled_hover_text(why).clicked(),
-                    None => button.on_hover_text(hint).clicked(),
+                match (reason, behind) {
+                    (Some(why), _) => button.on_disabled_hover_text(why).clicked(),
+                    (None, Some(running)) => button
+                        .on_hover_text(format!(
+                            "{hint}\n\nQueued behind what is running now: {running}."
+                        ))
+                        .clicked(),
+                    (None, None) => button.on_hover_text(hint).clicked(),
                 }
             };
 
@@ -6231,7 +6374,10 @@ impl App {
         {
             match crate::library::cached_envelopes(track.id) {
                 Some(cached) => self.envelopes = Some((track.id, cached)),
-                None if !self.running() => {
+                // On the foreground worker, so a render in the background
+                // does not hold it up — but not of a kit being rendered now,
+                // which would measure the half of it that has been written.
+                None if !self.foreground_busy() && !self.rendering(&track) => {
                     self.re_enveloped.insert(track.id);
                     self.start(Job::StemEnvelopes { id: track.id, kit: track.stems.clone() });
                 }
@@ -6263,7 +6409,12 @@ impl App {
                 // selected, so one that cannot be measured — its file has
                 // moved, it will not decode — would otherwise start a job,
                 // fail, and start another for as long as it stayed selected.
-                None if !self.running() && !self.remeasured.contains(&track.id) => {
+                // A stem row whose kit is being rendered has no file worth
+                // measuring yet; it is drawn once the kit lands.
+                None if !self.foreground_busy()
+                    && !self.remeasured.contains(&track.id)
+                    && !(track.parent.is_some() && self.rendering(&track)) =>
+                {
                     if let Some(sources) = sources {
                         self.remeasured.insert(track.id);
                         self.start(Job::Draw(vec![job::Drawable { id: track.id, sources }]));
@@ -6307,6 +6458,16 @@ impl App {
         if let Some(missing) = sources.iter().find(|path| !path.exists()) {
             crate::warn!("cannot play #{id}: {} is gone", missing.display());
             self.note("that file is not where it was", theme::alert());
+            return;
+        }
+        if track.parent.is_some() && self.rendering(&track) {
+            self.note(
+                format!(
+                    "its {} is being rendered; it can be heard once it lands",
+                    track.role.label()
+                ),
+                theme::amber(),
+            );
             return;
         }
 
@@ -12094,7 +12255,7 @@ impl App {
             }
 
             if ui
-                .add_enabled(!self.running(), egui::Button::new("re-measure").small())
+                .add_enabled(!self.foreground_busy(), egui::Button::new("re-measure").small())
                 .on_hover_text(
                     "Listen to the record again and take the tempo and the beats it finds. \
                      Leaves the cues, the phrases and the key alone — unlike re-analysing.",
@@ -14139,6 +14300,147 @@ mod tests {
         }
 
         /// Dragging a phrase boundary takes the cues that mark it along.
+        /// The two workers: the long work, and what the window is waiting on.
+        mod two_lanes {
+            use super::*;
+            use crate::library::Role;
+
+            /// A job that runs until the sender it returns is dropped.
+            fn hold(app: &mut App, lane: Lane) -> std::sync::mpsc::Sender<()> {
+                let (release, held) = std::sync::mpsc::channel();
+                app.start(Job::Hold { lane, until: held });
+                release
+            }
+
+            /// Collect until both workers are idle, or give up after a while.
+            fn settle(app: &mut App) {
+                let started = std::time::Instant::now();
+                while (app.runner.is_some() || app.foreground.is_some())
+                    && started.elapsed().as_secs() < 10
+                {
+                    app.collect();
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+
+            #[test]
+            fn a_track_starts_decoding_while_stems_are_rendering() {
+                // The report: nothing could be auditioned while stems
+                // rendered, because the decode waited behind the separation.
+                let mut app = app("lanes-decode");
+                let render = hold(&mut app, Lane::Background);
+                app.start(Job::Decode { id: 7, sources: vec![PathBuf::from("/nowhere.flac")] });
+
+                assert!(app.running(), "the render stopped");
+                assert!(app.foreground_busy(), "the decode is waiting rather than running");
+                assert!(app.queued.is_empty(), "the decode went into the long work's queue");
+
+                drop(render);
+                settle(&mut app);
+            }
+
+            #[test]
+            fn of_two_tracks_asked_for_in_a_row_only_the_second_is_decoded() {
+                let mut app = app("lanes-latest");
+                let busy = hold(&mut app, Lane::Foreground);
+                app.start(Job::Decode { id: 1, sources: Vec::new() });
+                app.start(Job::Decode { id: 2, sources: Vec::new() });
+
+                let waiting: Vec<u32> = app
+                    .foreground_queued
+                    .iter()
+                    .filter_map(|job| match job {
+                        Job::Decode { id, .. } => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(waiting, [2]);
+
+                drop(busy);
+                settle(&mut app);
+            }
+
+            #[test]
+            fn a_foreground_failure_is_the_decode_and_a_background_one_is_not() {
+                // A file the long work could not read says nothing about the
+                // track the deck is waiting for.
+                let mut app = app("lanes-failure");
+                app.loading = Some((7, true));
+                let render = hold(&mut app, Lane::Background);
+                drop(render);
+                settle(&mut app);
+                assert_eq!(app.loading, Some((7, true)), "a background finish cancelled the load");
+
+                app.start(Job::Decode { id: 7, sources: vec![PathBuf::from("/nowhere.flac")] });
+                settle(&mut app);
+                assert_eq!(app.loading, None, "the decode failed and the deck is still waiting");
+            }
+
+            /// The measurement behind the two lanes: a record decoded for the
+            /// deck while the long work keeps every core busy, against the same
+            /// decode with nothing else running. The long work stands in for a
+            /// stem render, which needs a separator installed: an analysis of
+            /// three records with the genre model, which saturates the cores
+            /// for tens of seconds the same way.
+            ///
+            /// ```sh
+            /// BOOTH_GENRE_MODEL=… BOOTH_SAMPLE_DIR=<a folder of a few records> \
+            ///     cargo test -p booth --release --lib decodes_in_seconds -- --ignored --nocapture
+            /// ```
+            #[test]
+            #[ignore = "needs records and the genre model: BOOTH_SAMPLE_DIR, BOOTH_GENRE_MODEL"]
+            fn a_record_decodes_in_seconds_while_the_long_work_holds_every_core() {
+                let dir = PathBuf::from(std::env::var("BOOTH_SAMPLE_DIR").unwrap());
+                let mut records: Vec<PathBuf> =
+                    std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+                records.sort();
+                let wait = |app: &mut App| {
+                    let started = std::time::Instant::now();
+                    while app.foreground.is_some() {
+                        app.collect();
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    started.elapsed()
+                };
+
+                let mut app = app("lanes-measured");
+                app.start(Job::Decode { id: 1, sources: vec![records[0].clone()] });
+                let alone = wait(&mut app);
+
+                let genre = crate::config::Genre { enabled: true, ..Default::default() };
+                let tracks =
+                    records.iter().enumerate().map(|(n, p)| (n as u32 + 10, p.clone())).collect();
+                let started = std::time::Instant::now();
+                app.start(Job::Analyze { tracks, genre });
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                app.start(Job::Decode { id: 1, sources: vec![records[0].clone()] });
+                let beside = wait(&mut app);
+                let still_working = app.running();
+                settle(&mut app);
+                eprintln!(
+                    "decode alone {alone:.2?}; beside the long work {beside:.2?}, which was still \
+                     running: {still_working}, and took {:.1?} in all",
+                    started.elapsed()
+                );
+                assert!(still_working, "the long work finished before the decode did");
+            }
+
+            #[test]
+            fn a_stem_row_is_not_read_while_its_kit_is_being_rendered() {
+                let mut app = app("lanes-rendering");
+                let mut acapella =
+                    Track::placeholder(crate::library::companion_id(3, Role::Vocals));
+                acapella.parent = Some(3);
+                acapella.role = Role::Vocals;
+                let other = Track::placeholder(4);
+                app.separating.insert(3);
+                assert!(app.rendering(&acapella));
+                assert!(!app.rendering(&other));
+                app.separating.clear();
+                assert!(!app.rendering(&acapella));
+            }
+        }
+
         mod moving_a_boundary {
             use super::*;
             use crate::library::{CueMark, Phrase, PhraseEdit};
@@ -16090,10 +16392,9 @@ mod tests {
                     let (mut app, id) = read_already("menu");
                     app.selected = Some(id);
                     // A picture already in hand. Without one the panel starts a
-                    // job to measure one on its first frame, and every action
-                    // on the strip is disabled while anything is running — so
-                    // the test would be photographing a panel mid-draw rather
-                    // than the one somebody clicks.
+                    // job to measure one on its first frame, and the test
+                    // would be photographing a panel mid-draw rather than the
+                    // one somebody clicks.
                     app.waveform = Some((id, vec![0; 300]));
 
                     // The prep panel, which is where the per-track actions
@@ -16113,6 +16414,35 @@ mod tests {
                             .any(|want| matches!(want, Pending::LookUpWords(_))),
                         "the entry did not ask for a lookup"
                     );
+                }
+
+                #[test]
+                fn the_per_track_actions_queue_behind_long_work_rather_than_greying_out() {
+                    // A stem render is minutes a track; a track nobody could
+                    // re-analyse or look up for that long was a track nobody
+                    // could do anything with.
+                    let (mut app, id) = read_already("queues");
+                    app.selected = Some(id);
+                    app.waveform = Some((id, vec![0; 300]));
+                    let (release, held) = std::sync::mpsc::channel();
+                    app.start(Job::Hold { lane: Lane::Background, until: held });
+                    assert!(app.running());
+
+                    let mut harness = Harness::builder()
+                        .with_size(egui::vec2(900.0, 1600.0))
+                        .build_ui_state(|ui, app: &mut App| app.prep(ui), app);
+                    harness.run();
+                    harness.get_by_label("Re-analyse").click();
+                    harness.run();
+                    assert!(
+                        harness
+                            .state()
+                            .pending
+                            .iter()
+                            .any(|want| matches!(want, Pending::Analyze(_))),
+                        "Re-analyse did nothing while a job was running"
+                    );
+                    drop(release);
                 }
 
                 #[test]

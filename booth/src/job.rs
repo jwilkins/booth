@@ -24,6 +24,10 @@ use crate::theme::CUE_COLORS;
 
 /// What the window has asked for.
 pub enum Job {
+    /// Work that lasts until the test holding the other end lets it go, so a
+    /// test can have a job running for as long as it needs one to be.
+    #[cfg(test)]
+    Hold { lane: Lane, until: std::sync::mpsc::Receiver<()> },
     /// Walk the paths and read what each file says about itself. Fast: no
     /// decoding beyond what the tags need.
     Import { paths: Vec<PathBuf>, recursive: bool },
@@ -127,10 +131,46 @@ pub enum Job {
     },
 }
 
+/// Which worker a job runs on.
+///
+/// Two, so that what is in front of somebody never waits behind what they set
+/// going. With one, a track could not be heard while its stems rendered: the
+/// decode for the deck sat in the queue behind a separation measured in
+/// minutes a track, and so did the picture of any row clicked meanwhile and
+/// the grid measured again by hand. Each lane runs one job at a time, in the
+/// order asked for, and the two run side by side.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Lane {
+    /// The long work: analysis, stems, words, tags, a sync. Minutes to hours,
+    /// reported by the queue indicator, and stoppable there.
+    Background,
+    /// What the window is waiting on to play or show one track: its decode for
+    /// the deck, its picture, its stems' loudness, its grid measured again.
+    /// Seconds, and nothing that writes outside the collection's caches.
+    Foreground,
+}
+
 impl Job {
+    /// Which worker runs it. See [`Lane`].
+    ///
+    /// A picture is foreground when it is one row's, which is the row
+    /// somebody just clicked; a batch of them is what an analysis queues for
+    /// a kit's stems, and is work like any other.
+    pub fn lane(&self) -> Lane {
+        match self {
+            #[cfg(test)]
+            Job::Hold { lane, .. } => *lane,
+            Job::Decode { .. } | Job::StemEnvelopes { .. } | Job::Regrid(_) => Lane::Foreground,
+            Job::Draw(rows) if rows.len() <= 1 => Lane::Foreground,
+            _ => Lane::Background,
+        }
+    }
+
     /// What the queue indicator calls it.
     pub fn name(&self) -> &'static str {
         match self {
+            #[cfg(test)]
+            Job::Hold { .. } => "holding",
             Job::Import { .. } => "reading",
             Job::Adopt { .. } => "copying",
             Job::Convert(_) => "converting",
@@ -1067,6 +1107,11 @@ impl Drop for Runner {
 
 fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
     match job {
+        #[cfg(test)]
+        Job::Hold { until, .. } => {
+            let _ = until.recv();
+            Ok(())
+        }
         Job::Import { paths, recursive } => import(&paths, recursive, reporter),
         Job::Analyze { tracks, genre } => analyze_all(&tracks, &genre, reporter),
         Job::Regrid(tracks) => regrid_all(&tracks, reporter),
@@ -2596,6 +2641,28 @@ mod tests {
         assert!(matches!(updates.last(), Some(Update::Done(Ok(())))));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_work_in_front_of_somebody_has_a_lane_of_its_own() {
+        let one = || Drawable { id: 1, sources: vec![PathBuf::from("/a.flac")] };
+        let foreground = [
+            Job::Decode { id: 1, sources: Vec::new() },
+            Job::StemEnvelopes { id: 1, kit: StemKit::default() },
+            Job::Regrid(vec![(1, PathBuf::from("/a.flac"))]),
+            Job::Draw(vec![one()]),
+        ];
+        for job in &foreground {
+            assert_eq!(job.lane(), Lane::Foreground, "{}", job.name());
+        }
+        let background = [
+            Job::Draw(vec![one(), one(), one()]),
+            Job::Hash(Vec::new()),
+            Job::Import { paths: Vec::new(), recursive: false },
+        ];
+        for job in &background {
+            assert_eq!(job.lane(), Lane::Background, "{}", job.name());
+        }
     }
 
     #[test]
