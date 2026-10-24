@@ -692,6 +692,13 @@ pub fn analyze_file(
     });
     let analysis =
         analysis::analyze_with_drums(&audio, None, &waveform.band_detail, drum_bands.as_deref());
+    // A debug build leaves the working beside the track, for whoever is
+    // finding out why it came out as it did. Not a release: a user's music
+    // folder is theirs, and a file turning up beside every track in it is not
+    // something they asked for.
+    if cfg!(debug_assertions) {
+        explain_beside(id, path, &analysis, &waveform.band_detail, drum_bands.as_deref());
+    }
     let loudness = booth_cli::loudness::measure(&audio).ok();
     // A model that fails on one track costs that track its genre and nothing
     // else: the grid, the cues and the picture are the analysis, and this is
@@ -774,6 +781,32 @@ fn beat_time(beats: &[u32], beat_number: u16) -> u32 {
 /// Shared by the analyser and by the auto-cue pass that runs off a track's
 /// words, so that a cue means the same thing and is the same colour whichever
 /// of the two placed it.
+/// Where a track's analysis is explained: beside it, under its whole name with
+/// `.log` after — `Sirens.flac.log` — so that a `Sirens.flac` and a
+/// `Sirens.mp3` in one folder do not write over each other's.
+pub fn explanation_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".log");
+    PathBuf::from(name)
+}
+
+/// Write [`analysis::explain`] for a track beside it. A folder that cannot be
+/// written to costs the explanation and nothing else.
+fn explain_beside(
+    id: u32,
+    path: &Path,
+    analysis: &analysis::TrackAnalysis,
+    bands: &[u8],
+    drums: Option<&[u8]>,
+) {
+    let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+    let text = analysis::explain::explain(&name, analysis, bands, drums);
+    let to = explanation_path(path);
+    if let Err(e) = std::fs::write(&to, text) {
+        crate::warn!("#{id}: no analysis log at {}: {e}", to.display());
+    }
+}
+
 pub fn cue_marks(cues: &[booth_cli::export::Cue]) -> Vec<CueMark> {
     cues.iter()
         .map(|cue| CueMark {
@@ -2571,6 +2604,47 @@ mod tests {
             analyzed.duration_secs
         );
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_debug_build_explains_the_analysis_in_a_log_beside_the_track() {
+        let dir = scratch("explained");
+        let path = dir.join("track.wav");
+        write_beats(&path, 128.0, 16);
+
+        analyze_file(1, &path, None, None).unwrap();
+        let log = std::fs::read_to_string(dir.join("track.wav.log"))
+            .expect("no analysis log beside the track");
+        assert!(log.starts_with("Analysis of track.wav\n"), "{log}");
+        assert!(log.contains("<- the one"), "the downbeat is not explained:\n{log}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_track_with_the_same_name_in_another_format_has_its_own_log() {
+        assert_eq!(
+            explanation_path(Path::new("/music/Sirens.flac")),
+            PathBuf::from("/music/Sirens.flac.log")
+        );
+        assert_ne!(
+            explanation_path(Path::new("/music/Sirens.flac")),
+            explanation_path(Path::new("/music/Sirens.mp3"))
+        );
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_written_to_costs_the_log_and_nothing_else() {
+        let dir = scratch("unwritable");
+        let path = dir.join("track.wav");
+        write_beats(&path, 128.0, 8);
+        let analysis = analysis::analyze(&decode_file(&path).unwrap());
+        // A folder that is not there stands in for one that cannot be written:
+        // either way the write fails, and the analysis is already done.
+        let gone = dir.join("gone").join("track.wav");
+        explain_beside(1, &gone, &analysis, &[], None);
+        assert!(!explanation_path(&gone).exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

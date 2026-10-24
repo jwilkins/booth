@@ -53,6 +53,45 @@ pub struct Beats {
     /// against the average. Around 1.0 means no rhythm was found at all;
     /// a four-to-the-floor track measures several times that.
     pub confidence: f32,
+    /// What the bar lines were placed by, kept so that a downbeat in the wrong
+    /// place can be traced to the beats that put it there.
+    pub downbeat: Downbeat,
+}
+
+/// The evidence for which beat is the one: how hard the low end hit on each
+/// beat the tracker found, and which of the four positions that favoured.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Downbeat {
+    /// Each tracked beat, as the tracker heard it, before straightening moved
+    /// it onto the line: milliseconds from the start of the track.
+    pub times_ms: Vec<u32>,
+    /// The low band's sharpest onset around each of those beats — the kick,
+    /// where there is one.
+    pub kicks: Vec<f32>,
+    /// Which of the four positions won: the tracked beats `phase`,
+    /// `phase + 4`, `phase + 8` and so on are the downbeats.
+    pub phase: usize,
+    /// How many tracked beats straightening took off the front, which moves
+    /// the phase in the grid the beats end up in.
+    pub dropped: usize,
+}
+
+impl Downbeat {
+    /// The kicks summed over each of the four positions in the bar, from the
+    /// first tracked beat. The largest is [`Downbeat::phase`].
+    pub fn strengths(&self) -> [f32; 4] {
+        self.strengths_over(0..self.kicks.len())
+    }
+
+    /// The same over some of the tracked beats, counted in the same fours, so
+    /// a stretch of the track can be seen to agree with the whole of it or not.
+    pub fn strengths_over(&self, beats: std::ops::Range<usize>) -> [f32; 4] {
+        let mut sums = [0.0f32; 4];
+        for i in beats.start..beats.end.min(self.kicks.len()) {
+            sums[i % 4] += self.kicks[i];
+        }
+        sums
+    }
 }
 
 /// Track the beats of a measured track.
@@ -72,7 +111,12 @@ pub fn detect(features: &Features) -> Beats {
 /// from the wrong one would be worse than not correcting it.
 pub fn detect_at(features: &Features, bpm: Option<f64>) -> Beats {
     if loudest_onsets(&features.flux) < MIN_ONSET_STRENGTH {
-        return Beats { grid: BeatGrid::default(), bpm: 0.0, confidence: 0.0 };
+        return Beats {
+            grid: BeatGrid::default(),
+            bpm: 0.0,
+            confidence: 0.0,
+            downbeat: Downbeat::default(),
+        };
     }
     let envelope = onset_envelope(features);
     let (period, confidence) = match bpm {
@@ -83,7 +127,12 @@ pub fn detect_at(features: &Features, bpm: Option<f64>) -> Beats {
         _ => estimate_period(&envelope, features.frame_rate),
     };
     let Some(period) = period else {
-        return Beats { grid: BeatGrid::default(), bpm: 0.0, confidence };
+        return Beats {
+            grid: BeatGrid::default(),
+            bpm: 0.0,
+            confidence,
+            downbeat: Downbeat::default(),
+        };
     };
 
     let frames = track_beats(&envelope, period);
@@ -106,10 +155,10 @@ pub fn detect_at(features: &Features, bpm: Option<f64>) -> Beats {
     // The phase is an index into the beats that were tracked, so it moves with
     // them when straightening takes some off the front.
     let dropped = straightened.as_ref().map(|s| s.dropped).unwrap_or(0);
-    let phase = downbeat_phase(features, &frames) + 4 - dropped % 4;
-    renumber(&mut grid, phase);
+    let downbeat = Downbeat { dropped, ..downbeat(features, &frames) };
+    renumber(&mut grid, downbeat.phase + 4 - dropped % 4);
 
-    Beats { grid, bpm, confidence }
+    Beats { grid, bpm, confidence, downbeat }
 }
 
 /// How strong this track's onsets are: the level the top twentieth of frames
@@ -246,34 +295,37 @@ fn track_beats(envelope: &[f32], period: usize) -> Vec<usize> {
     beats
 }
 
-/// Which of the four positions in the bar the first beat holds.
+/// Which of the four positions in the bar the first beat holds, and what it
+/// was decided on.
 ///
 /// Kicks land on the downbeat far more often than not, so the phase whose beats
 /// carry the most low-frequency onset wins.
-fn downbeat_phase(features: &Features, beats: &[usize]) -> usize {
+fn downbeat(features: &Features, beats: &[usize]) -> Downbeat {
+    let kicks: Vec<f32> = beats
+        .iter()
+        .map(|&frame| {
+            // A beat marker can sit a couple of frames either side of the
+            // transient it belongs to, and the transient itself takes a
+            // window to arrive.
+            let from = frame.saturating_sub(2);
+            let to = (frame + 3).min(features.low_flux.len());
+            features.low_flux[from..to].iter().fold(0.0f32, |a, &b| a.max(b))
+        })
+        .collect();
+    let times_ms =
+        beats.iter().map(|&frame| (features.seconds_at(frame) * 1000.0).round() as u32).collect();
+    let mut found = Downbeat { times_ms, kicks, phase: 0, dropped: 0 };
     if beats.len() < 8 {
-        return 0;
+        return found;
     }
     let mut best = (0usize, f32::MIN);
-    for phase in 0..4 {
-        let strength: f32 = beats
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| i % 4 == phase)
-            .map(|(_, &frame)| {
-                // A beat marker can sit a couple of frames either side of the
-                // transient it belongs to, and the transient itself takes a
-                // window to arrive.
-                let from = frame.saturating_sub(2);
-                let to = (frame + 3).min(features.low_flux.len());
-                features.low_flux[from..to].iter().fold(0.0f32, |a, &b| a.max(b))
-            })
-            .sum();
+    for (phase, strength) in found.strengths().into_iter().enumerate() {
         if strength > best.1 {
             best = (phase, strength);
         }
     }
-    best.0
+    found.phase = best.0;
+    found
 }
 
 /// A straight line through beat times: the period between them, and where the

@@ -1765,6 +1765,20 @@ That is a few lines per file, so it sits at the log's most detailed level and
 tool the same detail is `-v`, on stderr, so redirecting the results still
 captures only results.
 
+**An analysis, in a debug build,** is explained in a file of its own beside the
+track: `Sirens.flac.log` beside `Sirens.flac`, the whole name and `.log` after,
+so a FLAC and an MP3 of the same record in one folder each keep theirs. It is
+rewritten every time the track is analysed, and it holds the numbers each
+decision was made on rather than only the decisions: the tempo and how sure the
+tracker was; the downbeat, as the four sums it is chosen from — how hard the low
+end hits on the first, second, third and fourth of every four beats — and the
+same sums eight bars at a time, with any stretch that favours a different beat
+pointed out; the key; the arrangement's sections and the rules that named them;
+every bar's energy, from the mix and from the drum stem where there is one, with
+the drops and breaks found in it and which of them are D and B; and the cues.
+A release build never writes it: a music folder is its owner's, and a file
+beside every track in it is not something they asked for.
+
 ## How fast the disk will answer
 
 Two paths that look alike in a collection can be seconds apart to open, and none
