@@ -207,8 +207,8 @@ what the comparison is for — is the vocal clean through the drop, is the groov
 still there without it — and a comparison you have to re-cue by hand is not one
 anybody makes twice. Paused, the playhead still moves across so pressing play
 picks up there, without starting a sound nobody asked for. It works from the
-arrow keys as well as the pointer, since a stem sits directly under its parent
-in the list.
+arrow keys as well as the pointer, since an open kit's stems sit directly under
+their parent in the list.
 
 Between two different records nothing carries: the new one starts at its own
 beginning rather than at wherever the last one's playhead happened to be.
@@ -397,8 +397,19 @@ ungridded track is not slower than every other track, and reversing a sort must
 not bury the ones still to be worked on. Keys sort around the wheel rather than
 alphabetically, so 9A comes before 11B and the column is worth reading.
 
-Stem companions are indented under the track they came from, stay under it in
-every sort, and exist only when all three stem files are on disk. **They play**:
+**Stems fold away under the track they came from.** A record with a rendered
+kit has an arrow at the front of its line; the kit starts closed, and clicking
+the arrow, or pressing → with the record selected, shows its stems indented
+beneath it. Clicking the arrow does not select the record, so the deck stays on
+whatever it was playing. ← closes the kit again, from the record or from any of
+its stems; closed from a stem, the cursor goes to the record the way a click on
+it would, so a deck that was playing the acapella plays the record from the
+same moment rather than going on playing a line nobody can see. Every kit is
+closed again when the window next opens: three more lines for every record with stems
+is mostly stems, in a crate that has been through the separator.
+
+Open, the stems stay under the track in every sort, and exist only when all
+three stem files are on disk. **They play**:
 double-click an acapella and you hear the vocal stem. An instrumental is the
 melody and drum stems summed as it loads, because the separator writes parts and
 never a mix of some of them — there is no single file to point at, and playing
