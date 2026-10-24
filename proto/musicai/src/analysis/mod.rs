@@ -14,6 +14,7 @@
 
 pub mod cues;
 pub mod energy;
+pub mod explain;
 pub mod features;
 pub mod key;
 pub mod place;
@@ -41,6 +42,9 @@ pub struct TrackAnalysis {
     pub key: Option<key::Detected>,
     /// How hard the track goes where it goes hardest. See [`peak_intensity`].
     pub intensity: f32,
+    /// What the bar lines were placed by. See [`explain`], which is what reads
+    /// it.
+    pub downbeat: tempo::Downbeat,
 }
 
 impl TrackAnalysis {
@@ -116,6 +120,7 @@ pub fn analyze_with_drums(
         cues,
         key,
         intensity,
+        downbeat: beats.downbeat,
     }
 }
 
@@ -156,7 +161,7 @@ mod tests {
 
     /// A whole track, arranged: quiet intro, drums in, breakdown, drop, outro,
     /// with a centred voice over the second half.
-    fn track() -> Audio {
+    pub(super) fn track() -> Audio {
         const RATE: u32 = 44_100;
         let bpm = 128.0f32;
         let beat = 60.0 / bpm;
