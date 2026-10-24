@@ -1119,6 +1119,11 @@ question left in the format — whether a cue point written as type 1 shows up a
    are the only requirements here stated as numbers, and the numbers are still unmeasured.
 3. Stem quality scoring (STEM-6) and the drive's own loudness pass (STEM-4, STEM-5), which
    are what separate a rendered kit from one that is safe to play loud.
+4. A row of loop and jump buttons on the player, asked for by the owner on 2026-10-23. Loops:
+   **1/2**, which halves the current loop's length; **1**, a one-bar loop; **2**, a two-bar
+   loop; and **2x**, which doubles the current loop's length. Jumps, measured in beats, `<`
+   back and `>` forward: **<16**, **<8**, **<4**, **<2**, **<1**, **<1/2**, **1/2>**, **1>**,
+   **2>**, **4>**, **8>**, **16>**.
 
 ## 15. Sources
 
