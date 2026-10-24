@@ -14654,6 +14654,97 @@ mod tests {
                 assert!(still_working, "the long work finished before the decode did");
             }
 
+            /// The same measurement against the work the analysis stood in
+            /// for: demucs rendering one record's stems through the window's
+            /// own job, and another record decoded for the deck while it runs.
+            /// demucs is a process of its own, so what the decode competes
+            /// with is the cores, not this program's threads.
+            ///
+            /// Run demucs once by hand first, so that it has fetched its
+            /// weights and the decode lands on the separation rather than on
+            /// a download.
+            ///
+            /// ```sh
+            /// PATH=<demucs's bin>:$PATH BOOTH_SAMPLE_DIR=<a folder of two records or more> \
+            ///     cargo test -p booth --release --lib while_stems_render -- --ignored --nocapture
+            /// ```
+            #[test]
+            #[ignore = "needs demucs on PATH and records: BOOTH_SAMPLE_DIR"]
+            fn a_record_decodes_in_seconds_while_stems_render() {
+                let dir = PathBuf::from(std::env::var("BOOTH_SAMPLE_DIR").unwrap());
+                let mut records: Vec<PathBuf> =
+                    std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+                records.sort();
+                let decode = |app: &mut App| {
+                    let started = std::time::Instant::now();
+                    app.start(Job::Decode { id: 1, sources: vec![records[1].clone()] });
+                    while app.foreground.is_some() {
+                        app.collect();
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    started.elapsed()
+                };
+                // How much of every core was busy, from the kernel's own
+                // count: (busy, all) ticks so far. Linux only, and only read
+                // to say how hard the render was working at the time.
+                let ticks = || {
+                    let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+                    let n: Vec<u64> = stat
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .skip(1)
+                        .filter_map(|n| n.parse().ok())
+                        .collect();
+                    let all: u64 = n.iter().sum();
+                    let idle = n.get(3).copied().unwrap_or(0) + n.get(4).copied().unwrap_or(0);
+                    (all - idle, all)
+                };
+
+                let mut app = app("lanes-stems-measured");
+                let folder = app.library_path.parent().unwrap().join("stems");
+                // Once to warm up: the first read of a file is the disk's
+                // time, not the decoder's.
+                decode(&mut app);
+                let alone = decode(&mut app);
+
+                let started = std::time::Instant::now();
+                app.start(Job::Separate {
+                    tracks: vec![(10, records[0].clone())],
+                    stems_in: crate::config::StemsLocation {
+                        in_: crate::config::StemsIn::Folder,
+                        folder: folder.clone(),
+                    },
+                    backend: booth_cli::stems::Backend::Demucs,
+                    quality: booth_cli::cli::StemQuality::Standard,
+                });
+                // Past demucs loading its model, and into the separation.
+                std::thread::sleep(std::time::Duration::from_secs(15));
+                let before = ticks();
+                let beside = decode(&mut app);
+                let after = ticks();
+                let still_rendering = app.running();
+                while app.runner.is_some() {
+                    app.collect();
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                let rendered = std::fs::read_dir(&folder)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                    .count();
+                eprintln!(
+                    "decode alone {alone:.2?}; beside demucs {beside:.2?}, with the cores {:.0}% \
+                     busy; the render was still going: {still_rendering}, took {:.1?} in all and \
+                     wrote {rendered} stems",
+                    100.0 * (after.0 - before.0) as f64 / (after.1 - before.1).max(1) as f64,
+                    started.elapsed()
+                );
+                assert!(still_rendering, "the render finished before the decode did");
+                assert!(rendered > 0, "demucs wrote nothing, so no render ran beside the decode");
+            }
+
             #[test]
             fn a_stem_row_is_not_read_while_its_kit_is_being_rendered() {
                 let mut app = app("lanes-rendering");
