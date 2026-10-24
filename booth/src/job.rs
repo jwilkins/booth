@@ -100,6 +100,9 @@ pub enum Job {
     /// in the collection before it did — without it, a library built before
     /// hashing existed can never be checked for copies at all.
     Hash(Vec<(u32, PathBuf)>),
+    /// Read both databases off a drive and say what each player sees on it.
+    /// See `booth_cli::audit`.
+    Audit { drive: PathBuf, key: Option<String> },
     /// Fingerprint tracks and ask AcoustID what they are.
     Identify { tracks: Vec<(u32, PathBuf)>, key: String },
     /// Write a drive.
@@ -142,6 +145,7 @@ impl Job {
             Job::StemEnvelopes { .. } => "measuring stems",
             Job::Identify { .. } => "identifying",
             Job::Hash(_) => "checking for copies",
+            Job::Audit { .. } => "checking what each player sees",
             Job::Verify { .. } => "checking the collection",
             Job::Analyze { .. } => "analysing",
             Job::GuessGenre { .. } => "hearing the genre",
@@ -343,6 +347,13 @@ pub enum Update {
         drive: String,
         root: PathBuf,
         sessions: Vec<crate::history::Session>,
+    },
+    /// What each player sees on a drive, as lines of text, and whether every
+    /// player sees the same drive with nothing on it failing.
+    Audited {
+        drive: PathBuf,
+        lines: Vec<String>,
+        clean: bool,
     },
     /// The two hashes for one track that had none.
     Hashed {
@@ -1096,6 +1107,16 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Retag(tracks) => retag(&tracks, reporter),
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
         Job::Hash(tracks) => hash_all(&tracks, reporter),
+        Job::Audit { drive, key } => {
+            let audit = booth_cli::audit::audit(&drive, key.as_deref());
+            let _ = reporter.tx.send(Update::Audited {
+                drive,
+                lines: audit.lines(),
+                clean: audit.is_clean(),
+            });
+            (reporter.wake)();
+            Ok(())
+        }
         Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
         Job::Keep { root, drive, state, into, known, foreign, library, key } => {
             let kept = match crate::backup::keep(
