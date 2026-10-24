@@ -29,6 +29,12 @@ pub const RUN_BARS: usize = 8;
 /// kick taken out for a fill is still the drop.
 const BRIDGE_BARS: usize = 2;
 
+/// How many bars apart two breaks' lengths can be and still count as the same
+/// length: two. A stretch is measured in whole bars and bridged over a dip of
+/// up to [`BRIDGE_BARS`], so its edges can each land a bar or two either way of
+/// where an ear would put them.
+pub const ALIKE_BARS: usize = 2;
+
 /// Which of a record's bars mark its quiet and its loud end. A tenth in from
 /// either end rather than the extremes, so that one silent bar at the top of
 /// the file or one clipped crash does not set the scale.
@@ -116,18 +122,17 @@ impl Shape {
         })
     }
 
-    /// The break with the least energy in it: the deepest, where a second
-    /// record has the most room. Between two alike, the longer, then the
-    /// earlier.
+    /// The break a DJ means by "the break": the longest, and of those about
+    /// as long — within [`ALIKE_BARS`] of it — the latest.
+    ///
+    /// Not the deepest, which is what this was. A short break near the top of
+    /// a record is often its quietest, and it is not the one a set is built
+    /// round: that is the long breakdown later on, the one the record builds
+    /// to, where a second record has the most time to be laid over and which
+    /// the main drop answers.
     pub fn main_break(&self) -> Option<Run> {
-        self.breaks.iter().copied().reduce(|best, run| {
-            match run.energy < best.energy
-                || (run.energy == best.energy && run.bars() > best.bars())
-            {
-                true => run,
-                false => best,
-            }
-        })
+        let longest = self.breaks.iter().map(Run::bars).max()?;
+        self.breaks.iter().copied().rfind(|run| run.bars() + ALIKE_BARS >= longest)
     }
 
     /// Whether a bar is inside one of the drops.
@@ -472,11 +477,29 @@ mod tests {
     }
 
     #[test]
-    fn of_two_breaks_the_deepest_is_the_main_one() {
+    fn of_two_breaks_the_longer_is_the_main_one() {
         let bars = record(&[(80.0, 16), (40.0, 8), (80.0, 16), (15.0, 16), (80.0, 16)]);
         let shape = shape(&bars);
         assert_eq!(shape.breaks.len(), 2, "{shape:?}");
         assert_eq!(shape.main_break().map(|run| run.from), Some(40));
+    }
+
+    #[test]
+    fn a_long_break_later_on_is_the_main_one_over_a_short_deeper_one_near_the_top() {
+        let bars = record(&[(20.0, 8), (80.0, 16), (5.0, 8), (80.0, 32), (30.0, 24), (85.0, 32)]);
+        let shape = shape(&bars);
+        assert_eq!(shape.breaks.len(), 2, "{shape:?}");
+        assert!(shape.breaks[0].energy < shape.breaks[1].energy, "the early one is not deeper");
+        assert_eq!(shape.main_break().map(|run| run.from), Some(64), "{shape:?}");
+    }
+
+    #[test]
+    fn of_two_breaks_about_as_long_the_later_is_the_main_one() {
+        // Ten bars and nine: the same length, as edges are measured.
+        let bars = record(&[(80.0, 16), (5.0, 10), (80.0, 32), (30.0, 9), (85.0, 32)]);
+        let shape = shape(&bars);
+        assert_eq!(shape.breaks.len(), 2, "{shape:?}");
+        assert_eq!(shape.main_break().map(|run| run.from), Some(58), "{shape:?}");
     }
 
     #[test]
@@ -788,6 +811,113 @@ mod tests {
                 at(old),
                 at(new),
                 if old != new { "  <- differ" } else { "" }
+            );
+        }
+        eprintln!("{differ} of {total} differ");
+    }
+
+    /// The comparison behind choosing the main break by length rather than by
+    /// depth, on real records: for each record in `BOOTH_DRUM_RECORDS`, read
+    /// with its drum stem from `BOOTH_DRUM_STEMS/<name>/drums.wav` where there
+    /// is one, the breaks, the deepest, and the one now taken, with the main
+    /// drop that answers each.
+    ///
+    /// ```sh
+    /// BOOTH_DRUM_RECORDS=<records> BOOTH_DRUM_STEMS=<demucs out>/htdemucs \
+    ///     cargo test -p booth-cli --release --lib b_by_each_rule -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs records: BOOTH_DRUM_RECORDS, and their stems in BOOTH_DRUM_STEMS"]
+    fn real_records_b_by_each_rule() {
+        use crate::audio::decode::decode_file;
+        let records = std::path::PathBuf::from(std::env::var("BOOTH_DRUM_RECORDS").unwrap());
+        let stems = std::path::PathBuf::from(std::env::var("BOOTH_DRUM_STEMS").unwrap_or_default());
+        let mut paths: Vec<std::path::PathBuf> =
+            std::fs::read_dir(&records).unwrap().map(|entry| entry.unwrap().path()).collect();
+        paths.sort();
+        let (mut differ, mut total) = (0, 0);
+        for path in paths {
+            let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            let audio = decode_file(&path).unwrap();
+            let bands = crate::export::waveform::analyze(&audio).band_detail;
+            let analysed = crate::analysis::analyze_drawn(&audio, None, &bands);
+            let times: Vec<u32> = analysed.grid.beats.iter().map(|beat| beat.time_ms).collect();
+            let phase = analysed.grid.beats.iter().position(|beat| beat.number == 1).unwrap_or(0);
+            let grid = &times[phase..];
+            let drums = decode_file(&stems.join(&name).join("drums.wav"))
+                .ok()
+                .map(|stem| crate::export::waveform::analyze(&stem).band_detail);
+            let shape = read(&bands, drums.as_deref(), grid);
+            let deepest = shape.breaks.iter().copied().reduce(|best, run| {
+                match run.energy < best.energy
+                    || (run.energy == best.energy && run.bars() > best.bars())
+                {
+                    true => run,
+                    false => best,
+                }
+            });
+            let answering = |quiet: Option<Run>| {
+                quiet
+                    .filter(|quiet| shape.drops.iter().all(|drop| quiet.energy < drop.energy))
+                    .and_then(|quiet| {
+                        shape.drops.iter().find(|drop| drop.from >= quiet.from).copied()
+                    })
+                    .or_else(|| shape.loudest_drop())
+            };
+            let at = |run: Option<Run>| match run {
+                Some(run) => {
+                    let s = grid.get(run.from * 4).copied().unwrap_or(0) / 1000;
+                    format!("{}-{} ({}:{:02})", run.from, run.to, s / 60, s % 60)
+                }
+                None => "none".to_string(),
+            };
+            let now = shape.main_break();
+            // Off the mix alone, as the analysis reads it, and where that finds
+            // no break the arrangement's sections named a break: the first of
+            // them, which B used to fall back to, and the one it falls back to
+            // now.
+            let mix_only = read(&bands, None, grid);
+            if mix_only.breaks.is_empty() {
+                let named: Vec<(u32, u16)> = analysed
+                    .structure
+                    .sections
+                    .iter()
+                    .filter(|section| section.kind == super::super::structure::Kind::Down)
+                    .filter_map(|section| {
+                        let at = times.get(section.start_beat as usize - 1)?;
+                        Some((*at, section.end_beat.saturating_sub(section.start_beat) / 4))
+                    })
+                    .collect();
+                let b = analysed
+                    .cues
+                    .iter()
+                    .find(|cue| cue.is_hot() && cue.hot_cue == 2)
+                    .map(|cue| cue.time_ms);
+                let clock = |ms: u32| format!("{}:{:02}", ms / 60_000, ms / 1000 % 60);
+                eprintln!(
+                    "  mix alone finds no break; sections named a break {:?}; first {}; B now {}",
+                    named
+                        .iter()
+                        .map(|(at, bars)| format!("{} ({bars} bars)", clock(*at)))
+                        .collect::<Vec<_>>(),
+                    named.first().map_or("none".into(), |(at, bars)| format!(
+                        "{} ({bars} bars)",
+                        clock(*at)
+                    )),
+                    b.map_or("empty".into(), clock)
+                );
+            }
+            total += 1;
+            differ += usize::from(now != deepest);
+            eprintln!(
+                "{name}{}: breaks {:?}\n  deepest {} -> D {}\n  now     {} -> D {}{}",
+                if drums.is_some() { " (with drums)" } else { "" },
+                shape.breaks.iter().map(|run| (run.from, run.to)).collect::<Vec<_>>(),
+                at(deepest),
+                at(answering(deepest)),
+                at(now),
+                at(shape.main_drop()),
+                if now != deepest { "  <- differ" } else { "" }
             );
         }
         eprintln!("{differ} of {total} differ");

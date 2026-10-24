@@ -345,6 +345,11 @@ pub fn suggest(
     assemble(start, end, beat_times, candidates)
 }
 
+/// The fewest bars a break can run and be worth a button: three, which is to
+/// say more than two. Two bars of the drums taken out is a fill, not a break
+/// to lay a second record over.
+pub const SHORTEST_BREAK_BARS: u16 = 3;
+
 /// How near a section's start a drop or a break found by energy has to begin to
 /// be that section, in bars. The arrangement analysis says exactly where a
 /// section starts, from how the sound changes; the energy says which section
@@ -359,8 +364,9 @@ const SAME_START_BARS: usize = 2;
 /// section it named a break that the energy finds is the main drop is the
 /// drop — or a new cue at that bar line where no section starts near it,
 /// which is the drop the analysis missed. Where the energy found none, the
-/// first section named a drop, or a break, is taken: the most there is to go
-/// on. `grid` is every beat from the first downbeat. A kind already marked is
+/// first section named a drop is taken, and of the sections named a break, the
+/// one [`the_break`] picks: the most there is to go on. `grid` is every beat
+/// from the first downbeat. A kind already marked is
 /// left as it is.
 pub fn mark_the_main_ones(
     candidates: &mut Vec<Candidate>,
@@ -376,11 +382,14 @@ pub fn mark_the_main_ones(
             continue;
         }
         let Some(run) = run else {
-            let first = candidates
-                .iter_mut()
-                .find(|candidate| candidate.reason == Reason::Section(kind) && !candidate.main);
-            if let Some(first) = first {
-                first.main = true;
+            let pick = match kind {
+                Kind::Down => the_break(candidates),
+                _ => candidates.iter().position(|candidate| {
+                    candidate.reason == Reason::Section(kind) && !candidate.main
+                }),
+            };
+            if let Some(at) = pick {
+                candidates[at].main = true;
             }
             continue;
         };
@@ -395,7 +404,11 @@ pub fn mark_the_main_ones(
             .min_by_key(|candidate| candidate.time_ms.abs_diff(at));
         match section {
             Some(section) => {
-                if section.reason != Reason::Section(kind) {
+                // A break's length is the energy's, where it measured one: the
+                // section it starts on can be a short one that the arrangement
+                // split off the front of it, and a marker saying "2 bars" on
+                // the main break is a marker saying it is not one.
+                if section.reason != Reason::Section(kind) || kind == Kind::Down {
                     section.reason = Reason::Section(kind);
                     section.bars = u16::try_from(run.bars()).ok();
                 }
@@ -432,6 +445,33 @@ pub fn sections(structure: &Structure, beat_times: &[u32]) -> Vec<Candidate> {
 /// button. Eight: a phrase, which is the least another record's vocal can be
 /// laid over and sound meant.
 pub const INSTRUMENTAL_BARS: usize = 8;
+
+/// Which of the sections named a break is the main one, where nothing measured
+/// it: among those longer than two bars, the longest, and of those about as
+/// long — within [`super::energy::ALIKE_BARS`] — the latest. The same as
+/// [`super::energy::Shape::main_break`], for the arrangement's sections.
+///
+/// It was the first, which put B on a two-bar break at the top of a record
+/// with a long one later. A break whose length nobody gave is taken only where
+/// no break's length is known, and then the first, as before; one known to run
+/// two bars or fewer is never taken, and B is left empty rather than put on it.
+fn the_break(candidates: &[Candidate]) -> Option<usize> {
+    use super::energy::ALIKE_BARS;
+    let breaks: Vec<usize> = (0..candidates.len())
+        .filter(|&i| candidates[i].reason == Reason::Section(Kind::Down) && !candidates[i].main)
+        .collect();
+    let bars = |i: usize| candidates[i].bars.map(usize::from);
+    let Some(longest) = breaks.iter().filter_map(|&i| bars(i)).max() else {
+        return breaks.first().copied();
+    };
+    breaks
+        .into_iter()
+        .filter(|&i| {
+            bars(i)
+                .is_some_and(|b| b >= usize::from(SHORTEST_BREAK_BARS) && b + ALIKE_BARS >= longest)
+        })
+        .max_by_key(|&i| candidates[i].time_ms)
+}
 
 /// The longest stretch of the record with nothing sung over it, as a cue at
 /// its bar line, where it is [`INSTRUMENTAL_BARS`] long or longer.
@@ -549,6 +589,16 @@ pub fn assemble_with_reasons(
     // measured how much the record plays — so the first of each.
     let mut candidates = candidates;
     mark_the_main_ones(&mut candidates, grid, &super::energy::Shape::default());
+    // A break of two bars or less is a marker and nothing more: a fill, not
+    // a break worth a button. The main one is long enough by how it was chosen.
+    for candidate in &mut candidates {
+        if candidate.reason == Reason::Section(Kind::Down)
+            && !candidate.main
+            && candidate.bars.is_some_and(|bars| bars < SHORTEST_BREAK_BARS)
+        {
+            candidate.memory_only = true;
+        }
+    }
     let mut kept = fold(rank(candidates));
 
     // Every moment worth cueing becomes a memory cue, whether or not it also
@@ -1680,10 +1730,10 @@ mod tests {
     }
 
     #[test]
-    fn the_drop_after_the_deeper_of_two_breaks_is_d_though_an_earlier_one_is_louder() {
+    fn the_drop_after_the_later_of_two_breaks_as_long_is_d_though_an_earlier_one_is_louder() {
         // 500 ms beats, so a bar is two seconds: drops at bars 16, 64 and 112,
-        // the one at 64 the loudest; breaks at bars 48 and 96, the second
-        // deeper. B is the deeper break, and D the drop that answers it.
+        // the one at 64 the loudest; breaks of sixteen bars each at bars 48 and
+        // 96. B is the later break, and D the drop that answers it.
         let grid = beats(600);
         let shape = super::super::energy::shape(&played(&[
             (20.0, 16),
@@ -1709,6 +1759,95 @@ mod tests {
             .collect();
         assert!(hot.contains(&(4, 224_000)), "{hot:?}");
         assert!(hot.contains(&(2, 192_000)), "{hot:?}");
+    }
+
+    /// A section named a break, `bars` long, at `at`.
+    fn break_of(at: u32, bars: u16) -> Candidate {
+        Candidate { bars: Some(bars), ..Candidate::new(at, Reason::Section(Kind::Down)) }
+    }
+
+    /// The time of each hot cue with this letter.
+    fn on(letter: u8, cues: &[Cue]) -> Vec<u32> {
+        cues.iter().filter(|cue| cue.is_hot() && cue.hot_cue == letter).map(|c| c.time_ms).collect()
+    }
+
+    #[test]
+    fn with_nothing_measured_b_is_the_long_break_later_on_not_a_short_one_at_the_top() {
+        let grid = beats(600);
+        let candidates = vec![
+            break_of(8_000, 2),
+            Candidate::new(32_000, Reason::Section(Kind::Chorus)),
+            break_of(150_000, 16),
+            Candidate::new(182_000, Reason::Section(Kind::Chorus)),
+        ];
+        assert_eq!(on(2, &assemble(0, None, &grid, candidates)), [150_000]);
+    }
+
+    #[test]
+    fn a_break_of_two_bars_is_never_b_and_b_is_left_empty() {
+        let grid = beats(600);
+        let candidates =
+            vec![break_of(40_000, 2), Candidate::new(60_000, Reason::Section(Kind::Chorus))];
+        let cues = assemble(0, None, &grid, candidates);
+        assert!(on(2, &cues).is_empty(), "{cues:?}");
+        assert!(
+            cues.iter().any(|cue| !cue.is_hot() && cue.time_ms == 40_000),
+            "it lost its marker as well: {cues:?}"
+        );
+    }
+
+    #[test]
+    fn of_breaks_about_as_long_the_later_is_b() {
+        // Ten bars and nine: the same length, as section edges go.
+        let grid = beats(600);
+        let candidates = vec![
+            break_of(40_000, 10),
+            Candidate::new(60_000, Reason::Section(Kind::Chorus)),
+            break_of(160_000, 9),
+            Candidate::new(178_000, Reason::Section(Kind::Chorus)),
+        ];
+        assert_eq!(on(2, &assemble(0, None, &grid, candidates)), [160_000]);
+    }
+
+    #[test]
+    fn a_break_of_two_bars_does_not_take_one_of_the_other_buttons_either() {
+        let grid = beats(600);
+        let candidates = vec![
+            break_of(40_000, 2),
+            Candidate::new(60_000, Reason::Section(Kind::Chorus)),
+            break_of(150_000, 16),
+            Candidate::new(182_000, Reason::Section(Kind::Chorus)),
+        ];
+        let cues = assemble(0, None, &grid, candidates);
+        assert!(!cues.iter().any(|cue| cue.is_hot() && cue.time_ms == 40_000), "{cues:?}");
+    }
+
+    #[test]
+    fn the_main_break_found_by_energy_is_marked_as_long_as_it_measured() {
+        // The arrangement split a two-bar section off the front of the break
+        // the energy measured from bar 48 to 64: the marker says sixteen.
+        let grid = beats(600);
+        let shape = super::super::energy::shape(&played(&[
+            (20.0, 16),
+            (80.0, 32),
+            (10.0, 16),
+            (90.0, 32),
+            (20.0, 16),
+        ]));
+        let mut candidates = vec![
+            Candidate::new(32_000, Reason::Section(Kind::Chorus)),
+            break_of(96_000, 2),
+            Candidate::new(128_000, Reason::Section(Kind::Chorus)),
+        ];
+        mark_the_main_ones(&mut candidates, &grid, &shape);
+        let cues = assemble(0, None, &grid, candidates);
+        assert_eq!(on(2, &cues), [96_000], "{cues:?}");
+        assert!(
+            cues.iter().any(|cue| !cue.is_hot()
+                && cue.time_ms == 96_000
+                && cue.comment.as_deref().is_some_and(|said| said.contains("16 bars"))),
+            "{cues:?}"
+        );
     }
 
     #[test]
