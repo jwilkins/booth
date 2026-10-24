@@ -2234,7 +2234,17 @@ impl App {
             self.envelopes = None;
         }
         self.ensure_local(&ids);
-        self.start(Job::Analyze { tracks: waiting.clone(), genre: self.config.genre.clone() });
+        // The drum stem of each track that has a kit, for the breaks the mix
+        // hides — see `energy::shape_with_drums`.
+        let drums = ids
+            .iter()
+            .filter_map(|id| Some((*id, self.library.get(*id)?.stems.drums.clone()?)))
+            .collect();
+        self.start(Job::Analyze {
+            tracks: waiting.clone(),
+            drums,
+            genre: self.config.genre.clone(),
+        });
 
         // And the stems, where there are any. Listening to a record is the
         // moment its pictures are made, and a stem row has a picture of its
@@ -3154,13 +3164,23 @@ impl App {
             .library
             .get(id)
             .and_then(|track| crate::library::cached_waveform(id, &track.sources()));
-        self.auto_cue_from(id, bands.as_deref())
+        // The drum stem's picture as well, where the kit has been drawn: it
+        // finds the breaks the mix hides. Not drawn here if it is missing —
+        // the mix alone is what this read before there were stems.
+        let drums = crate::library::companion_id(id, crate::library::Role::Drums);
+        let drum_bands = self
+            .library
+            .get(id)
+            .and_then(|track| track.stems.drums.clone())
+            .and_then(|stem| crate::library::cached_waveform(drums, &[stem]));
+        self.auto_cue_from(id, bands.as_deref(), drum_bands.as_deref())
     }
 
-    /// [`Self::auto_cue`], with the three-band picture the main drop and break
-    /// are found in handed over rather than read from where the collection
-    /// keeps it — which is a folder of the user's, and no place for a test.
-    fn auto_cue_from(&mut self, id: u32, bands: Option<&[u8]>) -> usize {
+    /// [`Self::auto_cue`], with the three-band pictures the main drop and
+    /// break are found in handed over rather than read from where the
+    /// collection keeps them — which is a folder of the user's, and no place
+    /// for a test.
+    fn auto_cue_from(&mut self, id: u32, bands: Option<&[u8]>, drums: Option<&[u8]>) -> usize {
         use booth_cli::analysis::cues::{self, Candidate, Reason};
         use booth_cli::analysis::structure::Kind;
         use booth_cli::transcribe::MomentKind;
@@ -3182,14 +3202,11 @@ impl App {
         let sections: Vec<u32> = candidates.iter().map(|candidate| candidate.time_ms).collect();
 
         // The main drop and the main break by how much each bar plays, read
-        // off the picture the collection keeps — see `energy`. No picture, no
-        // measurement: the first section named each, as before.
+        // off the picture the collection keeps — see `energy` — and the drum
+        // stem's where there is one. No picture, no measurement: the first
+        // section named each, as before.
         let shape = bands
-            .map(|bands| {
-                booth_cli::analysis::energy::shape(&booth_cli::analysis::energy::bars(
-                    bands, &beats,
-                ))
-            })
+            .map(|bands| booth_cli::analysis::energy::read(bands, drums, &beats))
             .unwrap_or_default();
         cues::mark_the_main_ones(&mut candidates, &beats, &shape);
         let main_drop = candidates
@@ -14733,7 +14750,7 @@ mod tests {
                 let tracks =
                     records.iter().enumerate().map(|(n, p)| (n as u32 + 10, p.clone())).collect();
                 let started = std::time::Instant::now();
-                app.start(Job::Analyze { tracks, genre });
+                app.start(Job::Analyze { tracks, drums: Default::default(), genre });
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 app.start(Job::Decode { id: 1, sources: vec![records[0].clone()] });
                 let beside = wait(&mut app);
@@ -15932,13 +15949,55 @@ mod tests {
                         (250_100, "hold me closer now"),
                     ],
                 );
-                app.auto_cue_from(id, Some(&loud_from(60, 32)));
+                app.auto_cue_from(id, Some(&loud_from(60, 32)), None);
                 let cues = app.library.get(id).unwrap().cues.clone();
                 let lettered =
                     |n: u8| cues.iter().find(|cue| cue.letter == n).map(|cue| cue.time_ms);
                 assert_eq!(lettered(4), Some(120_000), "{cues:?}");
                 assert_eq!(lettered(1), Some(100_000), "{cues:?}");
                 assert_eq!(lettered(3), Some(160_000), "{cues:?}");
+            }
+
+            #[test]
+            fn a_break_only_the_drum_stem_hears_is_b() {
+                // The mix is loud and kicking from bar 60 for 48 bars, with
+                // nothing in it to say that the drums leave from bar 76 to 92:
+                // a bassline keeps its low end rising through them. The drum
+                // stem plays from bar 8 to 140 but for those sixteen.
+                let (mut app, id) = sung("drum-break", &[(100_100, "hold me closer now")]);
+                let mix = loud_from(60, 48);
+                let mut drums = loud_from(8, 132);
+                for at in 76 * 300..92 * 300 {
+                    drums[at * 3..at * 3 + 3].copy_from_slice(&[20, 20, 20]);
+                }
+                let b = |app: &App| {
+                    let cues = &app.library.get(id).unwrap().cues;
+                    cues.iter().find(|cue| cue.letter == 2).map(|cue| cue.time_ms)
+                };
+
+                app.auto_cue_from(id, Some(&mix), None);
+                assert_ne!(b(&app), Some(152_000), "the mix heard the break after all");
+                app.auto_cue_from(id, Some(&mix), Some(&drums));
+                assert_eq!(b(&app), Some(152_000), "{:?}", app.library.get(id).unwrap().cues);
+            }
+
+            #[test]
+            fn analysing_a_track_with_a_kit_hands_the_analysis_its_drum_stem() {
+                let (mut app, id) = sung("analyse-with-drums", &[]);
+                let drums = app.library_path.with_file_name("track (drums).mp3");
+                std::fs::write(&drums, b"a stem").unwrap();
+                app.library.get_mut(id).unwrap().stems.drums = Some(drums.clone());
+                // Held, so that the analysis waits in the queue to be read.
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                app.start(Job::Hold { lane: Lane::Background, until: held });
+
+                app.analyze_tracks(&[id]);
+                let handed = app.queued.iter().find_map(|job| match job {
+                    Job::Analyze { drums, .. } => Some(drums.clone()),
+                    _ => None,
+                });
+                drop(release);
+                assert_eq!(handed, Some([(id, drums)].into_iter().collect()));
             }
 
             #[test]
@@ -15949,7 +16008,7 @@ mod tests {
                     "hook-near-d",
                     &[(100_100, "hold me closer now"), (128_100, "hold me closer now")],
                 );
-                app.auto_cue_from(id, Some(&loud_from(60, 32)));
+                app.auto_cue_from(id, Some(&loud_from(60, 32)), None);
                 let cues = app.library.get(id).unwrap().cues.clone();
                 assert!(!cues.iter().any(|cue| cue.letter == 3), "{cues:?}");
                 assert!(
