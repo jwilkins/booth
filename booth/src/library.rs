@@ -686,6 +686,16 @@ pub struct Track {
     /// means the genre came from the file's tag rather than from listening.
     #[serde(default)]
     pub genre_confidence: f32,
+    /// Whether somebody has answered for this genre: asked over a file's tag
+    /// that disagreed with the model, or over a guess, and said which to keep.
+    ///
+    /// An analysis then leaves the genre alone, says nothing and asks nothing.
+    /// Without it the question came back on every re-analysis: an answer of
+    /// "keep the file's" left a tag and a hearing that still disagreed, which
+    /// is the question again. **Guess genre** on the row is how it is asked
+    /// once more, on purpose.
+    #[serde(default)]
+    pub genre_chosen: bool,
     pub beats: usize,
     /// Every beat, for a track whose grid bends.
     ///
@@ -926,6 +936,7 @@ impl Track {
             intensity: 0.0,
             genre: String::new(),
             genre_confidence: 0.0,
+            genre_chosen: false,
             beats: 0,
             beat_ms: Vec::new(),
             downbeat_ms: None,
@@ -1916,6 +1927,7 @@ impl Library {
             kept.intensity = copy.intensity;
             kept.genre = copy.genre.clone();
             kept.genre_confidence = copy.genre_confidence;
+            kept.genre_chosen = copy.genre_chosen;
             kept.beats = copy.beats;
             kept.phrases = copy.phrases.clone();
             kept.loudness_lufs = copy.loudness_lufs;
