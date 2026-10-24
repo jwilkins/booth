@@ -956,7 +956,9 @@ which would put the hand on the wrong moment:
   record has the most room.
 - **C, the hook in a drop**, the best airing of the hook inside one, if it is at
   least eight bars from D. Nearer, the two pads play into the same moment.
-- **D, the main drop**, the drop with the most energy in it.
+- **D, the main drop**, the drop that answers the record's breakdown: the first
+  after its main break. A record with no breakdown has the drop with the most
+  energy in it.
 
 E to H are the rest, in time order, filled by what a set needs next: a way in,
 the intro or the build before the first drop; a way out, the outro; a build
@@ -986,10 +988,24 @@ under, and in the picture, which scales each band on its own, louder — and
 hi-hats on their own are nearly as busy as a drop, counted by onsets. What a
 drop has that neither has is the kick. On that made record, sixteen bars of
 hats, a drop, a pad breakdown, a louder drop with a lead and sixteen bars of
-hats, this finds both drops, the louder as D, and the breakdown as B, where
-loudness alone read the breakdown as the drop and onsets alone read the hats as
-drops too. The command line and the app read the same picture, so they agree
-on D.
+hats, this finds both drops, the one after the breakdown as D, and the
+breakdown as B, where loudness alone read the breakdown as the drop and onsets
+alone read the hats as drops too. The command line and the app read the same
+picture, so they agree on D.
+
+**D is the drop after the breakdown, not the loudest drop.** A club record is
+mastered so that its drops play about as hard as each other, and which one
+measures a hair louder is not something the record decided. Read that way, of
+eighteen records from archive.org, D landed on bar one of an intro with its
+drums already in, on the drop before a 33-bar breakdown rather than the one
+after it (by 0.96 against 0.95), on a drop before the breakdown by 0.93
+against 0.91, and on a stretch whose drums were barely in. What the record
+does decide is where it holds back, and the drop that answers that is the one a
+set is built round. The other fourteen records come out the same either way. A
+breakdown is the main break when it is quieter than every drop; one that is not
+— read with the drum stem, a stretch with the drums out and the synths at full
+can be — is a dip between two loud stretches, and the record is treated as
+having no breakdown.
 
 **A record with stems is read with its drum stem too.** The kick is the half
 of the measure a mix can fake: a bassline plucked through a breakdown rises in

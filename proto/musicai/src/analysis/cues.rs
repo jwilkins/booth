@@ -35,7 +35,7 @@ pub enum Slot {
     /// The hook again, inside a drop, at least [`HOOK_IN_A_DROP_BARS`] from
     /// the main drop.
     HookInADrop,
-    /// The drop with the most energy.
+    /// The drop after the breakdown: see [`super::energy::Shape::main_drop`].
     MainDrop,
 }
 
@@ -356,8 +356,8 @@ const SAME_START_BARS: usize = 2;
 ///
 /// Each is the section that starts within [`SAME_START_BARS`] of where the
 /// energy says it does, whatever the arrangement analysis called it — a
-/// section it named a break that plays like the loudest part of the record is
-/// the drop — or a new cue at that bar line where no section starts near it,
+/// section it named a break that the energy finds is the main drop is the
+/// drop — or a new cue at that bar line where no section starts near it,
 /// which is the drop the analysis missed. Where the energy found none, the
 /// first section named a drop, or a break, is taken: the most there is to go
 /// on. `grid` is every beat from the first downbeat. A kind already marked is
@@ -1680,9 +1680,10 @@ mod tests {
     }
 
     #[test]
-    fn the_louder_of_two_drops_is_d_and_the_deeper_of_two_breaks_is_b() {
-        // 500 ms beats, so a bar is two seconds: drops at bars 16 and 64, the
-        // second louder; breaks at bars 48 and 96, the second deeper.
+    fn the_drop_after_the_deeper_of_two_breaks_is_d_though_an_earlier_one_is_louder() {
+        // 500 ms beats, so a bar is two seconds: drops at bars 16, 64 and 112,
+        // the one at 64 the loudest; breaks at bars 48 and 96, the second
+        // deeper. B is the deeper break, and D the drop that answers it.
         let grid = beats(600);
         let shape = super::super::energy::shape(&played(&[
             (20.0, 16),
@@ -1706,7 +1707,7 @@ mod tests {
             .filter(|cue| cue.is_hot())
             .map(|cue| (cue.hot_cue, cue.time_ms))
             .collect();
-        assert!(hot.contains(&(4, 128_000)), "{hot:?}");
+        assert!(hot.contains(&(4, 224_000)), "{hot:?}");
         assert!(hot.contains(&(2, 192_000)), "{hot:?}");
     }
 
