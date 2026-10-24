@@ -1550,6 +1550,22 @@ impl Library {
         self.tracks.iter_mut().find(|t| t.id == id)
     }
 
+    /// Take out the macOS `._` companions a collection holds, which one built
+    /// before they were recognised can: every folder imported off a stick a
+    /// Mac had touched brought one in beside each track. Says which went.
+    pub fn forget_apple_doubles(&mut self) -> Vec<PathBuf> {
+        let gone: Vec<(u32, PathBuf)> = self
+            .tracks
+            .iter()
+            .filter(|track| track.role == Role::Track && is_apple_double(&track.path, track.bytes))
+            .map(|track| (track.id, track.path.clone()))
+            .collect();
+        for (id, _) in &gone {
+            self.remove(*id);
+        }
+        gone.into_iter().map(|(_, path)| path).collect()
+    }
+
     /// Remove a track and everything that refers to it.
     pub fn remove(&mut self, id: u32) {
         self.tracks.retain(|t| t.id != id && t.parent != Some(id));
@@ -2093,6 +2109,22 @@ impl Library {
     }
 }
 
+/// Whether a file the collection knows is a macOS `._` companion rather than
+/// audio: see [`booth_cli::discover::is_apple_double`].
+///
+/// The file says, where it can be reached. Where it cannot — the drive it is
+/// on is unplugged — the name and the size the collection noted for it do:
+/// `bytes` under [`booth_cli::discover::APPLE_DOUBLE_SMALL`], or never noted.
+pub fn is_apple_double(path: &Path, bytes: u64) -> bool {
+    match path.exists() {
+        true => booth_cli::discover::is_apple_double(path),
+        false => {
+            booth_cli::discover::named_apple_double(path)
+                && bytes < booth_cli::discover::APPLE_DOUBLE_SMALL
+        }
+    }
+}
+
 /// A stable id for a derived companion row.
 ///
 /// The high bits are free because real ids come from a counter that starts at
@@ -2489,6 +2521,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The `._` companion macOS writes beside `of` on a stick: the AppleDouble
+    /// header and some Finder information.
+    fn apple_double_beside(of: &Path) -> PathBuf {
+        let name = of.file_name().unwrap().to_string_lossy();
+        let path = of.with_file_name(format!("._{name}"));
+        let mut bytes = vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00];
+        bytes.resize(4096, 0);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_collection_lets_go_of_the_macos_companions_it_holds_and_keeps_the_tracks() {
+        let dir = scratch("companions");
+        let real = dir.join("Sirens.flac");
+        std::fs::write(&real, vec![0x66u8; 256 * 1024]).unwrap();
+        let fake = apple_double_beside(&real);
+        let mut library = Library::new();
+        let (keep, drop) = (library.add(&real), library.add(&fake));
+        library.add_playlist("peak", "").unwrap();
+        library.playlists[0].tracks = vec![keep, drop];
+
+        assert_eq!(library.forget_apple_doubles(), [fake]);
+        assert_eq!(library.tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [keep]);
+        assert_eq!(library.playlists[0].tracks, [keep], "the playlist kept a row for it");
+        assert!(library.forget_apple_doubles().is_empty(), "a second pass found more");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_companion_on_an_unplugged_drive_goes_by_its_name_and_the_size_noted_for_it() {
+        let gone = Path::new("/Volumes/NOT-PLUGGED-IN/Music");
+        assert!(is_apple_double(&gone.join("._Sirens.flac"), 4096));
+        assert!(is_apple_double(&gone.join("._Sirens.flac"), 0), "never measured");
+        assert!(!is_apple_double(&gone.join("._Intro.flac"), 31_000_000), "a real track");
+        assert!(!is_apple_double(&gone.join("Sirens.flac"), 4096), "a real name");
     }
 
     #[test]

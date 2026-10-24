@@ -12,6 +12,16 @@ cargo run -p booth
 Anything named on the command line is imported at startup, and files can be
 dropped onto the window.
 
+**The `._` files macOS leaves on a stick are not music, and are left out.** A
+Mac writes one beside every file it touches on a FAT32 or exFAT drive or a
+network share, named after it — `._Sirens.flac` beside `Sirens.flac` — so a
+folder imported off such a drive used to bring a second, silent copy of every
+track. A file whose name starts with `._` and which opens with the AppleDouble
+mark (`00 05 16 07`), or is under 64 KiB, is skipped at import, from a rekordbox
+library and by the command line, and any already in the collection are taken
+out when the window opens. A real track that happens to be named `._…` is
+megabytes, and is kept.
+
 On Linux the audio output needs ALSA's headers at build time
 (`apt install libasound2-dev`, or `alsa-lib-devel`). macOS and Windows need
 nothing extra. Without a working output device the window still opens and does

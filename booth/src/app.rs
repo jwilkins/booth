@@ -873,7 +873,7 @@ impl App {
         }
         theme::install(&cc.egui_ctx);
         let library_path = Library::default_path();
-        let (library, status) = match Library::load(&library_path) {
+        let (mut library, status) = match Library::load(&library_path) {
             Ok(library) => {
                 let count = library.tracks.len();
                 (library, format!("{count} tracks"))
@@ -896,7 +896,24 @@ impl App {
             config.on_external.label().to_lowercase()
         );
 
+        // The `._` files a collection made before they were recognised holds,
+        // taken out before anything is listed, so no row for one is ever shown.
+        let companions = library.forget_apple_doubles();
+        for path in &companions {
+            crate::info!("took {} out of the collection: a macOS ._ file", path.display());
+        }
+
         let mut app = Self::assemble(library, library_path, config, config_path, status);
+        if !companions.is_empty() {
+            app.save();
+            app.note(
+                format!(
+                    "took out {}: the ._ files macOS leaves beside real ones",
+                    plural(companions.len(), "track")
+                ),
+                theme::text(),
+            );
+        }
 
         // The device is opened once, at startup, and kept: opening one per
         // track costs a noticeable gap and, on some hosts, a click.
@@ -2311,11 +2328,18 @@ impl App {
         let mut added = 0usize;
         let mut filled = 0usize;
         let mut missing = 0usize;
+        let mut companions = 0usize;
         // rekordbox id to this collection's id, so the playlists can be
         // rebuilt afterwards.
         let mut ours: HashMap<String, u32> = HashMap::new();
 
         for track in &collection.tracks {
+            // A rekordbox pointed at a folder a Mac had touched lists the `._`
+            // file beside each track as a track of its own.
+            if crate::library::is_apple_double(&track.path, 0) {
+                companions += 1;
+                continue;
+            }
             let id = match by_path.get(&track.path) {
                 Some(id) => *id,
                 None => {
@@ -2351,6 +2375,10 @@ impl App {
         );
         if missing > 0 {
             said.push_str(&format!(" · {missing} files not where rekordbox left them"));
+        }
+        if companions > 0 {
+            crate::info!("rekordbox: left out {companions} macOS ._ files");
+            said.push_str(&format!(" · {} left out", plural(companions, "macOS ._ file")));
         }
         said
     }
@@ -14637,6 +14665,33 @@ mod tests {
                 dir.join("config.json"),
                 String::new(),
             )
+        }
+
+        #[test]
+        fn a_rekordbox_import_leaves_out_the_macos_companions_it_lists_as_tracks() {
+            use booth_cli::rekordbox::master::{Collection, Track as Theirs};
+            let mut app = app("rekordbox-companions");
+            let dir = app.library_path.parent().unwrap().to_path_buf();
+            let real = dir.join("Sirens.flac");
+            std::fs::write(&real, vec![0x66u8; 256 * 1024]).unwrap();
+            let fake = dir.join("._Sirens.flac");
+            let mut header = vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00];
+            header.resize(4096, 0);
+            std::fs::write(&fake, header).unwrap();
+            let theirs = |id: &str, path: &std::path::Path| Theirs {
+                id: id.into(),
+                path: path.to_path_buf(),
+                ..Default::default()
+            };
+            let collection = Collection {
+                tracks: vec![theirs("1", &real), theirs("2", &fake)],
+                playlists: vec![],
+            };
+
+            let said = app.merge_rekordbox(&collection);
+            let paths: Vec<_> = app.library.tracks.iter().map(|t| t.path.clone()).collect();
+            assert_eq!(paths, [real], "{said}");
+            assert!(said.contains("1 macOS ._ file left out"), "{said}");
         }
 
         /// The two workers: the long work, and what the window is waiting on.
