@@ -79,9 +79,35 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// The drop with the most energy in it: the one a DJ means by "the drop".
-    /// Between two alike, the longer, then the earlier.
+    /// The drop a DJ means by "the drop": the first after the record's
+    /// breakdown, where it has one.
+    ///
+    /// Not the drop with the most energy in it, which is what this was. A club
+    /// record is mastered so that its drops play about as hard as each other,
+    /// and which measures a hair louder is not a choice the record makes: on
+    /// four records of eighteen it put D on the intro, on a drop before the
+    /// breakdown rather than after it, or on a stretch with the drums barely
+    /// in, by margins as thin as 0.96 against 0.95. What the arrangement does
+    /// say is where it holds back, and the drop that answers that is the one
+    /// a set is built round.
+    ///
+    /// The breakdown is the main break, if it is quieter than every drop. One
+    /// that is not is a dip between two loud stretches rather than a record
+    /// holding back — on one record of the eighteen, the drop after it began
+    /// with its drums barely in — and then, as with no break at all, the main
+    /// drop is the one with the most energy, between two alike the longer,
+    /// then the earlier.
     pub fn main_drop(&self) -> Option<Run> {
+        let after_the_breakdown = self
+            .main_break()
+            .filter(|quiet| self.drops.iter().all(|drop| quiet.energy < drop.energy))
+            .and_then(|quiet| self.drops.iter().find(|drop| drop.from >= quiet.from).copied());
+        after_the_breakdown.or_else(|| self.loudest_drop())
+    }
+
+    /// The drop with the most energy in it. Between two alike, the longer,
+    /// then the earlier.
+    fn loudest_drop(&self) -> Option<Run> {
         self.drops.iter().copied().reduce(|best, run| {
             match (run.energy, run.bars()) > (best.energy, best.bars()) {
                 true => run,
@@ -239,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_with_two_drops_and_a_break_between_has_the_louder_drop_as_its_main_one() {
+    fn a_record_with_two_drops_and_a_break_between_has_the_drop_after_it_as_its_main_one() {
         // Intro 16, drop 32, break 16, drop 32 a little louder, outro 16.
         let bars = record(&[(20.0, 16), (80.0, 32), (25.0, 16), (90.0, 32), (30.0, 16)]);
         let shape = shape(&bars);
@@ -254,6 +280,45 @@ mod tests {
             "the intro and the outro are not breaks"
         );
         assert_eq!(shape.main_break().map(|run| run.from), Some(48));
+    }
+
+    #[test]
+    fn of_drops_as_hard_as_each_other_the_one_after_the_breakdown_is_d() {
+        // Drums from the first bar, as a DJ-friendly intro has them, and every
+        // drop mastered to the same level: the most energy would be the intro.
+        let bars = record(&[(90.0, 64), (88.0, 8), (90.0, 72), (30.0, 48), (90.0, 56)]);
+        let shape = shape(&bars);
+        assert_eq!(shape.main_break().map(|run| run.from), Some(144), "{shape:?}");
+        assert_eq!(shape.main_drop().map(|run| run.from), Some(192), "{shape:?}");
+    }
+
+    #[test]
+    fn a_drop_a_little_louder_before_the_breakdown_is_not_d() {
+        let bars = record(&[(20.0, 16), (95.0, 32), (20.0, 32), (92.0, 32), (20.0, 16)]);
+        assert_eq!(shape(&bars).main_drop().map(|run| run.from), Some(80));
+    }
+
+    #[test]
+    fn a_break_as_loud_as_a_drop_is_no_breakdown_and_d_is_the_loudest_drop() {
+        // Read off the mix alone a break is quieter than every drop, since
+        // its bars are all below the line the drops' are above. Read with a
+        // drum stem it can be a stretch with the drums out and the synths
+        // loud: as on a record whose drop after such a stretch began with its
+        // drums barely in.
+        let run = |from, to, energy| Run { from, to, energy };
+        let shape = Shape {
+            drops: vec![run(34, 56, 0.78), run(61, 96, 0.99), run(104, 150, 0.91)],
+            breaks: vec![run(96, 104, 0.86)],
+        };
+        assert_eq!(shape.main_drop().map(|run| run.from), Some(61));
+    }
+
+    #[test]
+    fn a_record_with_no_break_has_its_loudest_drop_as_d() {
+        let bars = record(&[(20.0, 16), (80.0, 32), (60.0, 4), (90.0, 32), (20.0, 16)]);
+        let shape = shape(&bars);
+        assert!(shape.breaks.is_empty(), "{shape:?}");
+        assert_eq!(shape.main_drop().map(|run| run.from), Some(16), "{shape:?}");
     }
 
     #[test]
@@ -336,7 +401,7 @@ mod tests {
     #[test]
     fn on_a_made_record_the_picture_puts_the_main_drop_and_break_where_they_were_made() {
         // The measurement behind reading drops off the collection's picture:
-        // the louder drop starts at bar 64 and the break at bar 48, and the
+        // the drop after the break starts at bar 64 and the break at 48, and the
         // hat-only intro and outro are neither drops nor breaks, though the
         // hats are as busy as a drop and the pad in the break is the loudest
         // thing in the mids.
@@ -385,5 +450,51 @@ mod tests {
         let grid: Vec<u32> = (0..12).map(|beat| beat * 500).collect();
         let bands = vec![30u8; 450 * 3];
         assert_eq!(bars(&bands, &grid).len(), 1);
+    }
+
+    /// The comparison behind putting D after the breakdown, on real records:
+    /// for each record in `BOOTH_D_RECORDS`, where each rule puts D, with the
+    /// time to listen at.
+    ///
+    /// ```sh
+    /// BOOTH_D_RECORDS=<a folder of records> \
+    ///     cargo test -p booth-cli --release --lib d_by_each_rule -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs records: BOOTH_D_RECORDS"]
+    fn real_records_d_by_each_rule() {
+        let records = std::path::PathBuf::from(std::env::var("BOOTH_D_RECORDS").unwrap());
+        let mut paths: Vec<std::path::PathBuf> =
+            std::fs::read_dir(&records).unwrap().map(|entry| entry.unwrap().path()).collect();
+        paths.sort();
+        let (mut differ, mut total) = (0, 0);
+        for path in paths {
+            let audio = crate::audio::decode::decode_file(&path).unwrap();
+            let bands = crate::export::waveform::analyze(&audio).band_detail;
+            let analysed = crate::analysis::analyze_drawn(&audio, None, &bands);
+            let times: Vec<u32> = analysed.grid.beats.iter().map(|beat| beat.time_ms).collect();
+            let phase = analysed.grid.beats.iter().position(|beat| beat.number == 1).unwrap_or(0);
+            let grid = &times[phase..];
+            let shape = shape(&bars(&bands, grid));
+            let at = |run: Option<Run>| match run {
+                Some(run) => {
+                    let s = grid.get(run.from * 4).copied().unwrap_or(0) / 1000;
+                    format!("bar {} ({}:{:02})", run.from, s / 60, s % 60)
+                }
+                None => "none".to_string(),
+            };
+            let (old, new) = (shape.loudest_drop(), shape.main_drop());
+            total += 1;
+            differ += usize::from(old != new);
+            eprintln!(
+                "{}: B {}; loudest drop {}; after the breakdown {}{}",
+                path.file_stem().unwrap().to_string_lossy(),
+                at(shape.main_break()),
+                at(old),
+                at(new),
+                if old != new { "  <- differ" } else { "" }
+            );
+        }
+        eprintln!("{differ} of {total} differ");
     }
 }
