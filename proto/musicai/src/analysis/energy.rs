@@ -229,6 +229,141 @@ pub fn shape(bars: &[f32]) -> Shape {
     Shape { drops, breaks }
 }
 
+/// How far up the drum stem's own range a bar has to come for its drums to
+/// count as playing: a quarter of the way from its quiet bars to its loud.
+///
+/// Low, because the question is whether the drums are there at all. A fill, a
+/// bar of hats or a kick played half as hard is still drums; a breakdown is
+/// the stem near silence.
+const DRUMS_PLAYING: f32 = 0.25;
+
+/// The share of a record's bars its drums have to play in before the drum
+/// stem is let say where the breaks are. Half.
+///
+/// A record whose drums come and go in bursts has no groove for them to drop
+/// out of. On three experimental records from archive.org the drums played in
+/// 17, 26 and 64 per cent of the bars, and in the first two the gaps between
+/// bursts read as breaks that are nothing of the kind. On four club records
+/// they played in 56 to 87 per cent.
+const DRUMS_MOSTLY: f32 = 0.5;
+
+/// A record's drops and breaks, with its drum stem saying where the drums drop
+/// out.
+///
+/// `mix` is [`bars`] of the record and `drums` of its drum stem, on the same
+/// grid. The mix finds the drops and breaks as [`shape`] does, and decides
+/// which is the main one. The drum stem adds the breaks the mix cannot see:
+/// eight bars or more with the drums out, between bars with drums in. Measured
+/// from the mix, a bassline plucked through a breakdown rises in the low band
+/// the way a kick does, and a breakdown of loud synths is as loud as a drop, so
+/// either reads as part of the drop around it; in the stem, only the drums can
+/// make a bar sound like drums. A drop the mix found is cut where such a break
+/// runs through it.
+///
+/// Only the breaks come from the stem. The drums of an intro are often the
+/// drop's loop, so a drop found from the stem can begin at bar one, and the
+/// drums of two drops are often the same, so they cannot say which is bigger.
+///
+/// A record whose drums play in less than half its bars has no groove to drop
+/// out of, and its drum stem is not asked: the shape is the mix's.
+pub fn shape_with_drums(mix: &[f32], drums: &[f32]) -> Shape {
+    let from_mix = shape(mix);
+    let out = drums_out(&drums[..drums.len().min(mix.len())]);
+    if out.is_empty() {
+        return from_mix;
+    }
+    let run = |from: usize, to: usize| Run {
+        from,
+        to,
+        energy: mix[from..to].iter().sum::<f32>() / (to - from) as f32,
+    };
+
+    let mut drops = Vec::new();
+    for drop in &from_mix.drops {
+        let mut pieces = vec![(drop.from, drop.to)];
+        for &(from, to) in &out {
+            pieces = pieces
+                .into_iter()
+                .flat_map(|(start, end)| match to <= start || from >= end {
+                    true => vec![(start, end)],
+                    false => vec![(start, from.max(start)), (to.min(end), end)],
+                })
+                .collect();
+        }
+        drops.extend(
+            pieces.into_iter().filter(|(from, to)| to - from >= RUN_BARS).map(|(f, t)| run(f, t)),
+        );
+    }
+
+    // Both kinds of break, where they overlap as one: a stretch the mix had as
+    // a break and the drums dropping out inside it are the same breakdown.
+    let mut spans: Vec<(usize, usize)> =
+        from_mix.breaks.iter().map(|b| (b.from, b.to)).chain(out).collect();
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (from, to) in spans {
+        match merged.last_mut() {
+            Some(last) if from < last.1 => last.1 = last.1.max(to),
+            _ => merged.push((from, to)),
+        }
+    }
+    Shape { drops, breaks: merged.into_iter().map(|(f, t)| run(f, t)).collect() }
+}
+
+/// A record's drops and breaks from its picture, and from its drum stem's
+/// where it has one. `grid` is every beat from the first downbeat.
+pub fn read(bands: &[u8], drums: Option<&[u8]>, grid: &[u32]) -> Shape {
+    let mix = bars(bands, grid);
+    match drums {
+        Some(drums) => shape_with_drums(&mix, &bars(drums, grid)),
+        None => shape(&mix),
+    }
+}
+
+/// Where a drum stem's drums are out for [`RUN_BARS`] or more, between bars
+/// where they play: never the intro before they first come in or the outro
+/// after they last stop. Nothing, for a record whose drums do not play in
+/// most of its bars.
+fn drums_out(drums: &[f32]) -> Vec<(usize, usize)> {
+    if drums.len() < RUN_BARS * 2 {
+        return Vec::new();
+    }
+    let mut sorted = drums.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let at = |quantile: f32| sorted[((sorted.len() - 1) as f32 * quantile).round() as usize];
+    let (quiet, loud) = (at(QUIET_QUANTILE), at(LOUD_QUANTILE));
+    if loud <= quiet {
+        return Vec::new();
+    }
+    let playing: Vec<bool> =
+        drums.iter().map(|&bar| bar >= quiet + DRUMS_PLAYING * (loud - quiet)).collect();
+    let count = playing.iter().filter(|&&on| on).count();
+    if (count as f32) < DRUMS_MOSTLY * drums.len() as f32 {
+        return Vec::new();
+    }
+    let (Some(first), Some(last)) =
+        (playing.iter().position(|&on| on), playing.iter().rposition(|&on| on))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut bar = first;
+    while bar < last {
+        if playing[bar] {
+            bar += 1;
+            continue;
+        }
+        let from = bar;
+        while !playing[bar] {
+            bar += 1;
+        }
+        if bar - from >= RUN_BARS {
+            out.push((from, bar));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,21 +424,37 @@ mod tests {
     /// 16-bar break of a pad alone, a 32-bar drop with a lead over it as
     /// well, and 16 bars of hats out.
     fn arranged() -> crate::audio::Audio {
+        made(&ARRANGED, Keep::All)
+    }
+
+    /// Which instruments of a made record to write: all of them for the mix,
+    /// or only the drums, for the stem a perfect separator would give.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Keep {
+        All,
+        Drums,
+    }
+
+    /// (bars, kick and bass, hats, pad, lead, rolling bass)
+    type Part = (usize, bool, bool, bool, bool, bool);
+
+    const ARRANGED: [Part; 5] = [
+        (16, false, true, false, false, false),
+        (32, true, true, false, false, false),
+        (16, false, false, true, false, false),
+        (32, true, true, false, true, false),
+        (16, false, true, false, false, false),
+    ];
+
+    fn made(parts: &[Part], keep: Keep) -> crate::audio::Audio {
         const RATE: u32 = 22_050;
         let bar = 2.0f32;
-        let parts: [(usize, bool, bool, bool, bool); 5] = [
-            // (bars, kick and bass, hats, pad, lead)
-            (16, false, true, false, false),
-            (32, true, true, false, false),
-            (16, false, false, true, false),
-            (32, true, true, false, true),
-            (16, false, true, false, false),
-        ];
         let total: usize = parts.iter().map(|part| part.0).sum();
         let mut plane = vec![0.0f32; (total as f32 * bar * RATE as f32) as usize];
         let mut start = 0usize;
         let tau = 2.0 * std::f32::consts::PI;
-        for (bars, low, hats, pad, lead) in parts {
+        for &(bars, low, hats, pad, lead, rolling) in parts {
+            let drums = keep == Keep::Drums;
             let from = (start as f32 * bar * RATE as f32) as usize;
             let to = ((start + bars) as f32 * bar * RATE as f32) as usize;
             for (i, sample) in plane.iter_mut().enumerate().take(to).skip(from) {
@@ -312,7 +463,15 @@ mod tests {
                 let mut x = 0.0;
                 if low {
                     x += 0.6 * (tau * 55.0 * t).sin() * (-in_beat * 12.0).exp();
-                    x += 0.3 * (tau * 41.2 * t).sin();
+                    if !drums {
+                        x += 0.3 * (tau * 41.2 * t).sin();
+                    }
+                }
+                // A bassline plucked every sixteenth, with no kick under it:
+                // the low band rising four times a beat.
+                if rolling && !drums {
+                    let in_sixteenth = t % 0.125;
+                    x += 0.5 * (tau * 49.0 * t).sin() * (-in_sixteenth * 30.0).exp();
                 }
                 if hats {
                     let off = (t + 0.25) % 0.5;
@@ -320,10 +479,10 @@ mod tests {
                         * ((i as f32 * 12.9898).sin() * 43_758.545).fract()
                         * (-off * 60.0).exp();
                 }
-                if pad {
+                if pad && !drums {
                     x += 0.2 * (tau * 220.0 * t).sin() + 0.15 * (tau * 277.2 * t).sin();
                 }
-                if lead {
+                if lead && !drums {
                     x += 0.25 * (tau * 880.0 * t).sin() * (tau * 2.0 * t).sin().abs();
                 }
                 *sample = x;
@@ -348,6 +507,142 @@ mod tests {
         assert_eq!(spans(&shape.drops), [(16, 48), (64, 96)], "{shape:?}");
         assert_eq!(spans(&shape.breaks), [(48, 64)], "{shape:?}");
         assert_eq!(shape.main_drop().map(|run| run.from), Some(64), "{shape:?}");
+    }
+
+    /// Bars from a made record, on its two-second grid.
+    fn measured(parts: &[Part], keep: Keep) -> Vec<f32> {
+        let total: u32 = parts.iter().map(|part| part.0 as u32).sum();
+        let grid: Vec<u32> = (0..total * 4).map(|beat| beat * 500).collect();
+        bars(&crate::export::waveform::analyze(&made(parts, keep)).band_detail, &grid)
+    }
+
+    fn spans(runs: &[Run]) -> Vec<(usize, usize)> {
+        runs.iter().map(|run| (run.from, run.to)).collect()
+    }
+
+    #[test]
+    fn a_bassline_rolling_through_a_break_hides_it_from_the_mix_but_not_from_the_drum_stem() {
+        // The made record again, with a bass plucked every sixteenth under the
+        // pad in its break and no kick: the low band rising four times a beat.
+        let rolling: [Part; 5] = [
+            (16, false, true, false, false, false),
+            (32, true, true, false, false, false),
+            (16, false, false, true, false, true),
+            (32, true, true, false, true, false),
+            (16, false, true, false, false, false),
+        ];
+        let mix = measured(&rolling, Keep::All);
+        let drums = measured(&rolling, Keep::Drums);
+
+        // What this is here for: read from the mix, the break is part of the
+        // main drop, which runs straight through it.
+        let from_mix = shape(&mix);
+        assert!(from_mix.breaks.is_empty(), "the mix saw the break after all: {from_mix:?}");
+        assert!(from_mix.main_drop().unwrap().holds(56), "{from_mix:?}");
+
+        let with_drums = shape_with_drums(&mix, &drums);
+        assert_eq!(spans(&with_drums.breaks), [(48, 64)], "{with_drums:?}");
+        assert_eq!(with_drums.main_break().map(|run| run.from), Some(48));
+        assert_eq!(with_drums.main_drop().map(|run| run.from), Some(64), "{with_drums:?}");
+    }
+
+    #[test]
+    fn a_record_the_mix_already_reads_is_read_the_same_with_its_drum_stem() {
+        let mix = measured(&ARRANGED, Keep::All);
+        let drums = measured(&ARRANGED, Keep::Drums);
+        let (from_mix, with_drums) = (shape(&mix), shape_with_drums(&mix, &drums));
+        assert_eq!(spans(&with_drums.drops), spans(&from_mix.drops));
+        assert_eq!(spans(&with_drums.breaks), spans(&from_mix.breaks));
+        assert_eq!(with_drums.main_drop(), from_mix.main_drop());
+    }
+
+    #[test]
+    fn the_mix_still_says_which_drop_is_the_main_one() {
+        // The same drum loop in both drops, so the stem cannot tell them
+        // apart; the second is louder in the mix.
+        let mix = record(&[(20.0, 16), (60.0, 32), (20.0, 16), (90.0, 32), (20.0, 16)]);
+        let drums = record(&[(0.0, 16), (1.0, 32), (0.0, 16), (1.0, 32), (0.0, 16)]);
+        assert_eq!(shape_with_drums(&mix, &drums).main_drop().map(|run| run.from), Some(64));
+    }
+
+    #[test]
+    fn a_drop_the_mix_found_is_cut_where_the_drums_drop_out_inside_it() {
+        // A breakdown as loud as the drops either side, which the mix reads as
+        // one long drop.
+        let mix = record(&[(20.0, 16), (80.0, 32), (75.0, 16), (90.0, 32), (20.0, 16)]);
+        let drums = record(&[(0.0, 16), (1.0, 32), (0.0, 16), (1.0, 32), (0.0, 16)]);
+        assert_eq!(spans(&shape(&mix).drops), [(16, 96)], "the mix saw the break after all");
+
+        let with_drums = shape_with_drums(&mix, &drums);
+        assert_eq!(spans(&with_drums.drops), [(16, 48), (64, 96)]);
+        assert_eq!(spans(&with_drums.breaks), [(48, 64)]);
+    }
+
+    #[test]
+    fn before_the_drums_first_come_in_is_an_intro_and_after_they_stop_an_outro() {
+        let drums = record(&[(0.0, 16), (1.0, 32), (0.0, 16), (1.0, 32), (0.0, 16)]);
+        assert_eq!(drums_out(&drums), [(48, 64)]);
+    }
+
+    #[test]
+    fn a_record_whose_drums_come_in_bursts_keeps_the_mixs_shape() {
+        // Four bars of drums every sixteen: a quarter of the record, with
+        // twelve-bar gaps that would otherwise each be a break.
+        let drums: Vec<f32> = (0..128).map(|bar| if bar % 16 < 4 { 1.0 } else { 0.0 }).collect();
+        let mix = record(&[(20.0, 16), (80.0, 48), (25.0, 16), (90.0, 32), (30.0, 16)]);
+        assert!(drums_out(&drums).is_empty());
+        assert_eq!(shape_with_drums(&mix, &drums), shape(&mix));
+    }
+
+    #[test]
+    fn a_dip_in_the_drums_shorter_than_a_phrase_is_not_a_break() {
+        let drums = record(&[(1.0, 32), (0.0, 7), (1.0, 32)]);
+        assert!(drums_out(&drums).is_empty());
+    }
+
+    /// The comparison behind reading breaks off the drum stem, on real
+    /// records: for each `<name>.mp3` in `BOOTH_DRUM_RECORDS`, its stem at
+    /// `BOOTH_DRUM_STEMS/<name>/drums.wav` (the layout demucs writes), the
+    /// drops and breaks read from the mix alone and with the drum stem.
+    ///
+    /// ```sh
+    /// demucs -n htdemucs --out <stems> <records>/*.mp3
+    /// BOOTH_DRUM_RECORDS=<records> BOOTH_DRUM_STEMS=<stems>/htdemucs \
+    ///     cargo test -p booth-cli --release --lib with_the_drum_stem -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs records and their drum stems: BOOTH_DRUM_RECORDS, BOOTH_DRUM_STEMS"]
+    fn real_records_read_with_the_drum_stem() {
+        use crate::audio::decode::decode_file;
+        let records = std::path::PathBuf::from(std::env::var("BOOTH_DRUM_RECORDS").unwrap());
+        let stems = std::path::PathBuf::from(std::env::var("BOOTH_DRUM_STEMS").unwrap());
+        let mut names: Vec<std::path::PathBuf> =
+            std::fs::read_dir(&records).unwrap().map(|entry| entry.unwrap().path()).collect();
+        names.sort();
+        let said = |shape: &Shape| {
+            format!(
+                "drops {:?} breaks {:?} D {:?} B {:?}",
+                spans(&shape.drops),
+                spans(&shape.breaks),
+                shape.main_drop().map(|run| run.from),
+                shape.main_break().map(|run| run.from)
+            )
+        };
+        for path in names {
+            let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            let Ok(drums) = decode_file(&stems.join(&name).join("drums.wav")) else { continue };
+            let audio = decode_file(&path).unwrap();
+            let bands = crate::export::waveform::analyze(&audio).band_detail;
+            let analysed = crate::analysis::analyze_drawn(&audio, None, &bands);
+            let times: Vec<u32> = analysed.grid.beats.iter().map(|beat| beat.time_ms).collect();
+            let phase = analysed.grid.beats.iter().position(|beat| beat.number == 1).unwrap_or(0);
+            let grid = &times[phase..];
+            let mix = bars(&bands, grid);
+            let drum_bars = bars(&crate::export::waveform::analyze(&drums).band_detail, grid);
+            eprintln!("{name} ({:.0} BPM, {} bars)", analysed.bpm, mix.len());
+            eprintln!("  mix:        {}", said(&shape(&mix)));
+            eprintln!("  with drums: {}", said(&shape_with_drums(&mix, &drum_bars)));
+        }
     }
 
     /// A picture `bars` bars long at 120 BPM, a bar 300 columns, with every

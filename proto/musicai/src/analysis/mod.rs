@@ -84,6 +84,18 @@ pub fn analyze_at(audio: &Audio, bpm: Option<f64>) -> TrackAnalysis {
 /// 370 ms against 600 on a five-minute track — so a caller that wants the
 /// picture anyway draws it once.
 pub fn analyze_drawn(audio: &Audio, bpm: Option<f64>, bands: &[u8]) -> TrackAnalysis {
+    analyze_with_drums(audio, bpm, bands, None)
+}
+
+/// The same, for a track with a rendered kit: `drums` is the three-band
+/// picture of its drum stem, which finds the breaks the mix's picture cannot.
+/// See [`energy::shape_with_drums`].
+pub fn analyze_with_drums(
+    audio: &Audio,
+    bpm: Option<f64>,
+    bands: &[u8],
+    drums: Option<&[u8]>,
+) -> TrackAnalysis {
     let measured = features::extract(audio);
     let beats = tempo::detect_at(&measured, bpm);
     let times: Vec<u32> = beats.grid.beats.iter().map(|b| b.time_ms).collect();
@@ -92,7 +104,7 @@ pub fn analyze_drawn(audio: &Audio, bpm: Option<f64>, bands: &[u8]) -> TrackAnal
     // first heard one, so this is 0 to 3 beats in, and nothing downstream can
     // work it out from the times alone.
     let bar_phase = beats.grid.beats.iter().position(|beat| beat.number == 1).unwrap_or(0);
-    let cues = cues::suggest(&measured, bands, &times, &structure, bar_phase);
+    let cues = cues::suggest(&measured, bands, drums, &times, &structure, bar_phase);
     let key = key::detect(audio);
     let intensity = peak_intensity(&measured);
 

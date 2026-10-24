@@ -991,6 +991,30 @@ loudness alone read the breakdown as the drop and onsets alone read the hats as
 drops too. The command line and the app read the same picture, so they agree
 on D.
 
+**A record with stems is read with its drum stem too.** The kick is the half
+of the measure a mix can fake: a bassline plucked through a breakdown rises in
+the low band the way a kick does, and a breakdown of loud synths is as loud as
+the drops round it, so either reads as part of one long drop. In the drum stem
+nothing but the drums can sound like drums, so eight bars or more with them out,
+between bars with them in, is a break whatever the mix is doing, and a drop the
+mix found is cut where one runs through it. Only the breaks come from the stem:
+which drop is D, and which break is B, is still the mix's to say, because the
+drums of an intro and of two drops are often the same loop. A record whose drums
+play in fewer than half its bars — they come in bursts, or there are hardly any
+— has no groove for them to drop out of, and is read from the mix alone.
+
+Measured on nine records. On a made one with a bassline rolling under its
+break, the mix found one drop from bar 45 to 96 with D inside the break; with
+the drum stem, the break at 48 and D at 64, where they were made. Of four club
+records from archive.org, three came out exactly as the mix read them, and the
+fourth gained a break where its drums leave a rolling bassline alone, with D
+and B where they were. Of three more experimental ones, two had drums in too
+few bars to be asked, and on the third the drum stem found a 24-bar breakdown
+of synths that the mix had read as drop, and moved D from bar 58, inside it, to
+97, where the drums come back. **Re-analyse** or **Cue from the words** after a
+kit is rendered for this to apply: a track's cues are not changed when its kit
+lands.
+
 **No two buttons closer than two bars.** Pressed, the earlier of two buttons
 that close is at the later before a hand could reach for it, so a set with two
 of them covers seven places with eight buttons. Between A to D and the rest, the
