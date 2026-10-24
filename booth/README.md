@@ -161,7 +161,7 @@ drive by itself.
 Every batch job has a single-track twin. The prep editor under the waveform has
 **Analyse**, **Look up tags**, **Render stems** and **Cue from the words** for
 whatever is selected, and right-clicking any row offers the same four plus play,
-copy-into-library, copy the path, and remove.
+**Guess genre**, copy-into-library, copy the path, and remove.
 
 A job that has already been done says so: the button reads **Re-analyse** rather
 than **Analyse**, because the honest answer to "will this take twenty minutes"
@@ -1328,6 +1328,20 @@ collection and the file follow your answer. A tag that says exactly what the
 model said on an earlier pass is Booth's own earlier answer, and is replaced
 without asking.
 
+**Your answer is kept.** Once you have chosen a track's genre in that sheet, an
+analysis leaves it alone and asks nothing, whatever the model hears. It used to
+ask every time: keeping the file's genre left a tag and a hearing that still
+disagreed, which is the same question again. Closing the sheet without
+answering is not an answer, and those tracks are asked about next time.
+
+**Guess genre**, on a row's right-click menu, is how a genre is heard again on
+purpose: the model listens to that one track and nothing else is measured or
+changed — twenty seconds or so for a five-minute record, whether or not
+analyses are set to listen. A track with no genre takes what is heard. One whose genre the guess
+agrees with keeps it, now with the model's confidence. One with a different
+genre — its tag, or an answer you gave — is put to you in the same sheet, as
+**Keep what it has** or **Use what was heard**, and that answer is kept in turn.
+
 What it says is the model's opinion, not a measurement. It learned how Discogs
 users file records, so it draws the distinctions that community draws
 constantly — but whether it draws them as you would is something to check on a
@@ -1505,6 +1519,23 @@ answer "is this the write I meant"; this answers "which track is that", which is
 the question a drive about to remove four tracks really raises. A track the
 collection has since lost still gets a line saying so, because that is the one
 worth seeing.
+
+**What each player sees** reads the drive as it is now, without writing
+anything, and says what each generation of player will browse on it. A CDJ-3000
+and every player before it read `export.pdb`; a CDJ-3000X, XDJ-AZ or Opus Quad
+reads `exportLibrary.db`; neither falls back to the other, so a stick can show a
+playlist in one booth and not the next with no error on either deck — the
+complaint the research log has seen on every run so far. So it says where the two
+databases disagree ("“Peak” shows on the CDJ-3000 and older players but not on
+the CDJ-3000X…", a playlist missing tracks on one side, tracks only one side can
+find), and then, player by player, what will not work: audio listed and not on
+the stick, a file it will not open (FLAC on a nexus, 96 kHz on a nexus 2), and
+the analysis files it reads that are missing (a CDJ-3000 without the `.2EX` has
+no three-band waveform). It reads drives other programs wrote as well as Booth's
+— rekordbox's own exports are among what it was checked on — and repairs
+neither: for a drive Booth syncs, the next write rebuilds both databases from
+one description, which is the repair. `booth-cli audit /Volumes/USB` is the same
+from the terminal.
 
 **Carry stems** puts each track's vocals, drums and melody on the drive with
 it. It is **on** by default: a kit exists because somebody asked for one, and

@@ -289,6 +289,10 @@ pub struct App {
     /// "which track is that", which is as many lines as the write has changes.
     /// Putting the second inside the first made the sheet a scroll either way.
     details: bool,
+    /// What each player sees on a drive, once the audit of it is back: the
+    /// drive's name, the audit's lines, and whether it found nothing. See
+    /// `booth_cli::audit`.
+    audited: Option<(String, Vec<String>, bool)>,
     /// Set while the settings sheet is open.
     settings: bool,
     /// Whether the inspector's lyric sheet is opened out to [`EXPANDED_ROWS`]
@@ -738,6 +742,8 @@ enum Pending {
     },
     /// Listen to one track, whether or not it has been listened to before.
     Analyze(u32),
+    /// Hear one track's genre again, and ask before replacing the one it has.
+    GuessGenre(u32),
     /// Ask the fingerprint services about one track.
     Identify(u32),
     /// Render one track's stem kit.
@@ -940,6 +946,7 @@ impl App {
             plan: Plan::default(),
             sheet: false,
             details: false,
+            audited: None,
             settings: false,
             words_expanded: false,
             decided_expanded: false,
@@ -1999,6 +2006,132 @@ impl App {
             }
         }
         drawing
+    }
+
+    /// Fold the genre an analysis heard into a track.
+    ///
+    /// Only where the model heard something. An analysis run with no model is
+    /// not a finding that the track has no genre, and should not take away one
+    /// heard when there was. Nor where somebody has already said what the genre
+    /// is ([`Track::genre_chosen`]): their answer stands until they ask again.
+    /// Otherwise what the file's own tag says decides whether the heard genre
+    /// goes straight in or is put to the user first: a tag is somebody's
+    /// answer, the same as a tagged name is.
+    fn hear_genre(&mut self, id: u32, heard: &str, confidence: f32, tagged: &str) {
+        use crate::identify::GenreDecision;
+        let Some(track) = self.library.get_mut(id) else { return };
+        if heard.is_empty() {
+            return;
+        }
+        if track.genre_chosen {
+            crate::debug!("#{id} heard as {heard}, but {:?} was chosen, so it stays", track.genre);
+            return;
+        }
+        let decision = crate::identify::decide_genre(track, tagged, heard);
+        if decision != GenreDecision::Ask {
+            track.genre = heard.to_string();
+            track.genre_confidence = confidence;
+        }
+        let policy = self.config.write_tags.on_existing();
+        let write = match decision {
+            GenreDecision::Take => policy,
+            // Over this program's own earlier answer. The setting's "only
+            // where blank" protects other people's answers, and this one was
+            // ours.
+            GenreDecision::Replace => policy.map(|_| booth_cli::tag::OnExisting::Overwrite),
+            GenreDecision::Agrees => None,
+            GenreDecision::Ask => {
+                if !self.genre_questions.iter().any(|q| q.id == id) {
+                    self.genre_questions.push(crate::identify::GenreQuestion {
+                        id,
+                        file_says: tagged.to_string(),
+                        heard: heard.to_string(),
+                        confidence,
+                        guessed: false,
+                    });
+                }
+                None
+            }
+        };
+        if let Some(on_existing) = write {
+            self.write_genre(id, on_existing);
+        }
+    }
+
+    /// Hear the genre of these tracks again and nothing else: **Guess genre**.
+    ///
+    /// With the model wherever Settings finds it, whether or not analyses are
+    /// set to listen for a genre: that switch is about every analysis, and this
+    /// is somebody asking about one track.
+    fn guess_genres(&mut self, ids: &[u32]) {
+        let Some(model) = self.config.genre.model() else {
+            self.note(
+                "no genre model \u{2014} point at one under Genre in Settings",
+                theme::amber(),
+            );
+            return;
+        };
+        let waiting = self.files_for(ids);
+        if waiting.is_empty() {
+            self.note("nothing to listen to", theme::dim());
+            return;
+        }
+        crate::info!("guessing the genre of {}", plural(waiting.len(), "track"));
+        let ids: Vec<u32> = waiting.iter().map(|(id, _)| *id).collect();
+        self.ensure_local(&ids);
+        self.start(Job::GuessGenre { tracks: waiting, model });
+    }
+
+    /// What a guess at a track's genre comes to.
+    ///
+    /// Filled in where the track has no genre, since there is nothing to
+    /// overwrite; taken as the measurement where it agrees; and put to the
+    /// user where it would replace one, in the same sheet an analysis asks in.
+    /// "The genre it has" is the collection's, or the file's tag where the
+    /// collection has none.
+    fn genre_guessed(&mut self, id: u32, heard: Option<(String, f32)>, tagged: &str) {
+        use crate::identify::GuessDecision;
+        let Some(track) = self.library.get(id) else { return };
+        let name = track.display_title();
+        let Some((heard, confidence)) = heard else {
+            self.note(format!("{name}: the model heard no genre"), theme::amber());
+            return;
+        };
+        let has = match track.genre.trim() {
+            "" => tagged.trim().to_string(),
+            genre => genre.to_string(),
+        };
+        let decision = crate::identify::decide_guess(&has, &heard);
+        crate::info!("#{id} guessed as {heard} ({confidence:.2}), has {has:?}: {decision:?}");
+        match decision {
+            GuessDecision::Fill | GuessDecision::Agrees => {
+                if let Some(track) = self.library.get_mut(id) {
+                    track.genre = heard.clone();
+                    track.genre_confidence = confidence;
+                }
+                match decision {
+                    GuessDecision::Fill => {
+                        self.note(format!("{name}: {heard} ({confidence:.2})"), theme::dim());
+                        if let Some(on_existing) = self.config.write_tags.on_existing() {
+                            self.write_genre(id, on_existing);
+                        }
+                    }
+                    _ => self
+                        .note(format!("{name}: heard {heard}, which it already has"), theme::dim()),
+                }
+            }
+            GuessDecision::Ask => {
+                // A guess asked twice is the later one's question.
+                self.genre_questions.retain(|question| question.id != id);
+                self.genre_questions.push(crate::identify::GenreQuestion {
+                    id,
+                    file_says: has,
+                    heard,
+                    confidence,
+                    guessed: true,
+                });
+            }
+        }
     }
 
     fn analyze_tracks(&mut self, ids: &[u32]) {
@@ -3307,6 +3440,19 @@ impl App {
                         checked.orphans = paths;
                     }
                 }
+                Update::Audited { drive, lines, clean } => {
+                    let label = self
+                        .library
+                        .drives
+                        .iter()
+                        .find(|known| known.path == drive)
+                        .map(|known| known.label.clone())
+                        .unwrap_or_else(|| drive.display().to_string());
+                    for line in &lines {
+                        crate::info!("{label}: {line}");
+                    }
+                    self.audited = Some((label, lines, clean));
+                }
                 Update::Hashed { id, file, audio } => {
                     if let Some(track) = self.library.get_mut(id) {
                         track.file_hash = file;
@@ -3370,6 +3516,10 @@ impl App {
                     self.remeasured.remove(&id);
                     changed = true;
                 }
+                Update::GenreGuessed { id, heard, tagged } => {
+                    self.genre_guessed(id, heard, &tagged);
+                    changed = true;
+                }
                 Update::Analyzed(analyzed) => {
                     crate::debug!(
                         "analysed #{}: {:.2} BPM (confidence {:.1}), key {}, {} beats, {} phrases, {} cues, genre {}",
@@ -3382,10 +3532,6 @@ impl App {
                         analyzed.cues.len(),
                         if analyzed.genre.is_empty() { "none" } else { &analyzed.genre }
                     );
-                    // Whether the genre heard goes into the file, and under
-                    // what policy; decided in the fold, written after it,
-                    // once the record is no longer borrowed.
-                    let mut genre_write: Option<booth_cli::tag::OnExisting> = None;
                     if let Some(track) = self.library.get_mut(analyzed.id) {
                         track.bpm = analyzed.bpm;
                         track.grid_confidence = analyzed.grid_confidence;
@@ -3396,47 +3542,6 @@ impl App {
                         track.key_confidence = analyzed.key_confidence;
                         track.energy = analyzed.energy;
                         track.intensity = analyzed.intensity;
-                        // Only where the model heard something. An analysis
-                        // run with no model is not a finding that the track
-                        // has no genre, and should not take away one heard
-                        // when there was. What the file's own tag says decides
-                        // whether the heard genre goes straight in or is put
-                        // to the user first: a tag is somebody's answer, the
-                        // same as a tagged name is.
-                        if !analyzed.genre.is_empty() {
-                            use crate::identify::GenreDecision;
-                            let decision = crate::identify::decide_genre(
-                                track,
-                                &analyzed.tagged_genre,
-                                &analyzed.genre,
-                            );
-                            if decision != GenreDecision::Ask {
-                                track.genre = analyzed.genre.clone();
-                                track.genre_confidence = analyzed.genre_confidence;
-                            }
-                            let policy = self.config.write_tags.on_existing();
-                            match decision {
-                                GenreDecision::Take => genre_write = policy,
-                                // Over this program's own earlier answer. The
-                                // setting's "only where blank" protects other
-                                // people's answers, and this one was ours.
-                                GenreDecision::Replace => {
-                                    genre_write =
-                                        policy.map(|_| booth_cli::tag::OnExisting::Overwrite)
-                                }
-                                GenreDecision::Agrees => {}
-                                GenreDecision::Ask => {
-                                    if !self.genre_questions.iter().any(|q| q.id == analyzed.id) {
-                                        self.genre_questions.push(crate::identify::GenreQuestion {
-                                            id: analyzed.id,
-                                            file_says: analyzed.tagged_genre.clone(),
-                                            heard: analyzed.genre.clone(),
-                                            confidence: analyzed.genre_confidence,
-                                        });
-                                    }
-                                }
-                            }
-                        }
                         track.phrases = analyzed.phrases.clone();
                         track.cues = analyzed.cues.clone();
                         track.loudness_lufs = analyzed.loudness_lufs;
@@ -3447,9 +3552,12 @@ impl App {
                         track.bitrate_kbps = bitrate(track.bytes, analyzed.duration_secs);
                         track.analyzed = true;
                     }
-                    if let Some(on_existing) = genre_write {
-                        self.write_genre(analyzed.id, on_existing);
-                    }
+                    self.hear_genre(
+                        analyzed.id,
+                        &analyzed.genre,
+                        analyzed.genre_confidence,
+                        &analyzed.tagged_genre,
+                    );
                     // An analysis replaces the grid, the cues and the phrases,
                     // which is exactly what a player can also change.
                     self.prep_changed(analyzed.id);
@@ -4404,6 +4512,9 @@ impl eframe::App for App {
         // After the sheet, so it sits over it rather than under it.
         if self.details {
             self.details_window(ctx);
+        }
+        if self.audited.is_some() {
+            self.audit_window(ctx);
         }
         if self.settings {
             self.settings_sheet(ctx);
@@ -6021,6 +6132,7 @@ impl App {
                 rows::Hit::Chose(action) => self.pending.push(match action {
                     rows::Action::Play => Pending::TogglePlayback(id),
                     rows::Action::Analyze => Pending::Analyze(id),
+                    rows::Action::GuessGenre => Pending::GuessGenre(id),
                     rows::Action::Identify => Pending::Identify(id),
                     rows::Action::Separate => Pending::Separate(id),
                     rows::Action::AutoCue => Pending::AutoCue(id),
@@ -7718,6 +7830,7 @@ impl App {
                 Pending::Convert(ids) => self.convert_tracks(&ids),
                 Pending::Level(ids) => self.level_tracks(&ids),
                 Pending::Analyze(id) => self.analyze_tracks(&[id]),
+                Pending::GuessGenre(id) => self.guess_genres(&[id]),
                 Pending::Identify(id) => self.identify_tracks(&[id], true),
                 Pending::Separate(id) => self.separate_tracks(&[id]),
                 Pending::SeparateMany { tracks, for_cues } => self.separate_for(&tracks, for_cues),
@@ -7852,6 +7965,7 @@ impl App {
                                 if let Some(track) = self.library.get_mut(id) {
                                     track.genre = question.heard.clone();
                                     track.genre_confidence = question.confidence;
+                                    track.genre_chosen = true;
                                 }
                                 // Confirmed, so the file's own value is the one
                                 // being replaced, on purpose; the setting still
@@ -7862,13 +7976,25 @@ impl App {
                             }
                             crate::identify::GenreAnswer::File => {
                                 crate::info!(
-                                    "#{id} kept the file's genre, {}, over {}",
+                                    "#{id} kept {} {}, over {}",
+                                    if question.guessed {
+                                        "its genre,"
+                                    } else {
+                                        "the file's genre,"
+                                    },
                                     question.file_says,
                                     question.heard
                                 );
                                 if let Some(track) = self.library.get_mut(id) {
-                                    track.genre = question.file_says.clone();
-                                    track.genre_confidence = 0.0;
+                                    // After an analysis the collection takes the
+                                    // file's tag; after a guess it already has
+                                    // the genre being kept, and how it came by
+                                    // it — heard or tagged — still stands.
+                                    if !question.guessed {
+                                        track.genre = question.file_says.clone();
+                                        track.genre_confidence = 0.0;
+                                    }
+                                    track.genre_chosen = true;
                                 }
                             }
                         }
@@ -9105,6 +9231,9 @@ impl App {
             return;
         }
         let writes = self.config.write_tags != crate::config::WriteTags::Never;
+        // A guess is asked over the genre the track has, which may be the
+        // file's tag or an answer given before, rather than over the tag alone.
+        let guessing = questions.iter().any(|question| question.guessed);
         let mut open = true;
 
         egui::Window::new(format!("{} to check", plural(questions.len(), "genre")))
@@ -9117,12 +9246,23 @@ impl App {
             .frame(sheet_frame())
             .show(ctx, |ui| {
                 ui.label(
-                    RichText::new(
-                        "The file's own genre tag says one thing and the model heard another. \
-                         A tag is somebody's answer, so it is not replaced without asking. The \
-                         number is the model's activation for what it heard: 0.3 is it being \
-                         fairly sure of a style it rarely hears, not a thirty per cent chance.",
-                    )
+                    RichText::new(match guessing {
+                        false => {
+                            "The file's own genre tag says one thing and the model heard another. \
+                             A tag is somebody's answer, so it is not replaced without asking, and \
+                             whichever you choose is kept: analysing the track again does not ask \
+                             again. The number is the model's activation for what it heard: 0.3 is \
+                             it being fairly sure of a style it rarely hears, not a thirty per cent \
+                             chance."
+                        }
+                        true => {
+                            "The model heard a different genre from the one the track has, which \
+                             is its file's tag or an answer given before, and neither is replaced \
+                             without asking. Whichever you choose is kept: analysing the track \
+                             again does not ask again. The number is the model's activation for \
+                             what it heard, not a chance."
+                        }
+                    })
                     .color(theme::dim())
                     .size(theme::SMALL),
                 );
@@ -9148,7 +9288,8 @@ impl App {
                                 );
                                 ui.label(
                                     RichText::new(format!(
-                                        "file says: {} — {named}",
+                                        "{}: {} — {named}",
+                                        if question.guessed { "has" } else { "file says" },
                                         question.file_says
                                     ))
                                     .font(theme::mono(10.0))
@@ -9158,14 +9299,19 @@ impl App {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui
-                                        .button("Keep the file's")
-                                        .on_hover_text(
+                                    let (keep, about) = match question.guessed {
+                                        false => (
+                                            "Keep the file's",
                                             "The collection takes the file's genre too, and the \
                                              file is left as it is.",
-                                        )
-                                        .clicked()
-                                    {
+                                        ),
+                                        true => (
+                                            "Keep what it has",
+                                            "The genre stays as it is, in the collection and in \
+                                             the file.",
+                                        ),
+                                    };
+                                    if ui.button(keep).on_hover_text(about).clicked() {
                                         self.pending.push(Pending::AnswerGenre {
                                             id: question.id,
                                             answer: crate::identify::GenreAnswer::File,
@@ -9208,11 +9354,13 @@ impl App {
                             });
                         }
                     }
-                    if ui
-                        .button("Keep all the files'")
-                        .on_hover_text("Leave every one of these as its file has it.")
-                        .clicked()
-                    {
+                    let (keep, about) = match guessing {
+                        false => {
+                            ("Keep all the files'", "Leave every one of these as its file has it.")
+                        }
+                        true => ("Keep all as they are", "Leave every one of these as it is."),
+                    };
+                    if ui.button(keep).on_hover_text(about).clicked() {
                         for question in &questions {
                             self.pending.push(Pending::AnswerGenre {
                                 id: question.id,
@@ -12633,6 +12781,7 @@ impl App {
         let mut open = true;
         let mut forget = false;
         let mut details = false;
+        let mut audit = false;
         // Toggled here rather than applied in place: the sheet is drawing a
         // clone of the drive, and the plan under it was worked out before this
         // frame. Read back after the window closes, so one change redraws once.
@@ -12798,6 +12947,22 @@ impl App {
                         {
                             details = true;
                         }
+                        if ui
+                            .add_enabled(!drive.is_image, egui::Button::new("What each player sees"))
+                            .on_hover_text(
+                                "Read both databases off the drive as it is now and say what a \
+                                 CDJ-3000X, a CDJ-3000 and the nexus lines will each browse: a \
+                                 playlist one shows and another does not, audio that is not on \
+                                 the stick, files a player will not open, missing analysis. It \
+                                 changes nothing.",
+                            )
+                            .on_disabled_hover_text(
+                                "An image is read back by the write itself; mount it to ask this.",
+                            )
+                            .clicked()
+                        {
+                            audit = true;
+                        }
                     });
                     ui.horizontal(|ui| {
                         ui.add_space(74.0);
@@ -12912,6 +13077,13 @@ impl App {
         if details {
             self.details = true;
         }
+        if audit {
+            crate::info!("checking what each player sees on {}", drive.path.display());
+            self.start(Job::Audit {
+                drive: drive.path.clone(),
+                key: self.config.onelibrary_key().map(str::to_string),
+            });
+        }
         if forget {
             self.forget_drive_contents();
         }
@@ -13014,6 +13186,64 @@ impl App {
             });
         if !open {
             self.details = false;
+        }
+    }
+
+    /// What each player sees on a drive: the audit's lines, as it said them.
+    fn audit_window(&mut self, ctx: &egui::Context) {
+        let Some((label, lines, clean)) = self.audited.clone() else { return };
+        let mut open = true;
+        egui::Window::new(format!("WHAT EACH PLAYER SEES \u{2192} {label}"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(680.0)
+            .default_height(440.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::booth())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::rule()))
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(match clean {
+                            true => "Every player sees the same drive, and everything on it loads.",
+                            false => {
+                                "A CDJ-3000 reads export.pdb and a CDJ-3000X reads \
+                                 exportLibrary.db, and neither falls back to the other. Syncing \
+                                 this drive from Booth writes both from one description."
+                            }
+                        })
+                        .color(if clean { theme::go() } else { theme::dim() })
+                        .size(theme::SMALL),
+                    );
+                    if ui.button("Copy").on_hover_text("Put all of it on the clipboard.").clicked()
+                    {
+                        ui.ctx().copy_text(lines.join("\n"));
+                    }
+                });
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    for line in &lines {
+                        // The audit indents what it found under the database
+                        // or player it is about.
+                        let found = line.starts_with("  ");
+                        let fine = line.trim() == "everything on it loads";
+                        let color = match (found, fine) {
+                            (true, true) => theme::go(),
+                            (true, false) => theme::amber(),
+                            _ => theme::text(),
+                        };
+                        ui.label(RichText::new(line).font(theme::mono(11.0)).color(color));
+                    }
+                });
+            });
+        if !open {
+            self.audited = None;
         }
     }
 
@@ -14299,7 +14529,6 @@ mod tests {
             )
         }
 
-        /// Dragging a phrase boundary takes the cues that mark it along.
         /// The two workers: the long work, and what the window is waiting on.
         mod two_lanes {
             use super::*;
@@ -14441,6 +14670,138 @@ mod tests {
             }
         }
 
+        /// A genre heard against one somebody gave, and what they said.
+        mod choosing_a_genre {
+            use super::*;
+            use crate::identify::GenreAnswer;
+
+            /// A window holding one track with this genre, its file tagged the
+            /// same, and nothing ever written to a file.
+            fn with_genre(name: &str, genre: &str, confidence: f32) -> (App, u32) {
+                let mut app = app(name);
+                app.config.write_tags = crate::config::WriteTags::Never;
+                let id = app.library.add(std::path::Path::new("/music/track.flac"));
+                let track = app.library.get_mut(id).unwrap();
+                track.genre = genre.into();
+                track.genre_confidence = confidence;
+                (app, id)
+            }
+
+            fn answer(app: &mut App, id: u32, answer: GenreAnswer) {
+                app.pending.push(Pending::AnswerGenre { id, answer });
+                app.apply_pending(&egui::Context::default());
+            }
+
+            fn genre(app: &App, id: u32) -> (String, f32, bool) {
+                let track = app.library.get(id).unwrap();
+                (track.genre.clone(), track.genre_confidence, track.genre_chosen)
+            }
+
+            #[test]
+            fn keeping_the_files_genre_is_not_asked_about_again_when_the_track_is_analysed_again() {
+                // The report: the question came back after every re-analysis,
+                // because keeping the tag leaves a tag and a hearing that still
+                // disagree.
+                let (mut app, id) = with_genre("genre-kept", "House", 0.0);
+                app.hear_genre(id, "Techno", 0.4, "House");
+                assert_eq!(app.genre_questions.len(), 1);
+                answer(&mut app, id, GenreAnswer::File);
+                assert!(app.genre_questions.is_empty());
+
+                app.hear_genre(id, "Techno", 0.4, "House");
+                assert!(app.genre_questions.is_empty(), "asked again: {:?}", app.genre_questions);
+                assert_eq!(genre(&app, id), ("House".into(), 0.0, true));
+            }
+
+            #[test]
+            fn taking_the_heard_genre_is_kept_when_a_re_analysis_hears_another() {
+                let (mut app, id) = with_genre("genre-heard", "House", 0.0);
+                app.hear_genre(id, "Techno", 0.4, "House");
+                answer(&mut app, id, GenreAnswer::Heard);
+
+                // Tags are never written here, so the file still says House.
+                app.hear_genre(id, "Minimal", 0.3, "House");
+                assert!(app.genre_questions.is_empty(), "asked again: {:?}", app.genre_questions);
+                assert_eq!(genre(&app, id), ("Techno".into(), 0.4, true));
+            }
+
+            #[test]
+            fn a_genre_nobody_has_answered_for_is_still_asked_about() {
+                let (mut app, id) = with_genre("genre-unanswered", "House", 0.0);
+                app.hear_genre(id, "Techno", 0.4, "House");
+                // Closed without an answer: not now, rather than a choice.
+                app.genre_questions.clear();
+                app.hear_genre(id, "Techno", 0.4, "House");
+                assert_eq!(app.genre_questions.len(), 1);
+                assert!(!genre(&app, id).2);
+            }
+
+            #[test]
+            fn a_guess_over_a_chosen_genre_asks_and_keeping_it_changes_nothing() {
+                // Heard before at 0.5 and then chosen: keeping it after a guess
+                // keeps how it came by it, not just the word.
+                let (mut app, id) = with_genre("guess-kept", "House", 0.5);
+                app.library.get_mut(id).unwrap().genre_chosen = true;
+                app.genre_guessed(id, Some(("Techno".into(), 0.4)), "House");
+                let asked = app.genre_questions.clone();
+                assert_eq!(asked.len(), 1);
+                assert!(asked[0].guessed);
+                assert_eq!(
+                    (asked[0].file_says.as_str(), asked[0].heard.as_str()),
+                    ("House", "Techno")
+                );
+
+                answer(&mut app, id, GenreAnswer::File);
+                assert_eq!(genre(&app, id), ("House".into(), 0.5, true));
+            }
+
+            #[test]
+            fn a_guess_taken_over_a_chosen_genre_replaces_it_and_is_the_choice_from_then_on() {
+                let (mut app, id) = with_genre("guess-taken", "House", 0.0);
+                app.library.get_mut(id).unwrap().genre_chosen = true;
+                app.genre_guessed(id, Some(("Techno".into(), 0.4)), "House");
+                answer(&mut app, id, GenreAnswer::Heard);
+                assert_eq!(genre(&app, id), ("Techno".into(), 0.4, true));
+
+                app.hear_genre(id, "House", 0.6, "House");
+                assert_eq!(genre(&app, id).0, "Techno");
+            }
+
+            #[test]
+            fn a_guess_fills_a_track_with_no_genre_without_asking() {
+                let (mut app, id) = with_genre("guess-fills", "", 0.0);
+                app.genre_guessed(id, Some(("Techno".into(), 0.4)), "");
+                assert!(app.genre_questions.is_empty());
+                assert_eq!(genre(&app, id), ("Techno".into(), 0.4, false));
+            }
+
+            #[test]
+            fn a_guess_is_asked_over_the_files_tag_where_the_collection_has_no_genre() {
+                let (mut app, id) = with_genre("guess-tag", "", 0.0);
+                app.genre_guessed(id, Some(("Techno".into(), 0.4)), "House");
+                assert_eq!(app.genre_questions.len(), 1);
+                assert_eq!(app.genre_questions[0].file_says, "House");
+            }
+
+            #[test]
+            fn a_guess_that_agrees_asks_nothing_and_takes_the_measurement() {
+                let (mut app, id) = with_genre("guess-agrees", "techno", 0.0);
+                app.genre_guessed(id, Some(("Techno".into(), 0.4)), "techno");
+                assert!(app.genre_questions.is_empty());
+                assert_eq!(genre(&app, id), ("Techno".into(), 0.4, false));
+            }
+
+            #[test]
+            fn a_second_guess_replaces_the_first_question_rather_than_adding_one() {
+                let (mut app, id) = with_genre("guess-twice", "House", 0.0);
+                app.genre_guessed(id, Some(("Techno".into(), 0.4)), "House");
+                app.genre_guessed(id, Some(("Minimal".into(), 0.3)), "House");
+                assert_eq!(app.genre_questions.len(), 1);
+                assert_eq!(app.genre_questions[0].heard, "Minimal");
+            }
+        }
+
+        /// Dragging a phrase boundary takes the cues that mark it along.
         mod moving_a_boundary {
             use super::*;
             use crate::library::{CueMark, Phrase, PhraseEdit};
@@ -19660,6 +20021,39 @@ mod tests {
             harness.get_by_label("Details").click();
             harness.run();
             assert!(harness.state().details, "the Details button did not open the window");
+        }
+
+        #[test]
+        fn the_audit_button_reads_the_drive_and_shows_what_each_player_sees() {
+            // A drive that is not mounted has neither database on it, which
+            // is still an answer: every player is told it shows no library.
+            let mut app = a_drive_up_to_date("audit");
+            app.sheet = true;
+            let mut harness = Harness::new_ui_state(
+                |ui, app: &mut App| {
+                    let ctx = ui.ctx().clone();
+                    app.sync_sheet(&ctx);
+                },
+                app,
+            );
+            harness.run();
+            harness.get_by_label("What each player sees").click();
+            harness.run();
+
+            let started = std::time::Instant::now();
+            while harness.state().audited.is_none() && started.elapsed().as_secs() < 10 {
+                harness.state_mut().collect();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let (label, lines, clean) =
+                harness.state().audited.clone().expect("no audit came back");
+            assert_eq!(label, "USB");
+            assert!(!clean);
+            assert!(lines.iter().any(|line| line == "export.pdb: not on the drive"), "{lines:#?}");
+            assert!(
+                lines.iter().any(|line| line.contains("shows no library at all")),
+                "{lines:#?}"
+            );
         }
 
         #[test]

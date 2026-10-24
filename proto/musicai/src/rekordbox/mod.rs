@@ -23,6 +23,7 @@
 pub mod anlz;
 pub mod master;
 pub mod onelibrary;
+pub mod pdb;
 
 use std::path::Path;
 

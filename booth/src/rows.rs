@@ -510,6 +510,8 @@ pub enum Action {
     /// Put it in a playlist that does not exist yet.
     AddToNew,
     Analyze,
+    /// Hear the genre again, and nothing else.
+    GuessGenre,
     Identify,
     Separate,
     /// Read the vocal stem and cue what it finds.
@@ -533,6 +535,7 @@ impl Action {
             Action::Play => "Play",
             Action::Analyze if track.analyzed => "Re-analyse",
             Action::Analyze => "Analyse",
+            Action::GuessGenre => "Guess genre",
             Action::Identify if track.identified => "Look up again",
             Action::Identify => "Look up tags",
             Action::Separate if !track.stems.is_empty() => "Render stems again",
@@ -558,6 +561,9 @@ impl Action {
             Action::AddTo(_) | Action::AddToNew => "Put it at the end of a playlist.",
             Action::Analyze => {
                 "Listen to it: tempo, grid, key, sections and a waveform. A minute or so a track."
+            }
+            Action::GuessGenre => {
+                "Listen for the genre with the model, and ask before replacing the one it has."
             }
             Action::Identify => {
                 "Fingerprint the audio and ask what it is. Nothing already filled in is overwritten."
@@ -755,6 +761,7 @@ pub fn row(
             Action::Play,
             Action::AddToNew,
             Action::Analyze,
+            Action::GuessGenre,
             Action::Identify,
             Action::Separate,
             Action::AutoCue,

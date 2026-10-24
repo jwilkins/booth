@@ -34,6 +34,8 @@ pub enum Job {
     /// Listen to each track: grid, key, phrases, cues, loudness, waveform —
     /// and the genre, where there is a model to hear it with.
     Analyze { tracks: Vec<(u32, PathBuf)>, genre: crate::config::Genre },
+    /// Hear each track's genre with the model at `model`, and nothing else.
+    GuessGenre { tracks: Vec<(u32, PathBuf)>, model: PathBuf },
     /// Listen again, and keep only the tempo and the beats.
     ///
     /// The same measurement as [`Job::Analyze`] — one decode either way, and
@@ -102,6 +104,9 @@ pub enum Job {
     /// in the collection before it did — without it, a library built before
     /// hashing existed can never be checked for copies at all.
     Hash(Vec<(u32, PathBuf)>),
+    /// Read both databases off a drive and say what each player sees on it.
+    /// See `booth_cli::audit`.
+    Audit { drive: PathBuf, key: Option<String> },
     /// Fingerprint tracks and ask AcoustID what they are.
     Identify { tracks: Vec<(u32, PathBuf)>, key: String },
     /// Write a drive.
@@ -180,8 +185,10 @@ impl Job {
             Job::StemEnvelopes { .. } => "measuring stems",
             Job::Identify { .. } => "identifying",
             Job::Hash(_) => "checking for copies",
+            Job::Audit { .. } => "checking what each player sees",
             Job::Verify { .. } => "checking the collection",
             Job::Analyze { .. } => "analysing",
+            Job::GuessGenre { .. } => "hearing the genre",
             Job::Normalize { .. } => "levelling",
             Job::Regrid(_) => "measuring the grid",
             Job::Separate { .. } => "stems",
@@ -336,6 +343,14 @@ pub enum Update {
     Imported(Box<Track>),
     /// One track, listened to.
     Analyzed(Box<Analyzed>),
+    /// One track's genre, heard on its own: the style the model is surest of
+    /// and how surely, or `None` where it heard nothing, and what the file's
+    /// own genre tag says.
+    GenreGuessed {
+        id: u32,
+        heard: Option<(String, f32)>,
+        tagged: String,
+    },
     /// A track's tempo and beats, measured again and nothing else.
     Regridded {
         id: u32,
@@ -372,6 +387,13 @@ pub enum Update {
         drive: String,
         root: PathBuf,
         sessions: Vec<crate::history::Session>,
+    },
+    /// What each player sees on a drive, as lines of text, and whether every
+    /// player sees the same drive with nothing on it failing.
+    Audited {
+        drive: PathBuf,
+        lines: Vec<String>,
+        clean: bool,
     },
     /// The two hashes for one track that had none.
     Hashed {
@@ -661,11 +683,7 @@ pub fn analyze_file(
     // The file's own word on it, for the fold to weigh against what was heard.
     // One tag read against seconds of decoding, so not made conditional on
     // there being a model; a WAV simply has none.
-    let tagged_genre = booth_cli::tag::read_metadata(path)
-        .ok()
-        .and_then(|metadata| metadata.genre)
-        .map(|genre| genre.trim().to_string())
-        .unwrap_or_default();
+    let tagged_genre = tagged_genre(path);
 
     let beat_ms: Vec<u32> = analysis.grid.beats.iter().map(|b| b.time_ms).collect();
     // Kept only when a tempo and a downbeat could not put these beats back.
@@ -1114,6 +1132,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         }
         Job::Import { paths, recursive } => import(&paths, recursive, reporter),
         Job::Analyze { tracks, genre } => analyze_all(&tracks, &genre, reporter),
+        Job::GuessGenre { tracks, model } => guess_genres(&tracks, &model, reporter),
         Job::Regrid(tracks) => regrid_all(&tracks, reporter),
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
         Job::Convert(tracks) => convert(&tracks, reporter),
@@ -1133,6 +1152,16 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::Retag(tracks) => retag(&tracks, reporter),
         Job::Identify { tracks, key } => identify(&tracks, &key, reporter),
         Job::Hash(tracks) => hash_all(&tracks, reporter),
+        Job::Audit { drive, key } => {
+            let audit = booth_cli::audit::audit(&drive, key.as_deref());
+            let _ = reporter.tx.send(Update::Audited {
+                drive,
+                lines: audit.lines(),
+                clean: audit.is_clean(),
+            });
+            (reporter.wake)();
+            Ok(())
+        }
         Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
         Job::Keep { root, drive, state, into, known, foreign, library, key } => {
             let kept = match crate::backup::keep(
@@ -1448,6 +1477,54 @@ fn load_genre_model(
             None
         }
     }
+}
+
+/// What a file's own genre tag says, trimmed, or empty.
+fn tagged_genre(path: &Path) -> String {
+    booth_cli::tag::read_metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.genre)
+        .map(|genre| genre.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Hear the genre of each track and nothing else, for **Guess genre**.
+///
+/// The model at `model` whatever the switch in Settings says: the switch is
+/// whether an analysis listens for a genre, and this is somebody asking for
+/// one. A decode and the model and nothing else measured or changed: 19.6 s
+/// for a five-minute record here, the model's loading included.
+fn guess_genres(tracks: &[(u32, PathBuf)], model: &Path, reporter: &Channel) -> anyhow::Result<()> {
+    use rayon::prelude::*;
+    use std::sync::atomic::AtomicUsize;
+
+    let Some(classifier) = load_genre_model(Some(model.to_path_buf()), reporter) else {
+        return Ok(());
+    };
+    let total = tracks.len();
+    let done = AtomicUsize::new(0);
+    tracks.par_iter().for_each(|(id, path)| {
+        if reporter.cancelled() {
+            return;
+        }
+        let heard = decode_file(path).and_then(|audio| classifier.classify(&audio));
+        match heard {
+            Ok(styles) => {
+                let heard = styles.into_iter().next().map(|s| (s.style.to_string(), s.confidence));
+                let tagged = tagged_genre(path);
+                let _ = reporter.tx.send(Update::GenreGuessed { id: *id, heard, tagged });
+            }
+            Err(e) => {
+                let _ = reporter
+                    .tx
+                    .send(Update::Failed { path: path.clone(), message: format!("{e:#}") });
+            }
+        }
+        let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = reporter.tx.send(Update::Progress { done: finished, total });
+        (reporter.wake)();
+    });
+    Ok(())
 }
 
 fn analyze_all(
@@ -2641,6 +2718,42 @@ mod tests {
         assert!(matches!(updates.last(), Some(Update::Done(Ok(())))));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Guess genre against the real model and a real record. Needs the
+    /// model, and a record to hear:
+    ///
+    /// ```sh
+    /// BOOTH_GENRE_MODEL=…/discogs-effnet-bsdynamic-1.onnx BOOTH_GENRE_SAMPLE=…/record.mp3 \
+    ///     cargo test -p booth --lib guessing_a_real_record -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the genre model and a record: BOOTH_GENRE_MODEL, BOOTH_GENRE_SAMPLE"]
+    fn guessing_a_real_record_hears_a_genre_and_reads_the_files_tag() {
+        let model = PathBuf::from(std::env::var("BOOTH_GENRE_MODEL").unwrap());
+        let sample = PathBuf::from(std::env::var("BOOTH_GENRE_SAMPLE").unwrap());
+        let (tx, rx) = channel();
+        let reporter =
+            Channel { tx, cancel: Arc::new(AtomicBool::new(false)), wake: Arc::new(|| {}) };
+        let started = std::time::Instant::now();
+        guess_genres(&[(7, sample.clone())], &model, &reporter).unwrap();
+        drop(reporter);
+        let took = started.elapsed();
+
+        let guessed: Vec<_> = rx
+            .iter()
+            .filter_map(|update| match update {
+                Update::GenreGuessed { id, heard, tagged } => Some((id, heard, tagged)),
+                _ => None,
+            })
+            .collect();
+        eprintln!("{} in {took:.1?}: {guessed:?}", sample.display());
+        assert_eq!(guessed.len(), 1, "{guessed:?}");
+        let (id, heard, tagged) = &guessed[0];
+        assert_eq!(*id, 7);
+        let (style, confidence) = heard.as_ref().expect("the model heard nothing");
+        assert!(!style.is_empty() && *confidence > 0.0, "{style} {confidence}");
+        assert_eq!(*tagged, tagged_genre(&sample));
     }
 
     #[test]

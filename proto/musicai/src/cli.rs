@@ -58,6 +58,9 @@ pub enum Command {
     Anlz(AnlzArgs),
     /// Build a whole USB drive a Pioneer/AlphaTheta player can browse.
     Export(ExportArgs),
+    /// Say what each generation of player will see on a drive, and where its
+    /// two databases disagree. Reads; changes nothing.
+    Audit(AuditArgs),
     /// Bring files to a consistent loudness.
     Normalize(NormalizeArgs),
     /// Normalize, tag and separate, in one pass. This is what running
@@ -103,6 +106,20 @@ pub struct EmulatorArgs {
     /// success and should not read as one.
     #[arg(long)]
     pub no_reveal: bool,
+}
+
+/// Which drive to audit.
+#[derive(clap::Args, Debug)]
+pub struct AuditArgs {
+    /// The mounted drive, or a folder laid out as one: the directory holding
+    /// `PIONEER` and `Contents`.
+    pub drive: PathBuf,
+
+    /// The key for the drive's OneLibrary database. Every drive uses the same
+    /// one and this build carries it; defaults to `ONELIBRARY_KEY`, then to
+    /// the built-in one.
+    #[arg(long, value_name = "KEY")]
+    pub onelibrary_key: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

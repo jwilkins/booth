@@ -42,6 +42,66 @@ pub fn find(drive: &Path) -> Option<PathBuf> {
     PLACES.iter().map(|place| drive.join(place)).find(|path| path.exists())
 }
 
+/// The tracks and playlists in a OneLibrary database, in the same shape
+/// [`super::pdb::read`] gives an `export.pdb`, so that the two can be compared
+/// row for row.
+///
+/// `playlist.attribute` is 0 for a playlist, 1 for a folder and 4 for a smart
+/// playlist (`docs/onelibrary.md`); anything else is read as a playlist.
+pub fn library(connection: &rusqlite::Connection) -> Result<super::pdb::Library> {
+    use super::pdb::{Entry, Library, Node, Track};
+
+    let number = |value: Option<i64>| value.unwrap_or(0).clamp(0, i64::from(u32::MAX)) as u32;
+    let mut statement = connection.prepare(
+        "SELECT content_id, title, path, analysisDataFilePath, samplingRate FROM content",
+    )?;
+    let mut tracks = statement
+        .query_map([], |row| {
+            Ok(Track {
+                id: number(row.get(0)?),
+                title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                file_path: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                analyze_path: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                sample_rate: number(row.get(4)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut statement = connection.prepare(
+        "SELECT playlist_id, sequenceNo, name, attribute, playlist_id_parent FROM playlist",
+    )?;
+    let mut nodes = statement
+        .query_map([], |row| {
+            let attribute = row.get::<_, Option<i64>>(3)?.unwrap_or(0);
+            Ok(Node {
+                id: number(row.get(0)?),
+                sort_order: number(row.get(1)?),
+                name: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                folder: attribute == 1,
+                smart: attribute == 4,
+                parent: number(row.get(4)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut statement =
+        connection.prepare("SELECT playlist_id, sequenceNo, content_id FROM playlist_content")?;
+    let mut entries = statement
+        .query_map([], |row| {
+            Ok(Entry {
+                playlist: number(row.get(0)?),
+                index: number(row.get(1)?),
+                track: number(row.get(2)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    tracks.sort();
+    nodes.sort();
+    entries.sort();
+    Ok(Library { tracks, nodes, entries })
+}
+
 /// What one table looks like.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableShape {
