@@ -952,8 +952,11 @@ which would put the hand on the wrong moment:
 
 - **A, the hook**, sung outside a drop — the line the room sings, where the
   least is playing under it, so that it can be laid over another record.
-- **B, the main break**, the deepest of the record's breaks, where a second
-  record has the most room.
+- **B, the main break**, the longest of the record's breaks, and of those
+  about as long (within two bars), the latest: the breakdown the record builds
+  to, where a second record has the most time to be laid over. Never a break
+  of two bars or less, which is a fill; on a record with no other, B is left
+  empty, and a break that short is a marker rather than any button.
 - **C, the hook in a drop**, the best airing of the hook inside one, if it is at
   least eight bars from D. Nearer, the two pads play into the same moment.
 - **D, the main drop**, the drop that answers the record's breakdown: the first

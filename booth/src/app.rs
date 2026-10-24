@@ -3192,7 +3192,13 @@ impl App {
             .iter()
             .filter_map(|phrase| {
                 let kind = Kind::from_label(&phrase.kind)?;
-                Some(Candidate::new(snap_to(&beats, phrase.start_ms, 4), Reason::Section(kind)))
+                Some(Candidate {
+                    // How long it runs, so that a two-bar break is not taken
+                    // for the record's break — see `cues::the_break`.
+                    bars: crate::wave::bars_of(phrase, &beats)
+                        .and_then(|bars| u16::try_from(bars).ok()),
+                    ..Candidate::new(snap_to(&beats, phrase.start_ms, 4), Reason::Section(kind))
+                })
             })
             .collect();
 
@@ -16231,14 +16237,15 @@ mod tests {
 
                 // And every section it did not take is a named memory cue, so
                 // the list reads as an arrangement rather than as a row of
-                // identical markers.
+                // identical markers — with its length, as the command line's
+                // markers have, now that a phrase knows how many bars it is.
                 let marks: Vec<&str> = cues
                     .iter()
                     .filter(|cue| cue.letter == 0)
                     .map(|cue| cue.label.as_str())
                     .collect();
                 assert_eq!(marks.first(), Some(&"Start"));
-                assert!(marks.contains(&"Drop 1"), "{marks:?}");
+                assert!(marks.contains(&"Drop 1 \u{b7} 16 bars"), "{marks:?}");
                 assert_eq!(marks.last(), Some(&"End"), "{marks:?}");
             }
 
