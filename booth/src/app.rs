@@ -231,6 +231,12 @@ pub struct App {
     /// Where a shift-range is measured from — the last row picked without
     /// shift, which is what shift extends away from.
     anchor: Option<u32>,
+    /// The tracks whose stems are showing under them.
+    ///
+    /// Empty when the window opens. A kit is three more lines for every
+    /// record that has one, and a crate dug through with them all out is
+    /// mostly stems; they are a click away, and opened when they are wanted.
+    open_kits: std::collections::HashSet<u32>,
     /// The three-band waveform of the selected track, once it has been read.
     waveform: Option<(u32, Vec<u8>)>,
     /// Which part of the selected track's waveform is showing. Reset with the
@@ -586,6 +592,11 @@ impl WhichCue {
 /// half from the old state and half from the new.
 enum Pending {
     Select(u32),
+    /// Show a track's stems under it, or hide them.
+    Fold {
+        id: u32,
+        open: bool,
+    },
     Forget(u32),
     /// Take a track out of one playlist, by name. The name is carried rather
     /// than read at the time so that the list the menu was opened on is the
@@ -829,8 +840,15 @@ impl Edit {
 /// One line of the browser: a track, or a stem companion under one.
 struct Row {
     track: Track,
-    /// Companions are drawn indented, in the dim colour.
-    indented: bool,
+    /// Where it sits in the tree. Companions are drawn indented, in the dim
+    /// colour.
+    branch: rows::Branch,
+}
+
+impl Row {
+    fn indented(&self) -> bool {
+        self.branch == rows::Branch::Stem
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -923,6 +941,7 @@ impl App {
             selected: None,
             marked: std::collections::HashSet::new(),
             anchor: None,
+            open_kits: std::collections::HashSet::new(),
             waveform: None,
             zoom: wave::Zoom::default(),
             envelopes: None,
@@ -1072,6 +1091,12 @@ impl App {
         #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_SELECT_FIRST").is_some() {
             app.selected = app.library.tracks.first().map(|t| t.id);
+        }
+        // Every kit open, since a picture of the list cannot click an arrow.
+        #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_OPEN_KITS").is_some() {
+            app.open_kits = app.library.tracks.iter().map(|t| t.id).collect();
+            app.rebuild();
         }
         #[cfg(feature = "screenshot")]
         if let Some(which) = std::env::var_os("BOOTH_OPEN_SHEET") {
@@ -1477,9 +1502,16 @@ impl App {
         self.rows.clear();
         for track in in_view {
             let companions = self.library.companions(&track);
-            self.rows.push(Row { track, indented: false });
-            for companion in companions {
-                self.rows.push(Row { track: companion, indented: true });
+            let branch = match (companions.is_empty(), self.open_kits.contains(&track.id)) {
+                (true, _) => rows::Branch::Leaf,
+                (false, false) => rows::Branch::Closed,
+                (false, true) => rows::Branch::Open,
+            };
+            self.rows.push(Row { track, branch });
+            if branch == rows::Branch::Open {
+                for companion in companions {
+                    self.rows.push(Row { track: companion, branch: rows::Branch::Stem });
+                }
             }
         }
 
@@ -1493,7 +1525,7 @@ impl App {
 
         crate::debug!(
             "listed {} of {} ({}) by {} in {:.1} ms{}",
-            self.rows.iter().filter(|row| !row.indented).count(),
+            self.rows.iter().filter(|row| !row.indented()).count(),
             plural(self.library.tracks.len(), "track"),
             plural(self.rows.len(), "row"),
             self.sort.column.name(),
@@ -1743,6 +1775,50 @@ impl App {
         }
     }
 
+    /// Show a track's stems under it, or hide them.
+    ///
+    /// Hiding them from under the cursor moves the cursor to the record, the
+    /// same move a click on it makes: the position carries, and a deck that
+    /// was playing the stem plays the record from there. Left on the stem,
+    /// the deck would be playing a line nobody can see, and Space would put
+    /// the record on rather than pause what is sounding.
+    ///
+    /// The list is not rebuilt here; whoever asked relists.
+    fn fold(&mut self, id: u32, open: bool) {
+        if open {
+            self.open_kits.insert(id);
+            return;
+        }
+        self.open_kits.remove(&id);
+        let under = |row: u32| row != id && crate::library::family(row) == id;
+        if self.selected.is_some_and(under) {
+            self.select(id);
+            self.marked.insert(id);
+        }
+        self.marked.retain(|&row| !under(row));
+        if self.anchor.is_some_and(under) {
+            self.anchor = Some(id);
+        }
+    }
+
+    /// The arrow keys' other two directions: into a kit and back out of it.
+    fn fold_selected(&mut self, open: bool) {
+        let Some(row) = self.selected.and_then(|id| self.rows.iter().find(|r| r.track.id == id))
+        else {
+            return;
+        };
+        let id = row.track.id;
+        match (row.branch, open) {
+            (rows::Branch::Closed, true) => self.pending.push(Pending::Fold { id, open }),
+            (rows::Branch::Open, false) => self.pending.push(Pending::Fold { id, open }),
+            // Back out of a stem is to its record, closing the kit behind.
+            (rows::Branch::Stem, false) => {
+                self.pending.push(Pending::Fold { id: crate::library::family(id), open })
+            }
+            _ => {}
+        }
+    }
+
     /// Make one row the whole selection, and the point a range grows from.
     fn mark_only(&mut self, id: u32) {
         self.marked.clear();
@@ -1769,7 +1845,7 @@ impl App {
             // Companions come along with their parents rather than on their
             // own: a range drawn down the list sweeps over them, and a stem
             // is not a thing to analyse or put on a drive by itself.
-            .filter(|row| !row.indented)
+            .filter(|row| !row.indented())
             .map(|row| row.track.id)
             .collect();
     }
@@ -1791,7 +1867,7 @@ impl App {
             // Companions are not selected on their own: a stem is not a thing
             // to analyse or put on a drive by itself, and it goes wherever its
             // parent goes.
-            .filter(|row| !row.indented)
+            .filter(|row| !row.indented())
             .map(|row| row.track.id)
             .collect();
         self.anchor = self.selected.or_else(|| self.rows.first().map(|row| row.track.id));
@@ -1817,7 +1893,7 @@ impl App {
             true => self
                 .rows
                 .iter()
-                .filter(|row| !row.indented && self.marked.contains(&row.track.id))
+                .filter(|row| !row.indented() && self.marked.contains(&row.track.id))
                 .filter(|row| wanted(&row.track))
                 .map(|row| row.track.id)
                 .collect(),
@@ -1963,7 +2039,7 @@ impl App {
     fn showing(&self, wanted: impl Fn(&Track) -> bool) -> Vec<u32> {
         self.rows
             .iter()
-            .filter(|row| !row.indented && wanted(&row.track))
+            .filter(|row| !row.indented() && wanted(&row.track))
             .map(|row| row.track.id)
             .collect()
     }
@@ -4826,8 +4902,8 @@ impl App {
         std::mem::take(&mut self.sheet)
     }
 
-    /// The keys that make the browser a browser: arrows to dig, and one
-    /// shortcut to the bar.
+    /// The keys that make the browser a browser: arrows to dig, and to open
+    /// and close a kit, and one shortcut to the bar.
     fn keys(&mut self, ctx: &egui::Context) {
         let typing = ctx.memory(|m| m.focused().is_some());
         ctx.input_mut(|i| {
@@ -4854,6 +4930,12 @@ impl App {
             }
             if i.key_pressed(egui::Key::ArrowUp) {
                 self.step(-1, extend);
+            }
+            if i.key_pressed(egui::Key::ArrowRight) {
+                self.fold_selected(true);
+            }
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                self.fold_selected(false);
             }
             if i.key_pressed(egui::Key::Space) {
                 if let Some(id) = self.selected {
@@ -5160,7 +5242,10 @@ impl App {
                         let shown = if self.query.has_errors() {
                             "unknown term".to_string()
                         } else {
-                            format!("{} showing", self.rows.iter().filter(|r| !r.indented).count())
+                            format!(
+                                "{} showing",
+                                self.rows.iter().filter(|r| !r.indented()).count()
+                            )
                         };
                         ui.label(RichText::new(shown).font(theme::mono(11.5)).color(color));
                     }
@@ -6070,7 +6155,7 @@ impl App {
             true => self
                 .rows
                 .iter()
-                .filter(|row| !row.indented && self.marked.contains(&row.track.id))
+                .filter(|row| !row.indented() && self.marked.contains(&row.track.id))
                 .map(|row| row.track.id)
                 .collect(),
             false => Vec::new(),
@@ -6100,7 +6185,7 @@ impl App {
                 playlists: &playlist_names,
                 dragging: &carrying,
             };
-            if let Some(what) = rows::row(ui, &line.track, line.indented, selected, widths, menu) {
+            if let Some(what) = rows::row(ui, &line.track, line.branch, selected, widths, menu) {
                 hit = Some((line.track.id, what));
             }
         }
@@ -6108,7 +6193,7 @@ impl App {
             // A right-click does not move the selection. The menu names the
             // track it will act on, and stealing the selection would throw away
             // whatever is loaded on the deck to run an errand on something else.
-            let selects = !matches!(what, rows::Hit::Chose(_));
+            let selects = !matches!(what, rows::Hit::Chose(_) | rows::Hit::Folded);
             // Says whether picking this row already handed it the deck, which
             // it does when the row is another part of what is playing.
             let carried = selects && self.select(id);
@@ -6151,6 +6236,10 @@ impl App {
                     rows::Action::AddToNew => Pending::NamePlaylistFor(vec![id]),
                     rows::Action::Forget => Pending::Forget(id),
                 }),
+                rows::Hit::Folded => {
+                    let open = !self.open_kits.contains(&id);
+                    self.pending.push(Pending::Fold { id, open });
+                }
                 rows::Hit::Clicked => {}
             }
         }
@@ -7727,6 +7816,10 @@ impl App {
                         }
                         relist = true;
                     }
+                }
+                Pending::Fold { id, open } => {
+                    self.fold(id, open);
+                    relist = true;
                 }
                 Pending::Forget(id) => {
                     self.library.remove(id);
@@ -18739,7 +18832,7 @@ mod tests {
         fn chosen(app: &App) -> Vec<u32> {
             app.rows
                 .iter()
-                .filter(|row| !row.indented && app.marked.contains(&row.track.id))
+                .filter(|row| !row.indented() && app.marked.contains(&row.track.id))
                 .map(|row| row.track.id)
                 .collect()
         }
@@ -18980,6 +19073,11 @@ mod tests {
         fn browsing(name: &str, n: u32) -> Harness<'static, App> {
             let mut app = listing(name, n);
             app.selected = app.rows.first().map(|row| row.track.id);
+            browse(app)
+        }
+
+        /// The same window, on an app made some other way.
+        fn browse(app: App) -> Harness<'static, App> {
             let mut harness = Harness::new_ui_state(
                 |ui, app: &mut App| {
                     let ctx = ui.ctx().clone();
@@ -19197,6 +19295,153 @@ mod tests {
             // another record's position.
             assert_eq!(carry(Some(track), vocals, Some((other, 12.0, true))), Carry::Hold);
             assert_eq!(carry(Some(track), vocals, None), Carry::Hold);
+        }
+
+        /// A record's stems are under an arrow, closed until somebody opens it.
+        mod folding_a_kit {
+            use super::*;
+            use crate::library::{companion_id, Role};
+            use rows::Branch;
+
+            /// Two tracks, the second with a rendered kit and under the cursor.
+            ///
+            /// The second rather than the first, because a list that loses
+            /// its cursor puts it on the first line, and a cursor that landed
+            /// on the record for that reason would pass for one that was put
+            /// there.
+            fn with_a_kit(name: &str) -> (App, u32, u32) {
+                let mut app = listing(name, 2);
+                let (first, id) = (app.rows[0].track.id, app.rows[1].track.id);
+                let kit = &mut app.library.get_mut(id).unwrap().stems;
+                kit.vocals = Some("/stems/2-vocals.mp3".into());
+                kit.drums = Some("/stems/2-drums.mp3".into());
+                kit.melody = Some("/stems/2-melody.mp3".into());
+                app.rebuild();
+                app.select(id);
+                app.mark_only(id);
+                (app, first, id)
+            }
+
+            fn listed(app: &App) -> Vec<(u32, Branch)> {
+                app.rows.iter().map(|row| (row.track.id, row.branch)).collect()
+            }
+
+            #[test]
+            fn a_record_with_stems_is_listed_with_them_hidden() {
+                let (app, first, id) = with_a_kit("hidden");
+                assert_eq!(listed(&app), [(first, Branch::Leaf), (id, Branch::Closed)]);
+            }
+
+            #[test]
+            fn an_open_kit_lists_its_stems_under_the_record_in_kit_order() {
+                let (mut app, first, id) = with_a_kit("open");
+                app.fold(id, true);
+                app.rebuild();
+                assert_eq!(
+                    listed(&app),
+                    [
+                        (first, Branch::Leaf),
+                        (id, Branch::Open),
+                        (companion_id(id, Role::Vocals), Branch::Stem),
+                        (companion_id(id, Role::Drums), Branch::Stem),
+                        (companion_id(id, Role::Melody), Branch::Stem),
+                    ]
+                );
+
+                app.fold(id, false);
+                app.rebuild();
+                assert_eq!(listed(&app), [(first, Branch::Leaf), (id, Branch::Closed)]);
+            }
+
+            #[test]
+            fn closing_a_kit_from_under_the_cursor_puts_the_cursor_on_its_record() {
+                let (mut app, _, id) = with_a_kit("cursor");
+                app.fold(id, true);
+                app.rebuild();
+                let drums = companion_id(id, Role::Drums);
+                app.select(drums);
+                app.mark_only(drums);
+                app.playhead_ms = Some(40_000);
+
+                app.fold(id, false);
+                app.rebuild();
+                assert_eq!(app.selected, Some(id), "the cursor did not go to the record");
+                assert_eq!(chosen(&app), [id]);
+                assert_eq!(app.anchor, Some(id), "a shift-range would grow from a hidden line");
+                assert_eq!(
+                    app.playhead_ms,
+                    Some(40_000),
+                    "the same recording lost its place, as if a different record were chosen"
+                );
+            }
+
+            #[test]
+            fn closing_a_kit_leaves_the_cursor_on_another_track_where_it_was() {
+                let (mut app, first, id) = with_a_kit("elsewhere");
+                app.fold(id, true);
+                app.rebuild();
+                app.select(first);
+                app.mark_only(first);
+
+                app.fold(id, false);
+                app.rebuild();
+                assert_eq!(app.selected, Some(first));
+                assert_eq!(chosen(&app), [first]);
+            }
+
+            #[test]
+            fn right_opens_the_kit_under_the_cursor_and_left_from_a_stem_closes_it() {
+                let (app, _, id) = with_a_kit("keys");
+                let mut harness = browse(app);
+
+                press(&mut harness, egui::Key::ArrowRight, egui::Modifiers::NONE);
+                assert_eq!(harness.state().rows.len(), 5, "{:?}", listed(harness.state()));
+
+                // Into the kit with the arrow that digs, since its stems are
+                // now lines in the list like any other.
+                press(&mut harness, egui::Key::ArrowDown, egui::Modifiers::NONE);
+                let vocals = companion_id(id, Role::Vocals);
+                assert_eq!(harness.state().selected, Some(vocals));
+
+                press(&mut harness, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+                assert_eq!(harness.state().rows.len(), 2, "{:?}", listed(harness.state()));
+                assert_eq!(harness.state().selected, Some(id));
+            }
+
+            #[test]
+            fn left_and_right_on_a_track_without_stems_do_nothing() {
+                let (mut app, first, _) = with_a_kit("no kit");
+                app.select(first);
+                app.mark_only(first);
+                let mut harness = browse(app);
+
+                for key in [egui::Key::ArrowRight, egui::Key::ArrowLeft] {
+                    press(&mut harness, key, egui::Modifiers::NONE);
+                    assert_eq!(harness.state().rows.len(), 2, "{key:?} changed the list");
+                    assert_eq!(harness.state().selected, Some(first), "{key:?} moved the cursor");
+                }
+            }
+
+            #[test]
+            fn clicking_the_arrow_opens_the_kit_without_choosing_the_record() {
+                let (mut app, first, id) = with_a_kit("click");
+                app.select(first);
+                app.mark_only(first);
+                let mut harness = browse(app);
+
+                harness.get_by_label("Show the stems of Track 02").click();
+                harness.run();
+                assert_eq!(harness.state().rows.len(), 5, "{:?}", listed(harness.state()));
+                assert_eq!(
+                    harness.state().selected,
+                    Some(first),
+                    "opening the kit chose the record, and would have taken the deck to it"
+                );
+
+                harness.get_by_label("Hide the stems of Track 02").click();
+                harness.run();
+                assert_eq!(listed(harness.state()), [(first, Branch::Leaf), (id, Branch::Closed)]);
+            }
         }
 
         #[test]
@@ -20649,7 +20894,7 @@ mod tests {
             app.rebuild();
 
             let showing: Vec<u32> =
-                app.rows.iter().filter(|row| !row.indented).map(|row| row.track.id).collect();
+                app.rows.iter().filter(|row| !row.indented()).map(|row| row.track.id).collect();
             assert_eq!(showing, ids, "the list showed fewer than the count did");
         }
 
@@ -20677,7 +20922,7 @@ mod tests {
             }
 
             let showing: Vec<u32> =
-                app.rows.iter().filter(|row| !row.indented).map(|row| row.track.id).collect();
+                app.rows.iter().filter(|row| !row.indented()).map(|row| row.track.id).collect();
             assert_eq!(showing.len(), 3, "the list did not follow the drops: {showing:?}");
             assert_eq!(showing, ids);
         }

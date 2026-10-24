@@ -1,4 +1,4 @@
-//! The list itself: one line per track, stem companions indented under theirs.
+//! The list itself: one line per track, stem companions folded away under theirs.
 //!
 //! Drawn by hand rather than with a table widget because every column here has
 //! a fixed job — the numbers are tabular and monospaced so a crate can be
@@ -324,6 +324,12 @@ impl Widths {
 const ROW_HEIGHT: f32 = 19.0;
 /// How far a stem companion is indented.
 const INDENT: f32 = 14.0;
+/// The strip at the front of the first column that holds a kit's arrow.
+///
+/// Kept on every line, not only on the ones with a kit, so the first column
+/// starts at the same place down the whole list and a record with stems does
+/// not stand out of it by its arrow's width.
+const TWISTY: f32 = 16.0;
 
 /// What the header was asked to do this frame.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -384,7 +390,7 @@ pub fn header_row(ui: &mut Ui, layout: &mut Layout, widths: &Widths, sort: Sort)
     let pointer = response.hover_pos();
     let mut x = rect.left();
 
-    for (column, width) in shown.iter().copied() {
+    for (at, (column, width)) in shown.iter().copied().enumerate() {
         // The whole column's width is the target, not just the word: a
         // ten-point label is a small thing to hit twice in a row.
         let area = Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(width, rect.height()));
@@ -403,8 +409,11 @@ pub fn header_row(ui: &mut Ui, layout: &mut Layout, widths: &Widths, sort: Sort)
             true => format!("{} {}", theme::label_text(column.name()), sort.arrow()),
             false => theme::label_text(column.name()),
         };
+        // Over the first column's names rather than over the strip of arrows
+        // in front of them.
+        let lead = if at == 0 { TWISTY } else { 0.0 };
         painter.text(
-            egui::pos2(x, rect.center().y),
+            egui::pos2(x + lead, rect.center().y),
             egui::Align2::LEFT_CENTER,
             text,
             theme::sans(theme::LABEL),
@@ -597,6 +606,21 @@ pub enum Hit {
     Opened,
     /// Picked something out of the right-click menu.
     Chose(Action),
+    /// Clicked the arrow, to show or hide its stems.
+    Folded,
+}
+
+/// Where a line sits in the tree.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Branch {
+    /// A track with no stems to show.
+    Leaf,
+    /// A track whose stems are hidden under it.
+    Closed,
+    /// A track whose stems are showing under it.
+    Open,
+    /// One of those stems.
+    Stem,
 }
 
 /// What the menu needs to know that the row itself cannot see.
@@ -621,11 +645,12 @@ pub struct Menu<'a> {
 pub fn row(
     ui: &mut Ui,
     track: &Track,
-    indented: bool,
+    branch: Branch,
     selected: bool,
     widths: &Widths,
     menu: Menu<'_>,
 ) -> Option<Hit> {
+    let indented = branch == Branch::Stem;
     let (rect, response) = ui
         .allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click_and_drag());
     let response = response.on_hover_text(match track.path.parent() {
@@ -671,12 +696,35 @@ pub fn row(
             ui.label(egui::RichText::new(carrying).color(theme::amber()).size(11.0));
         });
     }
+    // The arrow is a target of its own, laid over the row after it so that a
+    // click on it opens the kit rather than selecting the record: opening a
+    // folder to look in it is not choosing the folder.
+    let fold = matches!(branch, Branch::Closed | Branch::Open).then(|| {
+        let open = branch == Branch::Open;
+        let target = Rect::from_min_size(rect.left_top(), Vec2::new(TWISTY, ROW_HEIGHT));
+        let fold = ui.interact(target, ui.id().with(("fold", track.id)), Sense::click());
+        let what = if open { "Hide" } else { "Show" };
+        fold.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                format!("{what} the stems of {}", track.display_title()),
+            )
+        });
+        let keys = if open { "←" } else { "→" };
+        fold.on_hover_text(format!("{what} its stems ({keys})"))
+    });
     let painter = ui.painter_at(rect);
 
+    let hovered = response.hovered() || fold.as_ref().is_some_and(|fold| fold.hovered());
     if selected {
         painter.rect_filled(rect, 0.0, theme::amber().gamma_multiply(0.14));
-    } else if response.hovered() {
+    } else if hovered {
         painter.rect_filled(rect, 0.0, theme::booth_2());
+    }
+    if let Some(fold) = &fold {
+        let color = if fold.hovered() { theme::amber() } else { theme::dim() };
+        twisty(&painter, fold.rect.center(), branch == Branch::Open, color);
     }
     painter.line_segment(
         [egui::pos2(rect.left(), rect.bottom()), egui::pos2(rect.right(), rect.bottom())],
@@ -686,20 +734,28 @@ pub fn row(
     // A companion is dim, and the whole line is dim rather than only its name:
     // it is one thing that belongs under another, not a track with a long title.
     let ink = if indented { theme::dim() } else { theme::text() };
-    let mut x = rect.left();
+    let mut left = rect.left();
 
     // Whichever columns are on, in whatever width they were left at. The row
     // walks the same list the header drew, so a column turned off here is a
     // column with nothing under its name rather than a gap in the middle.
-    for (column, width) in widths.iter() {
+    for (at, (column, full)) in widths.iter().enumerate() {
+        // The tree is drawn in whichever column comes first, since any of
+        // them can be turned off: past the arrow's strip, and a step further
+        // in for a stem.
+        let lead = match (at, indented) {
+            (0, false) => TWISTY,
+            (0, true) => TWISTY + INDENT,
+            _ => 0.0,
+        };
+        let (x, width) = (left + lead, full - lead);
         match column {
             Column::Artist => {
                 let artist = match indented {
                     true => format!("↳ {}", track.artist),
                     false => track.artist.clone(),
                 };
-                let indent = if indented { INDENT } else { 0.0 };
-                text(&painter, rect, x + indent, width - indent, &artist, ink, false);
+                text(&painter, rect, x, width, &artist, ink, false);
             }
             Column::Title => text(&painter, rect, x, width, &track.display_title(), ink, false),
             Column::Bpm => {
@@ -748,7 +804,7 @@ pub fn row(
                 );
             }
         }
-        x += width;
+        left += full;
     }
 
     // A companion is a file the parent owns: there is nothing to analyse, look
@@ -778,6 +834,9 @@ pub fn row(
     };
     if let Some(action) = chosen {
         return Some(Hit::Chose(action));
+    }
+    if fold.is_some_and(|fold| fold.clicked()) {
+        return Some(Hit::Folded);
     }
 
     // A double click is also a click, so the double is checked first: opening a
@@ -1015,6 +1074,25 @@ fn meter(painter: &egui::Painter, rect: Rect, x: f32, energy: u8) {
         let filled = step < energy;
         painter.rect_filled(block, 0.0, if filled { theme::amber() } else { theme::rule() });
     }
+}
+
+/// The arrow on a record with stems: pointing at the record while they are
+/// hidden, and down at them while they show.
+fn twisty(painter: &egui::Painter, center: egui::Pos2, open: bool, color: Color32) {
+    let (r, h) = (4.0, 3.5);
+    let points = match open {
+        true => vec![
+            center + Vec2::new(-r, -h / 2.0),
+            center + Vec2::new(r, -h / 2.0),
+            center + Vec2::new(0.0, h),
+        ],
+        false => vec![
+            center + Vec2::new(-h / 2.0, -r),
+            center + Vec2::new(h, 0.0),
+            center + Vec2::new(-h / 2.0, r),
+        ],
+    };
+    painter.add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
 }
 
 /// A bordered label, for what a row's stems are.
