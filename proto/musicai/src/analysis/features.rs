@@ -3,9 +3,9 @@
 //! Beat tracking, phrase detection and cue placement all want the same handful
 //! of things: how much the spectrum changed between frames, where the energy
 //! sits, and how centred it is in the stereo image. Computing them together
-//! costs one FFT pair per frame and keeps a few floats per frame afterwards,
-//! rather than a spectrogram — a five-minute track measures out at about a
-//! megabyte instead of a couple of hundred.
+//! costs one FFT pair per frame and keeps a few dozen floats per frame
+//! afterwards, rather than a spectrogram — a five-minute track measures out at
+//! about four megabytes instead of a couple of hundred.
 
 use realfft::num_complex::Complex32;
 use realfft::{RealFftPlanner, RealToComplex};
@@ -31,6 +31,20 @@ const VOICE_LOW_HZ: f32 = 200.0;
 const VOICE_HIGH_HZ: f32 = 4_000.0;
 /// Kick drums and bass lines, for finding the downbeat.
 const LOW_HZ: f32 = 200.0;
+/// Where a clap or a snare cracks: on the 2 and the 4, in most dance music.
+const MID_LOW_HZ: f32 = 1_000.0;
+const MID_HIGH_HZ: f32 = 5_000.0;
+/// The twelve pitch classes, for reading a chord or a bass note.
+pub const PITCHES: usize = 12;
+/// Where the chords are read: above the bass and below the hiss. Below about
+/// 400 Hz a bin of this window is wider than a semitone, so the bottom of
+/// this is rough; it is a chord's change that is wanted, not its name.
+const CHORD_LOW_HZ: f32 = 80.0;
+const CHORD_HIGH_HZ: f32 = 2_000.0;
+/// Where the bass note is read. Half a dozen bins at this window, each a
+/// pitch class or two: enough to hear the note move, not to name it.
+const BASS_LOW_HZ: f32 = 30.0;
+const BASS_HIGH_HZ: f32 = 160.0;
 /// The energy measure stops here. Above it is the first thing a lossy codec
 /// throws away, and counting it would make the same record score lower as a
 /// 192k MP3 than as a FLAC — a fact about the file, not about the music.
@@ -46,6 +60,14 @@ pub struct Features {
     /// The same, restricted to the bottom of the spectrum. A kick lands here
     /// and a hi-hat does not, which is how the downbeat is found.
     pub low_flux: Vec<f32>,
+    /// The same, from 1 to 5 kHz: a clap's crack or a snare's, which in most
+    /// dance music is on the 2 and the 4 and so says where the 1 is not.
+    pub mid_flux: Vec<f32>,
+    /// How much of each of the [`PITCHES`] pitch classes each frame holds from
+    /// 80 Hz to 2 kHz, frame-major: the chords, for hearing them change.
+    pub chroma: Vec<f32>,
+    /// The same from 30 to 160 Hz: the bass note.
+    pub bass: Vec<f32>,
     /// Onset strength per bin, over the part of the spectrum every format
     /// keeps: the same quantity as [`Features::flux`] in units that mean
     /// something on their own.
@@ -74,6 +96,16 @@ impl Features {
     /// The band energies of one frame.
     pub fn band_frame(&self, frame: usize) -> &[f32] {
         &self.bands[frame * BANDS..(frame + 1) * BANDS]
+    }
+
+    /// The chord profile of one frame.
+    pub fn chroma_frame(&self, frame: usize) -> &[f32] {
+        &self.chroma[frame * PITCHES..(frame + 1) * PITCHES]
+    }
+
+    /// The bass profile of one frame.
+    pub fn bass_frame(&self, frame: usize) -> &[f32] {
+        &self.bass[frame * PITCHES..(frame + 1) * PITCHES]
     }
 
     /// Which frame a moment in the track falls in.
@@ -114,6 +146,10 @@ pub fn extract(audio: &Audio) -> Features {
     let band_of = band_map(bin_hz, bins);
     let voice_bins = bin_range(bin_hz, bins, VOICE_LOW_HZ, VOICE_HIGH_HZ);
     let low_bins = bin_range(bin_hz, bins, 0.0, LOW_HZ);
+    let mid_bins = bin_range(bin_hz, bins, MID_LOW_HZ, MID_HIGH_HZ);
+    let chord_bins = bin_range(bin_hz, bins, CHORD_LOW_HZ, CHORD_HIGH_HZ);
+    let bass_bins = bin_range(bin_hz, bins, BASS_LOW_HZ, BASS_HIGH_HZ);
+    let pitch_of: Vec<usize> = (0..bins).map(|bin| pitch_class(bin as f32 * bin_hz)).collect();
     let core_bins = bin_range(bin_hz, bins, 0.0, CORE_HZ);
 
     let frames = if audio.frames() < N_FFT { 1 } else { (audio.frames() - N_FFT) / HOP + 1 };
@@ -121,6 +157,9 @@ pub fn extract(audio: &Audio) -> Features {
         frame_rate: audio.sample_rate as f64 / HOP as f64,
         flux: Vec::with_capacity(frames),
         low_flux: Vec::with_capacity(frames),
+        mid_flux: Vec::with_capacity(frames),
+        chroma: Vec::with_capacity(frames * PITCHES),
+        bass: Vec::with_capacity(frames * PITCHES),
         density: Vec::with_capacity(frames),
         bands: Vec::with_capacity(frames * BANDS),
         level: Vec::with_capacity(frames),
@@ -148,6 +187,8 @@ pub fn extract(audio: &Audio) -> Features {
         let mut total = 0.0f64;
         let mut voiced = 0.0f64;
         let mut band_energy = [0.0f64; BANDS];
+        let mut chord = [0.0f32; PITCHES];
+        let mut bass = [0.0f32; PITCHES];
 
         for bin in 0..bins {
             let mid = mid_spec[bin].norm_sqr() * scale;
@@ -163,16 +204,28 @@ pub fn extract(audio: &Audio) -> Features {
                 let centred = mid / (mid + side + f32::EPSILON);
                 voiced += (mid * centred) as f64;
             }
+            // Magnitude rather than power, as the key's chromagram does: how
+            // present a note is, not how loud the loudest one is.
+            if bin >= chord_bins.0 && bin < chord_bins.1 {
+                chord[pitch_of[bin]] += power.sqrt();
+            }
+            if bin >= bass_bins.0 && bin < bass_bins.1 {
+                bass[pitch_of[bin]] += power.sqrt();
+            }
         }
 
         let mut flux = 0.0f32;
         let mut low_flux = 0.0f32;
+        let mut mid_flux = 0.0f32;
         let mut core_flux = 0.0f32;
         for bin in 0..bins {
             let rise = (current[bin] - previous[bin]).max(0.0);
             flux += rise;
             if bin < low_bins.1 {
                 low_flux += rise;
+            }
+            if bin >= mid_bins.0 && bin < mid_bins.1 {
+                mid_flux += rise;
             }
             if bin < core_bins.1 {
                 core_flux += rise;
@@ -185,6 +238,9 @@ pub fn extract(audio: &Audio) -> Features {
         }
         features.flux.push(flux);
         features.low_flux.push(low_flux);
+        features.mid_flux.push(mid_flux);
+        features.chroma.extend_from_slice(&chord);
+        features.bass.extend_from_slice(&bass);
         features.density.push(core_flux / core_bins.1.max(1) as f32);
         features.level.push(10.0 * ((total / bins as f64) + 1e-12).log10() as f32);
         features.voice.push((voiced / (total + 1e-12)) as f32);
@@ -196,6 +252,9 @@ pub fn extract(audio: &Audio) -> Features {
         *first = 0.0;
     }
     if let Some(first) = features.low_flux.first_mut() {
+        *first = 0.0;
+    }
+    if let Some(first) = features.mid_flux.first_mut() {
         *first = 0.0;
     }
     if let Some(first) = features.density.first_mut() {
@@ -226,6 +285,12 @@ fn band_map(bin_hz: f32, bins: usize) -> Vec<usize> {
             ((position * BANDS as f32) as usize).min(BANDS - 1)
         })
         .collect()
+}
+
+/// The pitch class nearest a frequency, 0 for C through 11 for B.
+fn pitch_class(hz: f32) -> usize {
+    let midi = 69.0 + 12.0 * (hz.max(1.0) / 440.0).log2();
+    (midi.round() as i32).rem_euclid(PITCHES as i32) as usize
 }
 
 fn bin_range(bin_hz: f32, bins: usize, low_hz: f32, high_hz: f32) -> (usize, usize) {
@@ -312,6 +377,49 @@ mod tests {
         let kick = low_flux(60.0);
         let hat = low_flux(9_000.0);
         assert!(kick > hat * 5.0, "kick {kick} should dwarf hat {hat} in the low band");
+    }
+
+    #[test]
+    fn a_clap_moves_the_middle_band_far_more_than_a_hat_or_a_bass_note() {
+        let mid_flux = |hz: f32| peak(&extract(&tone_from(hz, 0.3, 1.0)).mid_flux);
+        let clap = mid_flux(2_000.0);
+        // Measured at 156 against 39 and 4.6. The hat's share is the click
+        // of a tone that starts from nothing in one sample, which spreads
+        // across the whole spectrum for a frame.
+        let (hat, bass) = (mid_flux(9_000.0), mid_flux(60.0));
+        assert!(clap > hat * 3.0, "a hat moved it: {hat} against {clap}");
+        assert!(clap > bass * 10.0, "a bass note moved it: {bass} against {clap}");
+    }
+
+    #[test]
+    fn a_chord_note_is_heard_in_its_own_pitch_class() {
+        // C an octave above middle C: both bins either side of it are nearer
+        // C than anything else, so this is the window's resolution and not luck.
+        let f = extract(&tone_from(523.25, 0.0, 1.0));
+        let profile = f.chroma_frame(f.frames() / 2);
+        let loudest = (0..PITCHES).max_by(|a, b| profile[*a].total_cmp(&profile[*b])).unwrap();
+        assert_eq!(loudest, 0, "{profile:?}");
+    }
+
+    #[test]
+    fn the_bass_profile_moves_with_a_note_a_seventh_up_and_holds_on_the_same_one() {
+        // Half a dozen bins under 160 Hz cannot name a bass note, and nothing
+        // asks them to: what the downbeat needs is to hear it change. They hear
+        // a move of a fifth or more — A1 to G2 measured 0.31 — and not much
+        // less: A1 to D2, a fourth, measured 0.003, both notes falling across
+        // the same two bins.
+        let profile = |hz: f32, at: f64| {
+            let f = extract(&tone_from(hz, 0.0, 2.0));
+            f.bass_frame(f.frame_at(at)).to_vec()
+        };
+        let apart = |a: &[f32], b: &[f32]| {
+            let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+            let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            1.0 - dot / (norm(a) * norm(b))
+        };
+        let a = profile(55.0, 0.5);
+        assert!(apart(&a, &profile(55.0, 1.5)) < 0.01, "the same note read differently");
+        assert!(apart(&a, &profile(98.0, 0.5)) > 0.2, "a seventh up read as the same note");
     }
 
     #[test]

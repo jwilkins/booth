@@ -15,11 +15,12 @@
 //! See [`hold`].
 //!
 //! The downbeat is a separate question, answered separately: of the four
-//! possible places the bar could start, the one where the kicks are.
+//! possible places the bar could start, the one the kick or the harmony is
+//! surer of, among those the backbeat leaves. See [`downbeat`].
 
 use crate::export::{Beat, BeatGrid};
 
-use super::features::Features;
+use super::features::{Features, PITCHES};
 
 /// The slowest and fastest tempo considered. Outside this a track is better
 /// described at half or double the rate, and every DJ tool makes the same
@@ -64,8 +65,8 @@ pub struct Beats {
     pub downbeat: Downbeat,
 }
 
-/// The evidence for which beat is the one: how hard the low end hit on each
-/// beat the tracker found, and which of the four positions that favoured.
+/// The evidence for which beat is the one, beat by beat, what it came to, and
+/// which of it decided.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Downbeat {
     /// Each beat of the grid: milliseconds from the start of the track.
@@ -73,28 +74,193 @@ pub struct Downbeat {
     /// The low band's sharpest onset around each of those beats — the kick,
     /// where there is one.
     pub kicks: Vec<f32>,
+    /// The sharpest onset from 1 to 5 kHz around each — a clap or a snare,
+    /// where there is one.
+    pub claps: Vec<f32>,
+    /// How far the bass note moved across each beat: the two beats before it
+    /// against the two from it.
+    pub bass_changes: Vec<f32>,
+    /// How far the chord moved across each: the bar before it against the bar
+    /// from it.
+    pub chord_changes: Vec<f32>,
     /// Which of the four positions won: the grid's beats `phase`, `phase + 4`,
     /// `phase + 8` and so on are the downbeats.
     pub phase: usize,
+    /// What it was decided by.
+    pub by: DecidedBy,
+}
+
+/// Which evidence placed the bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DecidedBy {
+    /// Under eight beats: the first is taken as the one.
+    #[default]
+    TooFew,
+    /// The kick: of the positions the backbeat left, it was the surer of the
+    /// two, or nothing pitched was heard to set against it.
+    Kick,
+    /// The harmony: of the positions the backbeat left, it was the surer.
+    Harmony,
 }
 
 impl Downbeat {
-    /// The kicks summed over each of the four positions in the bar, from the
-    /// grid's first beat. The largest is [`Downbeat::phase`].
-    pub fn strengths(&self) -> [f32; 4] {
-        self.strengths_over(0..self.kicks.len())
+    /// The kick at each of the four positions in the bar, counted from the
+    /// grid's first beat: the average over every beat in that position.
+    pub fn kick(&self) -> [f32; 4] {
+        means(&self.kicks, 0..self.kicks.len())
     }
 
-    /// The same over some of the beats, counted in the same fours, so
-    /// a stretch of the track can be seen to agree with the whole of it or not.
-    pub fn strengths_over(&self, beats: std::ops::Range<usize>) -> [f32; 4] {
-        let mut sums = [0.0f32; 4];
-        for i in beats.start..beats.end.min(self.kicks.len()) {
-            sums[i % 4] += self.kicks[i];
+    /// The claps, the same way.
+    pub fn claps(&self) -> [f32; 4] {
+        means(&self.claps, 0..self.claps.len())
+    }
+
+    /// The pair of positions the claps are on, if they are on one: `Some(0)`
+    /// for the first and third, `Some(1)` for the second and fourth. The 1
+    /// is on the other pair.
+    pub fn backbeat(&self) -> Option<usize> {
+        let claps = self.claps();
+        let (even, odd) = (claps[0] + claps[2], claps[1] + claps[3]);
+        if even > odd * BACKBEAT {
+            Some(0)
+        } else if odd > even * BACKBEAT {
+            Some(1)
+        } else {
+            None
         }
-        sums
+    }
+
+    /// How much the harmony changes at each of the four positions over some
+    /// of the beats: the bass's share of its change there and the chords'
+    /// share of theirs, added, so that each counts alike however large its
+    /// changes run. One that hardly moves at all over these beats counts for
+    /// nothing, since its shares would be shares of rounding: see
+    /// [`STILL_HARMONY`].
+    pub fn harmony_over(&self, beats: std::ops::Range<usize>) -> [f32; 4] {
+        let moving = |changes: &[f32]| {
+            let changes = self.changes_over(changes, beats.clone());
+            match changes.iter().sum::<f32>() / 4.0 >= STILL_HARMONY {
+                true => share(changes),
+                false => [0.0; 4],
+            }
+        };
+        let (bass, chords) = (moving(&self.bass_changes), moving(&self.chord_changes));
+        std::array::from_fn(|i| bass[i] + chords[i])
+    }
+
+    /// How far the bass note moves at each of the four positions, on average.
+    pub fn bass(&self) -> [f32; 4] {
+        self.changes_over(&self.bass_changes, 0..self.kicks.len())
+    }
+
+    /// How far the chord moves at each, on average.
+    pub fn chords(&self) -> [f32; 4] {
+        self.changes_over(&self.chord_changes, 0..self.kicks.len())
+    }
+
+    /// Some changes averaged by position over some beats, leaving out the bar
+    /// at either end where a chord's change is not measured, so the bass and
+    /// the chords are averaged over the same beats.
+    fn changes_over(&self, changes: &[f32], beats: std::ops::Range<usize>) -> [f32; 4] {
+        let end = self.kicks.len().saturating_sub(CHORD_SPAN);
+        means(changes, beats.start.max(CHORD_SPAN)..beats.end.min(end))
+    }
+
+    /// What one reading says at each of the four positions over some of the
+    /// beats, with the positions the backbeat rules out at zero.
+    pub fn reading_over(&self, by: DecidedBy, beats: std::ops::Range<usize>) -> [f32; 4] {
+        let mut reading = match by {
+            DecidedBy::TooFew | DecidedBy::Kick => means(&self.kicks, beats),
+            DecidedBy::Harmony => self.harmony_over(beats),
+        };
+        if let Some(claps) = self.backbeat() {
+            reading[claps] = 0.0;
+            reading[claps + 2] = 0.0;
+        }
+        reading
+    }
+
+    /// How far ahead one reading's strongest position is of the next of those
+    /// the backbeat left, over the whole track. `None` where it has nothing to
+    /// say.
+    pub fn lead_of(&self, by: DecidedBy) -> Option<f32> {
+        lead(self.reading_over(by, 0..self.kicks.len())).map(|(_, lead)| lead)
+    }
+
+    /// What the reading that decided says, over some of the beats. Its largest
+    /// over all of them is [`Downbeat::phase`].
+    pub fn scores_over(&self, beats: std::ops::Range<usize>) -> [f32; 4] {
+        self.reading_over(self.by, beats)
+    }
+
+    /// The same over every beat.
+    pub fn scores(&self) -> [f32; 4] {
+        self.scores_over(0..self.kicks.len())
+    }
+
+    /// How far ahead the winner is, by the reading that decided.
+    pub fn lead(&self) -> Option<f32> {
+        self.lead_of(self.by)
     }
 }
+
+/// Each position's average of some per-beat evidence, over some of the beats,
+/// counted in fours from the grid's first beat.
+///
+/// The average rather than the sum, because the positions do not get the same
+/// number of beats: on a 32-beat click track whose changes are measured from
+/// its third beat to its third from last, one position has eight and the rest
+/// seven, and that alone put it an eighth ahead.
+fn means(of: &[f32], beats: std::ops::Range<usize>) -> [f32; 4] {
+    let (mut sums, mut counts) = ([0.0f32; 4], [0usize; 4]);
+    for i in beats.start..beats.end.min(of.len()) {
+        sums[i % 4] += of[i];
+        counts[i % 4] += 1;
+    }
+    std::array::from_fn(|position| match counts[position] {
+        0 => 0.0,
+        count => sums[position] / count as f32,
+    })
+}
+
+/// Each of four sums as a share of all four.
+fn share(sums: [f32; 4]) -> [f32; 4] {
+    let total: f32 = sums.iter().sum();
+    match total > 0.0 {
+        true => sums.map(|sum| sum / total),
+        false => [0.0; 4],
+    }
+}
+
+/// The largest of four scores, and how far it is ahead of the next largest
+/// above zero.
+fn lead(scores: [f32; 4]) -> Option<(usize, f32)> {
+    let best = (0..4).fold(0, |a, b| if scores[b] > scores[a] { b } else { a });
+    let next = (0..4).filter(|&i| i != best).map(|i| scores[i]).fold(0.0f32, f32::max);
+    (next > 0.0).then(|| (best, scores[best] / next))
+}
+
+/// How many beats either side of each beat a bass note is heard over, and a
+/// chord: the bass moves on the beat and the chords by the bar.
+const BASS_SPAN: usize = 2;
+const CHORD_SPAN: usize = 4;
+
+/// How much more 1 to 5 kHz onset one pair of alternate positions has to have
+/// than the other before it is taken for a backbeat.
+///
+/// Measured on 25 CC records, the pairs fell into two groups with nothing
+/// between: thirteen 1.23 to 2.42 apart, and twelve 1.01 to 1.14, which lean
+/// either way — Signal's leans 1.10 against its own downbeat. The line is in
+/// the gap, a little nearer the noise; where in it is reasoned, not measured.
+const BACKBEAT: f32 = 1.18;
+
+/// How little the bass or the chords can change a beat, on average, and still
+/// be counted: a thousandth, as a cosine distance. A click track's chords
+/// change by two ten-thousandths a beat, which is rounding, and as shares of
+/// nothing those decided where its bar was; the stillest of 25 CC records,
+/// Heart Burn, changes by fifteen ten-thousandths in the bass and sixteen in
+/// the chords.
+const STILL_HARMONY: f32 = 0.001;
 
 /// Track the beats of a measured track.
 ///
@@ -540,33 +706,113 @@ fn hold(envelope: &[f32], period: usize, beats: &[usize], features: &Features) -
 /// Which of the four positions in the bar the first beat holds, and what it
 /// was decided on.
 ///
-/// Kicks land on the downbeat far more often than not, so the phase whose beats
-/// carry the most low-frequency onset wins.
+/// Kicks were the whole of it. But a four-on-the-floor kick hits every beat
+/// alike, and where it leads by a few per cent the lead is the mix's dynamics
+/// rather than the bar: on CC records gridded on the kick, leads of 1.10 and
+/// 1.11 were on the wrong beat, and right ones led by as little as 1.01.
+///
+/// What differs between the beats of a bar on such a record is the rest of
+/// it. The clap or snare is on the 2 and the 4, so where one pair of positions
+/// has clearly more 1 to 5 kHz onset than the other, the 1 is on the other
+/// pair. And the harmony changes on the 1: the bass note, and the chord. Of
+/// the positions left, the kick and the harmony each say which they favour and
+/// by how much, and the surer of the two decides — so a kick accented on the
+/// 1, or played only on it, still places the bar as it always did.
+///
+/// Measured against the eleven CC records whose downbeat the arrangement's
+/// changes and the backbeat agree on — how that reference was made is in the
+/// pull request that added this — the kick alone was right on six, and this on
+/// all eleven. Of five more where the reference is less sure, it agreed on two
+/// and disagreed with three, one of those by under one per cent, which the
+/// log calls a guess.
 fn downbeat(features: &Features, times: &[u32]) -> Downbeat {
-    let kicks: Vec<f32> = times
-        .iter()
-        .map(|&ms| {
-            let frame = features.frame_at(ms as f64 / 1000.0);
-            // A beat marker can sit a couple of frames either side of the
-            // transient it belongs to, and the transient itself takes a
-            // window to arrive.
-            let from = frame.saturating_sub(2);
-            let to = (frame + 3).min(features.low_flux.len());
-            features.low_flux[from..to].iter().fold(0.0f32, |a, &b| a.max(b))
-        })
-        .collect();
-    let mut found = Downbeat { times_ms: times.to_vec(), kicks, phase: 0 };
+    let frames: Vec<usize> =
+        times.iter().map(|&ms| features.frame_at(ms as f64 / 1000.0)).collect();
+    // A beat marker can sit a couple of frames either side of the transient
+    // it belongs to, and the transient itself takes a window to arrive.
+    let sharpest = |of: &[f32]| -> Vec<f32> {
+        frames
+            .iter()
+            .map(|&frame| {
+                let window = frame.saturating_sub(2)..(frame + 3).min(of.len());
+                of[window].iter().fold(0.0f32, |a, &b| a.max(b))
+            })
+            .collect()
+    };
+    let kicks = sharpest(&features.low_flux);
+    let claps = sharpest(&features.mid_flux);
+    // Each beat's chord and bass, added up over the frames up to the next.
+    let held = |profile: fn(&Features, usize) -> &[f32]| -> Vec<[f32; PITCHES]> {
+        (0..frames.len())
+            .map(|i| {
+                let from = frames[i];
+                // The last beat runs as long as the one before it.
+                let next = match frames.get(i + 1) {
+                    Some(&next) => next,
+                    None => from + (from - frames[i.saturating_sub(1)]),
+                };
+                let to = next.max(from + 1).min(features.frames());
+                let mut sum = [0.0f32; PITCHES];
+                for frame in from..to {
+                    for (total, value) in sum.iter_mut().zip(profile(features, frame)) {
+                        *total += value;
+                    }
+                }
+                sum
+            })
+            .collect()
+    };
+    let chords = held(Features::chroma_frame);
+    let bass = held(Features::bass_frame);
+    let bass_changes = changes(&bass, BASS_SPAN);
+    let chord_changes = changes(&chords, CHORD_SPAN);
+
+    let mut found = Downbeat {
+        times_ms: times.to_vec(),
+        kicks,
+        claps,
+        bass_changes,
+        chord_changes,
+        phase: 0,
+        by: DecidedBy::TooFew,
+    };
     if times.len() < 8 {
         return found;
     }
-    let mut best = (0usize, f32::MIN);
-    for (phase, strength) in found.strengths().into_iter().enumerate() {
-        if strength > best.1 {
-            best = (phase, strength);
-        }
-    }
-    found.phase = best.0;
+    // Each reading's lead, among the positions the backbeat left; the surer
+    // decides. A kick accented on the 1 is surer than any harmony, and a kick
+    // on every beat is surer of nothing.
+    let kick = found.lead_of(DecidedBy::Kick).unwrap_or(1.0);
+    found.by = match found.lead_of(DecidedBy::Harmony) {
+        Some(harmony) if harmony > kick => DecidedBy::Harmony,
+        _ => DecidedBy::Kick,
+    };
+    let scores = found.scores();
+    found.phase = (0..4).fold(0, |a, b| if scores[b] > scores[a] { b } else { a });
     found
+}
+
+/// How far a profile moves across each beat: the `span` beats before it
+/// against the `span` from it, as the cosine distance between their sums. Zero
+/// where there are not `span` beats either side.
+fn changes(profiles: &[[f32; PITCHES]], span: usize) -> Vec<f32> {
+    let total = |beats: &[[f32; PITCHES]]| -> [f32; PITCHES] {
+        std::array::from_fn(|pitch| beats.iter().map(|beat| beat[pitch]).sum())
+    };
+    (0..profiles.len())
+        .map(|i| {
+            if i < span || i + span > profiles.len() {
+                return 0.0;
+            }
+            let (before, after) = (total(&profiles[i - span..i]), total(&profiles[i..i + span]));
+            let dot: f32 = before.iter().zip(&after).map(|(a, b)| a * b).sum();
+            let norm = |v: &[f32; PITCHES]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            match norm(&before) * norm(&after) {
+                product if product > 0.0 => 1.0 - dot / product,
+                _ => 0.0,
+            }
+        })
+        .collect()
 }
 
 /// A straight line through beat times: the period between them, and where the
@@ -763,7 +1009,7 @@ mod tests {
     const LEAD_IN_MS: f64 = 500.0;
 
     /// A click track: a kick on every beat, and on every fourth beat a lower,
-    /// louder one, which is what the downbeat detector is meant to find.
+    /// louder one.
     fn clicks(bpm: f64, bars: usize, accent_downbeats: bool) -> Audio {
         let period = 60.0 / bpm;
         let beats = bars * 4;
@@ -1020,25 +1266,81 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_downbeat_is_where_the_accent_is() {
-        let found = detect(&features::extract(&clicks(120.0, 8, true)));
-        let period_ms = 500.0;
-        let downbeats: Vec<f64> = found
-            .grid
-            .beats
+    /// Where each of a grid's downbeats falls in the bars of a record whose
+    /// first beat is at [`LEAD_IN_MS`] and whose first bar line is `early`
+    /// beats after it: 0 for the 1, 1 for the 2, and so on.
+    fn bar_positions(grid: &BeatGrid, bpm: f64, early: usize) -> Vec<usize> {
+        let period = 60_000.0 / bpm;
+        grid.beats
             .iter()
-            .filter(|b| b.number == 1)
-            .map(|b| (b.time_ms as f64 - LEAD_IN_MS) / period_ms)
-            .collect();
+            .filter(|beat| beat.number == 1)
+            .map(|beat| ((beat.time_ms as f64 - LEAD_IN_MS) / period).round() as usize)
+            .map(|beat| (beat + 4 - early % 4) % 4)
+            .collect()
+    }
 
-        assert!(downbeats.len() >= 4, "found {} downbeats", downbeats.len());
-        // Accented clicks are on beats 0, 4, 8 … so every downbeat should land
-        // on a multiple of four beats.
-        for position in &downbeats {
-            let off = (position / 4.0 - (position / 4.0).round()).abs() * 4.0;
-            assert!(off < 0.2, "a downbeat landed {off:.2} beats from the accent");
-        }
+    #[test]
+    fn a_kick_only_on_the_one_puts_the_bar_there() {
+        // The test this replaces asked the same of a click track whose 1 was
+        // a click twice as loud as the rest, and passed — but only because
+        // the 1 had nine beats to the others' eight. Averaged, the accent read
+        // 24.7 in the low band against 25.2: a log-compressed onset does not
+        // hear a kick twice as loud as another, so what the kick can say is
+        // where it is, not how hard. Here it is only on the 1.
+        let audio =
+            club(125.0, 16, Over { kick_only_on_the_one: true, early: 2, ..Over::default() });
+        let found = detect(&features::extract(&audio));
+        let positions = bar_positions(&found.grid, 125.0, 2);
+        assert!(positions.len() >= 12, "{} downbeats", positions.len());
+        assert!(positions.iter().all(|&p| p == 0), "downbeats on {positions:?}");
+        assert_eq!(found.downbeat.by, DecidedBy::Kick);
+    }
+
+    #[test]
+    fn on_a_kick_on_every_beat_the_bar_starts_where_the_chord_changes() {
+        // The kick hits all four beats alike and cannot say; the chord changes
+        // on every 1, all of it above the band the kick is read in, and says.
+        let audio = club(125.0, 16, Over { chords: true, early: 2, ..Over::default() });
+        let found = detect(&features::extract(&audio));
+        let positions = bar_positions(&found.grid, 125.0, 2);
+        assert!(positions.len() >= 12, "{} downbeats", positions.len());
+        assert!(positions.iter().all(|&p| p == 0), "downbeats on {positions:?}");
+        assert_eq!(found.downbeat.by, DecidedBy::Harmony);
+    }
+
+    #[test]
+    fn a_bass_line_moving_on_every_one_is_heard_as_the_harmony_and_not_as_the_kick() {
+        // A new bass note is an onset in the low band too, so the kick reads
+        // a bass line moving on the 1 as a kick a little harder there: 1.11
+        // times the next, on this record. The harmony reads it as what it is,
+        // 3.4 times the next, and is the surer.
+        let audio = club(125.0, 16, Over { bass: true, early: 2, ..Over::default() });
+        let found = detect(&features::extract(&audio));
+        let positions = bar_positions(&found.grid, 125.0, 2);
+        assert!(positions.len() >= 12, "{} downbeats", positions.len());
+        assert!(positions.iter().all(|&p| p == 0), "downbeats on {positions:?}");
+        assert_eq!(found.downbeat.by, DecidedBy::Harmony);
+    }
+
+    #[test]
+    fn a_clap_on_the_two_and_four_keeps_the_one_off_them() {
+        // With nothing pitched, a backbeat cannot say which of the 1 and the
+        // 3 is the 1. It can say it is neither the 2 nor the 4.
+        let audio = club(125.0, 16, Over { claps: true, early: 2, ..Over::default() });
+        let found = detect(&features::extract(&audio));
+        let positions = bar_positions(&found.grid, 125.0, 2);
+        assert!(positions.len() >= 12, "{} downbeats", positions.len());
+        assert!(positions.iter().all(|&p| p % 2 == 0), "downbeats on {positions:?}");
+        assert_eq!(found.downbeat.backbeat().map(|claps| claps % 2), Some((2 + 1) % 2));
+    }
+
+    #[test]
+    fn a_backbeat_and_a_change_of_chord_put_the_bar_on_the_one() {
+        let over = Over { claps: true, chords: true, early: 3, ..Over::default() };
+        let found = detect(&features::extract(&club(128.0, 16, over)));
+        let positions = bar_positions(&found.grid, 128.0, 3);
+        assert!(positions.len() >= 12, "{} downbeats", positions.len());
+        assert!(positions.iter().all(|&p| p == 0), "downbeats on {positions:?}");
     }
 
     #[test]
@@ -1181,6 +1483,115 @@ mod tests {
                     0.5 * (t / 0.005).min(1.0) * (-8.0 * t).exp() * (tau * 220.0 * t).sin()
                 });
                 beat += b.every;
+            }
+        }
+        Audio::new(RATE, vec![plane.clone(), plane]).unwrap()
+    }
+
+    /// What a [`club`] record has besides a hat on every off-beat.
+    #[derive(Clone, Copy, Default)]
+    struct Over {
+        /// A kick on the 1 and a higher drum on the rest, rather than a kick
+        /// on every beat.
+        kick_only_on_the_one: bool,
+        /// A clap on the 2 and the 4.
+        claps: bool,
+        /// A chord, changing on every 1, all of it above the low band.
+        chords: bool,
+        /// A bass note, changing on every 1.
+        bass: bool,
+        /// How many beats the record runs before its first bar line.
+        early: usize,
+    }
+
+    /// A four-on-the-floor record: a kick on every beat, all alike, and a hat
+    /// on every off-beat; then whatever `over` adds. Its first beat is at
+    /// [`LEAD_IN_MS`] and its first bar line `over.early` beats after.
+    fn club(bpm: f64, bars: usize, over: Over) -> Audio {
+        let period = 60.0 / bpm;
+        let beats = bars * 4 + over.early;
+        let lead_in = RATE as usize / 2;
+        let frames = lead_in + (RATE as f64 * period * beats as f64) as usize + RATE as usize;
+        let mut plane = vec![0.0f32; frames];
+        let tau = 2.0 * std::f32::consts::PI;
+        let mut noise = 12_345u32;
+        let mut white = move || {
+            noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (noise >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+        };
+        let at = |beat: f64| lead_in + (RATE as f64 * period * beat) as usize;
+        let add = |plane: &mut Vec<f32>,
+                   start: usize,
+                   length: usize,
+                   sound: &mut dyn FnMut(f32) -> f32| {
+            for i in 0..length {
+                if let Some(sample) = plane.get_mut(start + i) {
+                    *sample += sound(i as f32 / RATE as f32);
+                }
+            }
+        };
+        for beat in 0..beats {
+            // Where in the bar: 0 for the 1.
+            let position = (beat + 4 - over.early % 4) % 4;
+            let start = at(beat as f64);
+            match over.kick_only_on_the_one && position != 0 {
+                // A tom an octave and a half up, outside the low band.
+                true => add(&mut plane, start, RATE as usize / 8, &mut |t| {
+                    0.5 * (-30.0 * t).exp() * (tau * 300.0 * t).sin()
+                }),
+                false => add(&mut plane, start, RATE as usize / 5, &mut |t| {
+                    0.8 * (-12.0 * t).exp() * (tau * (50.0 + 100.0 * (-40.0 * t).exp()) * t).sin()
+                }),
+            }
+            let mut last = 0.0f32;
+            add(&mut plane, at(beat as f64 + 0.5), RATE as usize / 8, &mut |t| {
+                let w = white();
+                let hiss = w - last;
+                last = w;
+                0.3 * (-25.0 * t).exp() * hiss
+            });
+            if over.claps && position % 2 == 1 {
+                add(&mut plane, start, RATE as usize / 6, &mut |t| {
+                    0.3 * (-20.0 * t).exp() * white()
+                });
+            }
+        }
+        if over.chords || over.bass {
+            // A bass note and a triad a bar each, round a cycle of four whose
+            // bass notes are far enough apart for the window to hear them
+            // move, and whose chords are all above the 200 Hz the kick is read
+            // under. The beats before the first bar line hold the last chord.
+            let bass = [55.0f32, 98.0, 65.4, 110.0];
+            let chords = [
+                [261.6f32, 329.6, 392.0],
+                [246.9, 293.7, 392.0],
+                [220.0, 261.6, 329.6],
+                [349.2, 440.0, 523.3],
+            ];
+            let (bass_level, chord_level) =
+                (if over.bass { 0.3 } else { 0.0 }, if over.chords { 0.08 } else { 0.0 });
+            let length = at(4.0) - at(0.0);
+            // Slow fades, so that a new note is a change and not an onset: the
+            // kick reads onsets, and this is about what it cannot read.
+            let fade = RATE as f32 * 0.15;
+            for bar in -1..bars as i64 {
+                let first = over.early as f64 + 4.0 * bar as f64;
+                if first + 4.0 <= 0.0 {
+                    continue;
+                }
+                let start = at(first.max(0.0));
+                let which = bar.rem_euclid(4) as usize;
+                let shape = move |i: usize| {
+                    (i as f32 / fade).min(1.0) * ((length - i) as f32 / fade).min(1.0)
+                };
+                let (bass, chord) = (bass[which], chords[which]);
+                let mut i = 0usize;
+                add(&mut plane, start, length, &mut |t| {
+                    let level = shape(i);
+                    i += 1;
+                    let triad: f32 = chord.iter().map(|hz| (tau * hz * t).sin()).sum();
+                    level * (bass_level * (tau * bass * t).sin() + chord_level * triad)
+                });
             }
         }
         Audio::new(RATE, vec![plane.clone(), plane]).unwrap()

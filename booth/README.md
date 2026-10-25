@@ -702,13 +702,41 @@ what a sequencer writes. Two have no steady beat for it to find and one, a
 hard techno record whose kick is a rumble, folds but does not pass, and those
 three are gridded as they were.
 
+### Which beat is the one
+
+The downbeat was the beat of four the kick hit hardest, which is no answer at
+all on a record with a kick on every beat: on eight of eighteen CC records the
+winner led by 1 or 2 per cent, and every bar line, phrase and cue sat a beat or
+three out on whichever it picked. On a four-on-the-floor record it is the rest
+that differs between the beats of a bar, so the rest is read now:
+
+- **The backbeat.** A clap or snare is on the 2 and the 4. Where one pair of
+  alternate beats has clearly more onset between 1 and 5 kHz than the other —
+  1.23 to 2.42 times, on the records with one, against at most 1.14 on those
+  without — the 1 is on the other pair.
+- **The harmony.** The bass note and the chord change on the 1. How far each
+  moves across every beat is measured, and of the beats the backbeat left, the
+  one where they move most is the harmony's choice.
+- **The kick** still has its say, and where it is surer than the harmony it
+  decides: a kick only on the 1 places the bar as it always did, and a broken
+  beat like MALA's, whose kick leads by ten times, is read off its kick.
+
+There is no rekordbox grid or listening behind these records yet, so the
+reference is the arrangement itself: where each record adds and takes away its
+parts, which a club record does on bar lines and mostly a whole phrase apart,
+checked against its backbeat. On the eleven records where those agree, the kick
+alone put the bar right on six and this puts it right on all eleven. On a
+record where neither the backbeat nor the harmony says much it is still a
+guess, and the analysis log says so; the fix controls below are for those.
+
 ### Correcting a grid by hand
 
 A tracker is right about most records and wrong about a few, and the few are
 not random. It reads a half-time record at double, a drum-and-bass record at
-half, and it puts the one on the snare of anything with a strong backbeat. None
-of that is fixed by analysing again — the same audio gives the same answer —
-and all of it is a press or two for somebody looking at the waveform.
+half, and on a record where nothing marks the bar — a kick on every beat, no
+clap, a chord held for minutes — the one is a guess. None of that is fixed by
+analysing again — the same audio gives the same answer — and all of it is a
+press or two for somebody looking at the waveform.
 
 **fix**, beside the grid reading, opens the controls:
 
@@ -1815,10 +1843,11 @@ track: `Sirens.flac.log` beside `Sirens.flac`, the whole name and `.log` after,
 so a FLAC and an MP3 of the same record in one folder each keep theirs. It is
 rewritten every time the track is analysed, and it holds the numbers each
 decision was made on rather than only the decisions: the tempo and how sure the
-tracker was; the downbeat, as the four sums it is chosen from — how hard the low
-end hits on the first, second, third and fourth of every four beats — and the
-same sums eight bars at a time, with any stretch that favours a different beat
-pointed out; the key; the arrangement's sections and the rules that named them;
+tracker was; the downbeat, as what was heard at each of the four positions in
+the bar — the kick, the clap, how far the bass and the chords move — with which
+pair the backbeat ruled out, how far the kick and the harmony each led, which
+of them decided, and the same eight bars at a time, with any stretch that
+favours a different beat pointed out; the key; the arrangement's sections and the rules that named them;
 every bar's energy, from the mix and from the drum stem where there is one, with
 the drops and breaks found in it and which of them are D and B; and the cues.
 A release build never writes it: a music folder is its owner's, and a file
