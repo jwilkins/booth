@@ -13,6 +13,7 @@ use std::fmt::Write;
 use super::energy;
 use super::place::BEATS_PER_BAR;
 use super::structure::Kind;
+use super::tempo::{lead, CLEAR_LEAD};
 use super::TrackAnalysis;
 use crate::export::CueKind;
 
@@ -20,16 +21,6 @@ use crate::export::CueKind;
 /// account covers: eight bars, a phrase, which is the longest a record holds
 /// one idea and so the shortest stretch whose answer means anything.
 const STRETCH_BEATS: usize = 32;
-
-/// How far ahead the winning sum has to be for the downbeat to be more than a
-/// guess: a tenth. Below it the log says so.
-///
-/// Measured on eighteen CC records: on the ten whose winner led by 7 per cent
-/// or less — by 1 or 2 per cent on eight of them, records with a kick on every
-/// beat, which hits all four positions alike — most eight-bar stretches
-/// favoured some other beat. On all but two of the eight that led by 12 per
-/// cent or more, most stretches agreed with the whole.
-const CLEAR_LEAD: f32 = 1.1;
 
 /// How wide the prose is wrapped: what a terminal shows without wrapping it
 /// mid-word itself.
@@ -129,45 +120,73 @@ fn downbeat(out: &mut String, analysis: &TrackAnalysis) {
         out,
         &format!(
             "The tracker heard {heard} beats. Which of every four is the one is read off the \
-             low band: the sharpest onset within a couple of frames of each beat, which is the \
-             kick where there is one, summed over each of the four positions in the bar. The \
-             largest sum wins."
+             kick first: the low band's sharpest onset within a couple of frames of each beat, \
+             summed over each of the four positions in the bar. Where one position leads the \
+             next by a tenth or more, it is the one. A kick on every beat hits all four alike, \
+             and then three more are asked: how different each beat sounds from the one \
+             before, the same in the bass, and where the arrangement turns, two bars against \
+             the two before. Each is shown as its share of its own total, and together is \
+             those four shares added."
         ),
     );
     if heard < 8 {
         paragraph(out, "Under eight beats is too few to tell, so the first is taken as the one.");
     } else {
-        let sums = found.strengths();
-        let _ = writeln!(out, "\n  position  tracked beats       low-band onset");
-        for (position, sum) in sums.iter().enumerate() {
+        let cues = found.cues();
+        let together = found.together();
+        let share = |sums: &[f32; 4], position: usize| {
+            let total: f32 = sums.iter().sum();
+            if total > 0.0 {
+                100.0 * sums[position] / total
+            } else {
+                25.0
+            }
+        };
+        let _ = writeln!(
+            out,
+            "\n  position  tracked beats      kick  change    bass   turns  together"
+        );
+        for (position, together) in together.iter().enumerate() {
             let beats = format!("{}, {}, {}, ...", position + 1, position + 5, position + 9);
             let mark = if position == found.phase { "  <- the one" } else { "" };
-            let _ = writeln!(out, "  {:<8}  {beats:<18}  {sum:>14.2}{mark}", ordinal(position));
-        }
-        let runner_up = sums
-            .iter()
-            .enumerate()
-            .filter(|(position, _)| *position != found.phase)
-            .map(|(_, &sum)| sum)
-            .fold(0.0f32, f32::max);
-        if runner_up > 0.0 {
-            let lead = sums[found.phase] / runner_up;
-            let guess = match lead < CLEAR_LEAD {
-                true => {
-                    " That is near enough a tie to be a guess: a kick on every beat hits all \
-                     four positions alike, and then this cannot tell them apart."
-                }
-                false => "",
-            };
-            out.push('\n');
-            paragraph(
+            let _ = writeln!(
                 out,
-                &format!(
-                    "The {} position's sum is {lead:.2} times the next largest.{guess}",
-                    ordinal(found.phase)
-                ),
+                "  {:<8}  {beats:<16}{:>6.1}% {:>6.1}% {:>6.1}% {:>6.1}%  {:>8.3}{mark}",
+                ordinal(position),
+                share(&cues[0], position),
+                share(&cues[1], position),
+                share(&cues[2], position),
+                share(&cues[3], position),
+                together,
             );
         }
+        let kick = cues[0];
+        out.push('\n');
+        let said = match found.kick_decides() {
+            true => format!(
+                "The kick's {} leads the next by {:.2}, which is clear enough to decide on its \
+                 own.",
+                ordinal(found.phase),
+                lead(kick)
+            ),
+            false => {
+                let close = lead(together);
+                let guess = match close < CLEAR_LEAD {
+                    true => {
+                        " That is near enough a tie to be a guess: none of the four can tell the \
+                         positions apart here."
+                    }
+                    false => "",
+                };
+                format!(
+                    "The kick leads by only {:.2}, a near tie, so the four together decided: \
+                     their {} leads the next by {close:.2}.{guess}",
+                    lead(kick),
+                    ordinal(found.phase)
+                )
+            }
+        };
+        paragraph(out, &said);
     }
     if found.dropped > 0 {
         paragraph(
@@ -196,7 +215,7 @@ fn downbeat(out: &mut String, analysis: &TrackAnalysis) {
     out.push('\n');
     paragraph(
         out,
-        "Eight bars at a time, the same sums, to show whether the whole track agrees or one \
+        "The kick's sums eight bars at a time, to show whether the whole track agrees or one \
          stretch of it is outvoted. A break, with the kick out, often is.",
     );
     let _ = writeln!(out, "\n  from        1st       2nd       3rd       4th     favours");
@@ -432,12 +451,16 @@ mod tests {
     }
 
     #[test]
-    fn the_position_marked_as_the_one_is_the_largest_sum_and_the_grid_agrees() {
+    fn the_position_marked_as_the_one_is_the_one_its_cues_chose_and_the_grid_agrees() {
         let analysis = analyze(&track());
         let text = explained(&analysis);
-        let sums = analysis.downbeat.strengths();
+        let found = &analysis.downbeat;
+        let sums = match found.kick_decides() {
+            true => found.strengths(),
+            false => found.together(),
+        };
         let largest = (0..4).fold(0, |best, i| if sums[i] > sums[best] { i } else { best });
-        assert_eq!(analysis.downbeat.phase, largest);
+        assert_eq!(found.phase, largest);
 
         let marked: Vec<&str> = text.lines().filter(|line| line.ends_with("<- the one")).collect();
         assert_eq!(marked.len(), 1, "{text}");
@@ -469,8 +492,7 @@ mod tests {
         analysis.downbeat = Downbeat {
             times_ms: (0..beats as u32).map(|i| i * 500).collect(),
             kicks,
-            phase: 0,
-            dropped: 0,
+            ..Downbeat::default()
         };
         let text = explained(&analysis);
         let pointed: Vec<&str> =
@@ -533,8 +555,7 @@ mod tests {
             analysis.downbeat = Downbeat {
                 times_ms: (0..16).map(|i| i * 500).collect(),
                 kicks: (0..16).map(|i| kicks[i % 4]).collect(),
-                phase: 0,
-                dropped: 0,
+                ..Downbeat::default()
             };
             // Read as prose, whatever line the wrapping broke it over.
             let words: Vec<String> =
@@ -543,6 +564,27 @@ mod tests {
         };
         assert!(said([1.02, 1.0, 1.0, 1.0], &mut analysis));
         assert!(!said([2.0, 1.0, 1.0, 1.0], &mut analysis));
+    }
+
+    #[test]
+    fn a_kick_that_cannot_decide_is_said_to_have_handed_it_to_the_four_together() {
+        let mut analysis = analyze(&track());
+        analysis.downbeat = Downbeat {
+            times_ms: (0..16).map(|i| i * 500).collect(),
+            kicks: vec![1.0; 16],
+            // The chord changes on the third of every four.
+            changes: (0..16).map(|i| if i % 4 == 2 { 1.0 } else { 0.1 }).collect(),
+            phase: 2,
+            ..Downbeat::default()
+        };
+        let words: Vec<String> =
+            explained(&analysis).split_whitespace().map(str::to_string).collect();
+        let text = words.join(" ");
+        assert!(text.contains("a near tie, so the four together decided: their 3rd"), "{text}");
+        let marked = explained(&analysis)
+            .lines()
+            .any(|line| line.trim_start().starts_with("3rd") && line.ends_with("<- the one"));
+        assert!(marked, "{text}");
     }
 
     #[test]

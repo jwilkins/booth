@@ -670,6 +670,20 @@ they are stored in, and **no drift at all** over five minutes, where there used
 to be 28 to 36 ms. A record that speeds up from 124 to 127 is still written
 speeding up, beat for beat.
 
+### Where the one goes
+
+Which beat of four starts the bar is read off the kick first: the position
+that carries the most low end. On a record with a kick on every beat that is a
+coin toss — on eight of eighteen CC records the winner led the next by 1 or 2
+per cent. So where the kick does not lead by a tenth, three more things are
+asked: how different each beat sounds from the one before, since a chord
+changes on the one; the same in the bass, where a bassline's note changes with
+the bar; and where the arrangement turns, two bars against the two before,
+since a drop, a break or a new part starts on it. A kick that leads clearly
+still decides on its own — the others only answer what used to be a guess.
+Where none of them can tell the positions apart either, a debug build's
+analysis log says so, and **One here** below is the fix.
+
 ### Correcting a grid by hand
 
 A tracker is right about most records and wrong about a few, and the few are
