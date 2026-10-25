@@ -539,6 +539,15 @@ on the player — see [What it hears](#what-it-hears). Every other format seeks 
 Once the database is written it is read back off the drive and walked the way a player
 walks it, and the command fails rather than reporting success if that does not work.
 
+Every file written into a folder is landed whole — written beside its name, flushed and
+renamed — and read back off the device rather than out of the page cache, and the audio
+is compared with its source byte for byte. The machine is held awake while the write
+runs (`caffeinate` on macOS, `systemd-inhibit` on Linux, `SetThreadExecutionState` on
+Windows), and `-v` says which or that it could not. A drive that fails a write — gone,
+full, read-only, an I/O error, or a file that reads back different — stops the export
+there and leaves the databases as the last write made them, and the error names the
+drive rather than the track.
+
 `-v` adds a step-by-step account on stderr — which is where the results are not, so
 redirecting stdout still captures only results:
 

@@ -1638,6 +1638,20 @@ command: the database and every analysis file are read back off the drive by a
 parser that shares no code with the writer. Until that passes, the drive is not
 finished.
 
+Each file is written beside its name, flushed to the stick and renamed into
+place, so a write that dies partway leaves the file that was there rather than
+half of a new one. Then it is read back off the stick itself — not out of the
+computer's memory, which still holds what was just written and would pass a
+failing stick every time — and the audio is compared byte for byte with the
+file it came from. The machine is kept from sleeping while the write runs.
+
+A drive that fails a write is named as the problem, not the music: unplugged,
+full, made read-only, or an input/output error, which is the stick or its port.
+The write stops there. The databases are not rewritten, so the drive still plays
+exactly what its last good write put on it, and what this write had added sits
+beside it under names no database points at. A file the collection names that is
+not on the laptop any more is a different thing, and says so.
+
 ### What goes on the drive is what the collection says
 
 The exporter listens to every file it prepares, because it has to — the waveform

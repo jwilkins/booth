@@ -17,6 +17,7 @@ use crate::cli::{
 };
 use crate::discover;
 use crate::export::image::{capacity_for, Destination, DriveImage};
+use crate::export::landing::DriveFault;
 use crate::export::{anlz, pdb, waveform, BeatGrid};
 use crate::loudness::{self, Loudness};
 use crate::normalize::replaygain::{write_tags, ReplayGain};
@@ -332,6 +333,13 @@ pub fn export(
         true => None,
         false => Some(open_destination(args, &files, reporter)?),
     };
+    // Held until the export returns: a laptop that sleeps partway through a
+    // long write leaves a drive half written.
+    let _awake = destination.as_ref().map(|_| {
+        let (awake, said) = crate::awake::Awake::hold("writing a drive");
+        report::detail(reporter, said);
+        awake
+    });
     let progress = Progress::new(reporter, files.len());
 
     // What is already on the drive, carried through unchanged. Its ids are
@@ -366,7 +374,11 @@ pub fn export(
         }
     }
 
-    for (batch, chunk) in files.chunks(BATCH).enumerate() {
+    // The drive failing a write, and the file it failed on. Everything stops
+    // there: a drive that has just failed one write is no place for the next,
+    // and least of all for the databases.
+    let mut stopped: Option<(PathBuf, anyhow::Error)> = None;
+    'batches: for (batch, chunk) in files.chunks(BATCH).enumerate() {
         let first_id = taken + (batch * BATCH) as u32 + 1;
         let prepared: Vec<Result<Prepared>> = chunk
             .par_iter()
@@ -403,6 +415,11 @@ pub fn export(
                     let landed = match &destination {
                         Some(destination) => match prepared.commit(destination, path, reporter) {
                             Ok(()) => Some(prepared.track.unwrap()),
+                            Err(e) if e.downcast_ref::<DriveFault>().is_some() => {
+                                lines.pop();
+                                stopped = Some((path.clone(), e));
+                                break 'batches;
+                            }
                             Err(e) => {
                                 lines.pop();
                                 failures.push((path.clone(), e));
@@ -425,6 +442,24 @@ pub fn export(
                 Err(e) => failures.push((path.clone(), e)),
             }
         }
+    }
+
+    if let (Some((path, fault)), Some(destination)) = (stopped, &destination) {
+        // The databases are what a player reads first, and the ones on the
+        // drive still describe its last good write, every file of which is
+        // still there: what this write put on went beside, under names no
+        // database points at, and a file it was replacing was only replaced
+        // once the new one had landed whole. So they are left exactly as they
+        // are, and the drive plays what it played before.
+        for (path, error) in &failures {
+            report::failed(reporter, path, error);
+        }
+        return Err(fault.context(format!(
+            "stopped writing {} at {}: nothing more was put on, and the databases were left as \
+             the last write made them, so the drive still plays what it did before",
+            destination.describe(),
+            path.display()
+        )));
     }
 
     if !tracks.is_empty() {
