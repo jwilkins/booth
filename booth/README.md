@@ -19,8 +19,15 @@ folder imported off such a drive used to bring a second, silent copy of every
 track. A file whose name starts with `._` and which opens with the AppleDouble
 mark (`00 05 16 07`), or is under 64 KiB, is skipped at import, from a rekordbox
 library and by the command line, and any already in the collection are taken
-out when the window opens. A real track that happens to be named `._…` is
-megabytes, and is kept.
+out when the window opens. One that gets past all of that is taken out when the
+list is about to show it or an analysis is about to read it. Whenever one comes
+out of the collection, the file is deleted too if it is in the library folder or
+on a drive plugged in from outside — a stick is where a Mac leaves them — and is
+left alone anywhere else, which is somebody's own folder. The file is asked again
+before it goes, so a track the collection only judged by its name and noted size
+is not deleted on that. The line at the bottom of the window says which, where
+it was met, and whether it was deleted. A real track that happens to be named
+`._…` is megabytes, and is kept.
 
 On Linux the audio output needs ALSA's headers at build time
 (`apt install libasound2-dev`, or `alsa-lib-devel`). macOS and Windows need

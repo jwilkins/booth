@@ -1554,10 +1554,21 @@ impl Library {
     /// before they were recognised can: every folder imported off a stick a
     /// Mac had touched brought one in beside each track. Says which went.
     pub fn forget_apple_doubles(&mut self) -> Vec<PathBuf> {
+        let every: Vec<u32> = self.tracks.iter().map(|track| track.id).collect();
+        self.forget_apple_doubles_among(&every)
+    }
+
+    /// The same, for only these tracks: the ones a list is about to show, or
+    /// an analysis about to read. Says which went.
+    pub fn forget_apple_doubles_among(&mut self, ids: &[u32]) -> Vec<PathBuf> {
         let gone: Vec<(u32, PathBuf)> = self
             .tracks
             .iter()
+            // The name before the list: almost no track is a `._` one, and
+            // asking every track whether it is among ten thousand ids is not
+            // free.
             .filter(|track| track.role == Role::Track && is_apple_double(&track.path, track.bytes))
+            .filter(|track| ids.contains(&track.id))
             .map(|track| (track.id, track.path.clone()))
             .collect();
         for (id, _) in &gone {
@@ -2115,14 +2126,33 @@ impl Library {
 /// The file says, where it can be reached. Where it cannot — the drive it is
 /// on is unplugged — the name and the size the collection noted for it do:
 /// `bytes` under [`booth_cli::discover::APPLE_DOUBLE_SMALL`], or never noted.
+///
+/// The name is asked first, and only a `._` name goes to the disk: this runs
+/// over every track the browser lists, each time it lists them, and a file
+/// system asked ten thousand times whether a file is there is a list that
+/// takes a second to filter — longer, on a drive that has gone to sleep.
 pub fn is_apple_double(path: &Path, bytes: u64) -> bool {
+    if !booth_cli::discover::named_apple_double(path) {
+        return false;
+    }
     match path.exists() {
         true => booth_cli::discover::is_apple_double(path),
-        false => {
-            booth_cli::discover::named_apple_double(path)
-                && bytes < booth_cli::discover::APPLE_DOUBLE_SMALL
-        }
+        false => bytes < booth_cli::discover::APPLE_DOUBLE_SMALL,
     }
+}
+
+/// Delete a `._` file, having asked the file itself first whether it is one:
+/// see [`booth_cli::discover::is_apple_double`]. `Ok(false)` when there was
+/// nothing to delete, or what is there is not one after all.
+///
+/// The collection's word for it is not taken. A track can be judged a `._`
+/// file by its name and the size the collection noted while its drive was
+/// unplugged, and the file at that path today could be something else.
+pub fn delete_apple_double(path: &Path) -> std::io::Result<bool> {
+    if !booth_cli::discover::is_apple_double(path) {
+        return Ok(false);
+    }
+    std::fs::remove_file(path).map(|()| true)
 }
 
 /// A stable id for a derived companion row.
@@ -2549,6 +2579,41 @@ mod tests {
         assert_eq!(library.tracks.iter().map(|t| t.id).collect::<Vec<_>>(), [keep]);
         assert_eq!(library.playlists[0].tracks, [keep], "the playlist kept a row for it");
         assert!(library.forget_apple_doubles().is_empty(), "a second pass found more");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pass_over_some_tracks_takes_out_only_the_companions_among_them() {
+        let dir = scratch("companions-among");
+        let real = dir.join("Sirens.flac");
+        std::fs::write(&real, vec![0x66u8; 256 * 1024]).unwrap();
+        let other = dir.join("Tides.flac");
+        std::fs::write(&other, vec![0x66u8; 256 * 1024]).unwrap();
+        let mut library = Library::new();
+        let first = library.add(&apple_double_beside(&real));
+        let second = library.add(&apple_double_beside(&other));
+        library.add(&real);
+
+        assert_eq!(library.forget_apple_doubles_among(&[first]), [dir.join("._Sirens.flac")]);
+        assert!(library.get(first).is_none());
+        assert!(library.get(second).is_some(), "one it was not asked about went too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_companion_is_deleted_only_once_the_file_itself_says_it_is_one() {
+        let dir = scratch("delete-companion");
+        let real = dir.join("Sirens.flac");
+        std::fs::write(&real, vec![0x66u8; 256 * 1024]).unwrap();
+        let fake = apple_double_beside(&real);
+        assert!(delete_apple_double(&fake).unwrap());
+        assert!(!fake.exists());
+        // A real track that happens to start with `._`: no mark, and too big.
+        let lookalike = dir.join("._Intro.flac");
+        std::fs::write(&lookalike, vec![0x66u8; 256 * 1024]).unwrap();
+        assert!(!delete_apple_double(&lookalike).unwrap());
+        assert!(lookalike.exists(), "a real track was deleted");
+        assert!(!delete_apple_double(&dir.join("._gone.flac")).unwrap(), "nothing there");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
