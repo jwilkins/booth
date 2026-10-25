@@ -164,6 +164,7 @@ fn editing_a_cue_makes_the_drive_out_of_date() {
         time_ms: 64_000,
         label: "drop".into(),
         color: [226, 160, 63],
+        loop_end_ms: None,
     });
     let after = booth::sync::fingerprint(&track);
     assert_ne!(before, after, "a placed cue must show up as a change");
@@ -189,6 +190,7 @@ fn naming_a_cue_is_something_the_player_sees() {
         time_ms: 1_000,
         label: String::new(),
         color: [0, 0, 0],
+        loop_end_ms: None,
     });
     let before = booth::sync::fingerprint(&track);
 

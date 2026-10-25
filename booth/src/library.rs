@@ -568,6 +568,8 @@ pub fn take_prep(track: &mut Track, found: &booth_cli::rekordbox::anlz::Analysis
                 .color
                 .map(|rgb| [rgb.r, rgb.g, rgb.b])
                 .unwrap_or_else(|| crate::job::cue_color(cue.hot_cue)),
+            // A loop the player saved stays one: see [`CueMark::loop_end_ms`].
+            loop_end_ms: crate::job::loop_end(cue),
         })
         .collect();
     track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
@@ -619,9 +621,25 @@ pub struct CueMark {
     pub time_ms: u32,
     pub label: String,
     pub color: [u8; 3],
+    /// Where a saved loop ends, for a cue that is one. A player saves a loop as
+    /// a cue with an end, and a collection that could not hold the end turned
+    /// every loop read off a stick or out of rekordbox into a plain cue, and
+    /// wrote it back to the stick that way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_end_ms: Option<u32>,
 }
 
 impl CueMark {
+    /// Move the cue to `time_ms`, taking a loop's end along with it so the
+    /// loop keeps its length rather than stretching, or ending before it
+    /// starts.
+    pub fn move_to(&mut self, time_ms: u32) {
+        if let Some(end) = self.loop_end_ms {
+            self.loop_end_ms = Some(time_ms.saturating_add(end.saturating_sub(self.time_ms)));
+        }
+        self.time_ms = time_ms;
+    }
+
     /// A, B, C… for a hot cue; a bullet for a memory cue.
     pub fn name(&self) -> String {
         match self.letter {
@@ -1028,6 +1046,7 @@ impl Track {
                     time_ms: cue.time_ms,
                     label: cue.label.clone(),
                     color: crate::job::cue_color(cue.letter),
+                    loop_end_ms: cue.loop_end_ms,
                 })
                 .collect();
             touched = true;
@@ -2649,6 +2668,7 @@ mod tests {
                 letter: 1,
                 time_ms: 30_000,
                 label: "drop".into(),
+                loop_end_ms: None,
             }],
             my_tags: vec!["peak time".into()],
         }
@@ -2690,8 +2710,13 @@ mod tests {
         track.analyzed = true;
         track.has_grid = true;
         track.bpm = 174.0;
-        track.cues =
-            vec![CueMark { letter: 1, time_ms: 1_234, label: "mine".into(), color: [1, 2, 3] }];
+        track.cues = vec![CueMark {
+            letter: 1,
+            time_ms: 1_234,
+            label: "mine".into(),
+            color: [1, 2, 3],
+            loop_end_ms: None,
+        }];
 
         track.fill_from(&rekordbox_track());
 
@@ -2881,8 +2906,13 @@ mod tests {
             track.bpm = 128.5;
             track.key = "8A".into();
             track.has_grid = true;
-            track.cues =
-                vec![CueMark { letter: 1, time_ms: 1000, label: String::new(), color: [1, 2, 3] }];
+            track.cues = vec![CueMark {
+                letter: 1,
+                time_ms: 1000,
+                label: String::new(),
+                color: [1, 2, 3],
+                loop_end_ms: None,
+            }];
         }
         library.add_playlist("Saturday peak", "").unwrap();
         library.playlists[0].tracks.push(other);
@@ -3863,8 +3893,13 @@ mod what_the_deck_did {
         track.duration_secs = 8.0;
         track.bpm = 174.0;
         track.analyzed = true;
-        track.cues =
-            vec![CueMark { letter: 1, time_ms: 1_000, label: "drop".into(), color: [1, 2, 3] }];
+        track.cues = vec![CueMark {
+            letter: 1,
+            time_ms: 1_000,
+            label: "drop".into(),
+            color: [1, 2, 3],
+            loop_end_ms: None,
+        }];
         track
     }
 
@@ -3883,6 +3918,33 @@ mod what_the_deck_did {
         assert_eq!(hot.time_ms, 4_000);
         assert_eq!(hot.label, "hold me closer now");
         assert_eq!(hot.color, [0xe8, 0x3c, 0x9e]);
+    }
+
+    #[test]
+    fn a_loop_moved_keeps_its_length() {
+        let mut cue = CueMark {
+            letter: 3,
+            time_ms: 12_000,
+            label: String::new(),
+            color: [0; 3],
+            loop_end_ms: Some(13_875),
+        };
+        cue.move_to(20_000);
+        assert_eq!((cue.time_ms, cue.loop_end_ms), (20_000, Some(21_875)));
+        cue.move_to(500);
+        assert_eq!((cue.time_ms, cue.loop_end_ms), (500, Some(2_375)));
+    }
+
+    #[test]
+    fn a_loop_the_player_saved_comes_back_a_loop() {
+        // What a deck writes when a loop is saved to a hot cue: the cue, with
+        // where the loop ends. It used to come back a plain cue.
+        let cues = vec![Cue::memory(0), Cue::hot(3, 12_000).looping(13_875)];
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&cues, None));
+        let looped = track.cues.iter().find(|cue| cue.letter == 3).unwrap();
+        assert_eq!(looped.loop_end_ms, Some(13_875));
+        assert_eq!(track.cues[0].loop_end_ms, None, "the memory cue became a loop");
     }
 
     #[test]

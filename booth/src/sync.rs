@@ -295,6 +295,13 @@ pub fn fingerprint(track: &Track) -> u64 {
         // cues and neither ever reached a player.
         eat(cue.label.as_bytes());
         eat(&cue.color);
+        // Only for a loop, so that every cue that is not one hashes as it did
+        // before loops were kept: otherwise the first sync after this would
+        // report every track on every drive as changed.
+        if let Some(end_ms) = cue.loop_end_ms {
+            eat(b"loop");
+            eat(&end_ms.to_le_bytes());
+        }
     }
     for phrase in &track.phrases {
         eat(&phrase.start_ms.to_le_bytes());
@@ -334,6 +341,13 @@ pub fn prep(track: &Track) -> booth_cli::export::Prep {
             let placed = match cue.letter {
                 0 => Cue::memory(cue.time_ms),
                 letter => Cue::hot(letter, cue.time_ms),
+            };
+            // A loop goes back on the drive a loop. One that ends where it
+            // starts, or before, is no loop a player can play, and goes on as
+            // the cue it starts with.
+            let placed = match cue.loop_end_ms {
+                Some(end_ms) if end_ms > cue.time_ms => placed.looping(end_ms),
+                _ => placed,
             };
             Cue {
                 comment: (!cue.label.is_empty()).then(|| cue.label.clone()),
@@ -1106,6 +1120,7 @@ mod tests {
             time_ms: 64_000,
             label: "drop".into(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let plan = plan(&library, &drive);
@@ -1446,6 +1461,7 @@ mod tests {
             time_ms: 4_000,
             label: "drop".into(),
             color: [1, 2, 3],
+            loop_end_ms: None,
         });
         library.get_mut(id).unwrap().phrases.push(Phrase {
             start_ms: 0,
@@ -1472,6 +1488,30 @@ mod tests {
             (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap())),
             unchanged
         );
+    }
+
+    #[test]
+    fn a_loop_in_the_collection_goes_on_the_drive_a_loop_and_moving_its_end_is_a_change() {
+        use booth_cli::export::CueKind;
+        let (mut library, ids) = library_with(1);
+        let id = ids[0];
+        library.get_mut(id).unwrap().cues.push(crate::library::CueMark {
+            letter: 3,
+            time_ms: 12_000,
+            label: "roll".into(),
+            color: [1, 2, 3],
+            loop_end_ms: Some(13_875),
+        });
+        let written = prep(library.get(id).unwrap());
+        assert_eq!(written.cues[0].kind, CueKind::Loop { end_ms: 13_875 });
+
+        let before = fingerprint(library.get(id).unwrap());
+        library.get_mut(id).unwrap().cues[0].loop_end_ms = Some(15_750);
+        assert_ne!(fingerprint(library.get(id).unwrap()), before, "the drive has the old end");
+
+        // An end that is not after the start is no loop a player can play.
+        library.get_mut(id).unwrap().cues[0].loop_end_ms = Some(12_000);
+        assert_eq!(prep(library.get(id).unwrap()).cues[0].kind, CueKind::Point);
     }
 
     #[test]
@@ -1783,6 +1823,7 @@ mod tests {
             time_ms: 32_000,
             label: "drop".into(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let plan = plan(&library, &drive);

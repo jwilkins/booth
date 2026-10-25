@@ -172,6 +172,7 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
         time_ms: 30_000,
         label: "drop".into(),
         color: [226, 160, 63],
+        loop_end_ms: None,
     });
     let plan = sync::plan(&collection, &collection.drives[0]);
     assert!(plan.add.is_empty(), "the file is already there");
@@ -383,6 +384,7 @@ fn booth_analyze(
             time_ms: cue.time_ms,
             label: cue.comment.clone().unwrap_or_default(),
             color: [226, 160, 63],
+            loop_end_ms: None,
         })
         .collect();
     let phrases = analysis

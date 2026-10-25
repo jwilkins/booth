@@ -1014,6 +1014,21 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
             [egui::pos2(x, edge), egui::pos2(x, edge + into * (rect.height() - 10.0))],
             Stroke::new(1.5_f32, color),
         );
+        // A saved loop shows how far it runs: a bar along the edge it hangs
+        // from, out to where the loop ends.
+        if let Some(end_ms) = cue.loop_end_ms.filter(|end| *end > cue.time_ms) {
+            let end = wave.zoom.across((end_ms as f64 / total_ms).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+            let end_x = (rect.left() + rect.width() * end).max(x + 1.0);
+            let (top, bottom) = match memory {
+                true => (edge - 3.0, edge),
+                false => (edge, edge + 3.0),
+            };
+            painter.rect_filled(
+                Rect::from_min_max(egui::pos2(x, top), egui::pos2(end_x, bottom)),
+                0.0,
+                color.gamma_multiply(0.6),
+            );
+        }
         // A flag, pointing the way the cue reads: from the marker into the
         // track.
         painter.add(egui::Shape::convex_polygon(
@@ -1052,7 +1067,12 @@ fn cue_flags(painter: &egui::Painter, rect: Rect, wave: &Waveform<'_>, held: Opt
 /// carries a dot where a hot cue carries its letter. A hot cue's letter is
 /// repeated because that is the button that gets pressed.
 fn cue_help(cue: &CueMark, words: &[crate::library::Lyric]) -> String {
-    let at = crate::app::time_text(cue.time_ms);
+    let looped = cue
+        .loop_end_ms
+        .filter(|end| *end > cue.time_ms)
+        .map(|end| format!(", a loop to {}", crate::app::time_text(end)))
+        .unwrap_or_default();
+    let at = format!("{}{looped}", crate::app::time_text(cue.time_ms));
     let label = cue.label.trim();
     // A cue placed from the words already carries its line as its label. One
     // placed from the arrangement carries a section name, and the line sung
@@ -2074,7 +2094,7 @@ mod tests {
     }
 
     fn marked(letter: u8, time_ms: u32, label: &str) -> CueMark {
-        CueMark { letter, time_ms, label: label.into(), color: [200, 60, 60] }
+        CueMark { letter, time_ms, label: label.into(), color: [200, 60, 60], loop_end_ms: None }
     }
 
     #[test]
@@ -2137,6 +2157,15 @@ mod tests {
         // And one nobody named still says what it is rather than nothing.
         let bare = cue_help(&marked(0, 0, "   "), &[]);
         assert!(bare.starts_with("memory cue"), "{bare}");
+    }
+
+    #[test]
+    fn a_saved_loop_says_where_it_ends_when_rested_on() {
+        let looped = CueMark { loop_end_ms: Some(64_375), ..marked(3, 62_500, "roll") };
+        assert_eq!(cue_help(&looped, &[]), "Hot cue C \u{2014} roll\n1:02.50, a loop to 1:04.37");
+        // An end that is not after the start is no loop, and is not called one.
+        let flat = CueMark { loop_end_ms: Some(62_500), ..marked(3, 62_500, "roll") };
+        assert!(!cue_help(&flat, &[]).contains("loop"));
     }
 
     #[test]
@@ -2496,7 +2525,7 @@ mod tests {
         const TOTAL: f64 = 240.0;
 
         fn cue(letter: u8, time_ms: u32) -> CueMark {
-            CueMark { letter, time_ms, label: String::new(), color: [1, 2, 3] }
+            CueMark { letter, time_ms, label: String::new(), color: [1, 2, 3], loop_end_ms: None }
         }
 
         fn panel() -> Rect {

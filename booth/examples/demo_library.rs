@@ -193,6 +193,7 @@ fn fill_in(
                 _ => format!("{word} {count}"),
             },
             color: booth::job::cue_color(0),
+            loop_end_ms: None,
         });
     }
     track.cues.push(CueMark {
@@ -200,6 +201,7 @@ fn fill_in(
         time_ms: total as u32,
         label: "End".into(),
         color: booth::job::cue_color(0),
+        loop_end_ms: None,
     });
 
     for (from, _, _) in ARRANGEMENT.iter().filter(|(_, _, kind)| *kind == "drop") {
@@ -211,6 +213,7 @@ fn fill_in(
             time_ms: (total * from) as u32,
             label: format!("Drop {letter}"),
             color: [shade.r(), shade.g(), shade.b()],
+            loop_end_ms: None,
         });
     }
     track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
