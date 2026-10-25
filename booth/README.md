@@ -670,6 +670,38 @@ they are stored in, and **no drift at all** over five minutes, where there used
 to be 28 to 36 ms. A record that speeds up from 124 to 127 is still written
 speeding up, beat for beat.
 
+### On the kick, all the way through
+
+Click tracks hide two faults that real records do not, and both put every bar
+line in the wrong place.
+
+**The beats went on the hats.** The tracker followed onsets summed across the
+whole spectrum, where a hat's hiss fills a thousand bins and a kick a dozen.
+With a kick on every beat and an open hat on every off-beat sixteen times
+quieter, every beat landed on the hat. On 25 CC records from archive.org, more
+than a quarter of the beats sat half a beat off on twelve, and on two
+(Orquidea, Prova) all or nearly all of them. The beats are now placed by the
+low band as well, which hears the kick and not the hat; the tempo is still
+read from the whole spectrum, since how often the music pushes is the same
+either way.
+
+**The beats wandered in a breakdown.** With no kick to follow, the tracker
+follows whatever is there — a bassline on the off-beat, a riff in threes — and
+comes out a beat or half a beat from where it went in. Then the grid was not
+straightened at all, because its beats no longer lay on a line: three of the
+25 were. A record made in a sequencer is at one tempo whatever its breakdown
+does, so now the whole record is folded onto one beat — every onset added into
+its step of the beat, over a fine range of tempos, the sharpest fold winning —
+and the grid is written from that, provided the beats heard on it pass the
+same test for bowing that the tracker's always did. A record whose tempo
+really moves still fails it, and keeps the tracker's beats as before.
+
+On the same 25: 22 now have a straight grid on the kick, 20 of them at a whole
+number of BPM to within a hundredth — 125.000, 124.000, 140.000 — which is
+what a sequencer writes. Two have no steady beat for it to find and one, a
+hard techno record whose kick is a rumble, folds but does not pass, and those
+three are gridded as they were.
+
 ### Correcting a grid by hand
 
 A tracker is right about most records and wrong about a few, and the few are

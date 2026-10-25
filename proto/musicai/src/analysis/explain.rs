@@ -16,7 +16,7 @@ use super::structure::Kind;
 use super::TrackAnalysis;
 use crate::export::CueKind;
 
-/// How many tracked beats each line of the downbeat's stretch-by-stretch
+/// How many beats each line of the downbeat's stretch-by-stretch
 /// account covers: eight bars, a phrase, which is the longest a record holds
 /// one idea and so the shortest stretch whose answer means anything.
 const STRETCH_BEATS: usize = 32;
@@ -128,7 +128,7 @@ fn downbeat(out: &mut String, analysis: &TrackAnalysis) {
     paragraph(
         out,
         &format!(
-            "The tracker heard {heard} beats. Which of every four is the one is read off the \
+            "The grid has {heard} beats. Which of every four is the one is read off the \
              low band: the sharpest onset within a couple of frames of each beat, which is the \
              kick where there is one, summed over each of the four positions in the bar. The \
              largest sum wins."
@@ -138,7 +138,7 @@ fn downbeat(out: &mut String, analysis: &TrackAnalysis) {
         paragraph(out, "Under eight beats is too few to tell, so the first is taken as the one.");
     } else {
         let sums = found.strengths();
-        let _ = writeln!(out, "\n  position  tracked beats       low-band onset");
+        let _ = writeln!(out, "\n  position  grid's beats        low-band onset");
         for (position, sum) in sums.iter().enumerate() {
             let beats = format!("{}, {}, {}, ...", position + 1, position + 5, position + 9);
             let mark = if position == found.phase { "  <- the one" } else { "" };
@@ -168,19 +168,6 @@ fn downbeat(out: &mut String, analysis: &TrackAnalysis) {
                 ),
             );
         }
-    }
-    if found.dropped > 0 {
-        paragraph(
-            out,
-            &format!(
-                "Straightening took {} tracked beat{} off the front, where the line through \
-                 them began before the track did, so the grid's beats are numbered from the {} \
-                 tracked one.",
-                found.dropped,
-                if found.dropped == 1 { "" } else { "s" },
-                ordinal(found.dropped)
-            ),
-        );
     }
     match first_downbeat(analysis) {
         Some((index, at)) => paragraph(
@@ -466,12 +453,8 @@ mod tests {
             })
             .collect();
         let mut analysis = analyze(&track());
-        analysis.downbeat = Downbeat {
-            times_ms: (0..beats as u32).map(|i| i * 500).collect(),
-            kicks,
-            phase: 0,
-            dropped: 0,
-        };
+        analysis.downbeat =
+            Downbeat { times_ms: (0..beats as u32).map(|i| i * 500).collect(), kicks, phase: 0 };
         let text = explained(&analysis);
         let pointed: Vec<&str> =
             text.lines().filter(|line| line.ends_with("<- not the one")).collect();
@@ -534,7 +517,6 @@ mod tests {
                 times_ms: (0..16).map(|i| i * 500).collect(),
                 kicks: (0..16).map(|i| kicks[i % 4]).collect(),
                 phase: 0,
-                dropped: 0,
             };
             // Read as prose, whatever line the wrapping broke it over.
             let words: Vec<String> =
