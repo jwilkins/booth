@@ -4188,6 +4188,11 @@ impl App {
             args.drive = Some(drive.path.clone());
         }
         args.player = self.config.oldest_player;
+        // The sheet has asked already, with the plan's own sums — which count a
+        // track being replaced at nothing, as it is — and offered to write
+        // anyway. Asking again with the export's rougher sum would overrule
+        // both.
+        args.no_space_check = true;
         args.playlists = self.drive_playlists(&drive);
         args.companions = companions;
         args.already = carry.already;

@@ -104,6 +104,36 @@ fn a_write_that_carries_no_onelibrary_takes_last_weeks_off_the_drive() {
     assert_eq!(both_databases_agree(&drive).len(), 2);
 }
 
+// The research log's fourth pain point on 2026-10-24: exports that run a disk
+// out of room partway and leave it half written. A write that will not fit
+// stops before it starts, and says so.
+#[test]
+fn a_write_that_will_not_fit_on_the_drive_is_refused_before_anything_is_written() {
+    let scratch = Scratch::new("no-room");
+    let drive = scratch.path("USB");
+    // A file that says it is larger than the disk under it, without taking the
+    // room: a sparse one, as large as the filesystem allows a file to be.
+    let huge = scratch.path("huge.flac");
+    let file = std::fs::File::create(&huge).unwrap();
+    let Some(size) = [1u64 << 43, 1 << 40].into_iter().find(|&size| file.set_len(size).is_ok())
+    else {
+        return;
+    };
+    match booth_cli::volume::free_space(&drive) {
+        Some(free) if free < size => {}
+        // A platform that will not say, or a disk with eight terabytes free.
+        _ => return,
+    }
+
+    let args = ExportArgs { drive: Some(drive.clone()), ..args_for(vec![huge]) };
+    let error = commands::export(&args, &Collected::new())
+        .expect_err("a write too big for the drive went ahead");
+    let said = format!("{error:#}");
+    assert!(said.contains("nothing was written"), "{said}");
+    assert!(said.contains("--no-space-check"), "the way past it is not named: {said}");
+    assert!(!drive.exists(), "the drive was written to");
+}
+
 // Nothing stale is removed from a drive that never had one: the line is only
 // said when something came off.
 #[test]
