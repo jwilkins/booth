@@ -146,6 +146,28 @@ pub fn volumes() -> Vec<PathBuf> {
     roots
 }
 
+/// Whether `path` is on one of the [`volumes`]: a drive plugged in from
+/// outside rather than the disk the system runs from.
+///
+/// A volume that leads back to `/` is not one of them, whatever it is listed
+/// under: macOS keeps a link to the boot disk in `/Volumes`, and every path
+/// on the machine is on that.
+pub fn on_a_volume(path: &Path) -> bool {
+    under_any(path, &volumes())
+}
+
+/// Whether `path` is inside any of `roots`, as written or once resolved, never
+/// counting a root that resolves to `/`.
+pub fn under_any(path: &Path, roots: &[PathBuf]) -> bool {
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    roots.iter().any(|root| {
+        let real = root.canonicalize().unwrap_or_else(|_| root.clone());
+        real.parent().is_some()
+            && root.parent().is_some()
+            && (path.starts_with(root) || resolved.starts_with(&real))
+    })
+}
+
 /// What one backup holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Backup {
@@ -749,6 +771,29 @@ mod tests {
             std::fs::write(&path, bytes).unwrap();
             path
         }
+    }
+
+    #[test]
+    fn a_file_on_a_drive_is_under_it_and_one_elsewhere_is_not() {
+        let scratch = Scratch::new("under");
+        let stick = scratch.path("STICK");
+        let on_it = scratch.file("STICK/Contents/._Sirens.flac", b"x");
+        let elsewhere = scratch.file("Music/._Sirens.flac", b"x");
+        assert!(under_any(&on_it, std::slice::from_ref(&stick)));
+        assert!(!under_any(&elsewhere, &[stick]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_volume_that_leads_back_to_the_boot_disk_holds_nothing() {
+        // What `/Volumes/Macintosh HD` is on a Mac: a link to `/`, under which
+        // every file on the machine sits.
+        let scratch = Scratch::new("boot-link");
+        let boot = scratch.path("Macintosh HD");
+        std::os::unix::fs::symlink("/", &boot).unwrap();
+        let home = scratch.file("Music/._Sirens.flac", b"x");
+        assert!(!under_any(&home, &[boot]));
+        assert!(!under_any(&home, &[PathBuf::from("/")]), "/ is not a drive");
     }
 
     impl Drop for Scratch {
