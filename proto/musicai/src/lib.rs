@@ -24,3 +24,4 @@ pub mod report;
 pub mod stems;
 pub mod tag;
 pub mod transcribe;
+pub mod volume;

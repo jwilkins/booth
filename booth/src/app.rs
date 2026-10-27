@@ -899,21 +899,9 @@ impl App {
         // The `._` files a collection made before they were recognised holds,
         // taken out before anything is listed, so no row for one is ever shown.
         let companions = library.forget_apple_doubles();
-        for path in &companions {
-            crate::info!("took {} out of the collection: a macOS ._ file", path.display());
-        }
 
         let mut app = Self::assemble(library, library_path, config, config_path, status);
-        if !companions.is_empty() {
-            app.save();
-            app.note(
-                format!(
-                    "took out {}: the ._ files macOS leaves beside real ones",
-                    plural(companions.len(), "track")
-                ),
-                theme::text(),
-            );
-        }
+        app.let_go_of_apple_doubles(companions, "opening it");
 
         // The device is opened once, at startup, and kept: opening one per
         // track costs a noticeable gap and, on some hosts, a click.
@@ -1508,6 +1496,13 @@ impl App {
             .cloned()
             .collect();
 
+        // A `._` file macOS left beside a real track is taken out as the list
+        // meets it, rather than shown as a row that will not play.
+        let listed: Vec<u32> = in_view.iter().map(|track| track.id).collect();
+        if self.forget_apple_doubles_met(&listed, "browsing") {
+            in_view.retain(|track| self.library.get(track.id).is_some());
+        }
+
         // Sorted before the companions are added, so a stem stays under the
         // track it came from however the list is ordered.
         let sort = self.sort;
@@ -2061,6 +2056,84 @@ impl App {
             .collect()
     }
 
+    /// Take any of these tracks that is a `._` file macOS left beside a real
+    /// one out of the collection: see [`Self::let_go_of_apple_doubles`]. `met`
+    /// is what was being done when it turned up. Whether any went.
+    ///
+    /// The window clears the collection of them as it opens, and nothing that
+    /// adds tracks lets one in; this is for whatever got past both, met as the
+    /// list is about to show it or an analysis is about to read it — not left
+    /// as a row that will not play, or a decode that fails.
+    fn forget_apple_doubles_met(&mut self, ids: &[u32], met: &str) -> bool {
+        let gone = self.library.forget_apple_doubles_among(ids);
+        let any = !gone.is_empty();
+        self.let_go_of_apple_doubles(gone, met);
+        any
+    }
+
+    /// After `._` files have been taken out of the collection: delete those in
+    /// the library folder or on a drive plugged in from outside, save, and say
+    /// what happened in the log, which is the line at the bottom of the window.
+    ///
+    /// Only there. The library folder is Booth's own, and a stick is where a
+    /// Mac leaves these; a `._` file anywhere else is in somebody's folder,
+    /// and taking it out of the collection is as far as this goes.
+    fn let_go_of_apple_doubles(&mut self, gone: Vec<PathBuf>, met: &str) {
+        if gone.is_empty() {
+            return;
+        }
+        let mut deleted = 0usize;
+        for path in &gone {
+            let place = match self.config.holds(path) {
+                true => Some("the library folder"),
+                false => {
+                    let drives: Vec<PathBuf> =
+                        self.library.drives.iter().map(|drive| drive.path.clone()).collect();
+                    let outside =
+                        crate::backup::on_a_volume(path) || crate::backup::under_any(path, &drives);
+                    outside.then_some("the drive it is on")
+                }
+            };
+            let done = match place.map(|_| crate::library::delete_apple_double(path)) {
+                Some(Ok(true)) => {
+                    deleted += 1;
+                    format!("and deleted it from {}", place.unwrap_or_default())
+                }
+                Some(Ok(false)) => "and left the file, which is not one after all".to_string(),
+                Some(Err(e)) => {
+                    crate::warn!("could not delete {}: {e}", path.display());
+                    format!("and could not delete it: {e}")
+                }
+                None => "and left the file, which is outside the library folder and off any \
+                         drive"
+                    .to_string(),
+            };
+            crate::info!(
+                "took {} out of the collection while {met}, {done}: a macOS ._ file",
+                path.display()
+            );
+        }
+        self.marked.retain(|id| self.library.get(*id).is_some());
+        self.save();
+        let what = match gone.as_slice() {
+            [one] => one.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            _ => plural(gone.len(), "._ file"),
+        };
+        let removed = match (gone.len(), deleted) {
+            (_, 0) => String::new(),
+            (1, _) => ", and deleted it".to_string(),
+            (_, n) if n == gone.len() => ", and deleted them".to_string(),
+            (_, n) => format!(", and deleted {n} of them from the library folder or a drive"),
+        };
+        self.note(
+            format!(
+                "took {what} out of the collection while {met}{removed}: macOS leaves these \
+                 beside real tracks, and they are not music"
+            ),
+            theme::text(),
+        );
+    }
+
     /// Pair ids with the files they name, dropping any that have gone.
     ///
     /// A job handed a path that is not there fails per file and says so, which
@@ -2228,6 +2301,9 @@ impl App {
     }
 
     fn analyze_tracks(&mut self, ids: &[u32]) {
+        if self.forget_apple_doubles_met(ids, "analysing") {
+            self.rebuild();
+        }
         let waiting = self.files_for(ids);
         if waiting.is_empty() {
             self.note("nothing to analyse", theme::dim());
@@ -4188,6 +4264,11 @@ impl App {
             args.drive = Some(drive.path.clone());
         }
         args.player = self.config.oldest_player;
+        // The sheet has asked already, with the plan's own sums — which count a
+        // track being replaced at nothing, as it is — and offered to write
+        // anyway. Asking again with the export's rougher sum would overrule
+        // both.
+        args.no_space_check = true;
         args.playlists = self.drive_playlists(&drive);
         args.companions = companions;
         args.already = carry.already;
@@ -8610,7 +8691,7 @@ impl App {
         let renamed =
             renamed_for_the_words(cue, &track.cues, snapped, &track.lyrics, &track.sounds);
         let Some(cue) = track.cues.get_mut(at) else { return };
-        cue.time_ms = snapped;
+        cue.move_to(snapped);
         if let Some(label) = renamed {
             crate::debug!("cue moved onto other words: {:?} -> {label:?}", cue.label);
             cue.label = label;
@@ -8660,12 +8741,18 @@ impl App {
 
         let Some(track) = self.library.get_mut(id) else { return };
         match track.cues.iter_mut().find(|cue| cue.letter == letter) {
-            Some(cue) => cue.time_ms = snapped,
+            // Set afresh somewhere else, a hot cue is a cue, as it is when a
+            // deck's button is pressed in a new place.
+            Some(cue) => {
+                cue.time_ms = snapped;
+                cue.loop_end_ms = None;
+            }
             None => track.cues.push(crate::library::CueMark {
                 letter,
                 time_ms: snapped,
                 label: String::new(),
                 color: [color.r(), color.g(), color.b()],
+                loop_end_ms: None,
             }),
         }
         track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
@@ -14189,7 +14276,7 @@ fn drag_cues(cues: &mut [crate::library::CueMark], from: u32, to: u32, within: u
     let mut moved = 0;
     for cue in cues.iter_mut() {
         if marks_a_section(&cue.label) && cue.time_ms.abs_diff(from) <= within {
-            cue.time_ms = to;
+            cue.move_to(to);
             moved += 1;
         }
     }
@@ -14700,6 +14787,94 @@ mod tests {
             assert!(said.contains("1 macOS ._ file left out"), "{said}");
         }
 
+        /// A real track and the `._` file macOS left beside it, both in the
+        /// collection as they would be after some way in that let it past.
+        fn with_a_companion(app: &mut App, name: &str) -> (u32, u32) {
+            let dir = app.library_path.parent().unwrap().to_path_buf();
+            let real = dir.join(name);
+            std::fs::write(&real, vec![0x66u8; 256 * 1024]).unwrap();
+            let fake = dir.join(format!("._{name}"));
+            let mut header = vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00];
+            header.resize(4096, 0);
+            std::fs::write(&fake, header).unwrap();
+            (app.library.add(&real), app.library.add(&fake))
+        }
+
+        /// Whether the log, which is the line at the bottom of the window,
+        /// says this.
+        fn logged(said: &str) -> bool {
+            crate::log::entries(crate::log::Level::Info)
+                .iter()
+                .any(|entry| entry.text.contains(said))
+        }
+
+        #[test]
+        fn a_companion_the_list_meets_is_taken_out_and_the_log_says_so() {
+            let mut app = app("companion-listed");
+            let (real, fake) = with_a_companion(&mut app, "Listed.flac");
+            app.rebuild();
+
+            let rows: Vec<u32> = app.rows.iter().map(|row| row.track.id).collect();
+            assert_eq!(rows, [real]);
+            assert!(app.library.get(fake).is_none(), "still in the collection");
+            assert!(logged("took ._Listed.flac out of the collection while browsing"));
+            // And it stays out: the collection on disk is the one without it.
+            let saved = Library::load(&app.library_path).unwrap();
+            assert!(saved.get(fake).is_none(), "the collection was not saved without it");
+        }
+
+        #[test]
+        fn a_companion_in_the_library_folder_is_deleted_as_well_as_forgotten() {
+            let mut app = app("companion-library");
+            let dir = app.library_path.parent().unwrap().to_path_buf();
+            app.config.library_path = dir.clone();
+            let (real, fake) = with_a_companion(&mut app, "Deleted.flac");
+            app.rebuild();
+
+            assert!(app.library.get(fake).is_none(), "still in the collection");
+            assert!(!dir.join("._Deleted.flac").exists(), "the file is still there");
+            assert!(dir.join("Deleted.flac").exists(), "the real track went with it");
+            assert!(app.library.get(real).is_some());
+            assert!(logged(
+                "took ._Deleted.flac out of the collection while browsing, and deleted"
+            ));
+        }
+
+        #[test]
+        fn a_companion_outside_the_library_folder_and_off_any_drive_stays_on_disk() {
+            let mut app = app("companion-elsewhere");
+            let dir = app.library_path.parent().unwrap().to_path_buf();
+            // The library folder somewhere else, and this folder on no drive.
+            app.config.library_path = dir.join("Library");
+            let (_, fake) = with_a_companion(&mut app, "Kept.flac");
+            app.rebuild();
+
+            assert!(app.library.get(fake).is_none(), "still in the collection");
+            assert!(dir.join("._Kept.flac").exists(), "a file in somebody's folder was deleted");
+        }
+
+        #[test]
+        fn a_companion_asked_to_be_analysed_is_taken_out_rather_than_read() {
+            let mut app = app("companion-analysed");
+            let (_, fake) = with_a_companion(&mut app, "Analysed.flac");
+            app.analyze_tracks(&[fake]);
+
+            assert!(app.library.get(fake).is_none(), "still in the collection");
+            assert!(app.runner.is_none() && app.queued.is_empty(), "an analysis was started");
+            assert!(logged("took ._Analysed.flac out of the collection while analysing"));
+        }
+
+        #[test]
+        fn a_real_track_whose_name_starts_like_a_companion_is_listed_as_ever() {
+            let mut app = app("companion-lookalike");
+            let dir = app.library_path.parent().unwrap().to_path_buf();
+            let real = dir.join("._Intro.flac");
+            std::fs::write(&real, vec![0x66u8; 256 * 1024]).unwrap();
+            let id = app.library.add(&real);
+            app.rebuild();
+            assert_eq!(app.rows.iter().map(|row| row.track.id).collect::<Vec<_>>(), [id]);
+        }
+
         /// The two workers: the long work, and what the window is waiting on.
         mod two_lanes {
             use super::*;
@@ -15069,7 +15244,13 @@ mod tests {
             use crate::library::{CueMark, Phrase, PhraseEdit};
 
             fn cue(letter: u8, time_ms: u32, label: &str) -> CueMark {
-                CueMark { letter, time_ms, label: label.to_string(), color: [0; 3] }
+                CueMark {
+                    letter,
+                    time_ms,
+                    label: label.to_string(),
+                    color: [0; 3],
+                    loop_end_ms: None,
+                }
             }
 
             /// 120 BPM, so a beat is 500 ms and a bar is two seconds.
@@ -15212,6 +15393,7 @@ mod tests {
                     time_ms: 4_000,
                     label: "drop".into(),
                     color: [1, 2, 3],
+                    loop_end_ms: None,
                 }];
                 for (part, slot) in [("vocals", 0), ("drums", 1), ("melody", 2)] {
                     let path = dir.join(format!("Sirens-{part}.mp3"));
@@ -15407,7 +15589,13 @@ mod tests {
             }
 
             fn cue(letter: u8, time_ms: u32, label: &str) -> CueMark {
-                CueMark { letter, time_ms, label: label.to_string(), color: [0; 3] }
+                CueMark {
+                    letter,
+                    time_ms,
+                    label: label.to_string(),
+                    color: [0; 3],
+                    loop_end_ms: None,
+                }
             }
 
             /// 120 BPM from zero: a beat is 500 ms and the one is every two
@@ -15713,8 +15901,13 @@ mod tests {
                 track.analyzed = true;
                 track.beats = 600;
                 track.duration_secs = 300.0;
-                track.cues =
-                    vec![CueMark { letter: 0, time_ms: 0, label: String::new(), color: [0; 3] }];
+                track.cues = vec![CueMark {
+                    letter: 0,
+                    time_ms: 0,
+                    label: String::new(),
+                    color: [0; 3],
+                    loop_end_ms: None,
+                }];
                 track.phrases = vec![
                     Phrase { start_ms: 0, end_ms: 32_000, kind: "intro".into() },
                     Phrase { start_ms: 32_000, end_ms: 64_000, kind: "drop".into() },
@@ -16319,12 +16512,14 @@ mod tests {
                             time_ms: 0,
                             label: "Start".into(),
                             color: [0, 0, 0],
+                            loop_end_ms: None,
                         },
                         crate::library::CueMark {
                             letter: 0,
                             time_ms: 60_000,
                             label: "Drop 1".into(),
                             color: [0, 0, 0],
+                            loop_end_ms: None,
                         },
                     ];
                 }
@@ -16354,6 +16549,7 @@ mod tests {
                     time_ms: from,
                     label: label.into(),
                     color: [0; 3],
+                    loop_end_ms: None,
                 });
                 track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
                 let at = track
@@ -16411,6 +16607,7 @@ mod tests {
                     time_ms: 40_000,
                     label: "V1 hold me closer now".into(),
                     color: [0; 3],
+                    loop_end_ms: None,
                 });
                 let label = dragged(&mut app, id, 0, 60_000, "V2 nothing here but us", 80_000);
                 assert_eq!(label, "V1 hold me closer now");
@@ -17291,12 +17488,14 @@ mod tests {
                             time_ms: 1_000,
                             label: String::new(),
                             color: [0x98, 0xA4, 0xAE],
+                            loop_end_ms: None,
                         },
                         crate::library::CueMark {
                             letter: 2,
                             time_ms: 62_500,
                             label: "Vocal".into(),
                             color: crate::job::cue_color(2),
+                            loop_end_ms: None,
                         },
                     ];
                     track.lyrics = vec![crate::library::Lyric {
@@ -17320,6 +17519,7 @@ mod tests {
                             time_ms,
                             label: String::new(),
                             color: [0x98, 0xA4, 0xAE],
+                            loop_end_ms: None,
                         })
                         .collect();
                     app.rebuild();
@@ -20247,6 +20447,7 @@ mod tests {
                     time_ms: 32_000,
                     label: "in".into(),
                     color: [1, 2, 3],
+                    loop_end_ms: None,
                 }];
             }
             app.library.add_playlist("Saturday", "").unwrap();
@@ -21262,6 +21463,7 @@ mod tests {
             time_ms: 2_000,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let beats = beat_times(&track);
@@ -21288,6 +21490,7 @@ mod tests {
             time_ms: 30_969,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let beats = beat_times(&track);
@@ -21335,6 +21538,7 @@ mod tests {
             time_ms: 3_000,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let off_the_cue = beat_times(&track);
@@ -21427,6 +21631,7 @@ mod tests {
             time_ms: 2_000,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         // Anything before the first beat is the first beat, not a negative one.
@@ -21454,6 +21659,7 @@ mod tests {
             time_ms: 1_234,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let period = 60_000.0 / 128.0;

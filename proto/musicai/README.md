@@ -533,6 +533,15 @@ Files a player cannot open are refused rather than copied — a file that fails 
 is worse on the drive than off it — which today means checking the container and the
 sample rate.
 
+A write that will not fit is refused before anything goes on. It is counted as every file
+at its full size plus two megabytes each for its analysis, against what the drive has
+free; a write that runs out of room partway leaves a drive half done, and since the
+databases go on last, it is the databases that do not fit. Replacing tracks already on the
+drive is counted as if they were new, so a nearly full drive can be refused a write that
+would have fitted — `--no-space-check` goes on regardless. Nothing is staged anywhere
+else on the way: every file is written straight to the drive, so the laptop's own disk is
+never what runs out.
+
 Variable-bitrate MP3s get a seek index (`PVBR`) so their hot cues land in the right place
 on the player — see [What it hears](#what-it-hears). Every other format seeks without one.
 

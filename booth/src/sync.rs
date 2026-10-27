@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::library::{Drive, Library, Stamp, Track};
+pub use booth_cli::volume::bytes;
+use booth_cli::volume::{free_space, nearest_existing, ANALYSIS_ALLOWANCE};
 
 /// What one sync would do.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -295,6 +297,13 @@ pub fn fingerprint(track: &Track) -> u64 {
         // cues and neither ever reached a player.
         eat(cue.label.as_bytes());
         eat(&cue.color);
+        // Only for a loop, so that every cue that is not one hashes as it did
+        // before loops were kept: otherwise the first sync after this would
+        // report every track on every drive as changed.
+        if let Some(end_ms) = cue.loop_end_ms {
+            eat(b"loop");
+            eat(&end_ms.to_le_bytes());
+        }
     }
     for phrase in &track.phrases {
         eat(&phrase.start_ms.to_le_bytes());
@@ -334,6 +343,13 @@ pub fn prep(track: &Track) -> booth_cli::export::Prep {
             let placed = match cue.letter {
                 0 => Cue::memory(cue.time_ms),
                 letter => Cue::hot(letter, cue.time_ms),
+            };
+            // A loop goes back on the drive a loop. One that ends where it
+            // starts, or before, is no loop a player can play, and goes on as
+            // the cue it starts with.
+            let placed = match cue.loop_end_ms {
+                Some(end_ms) if end_ms > cue.time_ms => placed.looping(end_ms),
+                _ => placed,
             };
             Cue {
                 comment: (!cue.label.is_empty()).then(|| cue.label.clone()),
@@ -847,50 +863,14 @@ fn space(plan: &Plan, destination: &Path, is_image: bool) -> Check {
 }
 
 /// Room for the analysis files, which are written per file and are not part of
-/// any file's size on disk. Two megabytes each is generous for anything under
-/// about half an hour long — the same allowance the writer sizes an image with.
+/// any file's size on disk: [`ANALYSIS_ALLOWANCE`] each.
 ///
 /// Stems count. Each one is a row on the player with its own grid, waveform and
 /// cues, so a drive carrying them needs four times this, not one.
 fn analysis_allowance(plan: &Plan) -> u64 {
-    (plan.writes().len() + plan.new_stems.len()) as u64 * 2 * 1024 * 1024
+    (plan.writes().len() + plan.new_stems.len()) as u64 * ANALYSIS_ALLOWANCE
 }
 
-/// Free bytes on the filesystem holding `path`, if it can be found out.
-///
-/// There is no portable way to ask, so on the platforms that answer the answer
-/// is used, and on the ones that do not the check says it does not know rather
-/// than guessing. A preflight that invents a free-space number is worse than
-/// one that admits it has none.
-#[cfg(unix)]
-fn free_space(path: &Path) -> Option<u64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let existing = nearest_existing(path)?;
-    let c_path = CString::new(existing.as_os_str().as_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: the path is a valid NUL-terminated string that outlives the call,
-    // and `statvfs` either fills the struct and returns zero or returns non-zero
-    // and leaves it alone — which is why it is only read on success.
-    let filled = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
-    if filled != 0 {
-        return None;
-    }
-    let stat = unsafe { stat.assume_init() };
-    // The casts are redundant on 64-bit and not on 32-bit, where these fields
-    // are `c_ulong`.
-    #[allow(clippy::unnecessary_cast)]
-    (stat.f_bavail as u64).checked_mul(stat.f_frsize as u64)
-}
-
-#[cfg(not(unix))]
-fn free_space(_path: &Path) -> Option<u64> {
-    None
-}
-
-/// The path itself if it exists, else the nearest parent that does — a drive
-/// folder that has not been created yet still sits on a filesystem with a size.
 /// What the drive is formatted as, in the name its own operating system uses.
 ///
 /// `None` when it cannot be found out, which is treated as not knowing rather
@@ -995,28 +975,6 @@ fn mountable(kind: &str, player: booth_cli::compat::Player) -> Check {
     }
 }
 
-fn nearest_existing(path: &Path) -> Option<PathBuf> {
-    let mut at = path;
-    loop {
-        if at.exists() {
-            return Some(at.to_path_buf());
-        }
-        at = at.parent()?;
-    }
-}
-
-/// A size, in the units a person reads.
-pub fn bytes(count: u64) -> String {
-    const UNITS: [(&str, u64); 4] =
-        [("TB", 1 << 40), ("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)];
-    for (unit, size) in UNITS {
-        if count >= size {
-            return format!("{:.1} {unit}", count as f64 / size as f64);
-        }
-    }
-    format!("{count} B")
-}
-
 /// A few of something, and then "+n".
 fn list<'a>(items: impl Iterator<Item = &'a str>) -> String {
     let mut seen: Vec<&str> = items.collect();
@@ -1106,6 +1064,7 @@ mod tests {
             time_ms: 64_000,
             label: "drop".into(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let plan = plan(&library, &drive);
@@ -1446,6 +1405,7 @@ mod tests {
             time_ms: 4_000,
             label: "drop".into(),
             color: [1, 2, 3],
+            loop_end_ms: None,
         });
         library.get_mut(id).unwrap().phrases.push(Phrase {
             start_ms: 0,
@@ -1472,6 +1432,30 @@ mod tests {
             (fingerprint(library.get(id).unwrap()), prep(library.get(id).unwrap())),
             unchanged
         );
+    }
+
+    #[test]
+    fn a_loop_in_the_collection_goes_on_the_drive_a_loop_and_moving_its_end_is_a_change() {
+        use booth_cli::export::CueKind;
+        let (mut library, ids) = library_with(1);
+        let id = ids[0];
+        library.get_mut(id).unwrap().cues.push(crate::library::CueMark {
+            letter: 3,
+            time_ms: 12_000,
+            label: "roll".into(),
+            color: [1, 2, 3],
+            loop_end_ms: Some(13_875),
+        });
+        let written = prep(library.get(id).unwrap());
+        assert_eq!(written.cues[0].kind, CueKind::Loop { end_ms: 13_875 });
+
+        let before = fingerprint(library.get(id).unwrap());
+        library.get_mut(id).unwrap().cues[0].loop_end_ms = Some(15_750);
+        assert_ne!(fingerprint(library.get(id).unwrap()), before, "the drive has the old end");
+
+        // An end that is not after the start is no loop a player can play.
+        library.get_mut(id).unwrap().cues[0].loop_end_ms = Some(12_000);
+        assert_eq!(prep(library.get(id).unwrap()).cues[0].kind, CueKind::Point);
     }
 
     #[test]
@@ -1783,6 +1767,7 @@ mod tests {
             time_ms: 32_000,
             label: "drop".into(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let plan = plan(&library, &drive);
@@ -2002,16 +1987,6 @@ mod tests {
     }
 
     #[test]
-    fn free_space_is_reported_when_the_platform_will_say() {
-        // On the platforms that answer, a real directory has a real size; on
-        // the ones that do not, the check says so instead of guessing.
-        let answer = free_space(Path::new("."));
-        if cfg!(unix) {
-            assert!(answer.is_some_and(|free| free > 0), "{answer:?}");
-        }
-    }
-
-    #[test]
     fn a_write_that_will_not_fit_is_a_blocker() {
         let (mut library, ids) = library_with(2);
         for id in &ids {
@@ -2034,12 +2009,5 @@ mod tests {
             assert_eq!(space.level, Level::Bad, "{}", space.text);
             assert!(space.text.contains("only"), "{}", space.text);
         }
-    }
-
-    #[test]
-    fn sizes_read_the_way_a_person_says_them() {
-        assert_eq!(bytes(512), "512 B");
-        assert_eq!(bytes(2 * 1024 * 1024), "2.0 MB");
-        assert_eq!(bytes(3 * 1024 * 1024 * 1024 + 512 * 1024 * 1024), "3.5 GB");
     }
 }

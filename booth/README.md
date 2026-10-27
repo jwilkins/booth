@@ -19,8 +19,15 @@ folder imported off such a drive used to bring a second, silent copy of every
 track. A file whose name starts with `._` and which opens with the AppleDouble
 mark (`00 05 16 07`), or is under 64 KiB, is skipped at import, from a rekordbox
 library and by the command line, and any already in the collection are taken
-out when the window opens. A real track that happens to be named `._…` is
-megabytes, and is kept.
+out when the window opens. One that gets past all of that is taken out when the
+list is about to show it or an analysis is about to read it. Whenever one comes
+out of the collection, the file is deleted too if it is in the library folder or
+on a drive plugged in from outside — a stick is where a Mac leaves them — and is
+left alone anywhere else, which is somebody's own folder. The file is asked again
+before it goes, so a track the collection only judged by its name and noted size
+is not deleted on that. The line at the bottom of the window says which, where
+it was met, and whether it was deleted. A real track that happens to be named
+`._…` is megabytes, and is kept.
 
 On Linux the audio output needs ALSA's headers at build time
 (`apt install libasound2-dev`, or `alsa-lib-devel`). macOS and Windows need
@@ -670,13 +677,73 @@ they are stored in, and **no drift at all** over five minutes, where there used
 to be 28 to 36 ms. A record that speeds up from 124 to 127 is still written
 speeding up, beat for beat.
 
+### On the kick, all the way through
+
+Click tracks hide two faults that real records do not, and both put every bar
+line in the wrong place.
+
+**The beats went on the hats.** The tracker followed onsets summed across the
+whole spectrum, where a hat's hiss fills a thousand bins and a kick a dozen.
+With a kick on every beat and an open hat on every off-beat sixteen times
+quieter, every beat landed on the hat. On 25 CC records from archive.org, more
+than a quarter of the beats sat half a beat off on twelve, and on two
+(Orquidea, Prova) all or nearly all of them. The beats are now placed by the
+low band as well, which hears the kick and not the hat; the tempo is still
+read from the whole spectrum, since how often the music pushes is the same
+either way.
+
+**The beats wandered in a breakdown.** With no kick to follow, the tracker
+follows whatever is there — a bassline on the off-beat, a riff in threes — and
+comes out a beat or half a beat from where it went in. Then the grid was not
+straightened at all, because its beats no longer lay on a line: three of the
+25 were. A record made in a sequencer is at one tempo whatever its breakdown
+does, so now the whole record is folded onto one beat — every onset added into
+its step of the beat, over a fine range of tempos, the sharpest fold winning —
+and the grid is written from that, provided the beats heard on it pass the
+same test for bowing that the tracker's always did. A record whose tempo
+really moves still fails it, and keeps the tracker's beats as before.
+
+On the same 25: 22 now have a straight grid on the kick, 20 of them at a whole
+number of BPM to within a hundredth — 125.000, 124.000, 140.000 — which is
+what a sequencer writes. Two have no steady beat for it to find and one, a
+hard techno record whose kick is a rumble, folds but does not pass, and those
+three are gridded as they were.
+
+### Which beat is the one
+
+The downbeat was the beat of four the kick hit hardest, which is no answer at
+all on a record with a kick on every beat: on eight of eighteen CC records the
+winner led by 1 or 2 per cent, and every bar line, phrase and cue sat a beat or
+three out on whichever it picked. On a four-on-the-floor record it is the rest
+that differs between the beats of a bar, so the rest is read now:
+
+- **The backbeat.** A clap or snare is on the 2 and the 4. Where one pair of
+  alternate beats has clearly more onset between 1 and 5 kHz than the other —
+  1.23 to 2.42 times, on the records with one, against at most 1.14 on those
+  without — the 1 is on the other pair.
+- **The harmony.** The bass note and the chord change on the 1. How far each
+  moves across every beat is measured, and of the beats the backbeat left, the
+  one where they move most is the harmony's choice.
+- **The kick** still has its say, and where it is surer than the harmony it
+  decides: a kick only on the 1 places the bar as it always did, and a broken
+  beat like MALA's, whose kick leads by ten times, is read off its kick.
+
+There is no rekordbox grid or listening behind these records yet, so the
+reference is the arrangement itself: where each record adds and takes away its
+parts, which a club record does on bar lines and mostly a whole phrase apart,
+checked against its backbeat. On the eleven records where those agree, the kick
+alone put the bar right on six and this puts it right on all eleven. On a
+record where neither the backbeat nor the harmony says much it is still a
+guess, and the analysis log says so; the fix controls below are for those.
+
 ### Correcting a grid by hand
 
 A tracker is right about most records and wrong about a few, and the few are
 not random. It reads a half-time record at double, a drum-and-bass record at
-half, and it puts the one on the snare of anything with a strong backbeat. None
-of that is fixed by analysing again — the same audio gives the same answer —
-and all of it is a press or two for somebody looking at the waveform.
+half, and on a record where nothing marks the bar — a kick on every beat, no
+clap, a chord held for minutes — the one is a guess. None of that is fixed by
+analysing again — the same audio gives the same answer — and all of it is a
+press or two for somebody looking at the waveform.
 
 **fix**, beside the grid reading, opens the controls:
 
@@ -1425,7 +1492,8 @@ the day AlphaTheta changes the key; the constant is `BUNDLED_KEY` in
 `proto/musicai/src/rekordbox/mod.rs`, and blanking it builds a program that asks for one.
 
 Settings → **Import a rekordbox library** brings across tracks, playlists and
-their folders, beat grids, hot cues, keys, ratings, play counts and My Tags.
+their folders, beat grids, hot cues and the loops saved on them, keys, ratings,
+play counts and My Tags.
 On the command line, `booth-cli rekordbox read <path>` lists what is in one
 without changing anything.
 
@@ -1696,9 +1764,13 @@ Keeping the drive's copy does two things. The track's analysis files on the
 stick are left exactly as the deck left them — it is not prepared again, and its
 row and its place in the playlists carry through untouched — and **what the deck
 did is read back into the collection**, so the cues, their names and colours, the
-phrases and the tempo become the ones Booth shows. Keeping the drive's copy
-therefore means having it, not merely not losing it. The decision is recorded, so
-a settled question is not asked again on every sync.
+phrases and the tempo become the ones Booth shows. A cue the deck saved as a loop
+comes back a loop, with where it ends, and goes back onto the stick as one: the
+collection used to keep only where a cue starts, so a loop read off a stick was
+written back as a plain cue and the loop was gone. The waveform draws a loop's
+length as a bar along the cue's edge, and resting on it says where it ends.
+Keeping the drive's copy therefore means having it, not merely not losing it. The
+decision is recorded, so a settled question is not asked again on every sync.
 
 The one thing that does not come back is the grid itself, only the tempo it was
 written at. A collection keeps a tempo and a downbeat rather than thousands of
@@ -1797,10 +1869,11 @@ track: `Sirens.flac.log` beside `Sirens.flac`, the whole name and `.log` after,
 so a FLAC and an MP3 of the same record in one folder each keep theirs. It is
 rewritten every time the track is analysed, and it holds the numbers each
 decision was made on rather than only the decisions: the tempo and how sure the
-tracker was; the downbeat, as the four sums it is chosen from — how hard the low
-end hits on the first, second, third and fourth of every four beats — and the
-same sums eight bars at a time, with any stretch that favours a different beat
-pointed out; the key; the arrangement's sections and the rules that named them;
+tracker was; the downbeat, as what was heard at each of the four positions in
+the bar — the kick, the clap, how far the bass and the chords move — with which
+pair the backbeat ruled out, how far the kick and the harmony each led, which
+of them decided, and the same eight bars at a time, with any stretch that
+favours a different beat pointed out; the key; the arrangement's sections and the rules that named them;
 every bar's energy, from the mix and from the drum stem where there is one, with
 the drops and breaks found in it and which of them are D and B; and the cues.
 A release build never writes it: a music folder is its owner's, and a file

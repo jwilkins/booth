@@ -902,10 +902,13 @@ offline, and every decision visible.
   level and a vocal-presence estimate. A five-minute track measures out at about a
   megabyte rather than a spectrogram's few hundred.
 - **`tempo.rs`** — ANA-1 and ANA-2. Autocorrelation with a perceptual tempo prior, then
-  Ellis's dynamic program for the beat times, then the downbeat from where the kicks are.
-  The tempo is read back off the tracked beats rather than off the autocorrelation lag,
-  which is only accurate to about a beat per minute; where a constant tempo fits the
-  beats, the grid becomes that constant tempo exactly.
+  Ellis's dynamic program for the beat times, then the downbeat: from the kick where it is
+  surest, and otherwise from the backbeat and where the bass and the chords change.
+  The beats are placed by the low band as well as the whole spectrum, so they land on the
+  kick rather than an off-beat hat. Where the record folds onto one steady beat, the grid
+  is that beat exactly, wherever the tracker wandered in a breakdown; otherwise the tempo
+  is read back off the tracked beats, and where a constant tempo fits them the grid becomes
+  that constant tempo exactly.
 - **`structure.rs`** — ANA-5. Foote's self-similarity novelty over bar-synchronous band
   features, snapped to four bars, labelled intro / build / drop / break / outro from how
   much is happening in each section.

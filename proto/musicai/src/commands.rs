@@ -329,6 +329,12 @@ pub fn export(
             }
         ),
     );
+    // A write that runs out of room partway leaves a drive half written, and
+    // the databases go on last, so it is the databases that do not fit. So the
+    // question is asked before anything goes on.
+    if let (Some(root), false, false) = (&args.drive, args.dry_run, args.no_space_check) {
+        room_for(root, &files, reporter)?;
+    }
     let destination = match args.dry_run {
         true => None,
         false => Some(open_destination(args, &files, reporter)?),
@@ -842,6 +848,33 @@ fn put_onelibrary(
 /// The size has to be settled before a byte is written, so it is estimated from
 /// the audio plus a couple of megabytes a track for the analysis. That is
 /// generous for anything under about half an hour long.
+/// Whether what is about to be written into the folder at `root` fits: every
+/// file at its full size, which is what a copy writes and more than a re-encode
+/// does, and room for each one's analysis. Free space that cannot be found out
+/// is said and written regardless, as the window's preflight does.
+fn room_for(root: &Path, files: &[PathBuf], reporter: &dyn Reporter) -> Result<()> {
+    use crate::volume::{bytes, free_space, ANALYSIS_ALLOWANCE};
+    let audio: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+    let needed = audio.saturating_add(files.len() as u64 * ANALYSIS_ALLOWANCE);
+    let free = free_space(root);
+    let line = match free {
+        Some(free) if free <= needed => bail!(
+            "{} to write and only {} free on {}, so nothing was written: a write that runs out \
+             of room leaves the drive half done. Make room, or pass --no-space-check if some \
+             of it replaces what is already there",
+            bytes(needed),
+            bytes(free),
+            root.display()
+        ),
+        Some(free) => {
+            format!("{} to write, {} free on {}", bytes(needed), bytes(free), root.display())
+        }
+        None => format!("{} to write; free space on {} is unknown", bytes(needed), root.display()),
+    };
+    report::detail(reporter, line);
+    Ok(())
+}
+
 fn open_destination(
     args: &ExportArgs,
     files: &[PathBuf],
@@ -854,7 +887,7 @@ fn open_destination(
     let image = args.image.as_ref().expect("clap requires one of --drive and --image");
 
     let audio: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
-    let analysis = files.len() as u64 * 2 * 1024 * 1024;
+    let analysis = files.len() as u64 * crate::volume::ANALYSIS_ALLOWANCE;
     let capacity = capacity_for(audio + analysis);
     // The size has to be settled before a byte is written, so what it was
     // worked out from is worth saying: an image that turns out too small is a

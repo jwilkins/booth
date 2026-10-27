@@ -817,8 +817,17 @@ pub fn cue_marks(cues: &[booth_cli::export::Cue]) -> Vec<CueMark> {
                 .color
                 .map(|rgb| [rgb.r, rgb.g, rgb.b])
                 .unwrap_or_else(|| cue_color(cue.hot_cue)),
+            loop_end_ms: loop_end(cue),
         })
         .collect()
+}
+
+/// Where a cue's loop ends, if it is a saved loop.
+pub fn loop_end(cue: &booth_cli::export::Cue) -> Option<u32> {
+    match cue.kind {
+        booth_cli::export::CueKind::Loop { end_ms } => Some(end_ms),
+        booth_cli::export::CueKind::Point => None,
+    }
 }
 
 pub fn cue_color(letter: u8) -> [u8; 3] {

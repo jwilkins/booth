@@ -47,7 +47,7 @@ fn write_library(path: &Path, key: &str) {
             rb_local_deleted INTEGER
         );
         CREATE TABLE djmdCue (
-            ID TEXT, ContentID TEXT, InMsec INTEGER, Kind INTEGER,
+            ID TEXT, ContentID TEXT, InMsec INTEGER, OutMsec INTEGER, Kind INTEGER,
             Comment TEXT, rb_local_deleted INTEGER
         );
         CREATE TABLE djmdMyTag (ID TEXT, Name TEXT, Seq INTEGER, rb_local_deleted INTEGER);
@@ -79,10 +79,12 @@ fn write_library(path: &Path, key: &str) {
             ('c3', '/music', 'Thrown Away.flac', 'Thrown Away',
              'a1', NULL, NULL, NULL, 12000, 100, 0, NULL, NULL, 0, NULL, 1);
 
-        INSERT INTO djmdCue VALUES ('q1', 'c1', 0,     0, 'top',  0);
-        INSERT INTO djmdCue VALUES ('q2', 'c1', 30000, 1, 'drop', 0);
-        INSERT INTO djmdCue VALUES ('q3', 'c1', 60000, 9, 'huh',  0);
-        INSERT INTO djmdCue VALUES ('q4', 'c1', 90000, 2, 'gone', 1);
+        -- OutMsec is -1 for a cue and the loop's end for a saved loop.
+        INSERT INTO djmdCue VALUES ('q1', 'c1', 0,     -1,    0, 'top',  0);
+        INSERT INTO djmdCue VALUES ('q2', 'c1', 30000, -1,    1, 'drop', 0);
+        INSERT INTO djmdCue VALUES ('q3', 'c1', 60000, -1,    9, 'huh',  0);
+        INSERT INTO djmdCue VALUES ('q4', 'c1', 90000, -1,    2, 'gone', 1);
+        INSERT INTO djmdCue VALUES ('q5', 'c1', 45000, 46875, 3, 'roll', 0);
 
         INSERT INTO djmdMyTag VALUES ('t1', 'peak', 1, 0);
         INSERT INTO djmdSongMyTag VALUES ('s1', 't1', 'c1', 0);
@@ -148,9 +150,12 @@ fn a_library_comes_across_with_its_names_grids_and_cues() {
     // Nought is the memory cue and one to eight are hot cues; a nine is
     // something this does not understand, and a deleted one is deleted.
     let letters: Vec<u8> = track.cues.iter().map(|c| c.letter).collect();
-    assert_eq!(letters, vec![0, 1], "{:?}", track.cues);
+    assert_eq!(letters, vec![0, 1, 3], "{:?}", track.cues);
     assert_eq!(track.cues[1].time_ms, 30_000);
     assert_eq!(track.cues[1].label, "drop");
+    assert_eq!(track.cues[1].loop_end_ms, None, "a cue is not a loop");
+    // And a saved loop comes across with where it ends.
+    assert_eq!(track.cues[2].loop_end_ms, Some(46_875), "{:?}", track.cues[2]);
 
     // The other track has almost nothing set, and that is not an error.
     let sparse = collection.tracks.iter().find(|t| t.title == "Sirens").unwrap();
