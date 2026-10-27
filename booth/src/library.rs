@@ -696,6 +696,12 @@ pub struct Track {
     /// once more, on purpose.
     #[serde(default)]
     pub genre_chosen: bool,
+    /// The genre whose octave the tempo was put in — "drum and bass" — when
+    /// the model heard one, or empty. Kept so that measuring the grid again
+    /// without the model, or analysing with it switched off, keeps the octave
+    /// the genre gave rather than going back to the one it overruled.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tempo_octave: String,
     pub beats: usize,
     /// Every beat, for a track whose grid bends.
     ///
@@ -937,6 +943,7 @@ impl Track {
             genre: String::new(),
             genre_confidence: 0.0,
             genre_chosen: false,
+            tempo_octave: String::new(),
             beats: 0,
             beat_ms: Vec::new(),
             downbeat_ms: None,
@@ -1944,6 +1951,7 @@ impl Library {
             kept.genre = copy.genre.clone();
             kept.genre_confidence = copy.genre_confidence;
             kept.genre_chosen = copy.genre_chosen;
+            kept.tempo_octave = copy.tempo_octave.clone();
             kept.beats = copy.beats;
             kept.phrases = copy.phrases.clone();
             kept.loudness_lufs = copy.loudness_lufs;

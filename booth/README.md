@@ -724,7 +724,8 @@ were picked for the genres where the octave is in question. The two agree on
 seven it misses are the octave: hip hop read at double, drum and bass and
 half-time records read at half. The seventh reads 120 as 80. The octave is a
 convention as much as a measurement, which is what the `÷2` and `×2` below
-are for.
+are for, and with the genre model switched on, the genre: see
+[Installing the genre model](#installing-the-genre-model).
 
 ### Which beat is the one
 
@@ -757,7 +758,8 @@ guess, and the analysis log says so; the fix controls below are for those.
 
 A tracker is right about most records and wrong about a few, and the few are
 not random. It reads hip hop at double, drum and bass and half-time records
-at half, and on a record where nothing marks the bar — a kick on every beat, no
+at half (less often with the genre model on), and on a record where nothing
+marks the bar — a kick on every beat, no
 clap, a chord held for minutes — the one is a guess. None of that is fixed by
 analysing again — the same audio gives the same answer — and all of it is a
 press or two for somebody looking at the waveform.
@@ -1499,6 +1501,31 @@ activation for that style, 0 to 1, and not a share of anything: 0.3 is the
 model being fairly sure of a style it rarely hears, not a thirty per cent
 chance.
 
+**It also says which octave the tempo is.** Hip hop at 86 is counted at 86 and
+drum and bass at 172 at 172, though a record of either can repeat as strongly
+at the other's tempo, and the tempo alone cannot tell them apart: they are as
+far either side of the 120 the tracker leans towards. The genre can. So with
+the switch on, the genre is heard before the beats are tracked, and where the
+model is sure of one of three, the tempo goes in that genre's octave:
+
+| Genre | Counted from | Styles |
+|---|---|---|
+| Drum and bass | 120 to 240 BPM | Drum n Bass, Jungle, Halftime |
+| Hip hop | 60 to 120 BPM | the slower hip hop styles and Trip Hop; not Trap, Miami Bass, Cloud Rap or Crunk |
+| Dubstep | 100 to 200 BPM | Dubstep, Grime |
+
+Sure means the genre's styles adding up to 0.3 among the five the model is
+surest of. On 75 CC records, where madmom and Essentia agree on 59 tempos, this
+took Booth from 50 of them to 54: five hip hop and drum and bass records read
+at double or half came right, and one instrumental hip hop record both trackers
+hear at 164 was put at 82. Seven drum and bass records the two disagree on went
+from 83 to 90 up to 166 to 180, which is what madmom and the convention say.
+It costs nothing the switch does not cost already. The analysis log says when
+it happens, and the octave is kept with the track: measuring the grid again, or
+analysing with the switch off, keeps it. Most genres have no octave here, and
+their records keep the one the tracker chose. `÷2` and `×2` still correct
+either.
+
 ## Importing a rekordbox library
 
 rekordbox keeps its library in `master.db`, a SQLCipher-encrypted SQLite file.
@@ -2066,7 +2093,9 @@ drive played only on older hardware has a history nothing here can see.
 - Genre is a model's opinion, and an optional one: it is off until switched on
   in Settings, needs the Discogs-EffNet file installed separately, costs about
   thirteen seconds a track on top of the analysis, and files a record where
-  Discogs users would have, which is not always where you would. A genre the
+  Discogs users would have, which is not always where you would. Where it is
+  sure of drum and bass, hip hop or dubstep it also picks the octave of the
+  tempo, and it is as wrong there as it is about the genre. A genre the
   file's own tag carries is read in and defended — a disagreement is asked
   about rather than settled — but there is no way yet to type one in by hand.
 - Key detection is right about 37% of the time on a real library, and confuses

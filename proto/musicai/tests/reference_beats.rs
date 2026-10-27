@@ -14,7 +14,7 @@
 //!
 //! See `scripts/reference/README.md` for the environment the script needs.
 //!
-//! The records it was measured on are 41 CC records. Eighteen are from the
+//! The records it was measured on are 75 CC records. Eighteen are from the
 //! archive.org items unfound51, mtrnc003, RAR032_TTC_Auf_Den_Punkt_EP, efp006,
 //! Jara_NosceTeIpsum, mne013-gartner-phobos, audcst031Blacksquare-Upside,
 //! tou207, tou350, vault-kid-into-the-vault and ca015_va_cs, and from Jamendo
@@ -25,11 +25,23 @@
 //! dig017_tromenia_ep, pan025, exp036, SCL160,
 //! rest037-kay_grove_-_samba_440-night_walk, YkYk015, rfr020,
 //! mz001_Mademoi_Selle and phoke33, picked for the genres where the octave is
-//! in question: dubstep, drum and bass, hip hop, trance and garage.
+//! in question: dubstep, drum and bass, hip hop, trance and garage. The last
+//! 34, one from each again, were fetched to check the genre's octave on
+//! records it had not been worked out on: s27-069VariousArtists-SectionedV2.0,
+//! s27-027Sectioned, gt459AnchoreState-ChangesOfLifeEp, miga42, eml009,
+//! s27-100VariousArtists-SectionedV3.0, s27-047Vektordrum-Trinity,
+//! siro768Frail-NumericHandcraftLp, siro379Syndrm-AnorisEp, tkep008, tkep011,
+//! tkep012, mstk002, mstk006, rfr003, chase005,
+//! xgn030_-_ricky_force_-_the_aerial_ep, digx1_first_anniversary, DWK119,
+//! DWK138, DWK149, DWK155, DWK217, OnorezdiLP014, OnorezdiLP015, nws142,
+//! diginet001, 3x13_-_a_summer_spent_inside, unfound25, WkBw0034, 1bit_013,
+//! gt458SteamFlow-WithTrainsAndBones, wave002 and FreeOsc38.
 
 use std::path::Path;
 
-use booth_cli::analysis::analyze;
+use booth_cli::analysis::analyze_with_drums;
+use booth_cli::analysis::style::{self, Classifier};
+use booth_cli::analysis::tempo::Moved;
 use booth_cli::audio::decode::decode_file;
 use booth_cli::export::Beat;
 
@@ -69,7 +81,7 @@ const SLIPS: [(f64, &str); 7] = [
 /// on the 2 and the 4, fixed five of these six; but the band that hears the
 /// snare hears the hats on the off-beat too, and it doubled 02_-_Get_Out from
 /// 95 and halved 1-02FractureDsordre from 160.
-const KNOWN: [(&str, &str); 7] = [
+const KNOWN: [(&str, &str); 9] = [
     // Dubstep, half-time: it repeats most strongly every two beats of 140.
     ("Hard_Epic_Dubstep", "half"),
     // Hard techno at 142, with the clap on every other beat.
@@ -77,10 +89,26 @@ const KNOWN: [(&str, &str); 7] = [
     ("Procedure238", "double"),
     ("The_Werewolf", "double"),
     ("thats_just_what_its_for", "double"),
+    ("Poldoore_-_04_-_Dream_On", "double"),
     ("Oldvision", "half"),
+    ("Lazy_Bastard", "half"),
     // 120 read as 80: it repeats half as much again every three half-beats
     // as every beat, and its levels do too.
     ("ryan_l", "2/3"),
+];
+
+/// The records Booth is known to miss with the genre model's octave as well:
+/// the four [`KNOWN`] misses whose genre the model does not hear (it calls
+/// Hard Epic Dubstep synth-pop, Heart electro, Procedure238 experimental and
+/// Ryan L's ambient), and one it moves.
+const KNOWN_WITH_GENRE: [(&str, &str); 5] = [
+    ("Hard_Epic_Dubstep", "half"),
+    ("dillerkopp", "half"),
+    ("Procedure238", "double"),
+    ("ryan_l", "2/3"),
+    // Instrumental hip hop the two both hear at 164, and the genre counts at
+    // 82. Which a DJ would count it at has not been listened for.
+    ("Jenova_7", "half"),
 ];
 
 /// What a ratio of two tempos reads as, or the number where it is none of them.
@@ -141,9 +169,13 @@ struct Compared {
     /// Of madmom's ones that land on a beat of Booth's, the share on each of
     /// Booth's four beats of the bar.
     ones_on: [f64; 4],
+    /// Where the genre moved Booth's tempo an octave.
+    moved: Option<Moved>,
 }
 
-fn compare(record: &Path, reference: &Path) -> Option<Compared> {
+/// One record analysed as the app analyses it: with the genre model's octave
+/// where there is a model.
+fn compare(record: &Path, reference: &Path, genre: Option<&Classifier>) -> Option<Compared> {
     let text = std::fs::read_to_string(reference).ok()?;
     let found: serde_json::Value = serde_json::from_str(&text).unwrap();
     let madmom: Vec<(f64, u64)> = found["madmom"]["beats"]
@@ -153,7 +185,10 @@ fn compare(record: &Path, reference: &Path) -> Option<Compared> {
         .collect();
     let essentia = found["essentia"]["bpm"].as_f64()?;
 
-    let analysis = analyze(&decode_file(record).unwrap());
+    let audio = decode_file(record).unwrap();
+    let octave = genre.and_then(|model| style::octave(&model.classify(&audio).unwrap()));
+    let bands = booth_cli::export::waveform::analyze(&audio).band_detail;
+    let analysis = analyze_with_drums(&audio, None, &bands, None, octave);
     let grid = &analysis.grid.beats;
     let times: Vec<f64> = madmom.iter().map(|&(t, _)| t).collect();
     let on = times.iter().filter(|&&t| nearest(grid, t).is_some()).count();
@@ -170,12 +205,13 @@ fn compare(record: &Path, reference: &Path) -> Option<Compared> {
         essentia,
         on_booth: on as f64 / times.len().max(1) as f64,
         ones_on: ones.map(|n| n as f64 / landed),
+        moved: analysis.moved,
     })
 }
 
-#[test]
-#[ignore = "needs records and their reference beats: BOOTH_REFERENCE_RECORDS, BOOTH_REFERENCE_BEATS"]
-fn booth_finds_every_tempo_two_other_trackers_agree_on_but_the_known_misses() {
+/// Every record in `BOOTH_REFERENCE_RECORDS` against its reference beats, and
+/// a failure for any the two agree on and Booth does not, but those `known`.
+fn measure(known: &[(&str, &str)], genre: Option<&Classifier>) {
     let var = |name: &str| std::env::var_os(name).map(std::path::PathBuf::from);
     let (Some(records), Some(beats)) =
         (var("BOOTH_REFERENCE_RECORDS"), var("BOOTH_REFERENCE_BEATS"))
@@ -199,7 +235,7 @@ fn booth_finds_every_tempo_two_other_trackers_agree_on_but_the_known_misses() {
     for path in paths {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-        let Some(r) = compare(&path, &beats.join(format!("{stem}.json"))) else {
+        let Some(r) = compare(&path, &beats.join(format!("{stem}.json")), genre) else {
             continue;
         };
         let agreed = slip(r.madmom / r.essentia) == "same";
@@ -208,8 +244,12 @@ fn booth_finds_every_tempo_two_other_trackers_agree_on_but_the_known_misses() {
             false => format!("{}, {}", slip(r.booth / r.madmom), slip(r.booth / r.essentia)),
         };
         let ones = r.ones_on.map(|share| format!("{:>3.0}", share * 100.0)).join(" ");
+        let moved = r
+            .moved
+            .map(|m| format!("  {} from {:.0}", m.octave.because, m.heard_bpm))
+            .unwrap_or_default();
         eprintln!(
-            "{:<28} {:>7.2} {:>7.2} {:>7.2}  {:<14} {:>4.0}%  {ones}",
+            "{:<28} {:>7.2} {:>7.2} {:>7.2}  {:<14} {:>4.0}%  {ones}{moved}",
             short(&stem),
             r.booth,
             r.madmom,
@@ -221,7 +261,7 @@ fn booth_finds_every_tempo_two_other_trackers_agree_on_but_the_known_misses() {
             continue;
         }
         counted += 1;
-        let known = KNOWN.iter().find(|(piece, _)| name.contains(piece)).map(|(_, slip)| *slip);
+        let known = known.iter().find(|(piece, _)| name.contains(piece)).map(|(_, slip)| *slip);
         match (against == "same", known) {
             (true, None) => right += 1,
             (true, Some(_)) => mended.push(short(&stem)),
@@ -237,6 +277,21 @@ fn booth_finds_every_tempo_two_other_trackers_agree_on_but_the_known_misses() {
         wrong.is_empty(),
         "Booth's tempo where madmom and Essentia agree on another: {wrong:?}"
     );
+}
+
+#[test]
+#[ignore = "needs records and their reference beats: BOOTH_REFERENCE_RECORDS, BOOTH_REFERENCE_BEATS"]
+fn booth_finds_every_tempo_two_other_trackers_agree_on_but_the_known_misses() {
+    measure(&KNOWN, None);
+}
+
+#[test]
+#[ignore = "needs records, their reference beats and the genre model: BOOTH_GENRE_MODEL as well"]
+fn with_the_genre_model_booth_finds_every_tempo_the_two_agree_on_but_fewer_misses() {
+    let Some(model) = style::locate(None) else {
+        return;
+    };
+    measure(&KNOWN_WITH_GENRE, Some(&Classifier::load(&model).unwrap()));
 }
 
 #[test]

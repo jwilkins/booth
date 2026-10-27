@@ -45,6 +45,8 @@ pub struct TrackAnalysis {
     /// What the bar lines were placed by. See [`explain`], which is what reads
     /// it.
     pub downbeat: tempo::Downbeat,
+    /// Where the genre moved the tempo an octave, and from what.
+    pub moved: Option<tempo::Moved>,
 }
 
 impl TrackAnalysis {
@@ -88,20 +90,22 @@ pub fn analyze_at(audio: &Audio, bpm: Option<f64>) -> TrackAnalysis {
 /// 370 ms against 600 on a five-minute track — so a caller that wants the
 /// picture anyway draws it once.
 pub fn analyze_drawn(audio: &Audio, bpm: Option<f64>, bands: &[u8]) -> TrackAnalysis {
-    analyze_with_drums(audio, bpm, bands, None)
+    analyze_with_drums(audio, bpm, bands, None, None)
 }
 
 /// The same, for a track with a rendered kit: `drums` is the three-band
 /// picture of its drum stem, which finds the breaks the mix's picture cannot.
-/// See [`energy::shape_with_drums`].
+/// See [`energy::shape_with_drums`]. And `octave`, where the genre is known,
+/// is the octave its tempo is counted in: see [`style::octave`].
 pub fn analyze_with_drums(
     audio: &Audio,
     bpm: Option<f64>,
     bands: &[u8],
     drums: Option<&[u8]>,
+    octave: Option<tempo::Octave>,
 ) -> TrackAnalysis {
     let measured = features::extract(audio);
-    let beats = tempo::detect_at(&measured, bpm);
+    let beats = tempo::detect_within(&measured, bpm, octave);
     let times: Vec<u32> = beats.grid.beats.iter().map(|b| b.time_ms).collect();
     let structure = structure::detect(&measured, &times);
     // Which of the tracked beats is a bar line. The tracker starts wherever it
@@ -121,6 +125,7 @@ pub fn analyze_with_drums(
         key,
         intensity,
         downbeat: beats.downbeat,
+        moved: beats.moved,
     }
 }
 

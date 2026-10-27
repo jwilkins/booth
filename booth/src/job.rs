@@ -41,6 +41,9 @@ pub enum Job {
         tracks: Vec<(u32, PathBuf)>,
         drums: std::collections::HashMap<u32, PathBuf>,
         genre: crate::config::Genre,
+        /// The genre each track's tempo octave was last put in, for an
+        /// analysis that does not hear the genre again.
+        octaves: std::collections::HashMap<u32, String>,
     },
     /// Hear each track's genre with the model at `model`, and nothing else.
     GuessGenre { tracks: Vec<(u32, PathBuf)>, model: PathBuf },
@@ -52,7 +55,7 @@ pub enum Job {
     /// to be measured again has not asked for their cues, their phrase names
     /// or their hand-corrected key to be written over, and an update with no
     /// field for them cannot do it by accident.
-    Regrid(Vec<(u32, PathBuf)>),
+    Regrid(Vec<(u32, PathBuf)>, std::collections::HashMap<u32, String>),
     /// Take a copy of tracks whose files are outside the library folder.
     Adopt { tracks: Vec<Adoptable>, config: Box<Config> },
     /// Write a track's artist, title and album back into the file's own tags.
@@ -173,7 +176,7 @@ impl Job {
         match self {
             #[cfg(test)]
             Job::Hold { lane, .. } => *lane,
-            Job::Decode { .. } | Job::StemEnvelopes { .. } | Job::Regrid(_) => Lane::Foreground,
+            Job::Decode { .. } | Job::StemEnvelopes { .. } | Job::Regrid(..) => Lane::Foreground,
             Job::Draw(rows) if rows.len() <= 1 => Lane::Foreground,
             _ => Lane::Background,
         }
@@ -198,7 +201,7 @@ impl Job {
             Job::Analyze { .. } => "analysing",
             Job::GuessGenre { .. } => "hearing the genre",
             Job::Normalize { .. } => "levelling",
-            Job::Regrid(_) => "measuring the grid",
+            Job::Regrid(..) => "measuring the grid",
             Job::Separate { .. } => "stems",
             Job::Transcribe { .. } => "reading the words",
             Job::LookUpWords { .. } => "looking up the words",
@@ -511,6 +514,9 @@ pub struct Analyzed {
     /// was too short for it to hear.
     pub genre: String,
     pub genre_confidence: f32,
+    /// The genre whose octave the tempo was put in, or empty: see
+    /// [`crate::library::Track::tempo_octave`].
+    pub tempo_octave: String,
     /// What the file's own genre tag says, trimmed, or empty. Read alongside so
     /// that whoever folds this in can tell a blank to fill from somebody's
     /// answer to ask about, without opening the file again.
@@ -672,12 +678,15 @@ fn is_float_wav(path: &Path) -> bool {
 ///
 /// `drums` is its drum stem, where it has one, for finding the breaks the mix
 /// hides. Drawn here rather than read from the collection's pictures, because
-/// an analysis forgets those so that they are drawn again after it.
+/// an analysis forgets those so that they are drawn again after it. `kept` is
+/// the octave its genre put the tempo in last time, which a pass without the
+/// classifier keeps; with one, what it hears now decides.
 pub fn analyze_file(
     id: u32,
     path: &Path,
     drums: Option<&Path>,
     genre: Option<&booth_cli::analysis::style::Classifier>,
+    kept: Option<booth_cli::analysis::tempo::Octave>,
 ) -> anyhow::Result<Analyzed> {
     let audio = decode_file(path)?;
     let waveform = booth_cli::export::waveform::analyze(&audio);
@@ -690,8 +699,36 @@ pub fn analyze_file(
             None
         }
     });
-    let analysis =
-        analysis::analyze_with_drums(&audio, None, &waveform.band_detail, drum_bands.as_deref());
+    // Heard before the beats are tracked, because the genre says which octave
+    // of the tempo is counted. A model that fails on one track costs that
+    // track its genre and that, and nothing else: the grid, the cues and the
+    // picture are the analysis, and this is on top of it.
+    let styles = genre.and_then(|classifier| match classifier.classify(&audio) {
+        Ok(styles) => Some(styles),
+        Err(e) => {
+            crate::warn!("#{id} has no genre: {e:#}");
+            None
+        }
+    });
+    let octave = match &styles {
+        Some(styles) => booth_cli::analysis::style::octave(styles),
+        None => kept,
+    };
+    let analysis = analysis::analyze_with_drums(
+        &audio,
+        None,
+        &waveform.band_detail,
+        drum_bands.as_deref(),
+        octave,
+    );
+    if let Some(moved) = analysis.moved {
+        crate::info!(
+            "#{id}: tempo heard at {:.1}, moved to {:.2}, the octave {} is counted in",
+            moved.heard_bpm,
+            analysis.bpm,
+            moved.octave.because
+        );
+    }
     // A debug build leaves the working beside the track, for whoever is
     // finding out why it came out as it did. Not a release: a user's music
     // folder is theirs, and a file turning up beside every track in it is not
@@ -700,16 +737,7 @@ pub fn analyze_file(
         explain_beside(id, path, &analysis, &waveform.band_detail, drum_bands.as_deref());
     }
     let loudness = booth_cli::loudness::measure(&audio).ok();
-    // A model that fails on one track costs that track its genre and nothing
-    // else: the grid, the cues and the picture are the analysis, and this is
-    // on top of it.
-    let heard = genre.and_then(|classifier| match classifier.classify(&audio) {
-        Ok(styles) => styles.into_iter().next(),
-        Err(e) => {
-            crate::warn!("#{id} has no genre: {e:#}");
-            None
-        }
-    });
+    let heard = styles.and_then(|styles| styles.into_iter().next());
     // The file's own word on it, for the fold to weigh against what was heard.
     // One tag read against seconds of decoding, so not made conditional on
     // there being a model; a WAV simply has none.
@@ -758,6 +786,7 @@ pub fn analyze_file(
         intensity,
         genre: heard.as_ref().map(|style| style.style.to_string()).unwrap_or_default(),
         genre_confidence: heard.as_ref().map(|style| style.confidence).unwrap_or(0.0),
+        tempo_octave: octave.map(|octave| octave.because.to_string()).unwrap_or_default(),
         tagged_genre,
         beat_ms: bent,
         phrases,
@@ -1187,9 +1216,11 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             Ok(())
         }
         Job::Import { paths, recursive } => import(&paths, recursive, reporter),
-        Job::Analyze { tracks, drums, genre } => analyze_all(&tracks, &drums, &genre, reporter),
+        Job::Analyze { tracks, drums, genre, octaves } => {
+            analyze_all(&tracks, &drums, &genre, &octaves, reporter)
+        }
         Job::GuessGenre { tracks, model } => guess_genres(&tracks, &model, reporter),
-        Job::Regrid(tracks) => regrid_all(&tracks, reporter),
+        Job::Regrid(tracks, octaves) => regrid_all(&tracks, &octaves, reporter),
         Job::Adopt { tracks, config } => adopt(&tracks, &config, reporter),
         Job::Convert(tracks) => convert(&tracks, reporter),
         Job::Normalize { tracks, how } => normalize(&tracks, how, reporter),
@@ -1587,6 +1618,7 @@ fn analyze_all(
     tracks: &[(u32, PathBuf)],
     drums: &std::collections::HashMap<u32, PathBuf>,
     genre: &config::Genre,
+    octaves: &std::collections::HashMap<u32, String>,
     reporter: &Channel,
 ) -> anyhow::Result<()> {
     use rayon::prelude::*;
@@ -1605,7 +1637,15 @@ fn analyze_all(
             return;
         }
         let started = std::time::Instant::now();
-        match analyze_file(*id, path, drums.get(id).map(PathBuf::as_path), classifier.as_ref()) {
+        let kept =
+            octaves.get(id).and_then(|named| booth_cli::analysis::style::octave_called(named));
+        match analyze_file(
+            *id,
+            path,
+            drums.get(id).map(PathBuf::as_path),
+            classifier.as_ref(),
+            kept,
+        ) {
             Ok(analyzed) => {
                 crate::debug!(
                     "listened to {} in {:.1}s",
@@ -2299,7 +2339,11 @@ fn hear(
 /// press on one track that is being looked at, not by adding a crate, so there
 /// is nothing to spread across cores and a decode per core of nothing is worse
 /// than a decode of one.
-fn regrid_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<()> {
+fn regrid_all(
+    tracks: &[(u32, PathBuf)],
+    octaves: &std::collections::HashMap<u32, String>,
+    reporter: &Channel,
+) -> anyhow::Result<()> {
     let total = tracks.len();
     for (done, (id, path)) in tracks.iter().enumerate() {
         if reporter.cancelled() {
@@ -2307,8 +2351,10 @@ fn regrid_all(tracks: &[(u32, PathBuf)], reporter: &Channel) -> anyhow::Result<(
         }
         // Without the genre: this keeps only the tempo and the beats, so
         // hearing what kind of record it is would be thirteen seconds for
-        // nothing.
-        match analyze_file(*id, path, None, None) {
+        // nothing. The octave the genre gave them last time is kept.
+        let kept =
+            octaves.get(id).and_then(|named| booth_cli::analysis::style::octave_called(named));
+        match analyze_file(*id, path, None, None, kept) {
             Ok(measured) => {
                 crate::debug!(
                     "re-measured #{id}: {:.2} BPM, {} beats",
@@ -2524,9 +2570,41 @@ mod tests {
         assert_eq!(track.genre_confidence, 0.0, "a tag is not a measurement");
 
         // And alongside an analysis, so the fold need not open the file again.
-        let analyzed = analyze_file(3, &path, None, None).unwrap();
+        let analyzed = analyze_file(3, &path, None, None, None).unwrap();
         assert_eq!(analyzed.tagged_genre, "Tech House");
         assert!(analyzed.genre.is_empty(), "nothing was heard without a model");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_measurement_without_the_model_keeps_the_octave_the_genre_gave() {
+        use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
+        let dir = scratch("kept-octave");
+        let path = dir.join("clicks.flac");
+        // A click on every beat at 174 for 24 seconds.
+        let rate = 44_100usize;
+        let mut plane = vec![0.0f32; rate * 24];
+        let period = rate as f64 * 60.0 / 174.0;
+        let mut at = rate as f64 / 2.0;
+        while (at as usize) + rate / 8 < plane.len() {
+            for i in 0..rate / 8 {
+                let t = i as f32 / rate as f32;
+                plane[at as usize + i] +=
+                    0.8 * (-30.0 * t).exp() * (2.0 * std::f32::consts::PI * 150.0 * t).sin();
+            }
+            at += period;
+        }
+        let audio = booth_cli::audio::Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap();
+        write_file(&path, &audio, Codec::Flac, &EncodeOptions::default()).unwrap();
+
+        let unheard = analyze_file(3, &path, None, None, None).unwrap();
+        assert!((unheard.bpm - 174.0).abs() < 1.0, "found {:.2}", unheard.bpm);
+        assert!(unheard.tempo_octave.is_empty());
+        let hip_hop = booth_cli::analysis::style::octave_called("hip hop");
+        let kept = analyze_file(3, &path, None, None, hip_hop).unwrap();
+        assert!((kept.bpm - 87.0).abs() < 1.0, "found {:.2}", kept.bpm);
+        assert_eq!(kept.tempo_octave, "hip hop", "and it is kept for the next time");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2583,7 +2661,7 @@ mod tests {
         let path = dir.join("track.wav");
         write_beats(&path, 128.0, 8);
 
-        let analyzed = analyze_file(3, &path, None, None).unwrap();
+        let analyzed = analyze_file(3, &path, None, None, None).unwrap();
         assert_eq!(analyzed.id, 3);
         assert!(analyzed.has_grid);
         assert!((analyzed.bpm - 128.0).abs() < 1.0, "{} BPM", analyzed.bpm);
@@ -2614,7 +2692,7 @@ mod tests {
         let path = dir.join("track.wav");
         write_beats(&path, 128.0, 16);
 
-        analyze_file(1, &path, None, None).unwrap();
+        analyze_file(1, &path, None, None, None).unwrap();
         let log = std::fs::read_to_string(dir.join("track.wav.log"))
             .expect("no analysis log beside the track");
         assert!(log.starts_with("Analysis of track.wav\n"), "{log}");
@@ -2654,7 +2732,7 @@ mod tests {
         let path = dir.join("track.wav");
         write_beats(&path, 128.0, 16);
 
-        let analyzed = analyze_file(1, &path, None, None).unwrap();
+        let analyzed = analyze_file(1, &path, None, None, None).unwrap();
         for phrase in &analyzed.phrases {
             assert!(phrase.end_ms >= phrase.start_ms, "{phrase:?}");
             assert!(
@@ -2673,8 +2751,9 @@ mod tests {
         let drums = dir.join("track (drums).mp3");
         std::fs::write(&drums, b"not really an mp3").unwrap();
 
-        let with = analyze_file(1, &path, Some(&drums), None).expect("the stem failed the track");
-        let without = analyze_file(1, &path, None, None).unwrap();
+        let with =
+            analyze_file(1, &path, Some(&drums), None, None).expect("the stem failed the track");
+        let without = analyze_file(1, &path, None, None, None).unwrap();
         assert_eq!(with.cues, without.cues);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2690,7 +2769,7 @@ mod tests {
         let audio = Audio::new(rate as u32, vec![samples.clone(), samples]).unwrap();
         write_file(&path, &audio, Codec::Wav, &EncodeOptions::default()).unwrap();
 
-        let analyzed = analyze_file(1, &path, None, None).unwrap();
+        let analyzed = analyze_file(1, &path, None, None, None).unwrap();
         assert!(!analyzed.has_grid);
         assert_eq!(analyzed.beats, 0);
 
@@ -2819,6 +2898,7 @@ mod tests {
                 tracks: vec![(1, a)],
                 drums: Default::default(),
                 genre: config::Genre { enabled: false, ..no_genre_model() },
+                octaves: Default::default(),
             },
             Arc::new(|| {}),
         );
@@ -2875,7 +2955,7 @@ mod tests {
         let foreground = [
             Job::Decode { id: 1, sources: Vec::new() },
             Job::StemEnvelopes { id: 1, kit: StemKit::default() },
-            Job::Regrid(vec![(1, PathBuf::from("/a.flac"))]),
+            Job::Regrid(vec![(1, PathBuf::from("/a.flac"))], Default::default()),
             Job::Draw(vec![one()]),
         ];
         for job in &foreground {
@@ -2924,6 +3004,7 @@ mod tests {
                 tracks: vec![(1, a), (2, b)],
                 drums: Default::default(),
                 genre: no_genre_model(),
+                octaves: Default::default(),
             },
             Arc::new(|| {}),
         );
@@ -3106,6 +3187,7 @@ mod tests {
                 tracks: vec![(1, good), (2, bad)],
                 drums: Default::default(),
                 genre: no_genre_model(),
+                octaves: Default::default(),
             },
             Arc::new(|| {}),
         );

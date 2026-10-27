@@ -72,6 +72,7 @@ use realfft::{RealFftPlanner, RealToComplex};
 use tract_onnx::prelude::*;
 
 use super::style_classes::CLASSES;
+use super::tempo::Octave;
 use crate::audio::resample::resample;
 use crate::audio::Audio;
 
@@ -175,6 +176,100 @@ impl Style {
 /// `Genre---Style` into its two halves.
 pub fn split(class: &str) -> (&str, &str) {
     class.split_once("---").unwrap_or((class, class))
+}
+
+/// A genre whose tempo is counted in one octave.
+struct Counted {
+    because: &'static str,
+    from_bpm: f64,
+    /// Its Discogs styles, as genre and style.
+    styles: &'static [(&'static str, &'static str)],
+}
+
+/// The genres whose tempo is counted in one octave: what each is called, where
+/// its octave starts, and the Discogs styles that make it up.
+///
+/// Only styles whose convention is clear. Trap and Miami Bass are filed under
+/// hip hop but counted from about 130, Cloud Rap and Crunk either way;
+/// Downtempo runs on past 120 and Breakcore past 240. A record of theirs keeps
+/// the octave the correlation chose.
+const OCTAVES: [Counted; 3] = [
+    Counted {
+        because: "drum and bass",
+        from_bpm: 120.0,
+        styles: &[
+            ("Electronic", "Drum n Bass"),
+            ("Electronic", "Jungle"),
+            ("Electronic", "Halftime"),
+        ],
+    },
+    Counted {
+        because: "hip hop",
+        from_bpm: 60.0,
+        styles: &[
+            ("Hip Hop", "Boom Bap"),
+            ("Hip Hop", "Conscious"),
+            ("Hip Hop", "Cut-up/DJ"),
+            ("Hip Hop", "G-Funk"),
+            ("Hip Hop", "Gangsta"),
+            ("Hip Hop", "Hardcore Hip-Hop"),
+            ("Hip Hop", "Horrorcore"),
+            ("Hip Hop", "Instrumental"),
+            ("Hip Hop", "Jazzy Hip-Hop"),
+            ("Hip Hop", "Pop Rap"),
+            ("Hip Hop", "Thug Rap"),
+            ("Hip Hop", "Trip Hop"),
+            ("Hip Hop", "Turntablism"),
+            ("Electronic", "Trip Hop"),
+        ],
+    },
+    Counted {
+        because: "dubstep",
+        from_bpm: 100.0,
+        styles: &[("Electronic", "Dubstep"), ("Electronic", "Grime"), ("Hip Hop", "Grime")],
+    },
+];
+
+/// How sure the model has to be of a genre before its octave is taken: its
+/// styles' activations added up, over the five styles it is surest of.
+///
+/// Summed, because the model spreads a genre over its styles: The Werewolf
+/// scores 0.34 for instrumental hip hop and 0.28 and 0.27 for the two trip
+/// hops. On 75 CC records, every tempo this moved came with 0.36 or more, and
+/// the four scoring from 0.23 to 0.30 were in their genre's octave already, so
+/// where in that gap the line goes is reasoned rather than measured. Under it
+/// the model is guessing: it hears Hard Epic Dubstep as dubstep at 0.10, after
+/// synth-pop and electro.
+const OCTAVE_SURE: f32 = 0.3;
+const OCTAVE_TOP: usize = 5;
+
+/// The octave named `because` in [`OCTAVES`], for a track that was heard in it
+/// once and is measured again without the model.
+pub fn octave_called(because: &str) -> Option<Octave> {
+    OCTAVES
+        .iter()
+        .find(|counted| counted.because == because)
+        .map(|counted| Octave { from_bpm: counted.from_bpm, because: counted.because })
+}
+
+/// The octave a record's tempo is counted in, if the model is sure enough of
+/// a genre that has one. `styles` surest first, as [`Classifier::classify`]
+/// gives them.
+pub fn octave(styles: &[Style]) -> Option<Octave> {
+    let top = &styles[..styles.len().min(OCTAVE_TOP)];
+    OCTAVES
+        .iter()
+        .map(|counted| {
+            let sure: f32 = top
+                .iter()
+                .filter(|style| counted.styles.contains(&(style.genre, style.style)))
+                .map(|style| style.confidence)
+                .sum();
+            (sure, Octave { from_bpm: counted.from_bpm, because: counted.because })
+        })
+        .filter(|&(sure, _)| sure >= OCTAVE_SURE)
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, octave)| octave)
 }
 
 /// The model, loaded and ready to be asked about tracks.
@@ -608,6 +703,46 @@ mod tests {
         assert_eq!(bands[0].1.len(), 1);
         let (first, weights) = &bands[BANDS - 1];
         assert!(first + weights.len() < BINS, "the top band reaches the Nyquist bin");
+    }
+
+    fn heard(styles: &[(&'static str, &'static str, f32)]) -> Vec<Style> {
+        styles
+            .iter()
+            .map(|&(genre, style, confidence)| Style { genre, style, confidence })
+            .collect()
+    }
+
+    #[test]
+    fn a_genre_whose_styles_add_up_to_sure_enough_says_its_octave() {
+        let jungle = heard(&[
+            ("Electronic", "Drum n Bass", 0.2),
+            ("Electronic", "Jungle", 0.15),
+            ("Electronic", "Techno", 0.1),
+        ]);
+        assert_eq!(
+            octave(&jungle).map(|o| (o.because, o.from_bpm)),
+            Some(("drum and bass", 120.0))
+        );
+        // Each alone is under what it takes; the two hip hops together are not.
+        let hip_hop = heard(&[("Hip Hop", "Instrumental", 0.2), ("Electronic", "Trip Hop", 0.12)]);
+        assert_eq!(octave(&hip_hop).map(|o| o.because), Some("hip hop"));
+        assert_eq!(octave(&hip_hop[..1]), None);
+    }
+
+    #[test]
+    fn an_octave_kept_by_name_is_found_again_and_an_unknown_name_is_not() {
+        let found = octave_called("drum and bass").unwrap();
+        assert_eq!((found.because, found.from_bpm), ("drum and bass", 120.0));
+        assert_eq!(octave_called("polka"), None);
+    }
+
+    #[test]
+    fn a_style_counted_either_way_or_past_the_fifth_says_nothing() {
+        let trap = heard(&[("Hip Hop", "Trap", 0.6), ("Hip Hop", "Cloud Rap", 0.3)]);
+        assert_eq!(octave(&trap), None);
+        let mut far = heard(&[("Electronic", "Techno", 0.5); 5]);
+        far.extend(heard(&[("Electronic", "Drum n Bass", 0.4)]));
+        assert_eq!(octave(&far), None);
     }
 
     #[test]

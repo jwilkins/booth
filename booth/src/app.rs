@@ -2257,10 +2257,12 @@ impl App {
             .iter()
             .filter_map(|id| Some((*id, self.library.get(*id)?.stems.drums.clone()?)))
             .collect();
+        let octaves = self.tempo_octaves(&ids);
         self.start(Job::Analyze {
             tracks: waiting.clone(),
             drums,
             genre: self.config.genre.clone(),
+            octaves,
         });
 
         // And the stems, where there are any. Listening to a record is the
@@ -3677,6 +3679,7 @@ impl App {
                         track.sample_rate = analyzed.sample_rate;
                         track.channels = analyzed.channels;
                         track.bitrate_kbps = bitrate(track.bytes, analyzed.duration_secs);
+                        track.tempo_octave = analyzed.tempo_octave.clone();
                         track.analyzed = true;
                     }
                     self.hear_genre(
@@ -12476,7 +12479,19 @@ impl App {
         }
         crate::info!("measuring the grid of #{id} again");
         self.ensure_local(&[id]);
-        self.start(Job::Regrid(waiting));
+        let octaves = self.tempo_octaves(&[id]);
+        self.start(Job::Regrid(waiting, octaves));
+    }
+
+    /// The genre each of these tracks' tempo octave was last put in, for a
+    /// measurement that does not hear the genre again.
+    fn tempo_octaves(&self, ids: &[u32]) -> std::collections::HashMap<u32, String> {
+        ids.iter()
+            .filter_map(|&id| {
+                let track = self.library.get(id)?;
+                (!track.tempo_octave.is_empty()).then(|| (id, track.tempo_octave.clone()))
+            })
+            .collect()
     }
 
     /// The controls for correcting a beat grid by hand.
@@ -14811,7 +14826,12 @@ mod tests {
                 let tracks =
                     records.iter().enumerate().map(|(n, p)| (n as u32 + 10, p.clone())).collect();
                 let started = std::time::Instant::now();
-                app.start(Job::Analyze { tracks, drums: Default::default(), genre });
+                app.start(Job::Analyze {
+                    tracks,
+                    drums: Default::default(),
+                    genre,
+                    octaves: Default::default(),
+                });
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 app.start(Job::Decode { id: 1, sources: vec![records[0].clone()] });
                 let beside = wait(&mut app);
