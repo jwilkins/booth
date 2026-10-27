@@ -514,8 +514,8 @@ pub struct Analyzed {
     /// was too short for it to hear.
     pub genre: String,
     pub genre_confidence: f32,
-    /// The genre whose octave the tempo was put in, or empty: see
-    /// [`crate::library::Track::tempo_octave`].
+    /// The genre whose octave the tempo was put in, from the model or else the
+    /// file's tag, or empty: see [`crate::library::Track::tempo_octave`].
     pub tempo_octave: String,
     /// What the file's own genre tag says, trimmed, or empty. Read alongside so
     /// that whoever folds this in can tell a blank to fill from somebody's
@@ -710,9 +710,15 @@ pub fn analyze_file(
             None
         }
     });
+    // The file's own word on it, for the fold to weigh against what was heard
+    // and for the octave where nothing was heard. One tag read against seconds
+    // of decoding, so not made conditional on there being a model; a WAV
+    // simply has none.
+    let tagged_genre = tagged_genre(path);
+    let tagged = || booth_cli::analysis::style::octave_tagged(&tagged_genre);
     let octave = match &styles {
-        Some(styles) => booth_cli::analysis::style::octave(styles),
-        None => kept,
+        Some(styles) => booth_cli::analysis::style::octave(styles).or_else(tagged),
+        None => kept.or_else(tagged),
     };
     let analysis = analysis::analyze_with_drums(
         &audio,
@@ -738,11 +744,6 @@ pub fn analyze_file(
     }
     let loudness = booth_cli::loudness::measure(&audio).ok();
     let heard = styles.and_then(|styles| styles.into_iter().next());
-    // The file's own word on it, for the fold to weigh against what was heard.
-    // One tag read against seconds of decoding, so not made conditional on
-    // there being a model; a WAV simply has none.
-    let tagged_genre = tagged_genre(path);
-
     let beat_ms: Vec<u32> = analysis.grid.beats.iter().map(|b| b.time_ms).collect();
     // Kept only when a tempo and a downbeat could not put these beats back.
     // The tracker here runs at one tempo, so this is almost always empty; it
@@ -2577,12 +2578,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn a_measurement_without_the_model_keeps_the_octave_the_genre_gave() {
+    /// A click on every beat at 174 for 24 seconds, as a FLAC at `path`.
+    fn clicks_at_174(path: &Path) {
         use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
-        let dir = scratch("kept-octave");
-        let path = dir.join("clicks.flac");
-        // A click on every beat at 174 for 24 seconds.
         let rate = 44_100usize;
         let mut plane = vec![0.0f32; rate * 24];
         let period = rate as f64 * 60.0 / 174.0;
@@ -2596,7 +2594,35 @@ mod tests {
             at += period;
         }
         let audio = booth_cli::audio::Audio::new(rate as u32, vec![plane.clone(), plane]).unwrap();
-        write_file(&path, &audio, Codec::Flac, &EncodeOptions::default()).unwrap();
+        write_file(path, &audio, Codec::Flac, &EncodeOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn a_files_genre_tag_puts_the_tempo_in_its_octave_without_the_model() {
+        let dir = scratch("tagged-octave");
+        let path = dir.join("clicks.flac");
+        clicks_at_174(&path);
+        booth_cli::tag::write_tags(
+            &path,
+            &booth_cli::tag::Metadata {
+                genre: Some("Instrumental Hip-Hop".into()),
+                ..Default::default()
+            },
+            booth_cli::tag::OnExisting::Overwrite,
+            None,
+        )
+        .unwrap();
+        let analyzed = analyze_file(3, &path, None, None, None).unwrap();
+        assert!((analyzed.bpm - 87.0).abs() < 1.0, "found {:.2}", analyzed.bpm);
+        assert_eq!(analyzed.tempo_octave, "hip hop");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_measurement_without_the_model_keeps_the_octave_the_genre_gave() {
+        let dir = scratch("kept-octave");
+        let path = dir.join("clicks.flac");
+        clicks_at_174(&path);
 
         let unheard = analyze_file(3, &path, None, None, None).unwrap();
         assert!((unheard.bpm - 174.0).abs() < 1.0, "found {:.2}", unheard.bpm);

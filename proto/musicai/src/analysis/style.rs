@@ -252,6 +252,34 @@ pub fn octave_called(because: &str) -> Option<Octave> {
         .map(|counted| Octave { from_bpm: counted.from_bpm, because: counted.because })
 }
 
+/// The octave a file's own genre tag puts its tempo in: a tag naming one of
+/// the [`OCTAVES`] genres, and no other.
+///
+/// Somebody's filing rather than the model's ear, and on 75 CC records worth
+/// as much: of the 59 tempos madmom and Essentia agree on, the tags alone
+/// would have taken Booth from 50 to 53, the model from 50 to 54. A tag that
+/// names two of them (IDM, Jungle, Dubstep) says nothing, and nor does one
+/// with trap in it, which is filed with hip hop and counted from about 130.
+pub fn octave_tagged(tag: &str) -> Option<Octave> {
+    const WORDS: [(&str, &[&str]); 3] = [
+        (
+            "drum and bass",
+            &["drum & bass", "drum and bass", "drum n bass", "drum'n'bass", "dnb", "d&b", "jungle"],
+        ),
+        ("hip hop", &["hip-hop", "hip hop", "hiphop", "trip-hop", "trip hop", "boom bap"]),
+        ("dubstep", &["dubstep", "grime"]),
+    ];
+    let tag = tag.to_lowercase();
+    if tag.contains("trap") {
+        return None;
+    }
+    let mut named = WORDS.iter().filter(|(_, words)| words.iter().any(|word| tag.contains(word)));
+    match (named.next(), named.next()) {
+        (Some(&(because, _)), None) => octave_called(because),
+        _ => None,
+    }
+}
+
 /// The octave a record's tempo is counted in, if the model is sure enough of
 /// a genre that has one. `styles` surest first, as [`Classifier::classify`]
 /// gives them.
@@ -727,6 +755,18 @@ mod tests {
         let hip_hop = heard(&[("Hip Hop", "Instrumental", 0.2), ("Electronic", "Trip Hop", 0.12)]);
         assert_eq!(octave(&hip_hop).map(|o| o.because), Some("hip hop"));
         assert_eq!(octave(&hip_hop[..1]), None);
+    }
+
+    #[test]
+    fn a_tag_naming_one_of_the_genres_says_its_octave_and_one_naming_two_does_not() {
+        let named = |tag: &str| octave_tagged(tag).map(|octave| octave.because);
+        assert_eq!(named("Drum & Bass"), Some("drum and bass"));
+        assert_eq!(named("Instrumental Hip-Hop"), Some("hip hop"));
+        assert_eq!(named("Trip-Hop/Lo-Fi/Swing"), Some("hip hop"));
+        assert_eq!(named("Dubstep"), Some("dubstep"));
+        assert_eq!(named("IDM, Jungle, Dubstep, Experimental"), None);
+        assert_eq!(named("Hip-Hop/Trap"), None);
+        assert_eq!(named("Tech House"), None);
     }
 
     #[test]

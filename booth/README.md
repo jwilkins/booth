@@ -724,8 +724,8 @@ were picked for the genres where the octave is in question. The two agree on
 seven it misses are the octave: hip hop read at double, drum and bass and
 half-time records read at half. The seventh reads 120 as 80. The octave is a
 convention as much as a measurement, which is what the `÷2` and `×2` below
-are for, and with the genre model switched on, the genre: see
-[Installing the genre model](#installing-the-genre-model).
+are for, and where the genre model or the file's tag knows it, the genre:
+see [Installing the genre model](#installing-the-genre-model).
 
 ### Which beat is the one
 
@@ -758,7 +758,7 @@ guess, and the analysis log says so; the fix controls below are for those.
 
 A tracker is right about most records and wrong about a few, and the few are
 not random. It reads hip hop at double, drum and bass and half-time records
-at half (less often with the genre model on), and on a record where nothing
+at half (less often where the genre is known), and on a record where nothing
 marks the bar — a kick on every beat, no
 clap, a chord held for minutes — the one is a guess. None of that is fixed by
 analysing again — the same audio gives the same answer — and all of it is a
@@ -1525,6 +1525,12 @@ it happens, and the octave is kept with the track: measuring the grid again, or
 analysing with the switch off, keeps it. Most genres have no octave here, and
 their records keep the one the tracker chose. `÷2` and `×2` still correct
 either.
+
+Without the model, or where it is not sure, a file's own genre tag does the
+same: a tag naming one of the three (Drum & Bass, Jungle, Instrumental
+Hip-Hop, Trip-Hop, Dubstep and so on) and no other. On the same 75 records the
+tags alone would have taken Booth from 50 to 53. A tag that names two of them
+says nothing, and nor does one with trap in it.
 
 ## Importing a rekordbox library
 

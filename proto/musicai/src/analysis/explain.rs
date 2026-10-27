@@ -105,8 +105,8 @@ fn tempo(out: &mut String, analysis: &TrackAnalysis) {
         paragraph(
             out,
             &format!(
-                "Heard first at {:.1}, and moved an octave: the genre model hears {}, which is \
-                 counted from {:.0} to {:.0} BPM.",
+                "Heard first at {:.1}, and moved an octave: the record is {}, which is counted \
+                 from {:.0} to {:.0} BPM.",
                 moved.heard_bpm,
                 moved.octave.because,
                 moved.octave.from_bpm,
