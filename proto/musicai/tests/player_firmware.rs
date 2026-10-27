@@ -129,6 +129,7 @@ fn export_image(inputs: Vec<PathBuf>, image: &Path) -> Vec<String> {
         playlist: "Firmware".to_string(),
         playlists: Vec::new(),
         dry_run: false,
+        no_space_check: false,
         onelibrary_key: None,
         analysed_bits: None,
         no_onelibrary: false,

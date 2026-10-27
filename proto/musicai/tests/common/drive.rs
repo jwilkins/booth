@@ -98,6 +98,7 @@ pub fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         playlist: "Sat 14/9".to_string(),
         playlists: Vec::new(),
         dry_run: false,
+        no_space_check: false,
         onelibrary_key: None,
         analysed_bits: None,
         no_onelibrary: false,
