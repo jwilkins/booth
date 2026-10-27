@@ -61,18 +61,15 @@ const SLIPS: [(f64, &str); 7] = [
 /// The records Booth is known to read at another tempo than the two agree on,
 /// by a piece of the file's name, with how it reads.
 ///
-/// Six are the octave, which is a convention as much as a measurement: hip hop
-/// at 86 is counted at 86 and drum and bass at 172 at 172, though a record of
-/// either can repeat as strongly at the other or more so (The Werewolf half as
-/// much again at 173), and the two are as far either side of the 120 Booth
-/// leans towards. Telling them apart by where the snare falls, on the 2 and
-/// the 4, fixed five of these six; but the band that hears the snare hears the
-/// hats on the off-beat too, and it doubled 02_-_Get_Out from 95 and halved
-/// 1-02FractureDsordre from 160.
-///
-/// The other five are a rhythm in threes over the four, or near one, taken for
-/// the beat.
-const KNOWN: [(&str, &str); 11] = [
+/// All but one are the octave, which is a convention as much as a measurement:
+/// hip hop at 86 is counted at 86 and drum and bass at 172 at 172, though a
+/// record of either can repeat as strongly at the other or more so (The
+/// Werewolf half as much again at 173), and the two are as far either side of
+/// the 120 Booth leans towards. Telling them apart by where the snare falls,
+/// on the 2 and the 4, fixed five of these six; but the band that hears the
+/// snare hears the hats on the off-beat too, and it doubled 02_-_Get_Out from
+/// 95 and halved 1-02FractureDsordre from 160.
+const KNOWN: [(&str, &str); 7] = [
     // Dubstep, half-time: it repeats most strongly every two beats of 140.
     ("Hard_Epic_Dubstep", "half"),
     // Hard techno at 142, with the clap on every other beat.
@@ -81,13 +78,8 @@ const KNOWN: [(&str, &str); 11] = [
     ("The_Werewolf", "double"),
     ("thats_just_what_its_for", "double"),
     ("Oldvision", "half"),
-    // A bass stab every three half-beats.
-    ("Circuit_Breaker", "2/3"),
-    ("Phobos", "4/3"),
-    ("Jet_Streams", "4/3"),
-    ("bedes_ii", "0.89x"),
     // 120 read as 80: it repeats half as much again every three half-beats
-    // as every beat.
+    // as every beat, and its levels do too.
     ("ryan_l", "2/3"),
 ];
 

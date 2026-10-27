@@ -703,7 +703,9 @@ Analysis is signal processing rather than a model: it runs offline in a couple o
 a track, it explains itself, and everything it decides is visible and correctable.
 
 **The beats.** Spectral flux gives an onset envelope; its autocorrelation, weighted
-towards the tempo a listener would pick, gives the period; and a dynamic program then
+towards the tempo a listener would pick, gives the period, each candidate scored with the
+half-beat, half-bar and bar around it so that a rhythm in threes over the four is not
+taken for the beat; and a dynamic program then
 chooses the sequence of beat times that best balances landing on the onsets against
 keeping time. That last step is Ellis's, from 2007, and it is hard to beat without a
 neural network. The bar lines go where the kicks are.
