@@ -92,12 +92,19 @@ pub fn one_tempo(times: &[u32]) -> Option<f64> {
 /// the line and the one-BPM drift puts one 44.4 ms off, which is why asking
 /// how far the worst beat sits was the wrong question.
 pub fn bow(times: &[u32], period: f64, first: f64) -> f64 {
-    let window = (times.len() / 2).clamp(8, BOW_WINDOW);
-    if times.len() < window {
-        return 0.0;
-    }
     let residual: Vec<f64> =
         (0..times.len()).map(|i| times[i] as f64 - (first + period * i as f64)).collect();
+    bow_of(&residual)
+}
+
+/// The same, from how far each beat sits off the line, in order — for beats
+/// that are not every beat of the record, where the line's numbering skips the
+/// ones nothing was heard at.
+pub fn bow_of(residual: &[f64]) -> f64 {
+    let window = (residual.len() / 2).clamp(8, BOW_WINDOW);
+    if residual.len() < window {
+        return 0.0;
+    }
     let mut worst = 0.0f64;
     let mut running: f64 = residual[..window].iter().sum();
     worst = worst.max((running / window as f64).abs());

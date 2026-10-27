@@ -5,30 +5,32 @@
 //! in the collection already; what it decided it *from* is not, and without
 //! that the only way to find out is to run it again under a debugger. So this
 //! gives each stage's evidence beside its answer — above all the downbeat,
-//! which is chosen from one sum per position in the bar and is wrong in a way
-//! nothing downstream can notice.
+//! which is chosen from a few readings per position in the bar and is wrong in
+//! a way nothing downstream can notice.
 
 use std::fmt::Write;
 
 use super::energy;
 use super::place::BEATS_PER_BAR;
 use super::structure::Kind;
+use super::tempo::{DecidedBy, Downbeat};
 use super::TrackAnalysis;
 use crate::export::CueKind;
 
-/// How many tracked beats each line of the downbeat's stretch-by-stretch
+/// How many beats each line of the downbeat's stretch-by-stretch
 /// account covers: eight bars, a phrase, which is the longest a record holds
 /// one idea and so the shortest stretch whose answer means anything.
 const STRETCH_BEATS: usize = 32;
 
-/// How far ahead the winning sum has to be for the downbeat to be more than a
-/// guess: a tenth. Below it the log says so.
+/// How far ahead the winning position has to be, by whichever reading decided,
+/// for the downbeat to be more than a guess: a tenth. Below it the log says so.
 ///
-/// Measured on eighteen CC records: on the ten whose winner led by 7 per cent
-/// or less — by 1 or 2 per cent on eight of them, records with a kick on every
-/// beat, which hits all four positions alike — most eight-bar stretches
-/// favoured some other beat. On all but two of the eight that led by 12 per
-/// cent or more, most stretches agreed with the whole.
+/// Measured on the sixteen CC records with a reference: the two decided by
+/// less were Pere, wrong at 1.008, and tou207c, right at 1.07 but with fifteen
+/// of its 29 eight-bar stretches favouring the other beat the backbeat left.
+/// The twelve others it got right it led by 1.16 to 10.4. A lead is not a
+/// guarantee: two were wrong by more, at 1.24 and 2.15, both where the
+/// reference itself is less sure.
 const CLEAR_LEAD: f32 = 1.1;
 
 /// How wide the prose is wrapped: what a terminal shows without wrapping it
@@ -128,59 +130,47 @@ fn downbeat(out: &mut String, analysis: &TrackAnalysis) {
     paragraph(
         out,
         &format!(
-            "The tracker heard {heard} beats. Which of every four is the one is read off the \
-             low band: the sharpest onset within a couple of frames of each beat, which is the \
-             kick where there is one, summed over each of the four positions in the bar. The \
-             largest sum wins."
+            "The grid has {heard} beats. Which of every four is the one is read off what \
+             happens at each of the four positions in the bar, averaged over every beat in it: \
+             the kick, as the low band's sharpest onset; the clap or snare, as the sharpest \
+             onset from 1 to 5 kHz; and how far the bass note and the chord move across the \
+             beat. A clap is on the 2 and the 4, so where one pair of positions has clearly \
+             more, the 1 is on the other pair. Of the positions left, the kick says which it \
+             favours and by how much, and so does the harmony, which changes on the 1, and the \
+             surer of the two decides. A kick on every beat is sure of nothing."
         ),
     );
-    if heard < 8 {
+    if found.by == DecidedBy::TooFew {
         paragraph(out, "Under eight beats is too few to tell, so the first is taken as the one.");
     } else {
-        let sums = found.strengths();
-        let _ = writeln!(out, "\n  position  tracked beats       low-band onset");
-        for (position, sum) in sums.iter().enumerate() {
+        let (kick, claps) = (found.kick(), found.claps());
+        let harmony = found.harmony_over(0..heard);
+        let (bass, chords) = (found.bass(), found.chords());
+        let scores = found.scores();
+        let _ = writeln!(
+            out,
+            "\n  position  grid's beats           kick     clap     bass   chords  harmony"
+        );
+        for position in 0..4 {
             let beats = format!("{}, {}, {}, ...", position + 1, position + 5, position + 9);
-            let mark = if position == found.phase { "  <- the one" } else { "" };
-            let _ = writeln!(out, "  {:<8}  {beats:<18}  {sum:>14.2}{mark}", ordinal(position));
-        }
-        let runner_up = sums
-            .iter()
-            .enumerate()
-            .filter(|(position, _)| *position != found.phase)
-            .map(|(_, &sum)| sum)
-            .fold(0.0f32, f32::max);
-        if runner_up > 0.0 {
-            let lead = sums[found.phase] / runner_up;
-            let guess = match lead < CLEAR_LEAD {
-                true => {
-                    " That is near enough a tie to be a guess: a kick on every beat hits all \
-                     four positions alike, and then this cannot tell them apart."
-                }
-                false => "",
+            let ruled_out = found.by == DecidedBy::Harmony && scores[position] == 0.0;
+            let harmony = match ruled_out {
+                true => "       -".to_string(),
+                false => format!("{:>8.3}", harmony[position]),
             };
-            out.push('\n');
-            paragraph(
+            let mark = if position == found.phase { "  <- the one" } else { "" };
+            let _ = writeln!(
                 out,
-                &format!(
-                    "The {} position's sum is {lead:.2} times the next largest.{guess}",
-                    ordinal(found.phase)
-                ),
+                "  {:<8}  {beats:<18}  {:>8.2} {:>8.2} {:>8.4} {:>8.4} {harmony}{mark}",
+                ordinal(position),
+                kick[position],
+                claps[position],
+                bass[position],
+                chords[position],
             );
         }
-    }
-    if found.dropped > 0 {
-        paragraph(
-            out,
-            &format!(
-                "Straightening took {} tracked beat{} off the front, where the line through \
-                 them began before the track did, so the grid's beats are numbered from the {} \
-                 tracked one.",
-                found.dropped,
-                if found.dropped == 1 { "" } else { "s" },
-                ordinal(found.dropped)
-            ),
-        );
+        out.push('\n');
+        paragraph(out, &reading(found));
     }
     match first_downbeat(analysis) {
         Some((index, at)) => paragraph(
@@ -196,28 +186,90 @@ fn downbeat(out: &mut String, analysis: &TrackAnalysis) {
     out.push('\n');
     paragraph(
         out,
-        "Eight bars at a time, the same sums, to show whether the whole track agrees or one \
-         stretch of it is outvoted. A break, with the kick out, often is.",
+        &format!(
+            "Eight bars at a time, the {} that decided, to show whether the whole track agrees \
+             or one stretch of it is outvoted. A break, with the kick out or the chords held, \
+             often is.",
+            match found.by {
+                DecidedBy::Harmony => "harmony",
+                _ => "kick",
+            }
+        ),
     );
     let _ = writeln!(out, "\n  from        1st       2nd       3rd       4th     favours");
     for start in (0..heard).step_by(STRETCH_BEATS) {
-        let sums = found.strengths_over(start..start + STRETCH_BEATS);
+        let sums = found.scores_over(start..start + STRETCH_BEATS);
         let favours = (0..4).fold(0, |best, position| match sums[position] > sums[best] {
             true => position,
             false => best,
         });
-        let mark = if favours == found.phase { "" } else { "  <- not the one" };
+        // A stretch with none of the evidence in it — the kick out, the
+        // chords held — favours nothing.
+        let (favours, mark) = match sums.iter().all(|&sum| sum == 0.0) {
+            true => ("-".to_string(), ""),
+            false if favours == found.phase => (ordinal(favours), ""),
+            false => (ordinal(favours), "  <- not the one"),
+        };
         let _ = writeln!(
             out,
-            "  {:<10}{:>8.2}  {:>8.2}  {:>8.2}  {:>8.2}   {}{mark}",
+            "  {:<10}{:>8.2}  {:>8.2}  {:>8.2}  {:>8.2}   {favours}{mark}",
             clock(found.times_ms[start]),
             sums[0],
             sums[1],
             sums[2],
             sums[3],
-            ordinal(favours)
         );
     }
+}
+
+/// What the downbeat was decided on, and by how much, in words.
+fn reading(found: &Downbeat) -> String {
+    let lead = found.lead().unwrap_or(1.0);
+    let guess = match lead < CLEAR_LEAD {
+        true => " That is near enough a tie to be a guess.",
+        false => "",
+    };
+    let one = ordinal(found.phase);
+    let claps = found.claps();
+    let (even, odd) = (claps[0] + claps[2], claps[1] + claps[3]);
+    let apart = even.max(odd) / even.min(odd).max(f32::MIN_POSITIVE);
+    let (backbeat, among) = match found.backbeat() {
+        Some(pair) => (
+            format!(
+                "The claps are on the {} and {} positions, {apart:.2} times the other pair, so \
+                 the 1 is on the {} or the {}.",
+                ordinal(pair),
+                ordinal(pair + 2),
+                ordinal(1 - pair),
+                ordinal(3 - pair)
+            ),
+            "Between those",
+        ),
+        None => (
+            format!(
+                "The claps favour neither pair of positions ({apart:.2} to 1), so they rule \
+                 nothing out."
+            ),
+            "Of all four",
+        ),
+    };
+    let lead_of = |by| match found.lead_of(by) {
+        Some(lead) => format!("{lead:.2}"),
+        None => "nothing".to_string(),
+    };
+    let (kick, harmony) = (lead_of(DecidedBy::Kick), lead_of(DecidedBy::Harmony));
+    let surer = match found.by {
+        DecidedBy::Harmony => "the harmony",
+        _ if found.lead_of(DecidedBy::Harmony).is_none() => {
+            "the kick, there being no harmony to speak of,"
+        }
+        _ => "the kick",
+    };
+    format!(
+        "{backbeat} {among}, the kick's strongest position leads by {kick}, and the harmony's \
+         — each position's share of the bass's change plus its share of the chords' — by \
+         {harmony}. The surer is {surer} and says the {one}.{guess}"
+    )
 }
 
 fn key(out: &mut String, analysis: &TrackAnalysis) {
@@ -410,7 +462,7 @@ fn clock(ms: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tempo::Downbeat;
+    use super::super::tempo::{DecidedBy, Downbeat};
     use super::super::{analyze, tests::track};
     use super::*;
     use crate::audio::Audio;
@@ -435,7 +487,7 @@ mod tests {
     fn the_position_marked_as_the_one_is_the_largest_sum_and_the_grid_agrees() {
         let analysis = analyze(&track());
         let text = explained(&analysis);
-        let sums = analysis.downbeat.strengths();
+        let sums = analysis.downbeat.scores();
         let largest = (0..4).fold(0, |best, i| if sums[i] > sums[best] { i } else { best });
         assert_eq!(analysis.downbeat.phase, largest);
 
@@ -469,8 +521,8 @@ mod tests {
         analysis.downbeat = Downbeat {
             times_ms: (0..beats as u32).map(|i| i * 500).collect(),
             kicks,
-            phase: 0,
-            dropped: 0,
+            by: DecidedBy::Kick,
+            ..Default::default()
         };
         let text = explained(&analysis);
         let pointed: Vec<&str> =
@@ -526,6 +578,81 @@ mod tests {
         }
     }
 
+    /// Where the analysis puts the bar on the records the downbeat was
+    /// measured against, from `BOOTH_DRUM_RECORDS`: for each, the beat of the
+    /// bar it gives a moment the reference calls a 1.
+    ///
+    /// The reference is the arrangement, not a listener or rekordbox: on each
+    /// record's straight grid, where its biggest changes in energy fall in the
+    /// bar, two and four bars either side, whether they sit whole phrases
+    /// apart, and whether the backbeat agrees. `true` where all of that is
+    /// consistent, `false` where it is less sure. A confident one off the 1
+    /// fails the test; the rest are reported.
+    ///
+    /// The records are on archive.org: mne013-gartner-phobos,
+    /// audcst031Blacksquare-Upside, INeedHouseByBlacksquareaudcst016, tou207,
+    /// vault-kid-into-the-vault, vault-kid-summer-wars, ca015_va_cs (Buben,
+    /// Pere), 45rpm028_trib2010Buben-MorningEcho (Next Time), unfound51,
+    /// mtrnc003, audcst037Aku-Stories, maladafneep, 1bit_011 (Markus Masuhr).
+    #[test]
+    #[ignore = "needs records on disk"]
+    fn real_records_put_the_bar_where_the_reference_does() {
+        use crate::audio::decode::decode_file;
+        let Some(records) = std::env::var_os("BOOTH_DRUM_RECORDS") else {
+            return;
+        };
+        // A distinctive piece of each title, a moment the reference calls a
+        // 1 in milliseconds, and whether the reference is confident of it.
+        let reference = [
+            ("Signal", 60_043, true),
+            ("Brain Dance", 59_994, false),
+            ("Deep Into Another", 60_485, true),
+            ("Groovielaugh", 59_513, true),
+            ("I Need House", 59_520, true),
+            ("Upside", 59_999, true),
+            ("Next Time", 60_041, true),
+            ("Pere", 60_542, false),
+            ("Dafne", 59_785, true),
+            ("Blunted", 59_515, true),
+            ("Orquidea", 59_517, true),
+            ("Prova", 59_541, true),
+            ("Summer Wars", 61_348, false),
+            ("Trainjam", 59_135, false),
+            ("Treasure", 59_085, false),
+            ("tou207c", 59_169, true),
+        ];
+        let mut wrong = Vec::new();
+        for entry in std::fs::read_dir(records).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let lower = name.to_lowercase();
+            let Some(&(title, at, confident)) =
+                reference.iter().find(|(title, ..)| lower.contains(&title.to_lowercase()))
+            else {
+                continue;
+            };
+            let analysis = analyze(&decode_file(&path).unwrap());
+            let beats = &analysis.grid.beats;
+            let Some(nearest) = beats.iter().min_by_key(|beat| beat.time_ms.abs_diff(at)) else {
+                continue;
+            };
+            let off = nearest.time_ms.abs_diff(at);
+            let said = match off < 70 {
+                true => format!("beat {}", nearest.number),
+                false => format!("no beat within {off} ms"),
+            };
+            eprintln!(
+                "{title:<18} {}  the reference's 1 at {} is {said}",
+                if confident { "confident" } else { "less sure" },
+                clock(at)
+            );
+            if confident && (off >= 70 || nearest.number != 1) {
+                wrong.push(title);
+            }
+        }
+        assert!(wrong.is_empty(), "off the 1 where the reference is confident: {wrong:?}");
+    }
+
     #[test]
     fn a_downbeat_won_by_a_hair_is_called_a_guess_and_a_clear_one_is_not() {
         let mut analysis = analyze(&track());
@@ -533,8 +660,8 @@ mod tests {
             analysis.downbeat = Downbeat {
                 times_ms: (0..16).map(|i| i * 500).collect(),
                 kicks: (0..16).map(|i| kicks[i % 4]).collect(),
-                phase: 0,
-                dropped: 0,
+                by: DecidedBy::Kick,
+                ..Default::default()
             };
             // Read as prose, whatever line the wrapping broke it over.
             let words: Vec<String> =
