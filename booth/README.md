@@ -1492,7 +1492,8 @@ the day AlphaTheta changes the key; the constant is `BUNDLED_KEY` in
 `proto/musicai/src/rekordbox/mod.rs`, and blanking it builds a program that asks for one.
 
 Settings → **Import a rekordbox library** brings across tracks, playlists and
-their folders, beat grids, hot cues, keys, ratings, play counts and My Tags.
+their folders, beat grids, hot cues and the loops saved on them, keys, ratings,
+play counts and My Tags.
 On the command line, `booth-cli rekordbox read <path>` lists what is in one
 without changing anything.
 
@@ -1749,9 +1750,13 @@ Keeping the drive's copy does two things. The track's analysis files on the
 stick are left exactly as the deck left them — it is not prepared again, and its
 row and its place in the playlists carry through untouched — and **what the deck
 did is read back into the collection**, so the cues, their names and colours, the
-phrases and the tempo become the ones Booth shows. Keeping the drive's copy
-therefore means having it, not merely not losing it. The decision is recorded, so
-a settled question is not asked again on every sync.
+phrases and the tempo become the ones Booth shows. A cue the deck saved as a loop
+comes back a loop, with where it ends, and goes back onto the stick as one: the
+collection used to keep only where a cue starts, so a loop read off a stick was
+written back as a plain cue and the loop was gone. The waveform draws a loop's
+length as a bar along the cue's edge, and resting on it says where it ends.
+Keeping the drive's copy therefore means having it, not merely not losing it. The
+decision is recorded, so a settled question is not asked again on every sync.
 
 The one thing that does not come back is the grid itself, only the tempo it was
 written at. A collection keeps a tempo and a downbeat rather than thousands of

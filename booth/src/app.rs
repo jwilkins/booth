@@ -8691,7 +8691,7 @@ impl App {
         let renamed =
             renamed_for_the_words(cue, &track.cues, snapped, &track.lyrics, &track.sounds);
         let Some(cue) = track.cues.get_mut(at) else { return };
-        cue.time_ms = snapped;
+        cue.move_to(snapped);
         if let Some(label) = renamed {
             crate::debug!("cue moved onto other words: {:?} -> {label:?}", cue.label);
             cue.label = label;
@@ -8741,12 +8741,18 @@ impl App {
 
         let Some(track) = self.library.get_mut(id) else { return };
         match track.cues.iter_mut().find(|cue| cue.letter == letter) {
-            Some(cue) => cue.time_ms = snapped,
+            // Set afresh somewhere else, a hot cue is a cue, as it is when a
+            // deck's button is pressed in a new place.
+            Some(cue) => {
+                cue.time_ms = snapped;
+                cue.loop_end_ms = None;
+            }
             None => track.cues.push(crate::library::CueMark {
                 letter,
                 time_ms: snapped,
                 label: String::new(),
                 color: [color.r(), color.g(), color.b()],
+                loop_end_ms: None,
             }),
         }
         track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
@@ -14270,7 +14276,7 @@ fn drag_cues(cues: &mut [crate::library::CueMark], from: u32, to: u32, within: u
     let mut moved = 0;
     for cue in cues.iter_mut() {
         if marks_a_section(&cue.label) && cue.time_ms.abs_diff(from) <= within {
-            cue.time_ms = to;
+            cue.move_to(to);
             moved += 1;
         }
     }
@@ -15238,7 +15244,13 @@ mod tests {
             use crate::library::{CueMark, Phrase, PhraseEdit};
 
             fn cue(letter: u8, time_ms: u32, label: &str) -> CueMark {
-                CueMark { letter, time_ms, label: label.to_string(), color: [0; 3] }
+                CueMark {
+                    letter,
+                    time_ms,
+                    label: label.to_string(),
+                    color: [0; 3],
+                    loop_end_ms: None,
+                }
             }
 
             /// 120 BPM, so a beat is 500 ms and a bar is two seconds.
@@ -15381,6 +15393,7 @@ mod tests {
                     time_ms: 4_000,
                     label: "drop".into(),
                     color: [1, 2, 3],
+                    loop_end_ms: None,
                 }];
                 for (part, slot) in [("vocals", 0), ("drums", 1), ("melody", 2)] {
                     let path = dir.join(format!("Sirens-{part}.mp3"));
@@ -15576,7 +15589,13 @@ mod tests {
             }
 
             fn cue(letter: u8, time_ms: u32, label: &str) -> CueMark {
-                CueMark { letter, time_ms, label: label.to_string(), color: [0; 3] }
+                CueMark {
+                    letter,
+                    time_ms,
+                    label: label.to_string(),
+                    color: [0; 3],
+                    loop_end_ms: None,
+                }
             }
 
             /// 120 BPM from zero: a beat is 500 ms and the one is every two
@@ -15882,8 +15901,13 @@ mod tests {
                 track.analyzed = true;
                 track.beats = 600;
                 track.duration_secs = 300.0;
-                track.cues =
-                    vec![CueMark { letter: 0, time_ms: 0, label: String::new(), color: [0; 3] }];
+                track.cues = vec![CueMark {
+                    letter: 0,
+                    time_ms: 0,
+                    label: String::new(),
+                    color: [0; 3],
+                    loop_end_ms: None,
+                }];
                 track.phrases = vec![
                     Phrase { start_ms: 0, end_ms: 32_000, kind: "intro".into() },
                     Phrase { start_ms: 32_000, end_ms: 64_000, kind: "drop".into() },
@@ -16488,12 +16512,14 @@ mod tests {
                             time_ms: 0,
                             label: "Start".into(),
                             color: [0, 0, 0],
+                            loop_end_ms: None,
                         },
                         crate::library::CueMark {
                             letter: 0,
                             time_ms: 60_000,
                             label: "Drop 1".into(),
                             color: [0, 0, 0],
+                            loop_end_ms: None,
                         },
                     ];
                 }
@@ -16523,6 +16549,7 @@ mod tests {
                     time_ms: from,
                     label: label.into(),
                     color: [0; 3],
+                    loop_end_ms: None,
                 });
                 track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
                 let at = track
@@ -16580,6 +16607,7 @@ mod tests {
                     time_ms: 40_000,
                     label: "V1 hold me closer now".into(),
                     color: [0; 3],
+                    loop_end_ms: None,
                 });
                 let label = dragged(&mut app, id, 0, 60_000, "V2 nothing here but us", 80_000);
                 assert_eq!(label, "V1 hold me closer now");
@@ -17460,12 +17488,14 @@ mod tests {
                             time_ms: 1_000,
                             label: String::new(),
                             color: [0x98, 0xA4, 0xAE],
+                            loop_end_ms: None,
                         },
                         crate::library::CueMark {
                             letter: 2,
                             time_ms: 62_500,
                             label: "Vocal".into(),
                             color: crate::job::cue_color(2),
+                            loop_end_ms: None,
                         },
                     ];
                     track.lyrics = vec![crate::library::Lyric {
@@ -17489,6 +17519,7 @@ mod tests {
                             time_ms,
                             label: String::new(),
                             color: [0x98, 0xA4, 0xAE],
+                            loop_end_ms: None,
                         })
                         .collect();
                     app.rebuild();
@@ -20416,6 +20447,7 @@ mod tests {
                     time_ms: 32_000,
                     label: "in".into(),
                     color: [1, 2, 3],
+                    loop_end_ms: None,
                 }];
             }
             app.library.add_playlist("Saturday", "").unwrap();
@@ -21431,6 +21463,7 @@ mod tests {
             time_ms: 2_000,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let beats = beat_times(&track);
@@ -21457,6 +21490,7 @@ mod tests {
             time_ms: 30_969,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let beats = beat_times(&track);
@@ -21504,6 +21538,7 @@ mod tests {
             time_ms: 3_000,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let off_the_cue = beat_times(&track);
@@ -21596,6 +21631,7 @@ mod tests {
             time_ms: 2_000,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         // Anything before the first beat is the first beat, not a negative one.
@@ -21623,6 +21659,7 @@ mod tests {
             time_ms: 1_234,
             label: String::new(),
             color: [0, 0, 0],
+            loop_end_ms: None,
         });
 
         let period = 60_000.0 / 128.0;
