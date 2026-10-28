@@ -397,7 +397,30 @@ fn normalised(flux: &[f32], frame_rate: f64) -> Vec<f32> {
     envelope
 }
 
+/// The levels a beat sits among in a bar of four, as multiples of its period:
+/// the half-beat, the beat, the half-bar and the bar.
+const LEVELS: [f64; 4] = [0.5, 1.0, 2.0, 4.0];
+
 /// The beat period, in frames, from the autocorrelation of the envelope.
+///
+/// The most periodic lag was the whole of it, and on records with a rhythm in
+/// threes over the four it is a lag in threes: VogelAudio's bass every three
+/// half-beats put it at 86.67 BPM, two thirds of the 130 madmom and Essentia
+/// both find, and Phobos's every three quarter-beats at 130.65 against their
+/// 98. Every bar line after that is in the wrong place, and no later step
+/// looks further than a frame from the lag chosen here.
+///
+/// What tells a beat from a lag in threes is what is around it. Under a beat
+/// the half-beat repeats too, and above it the half-bar and the bar. Around
+/// three half-beats are three quarter-beats and a bar and a half, which a bar
+/// of four has little on. So each candidate is scored by its own correlation
+/// and those of its [`LEVELS`] together.
+///
+/// That score chooses the grid and not the octave: a lag twice as long has the
+/// same levels but one, and which of the two is the beat is the prior's
+/// question, as it always was. So the octave of the grid the levels choose is
+/// chosen as before, and where they choose the grid the most periodic lag is
+/// on, nothing changes.
 fn estimate_period(envelope: &[f32], frame_rate: f64) -> (Option<usize>, f32) {
     let shortest = (60.0 * frame_rate / MAX_BPM).round() as usize;
     let longest = (60.0 * frame_rate / MIN_BPM).round() as usize;
@@ -405,36 +428,76 @@ fn estimate_period(envelope: &[f32], frame_rate: f64) -> (Option<usize>, f32) {
         return (None, 0.0);
     }
 
+    // Every lag up to a bar of the slowest beat, and a frame past it, so that
+    // each candidate's levels and neighbours are there to be read.
+    let correlation: Vec<f64> = (0..=longest * 4 + 1)
+        .map(|lag| match lag {
+            0 => 0.0,
+            lag if lag >= envelope.len() => 0.0,
+            lag => {
+                let mut sum = 0.0f64;
+                for i in lag..envelope.len() {
+                    sum += (envelope[i] * envelope[i - lag]) as f64;
+                }
+                sum / (envelope.len() - lag) as f64
+            }
+        })
+        .collect();
     let centre = 60.0 / PRIOR_CENTRE_BPM * frame_rate;
+    // Weight towards the tempo a listener would pick, which is what stops a
+    // four-to-the-floor track being reported at half or double speed.
+    let prior = |lag: usize| {
+        let octaves = (lag as f64 / centre).log2();
+        (-0.5 * (octaves / PRIOR_WIDTH_OCTAVES).powi(2)).exp()
+    };
+    let weighted = |lag: usize| correlation[lag] * prior(lag);
+
     let mut best = (0usize, f64::MIN);
     let mut total = 0.0f64;
-    let mut counted = 0usize;
-
     for lag in shortest..=longest {
-        let mut correlation = 0.0f64;
-        for i in lag..envelope.len() {
-            correlation += (envelope[i] * envelope[i - lag]) as f64;
-        }
-        correlation /= (envelope.len() - lag) as f64;
-        // Weight towards the tempo a listener would pick, which is what stops
-        // a four-to-the-floor track being reported at half or double speed.
-        let octaves = (lag as f64 / centre).log2();
-        let weighted = correlation * (-0.5 * (octaves / PRIOR_WIDTH_OCTAVES).powi(2)).exp();
-        total += weighted;
-        counted += 1;
-        if weighted > best.1 {
-            best = (lag, weighted);
+        total += weighted(lag);
+        if weighted(lag) > best.1 {
+            best = (lag, weighted(lag));
         }
     }
-
-    let average = total / counted.max(1) as f64;
+    let average = total / (longest + 1 - shortest).max(1) as f64;
     let confidence = if average > 0.0 { (best.1 / average) as f32 } else { 0.0 };
     // Nothing periodic enough to be a beat. Better to say so than to invent a
     // grid a DJ then has to notice is wrong.
     if best.0 == 0 || confidence < MIN_CONFIDENCE {
         return (None, confidence);
     }
-    (Some(best.0), confidence)
+
+    // The lag a level falls on, give or take the frame its rounding moved it.
+    let near = |at: f64| -> Option<usize> {
+        let middle = at.round() as usize;
+        (middle.saturating_sub(1)..=middle + 1)
+            .filter(|&lag| lag >= 1 && lag < correlation.len())
+            .max_by(|&a, &b| correlation[a].total_cmp(&correlation[b]))
+    };
+    let levels = |lag: usize| {
+        LEVELS.iter().filter_map(|&m| near(lag as f64 * m)).map(|at| correlation[at]).sum::<f64>()
+            * prior(lag)
+    };
+    let peaks = (shortest.max(1)..=longest).filter(|&lag| {
+        correlation[lag] >= correlation[lag - 1] && correlation[lag] >= correlation[lag + 1]
+    });
+    let Some(grid) = peaks.max_by(|&a, &b| levels(a).total_cmp(&levels(b))) else {
+        return (Some(best.0), confidence);
+    };
+    let octaves = |of: usize| [0.5, 1.0, 2.0].map(|m| of as f64 * m);
+    // Within a frame and a half of one of the most periodic lag's octaves: its
+    // own rounding and a doubled one's.
+    if octaves(best.0).iter().any(|&at| (grid as f64 - at).abs() <= 1.5) {
+        return (Some(best.0), confidence);
+    }
+    let period = octaves(grid)
+        .into_iter()
+        .filter_map(near)
+        .filter(|lag| (shortest..=longest).contains(lag))
+        .max_by(|&a, &b| weighted(a).total_cmp(&weighted(b)))
+        .unwrap_or(best.0);
+    (Some(period), confidence)
 }
 
 /// Choose the beat times: the sequence maximising onset strength minus the cost
@@ -1232,6 +1295,39 @@ mod tests {
                 found.bpm
             );
         }
+    }
+
+    /// Pulses laid over each other: each `(every, hz, gain)` a decaying tone
+    /// every `every` beats at `bpm`, for `bars` bars.
+    fn layered(bpm: f64, bars: usize, layers: &[(f64, f32, f32)]) -> Audio {
+        let period = 60.0 / bpm;
+        let lead_in = RATE as usize / 2;
+        let length = period * (bars * 4) as f64;
+        let frames = lead_in + (RATE as f64 * length) as usize + RATE as usize;
+        let mut plane = vec![0.0f32; frames];
+        for &(every, hz, gain) in layers {
+            let mut at = 0.0;
+            while at < length {
+                let start = lead_in + (RATE as f64 * at) as usize;
+                for i in 0..(RATE as usize / 8).min(frames - start) {
+                    let t = i as f32 / RATE as f32;
+                    plane[start + i] +=
+                        gain * (-30.0 * t).exp() * (2.0 * std::f32::consts::PI * hz * t).sin();
+                }
+                at += period * every;
+            }
+        }
+        Audio::new(RATE, vec![plane.clone(), plane]).unwrap()
+    }
+
+    #[test]
+    fn a_stab_every_three_half_beats_does_not_take_the_tempo_with_it() {
+        // A kick on every beat, a quiet hat on every half-beat, and over them a
+        // bass stab twice as loud as the kick every beat and a half, as
+        // VogelAudio's is. The most periodic lag is the stab's, 86.67 BPM.
+        let audio = layered(130.0, 32, &[(1.0, 60.0, 0.5), (0.5, 6000.0, 0.03), (1.5, 110.0, 1.0)]);
+        let found = detect(&features::extract(&audio));
+        assert!((found.bpm - 130.0).abs() < 1.0, "found {:.2} BPM for a 130 BPM track", found.bpm);
     }
 
     #[test]

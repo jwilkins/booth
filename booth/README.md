@@ -709,6 +709,30 @@ what a sequencer writes. Two have no steady beat for it to find and one, a
 hard techno record whose kick is a rumble, folds but does not pass, and those
 three are gridded as they were.
 
+### How fast it goes
+
+The tempo was the most periodic lag of the onsets, and on a record with a
+rhythm in threes over the four that is a lag in threes. VogelAudio's bass stab
+every beat and a half put it at 86.67 BPM where the record is at 130, and
+Phobos's every three quarter-beats at 130.65 where it is at 98. Nothing later
+looks further than a frame from that lag, so every bar line was off.
+
+Under a real beat the half-beat repeats as well, and above it the half-bar and
+the bar. A lag in threes has three quarter-beats and a bar and a half around
+it, where a bar of four has little. So each candidate is now scored together
+with those levels. The levels choose the grid, but not which octave of it: a
+lag twice as long has the same levels bar one, and that question is left to
+the lean towards 120 BPM, as before.
+
+This was measured against two trackers that are not Booth's, madmom and
+Essentia (see `scripts/reference`), on 41 CC records. Twenty-three of those
+were picked for the genres where the octave is in question. The two agree on
+35, and Booth now has the same tempo on 28 of them, up from 24. Six of the
+seven it misses are the octave: hip hop read at double, drum and bass and
+half-time records read at half. The seventh reads 120 as 80. The octave is a
+convention as much as a measurement, which is what the `÷2` and `×2` below
+are for.
+
 ### Which beat is the one
 
 The downbeat was the beat of four the kick hit hardest, which is no answer at
@@ -739,8 +763,8 @@ guess, and the analysis log says so; the fix controls below are for those.
 ### Correcting a grid by hand
 
 A tracker is right about most records and wrong about a few, and the few are
-not random. It reads a half-time record at double, a drum-and-bass record at
-half, and on a record where nothing marks the bar — a kick on every beat, no
+not random. It reads hip hop at double, drum and bass and half-time records
+at half, and on a record where nothing marks the bar — a kick on every beat, no
 clap, a chord held for minutes — the one is a guess. None of that is fixed by
 analysing again — the same audio gives the same answer — and all of it is a
 press or two for somebody looking at the waveform.

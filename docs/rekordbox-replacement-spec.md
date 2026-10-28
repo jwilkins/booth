@@ -901,7 +901,9 @@ offline, and every decision visible.
 - **`features.rs`** — one pass over the audio producing spectral flux, band energies,
   level and a vocal-presence estimate. A five-minute track measures out at about a
   megabyte rather than a spectrogram's few hundred.
-- **`tempo.rs`** — ANA-1 and ANA-2. Autocorrelation with a perceptual tempo prior, then
+- **`tempo.rs`** — ANA-1 and ANA-2. Autocorrelation with a perceptual tempo prior, each
+  candidate lag scored with the metrical levels around it so that a lag in threes is not
+  taken for the beat, then
   Ellis's dynamic program for the beat times, then the downbeat: from the kick where it is
   surest, and otherwise from the backbeat and where the bass and the chords change.
   The beats are placed by the low band as well as the whole spectrum, so they land on the
