@@ -1515,21 +1515,23 @@ model is sure of one of three, the tempo goes in that genre's octave:
 | Dubstep | 100 to 200 BPM | Dubstep, Grime |
 
 Sure means the genre's styles adding up to 0.3 among the five the model is
-surest of. On 75 CC records, where madmom and Essentia agree on 59 tempos, this
-took Booth from 50 of them to 54: five hip hop and drum and bass records read
-at double or half came right, and one instrumental hip hop record both trackers
-hear at 164 was put at 82. Seven drum and bass records the two disagree on went
-from 83 to 90 up to 166 to 180, which is what madmom and the convention say.
-It costs nothing the switch does not cost already. The analysis log says when
-it happens, and the octave is kept with the track: measuring the grid again, or
-analysing with the switch off, keeps it. Most genres have no octave here, and
+surest of. On 75 CC records, of the 62 tempos madmom and Essentia agree on or
+a listener has counted, this took Booth from 51 to 57: six hip hop and drum
+and bass records read at double or half came right, one of them a trip hop
+record both trackers hear at 164 and a listener counts at 82. It holds one
+record in the wrong octave: dub on a drum and bass release, counted at 90,
+which the model and the tag both call drum and bass. Seven drum and bass
+records the two disagree on went from 83 to 90 up to 166 to 180, which is what
+madmom and the convention say. It costs nothing the switch does not cost
+already. The analysis log says when it happens, and the octave is kept with the
+track: measuring the grid again, or analysing with the switch off, keeps it. Most genres have no octave here, and
 their records keep the one the tracker chose. `÷2` and `×2` still correct
 either.
 
 Without the model, or where it is not sure, a file's own genre tag does the
 same: a tag naming one of the three (Drum & Bass, Jungle, Instrumental
 Hip-Hop, Trip-Hop, Dubstep and so on) and no other. On the same 75 records the
-tags alone would have taken Booth from 50 to 53. A tag that names two of them
+tags alone would have taken Booth from 51 to 56. A tag that names two of them
 says nothing, and nor does one with trap in it.
 
 ## Importing a rekordbox library
