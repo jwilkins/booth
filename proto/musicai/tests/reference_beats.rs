@@ -75,7 +75,8 @@ const SLIPS: [(f64, &str); 7] = [
 /// Records whose tempo a listener has counted, by a piece of the file's name,
 /// or that a listener says has none to count. Where a record is here, this is
 /// the answer and the references are not asked: the two can agree with each
-/// other and both be an octave out, and on three of these they were.
+/// other and both be wrong. They were an octave out on Introspect and Hard Epic
+/// Dubstep, and gave Procedure238, which has no tempo, one.
 const BY_EAR: [(&str, Option<f64>); 7] = [
     // Trip hop at 82; madmom and Essentia both hear 164.
     ("Jenova_7", Some(82.0)),
