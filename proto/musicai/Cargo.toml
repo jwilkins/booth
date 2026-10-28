@@ -21,7 +21,8 @@ fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc
 flacenc = "0.5"
 hound = "3.5"
 id3 = "1"
-# statvfs, for asking a drive how much room it has before writing to it.
+# Asking the system about a drive and a write to it: how much room it has
+# before writing (statvfs), and reading a write back past the page cache.
 libc = "0.2"
 metaflac = "0.2"
 mp3lame-encoder = "0.2"

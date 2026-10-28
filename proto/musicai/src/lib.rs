@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod audio;
 pub mod audit;
+pub mod awake;
 pub mod cli;
 pub mod clock;
 pub mod commands;
