@@ -257,8 +257,8 @@ pub fn octave_called(because: &str) -> Option<Octave> {
 ///
 /// Somebody's filing rather than the model's ear, and on 75 CC records worth
 /// nearly as much: of the 62 tempos madmom and Essentia agree on or a listener
-/// has counted, the tags alone would have taken Booth from 51 to 56, the model
-/// from 51 to 57. A tag that names two of them (IDM, Jungle, Dubstep) says
+/// has counted, the tags alone would have taken Booth from 52 to 57, the model
+/// from 52 to 58. A tag that names two of them (IDM, Jungle, Dubstep) says
 /// nothing, and nor does one with trap in it, which is filed with hip hop and
 /// counted from about 130.
 pub fn octave_tagged(tag: &str) -> Option<Octave> {

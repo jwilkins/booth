@@ -87,9 +87,9 @@ const BY_EAR: [(&str, Option<f64>); 7] = [
     // Experimental, with no steady beat to count: no tempo is the answer, and
     // the two's 99 and 100 are not.
     ("Procedure238", None),
-    // Dub on a drum and bass release, counted at 90; madmom hears 180 and
+    // Dub on a drum and bass release, counted at 180; madmom hears 180 and
     // Essentia 90.
-    ("bandulu_dub", Some(90.0)),
+    ("bandulu_dub", Some(180.0)),
     // Counted at 92; madmom hears 185 and Essentia 92.
     ("Producer_Snafu", Some(92.0)),
     // Counted at 120; madmom hears 64 and Essentia 120.
@@ -107,7 +107,7 @@ const BY_EAR: [(&str, Option<f64>); 7] = [
 /// the 4, fixed five of the six on the first 41 records; but the band that
 /// hears the snare hears the hats on the off-beat too, and it doubled
 /// 02_-_Get_Out from 95 and halved 1-02FractureDsordre from 160.
-const KNOWN: [(&str, &str); 11] = [
+const KNOWN: [(&str, &str); 10] = [
     // Hard techno at 140, with the clap on every other beat.
     ("dillerkopp", "half"),
     // A tempo for a record with none.
@@ -118,7 +118,6 @@ const KNOWN: [(&str, &str); 11] = [
     ("Jenova_7", "double"),
     ("Oldvision", "half"),
     ("Lazy_Bastard", "half"),
-    ("bandulu_dub", "double"),
     // 120 read as 132.74, a ninth fast: no octave and no slip in threes.
     ("Klassikkos", "1.11x"),
     // 120 read as 80: it repeats half as much again every three half-beats
@@ -127,17 +126,13 @@ const KNOWN: [(&str, &str); 11] = [
 ];
 
 /// The records Booth is known to miss with the genre model's octave as well:
-/// the [`KNOWN`] misses the genre does not reach (the model calls Heart
-/// electro, Procedure238 and Klassikkos experimental and Ryan L's ambient),
-/// and one it holds in the wrong octave.
-const KNOWN_WITH_GENRE: [(&str, &str); 5] = [
+/// the [`KNOWN`] misses the genre does not reach. The model calls Heart
+/// electro, Procedure238 and Klassikkos experimental and Ryan L's ambient.
+const KNOWN_WITH_GENRE: [(&str, &str); 4] = [
     ("dillerkopp", "half"),
     ("Procedure238", "a tempo"),
     ("ryan_l", "2/3"),
     ("Klassikkos", "1.11x"),
-    // Dub on a drum and bass release, which the model hears as drum and bass
-    // and its tag calls Drum & Bass, so the genre's octave keeps it at 180.
-    ("bandulu_dub", "double"),
 ];
 
 /// What a ratio of two tempos reads as, or the number where it is none of them.
