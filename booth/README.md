@@ -1512,32 +1512,38 @@ chance.
 drum and bass at 172 at 172, though a record of either can repeat as strongly
 at the other's tempo, and the tempo alone cannot tell them apart: they are as
 far either side of the 120 the tracker leans towards. The genre can. So with
-the switch on, the genre is heard before the beats are tracked, and where the
-model is sure of one of three, the tempo goes in that genre's octave:
+the switch on, the genre is heard before the beats are tracked, and the tempo
+goes in the octave nearest the tempos that genre is played at.
 
-| Genre | Counted from | Styles |
-|---|---|---|
-| Drum and bass | 120 to 240 BPM | Drum n Bass, Jungle, Halftime |
-| Hip hop | 60 to 120 BPM | the slower hip hop styles and Trip Hop; not Trap, Miami Bass, Cloud Rap or Crunk |
-| Dubstep | 100 to 200 BPM | Dubstep, Grime |
+Those come from a table of 75 club genres in twelve families, from R&B at 70
+to 100 BPM to frenchcore at 190 to 220, each with the range its scene plays
+at and the names it goes by (`proto/musicai/src/analysis/genre_tempos.json`).
+A genre felt at half is placed where it is written: dubstep and trap at 140,
+not the 70 they are danced to. A style the model hears, or a word in the
+file's tag, is found in the table by name or alias; Discogs's hip hop styles
+are all hip hop, trip hop is counted as hip hop is, and halftime as drum and
+bass. A few are left out on purpose: Miami bass and cloud rap, which are counted
+either way, and Rock's Hardcore, which is not gabber.
 
-Sure means the genre's styles adding up to 0.3 among the five the model is
-surest of. On 75 CC records, of the 62 tempos madmom and Essentia agree on or a
-listener has counted, this took Booth from 52 to 58: six hip hop and drum and
-bass records read at double or half came right, one of them a trip hop record
-both trackers hear at 164 and a listener counts at 82. Seven drum and bass
-records the two disagree on went from 83 to 90 up to 166 to 180, which is what
-madmom and the convention say. It costs nothing the switch does not cost
-already. The analysis log says when it happens, and the octave is kept with the
-track: measuring the grid again, or analysing with the switch off, keeps it.
-Most genres have no octave here, and their records keep the one the tracker
-chose. `÷2` and `×2` still correct either.
+Each genre among the five styles the model is surest of calls the octave
+nearest its range, as sure as the model was of the style, and has no say where
+both octaves are more than a third of an octave from it. The octave called with
+0.3 or more between them is taken. On 75 CC records, of the 62 tempos madmom
+and Essentia agree on or a listener has counted, this took Booth from 52 to 58:
+seven records read at double or half came right, hip hop, drum and bass and one
+the model hears as electro, and one of them a trip hop record both trackers
+hear at 164 and a listener counts at 82. One went wrong: a record a listener counts at 92, which the model
+hears as hardcore, and the table plays hardcore from 150 to 200. Seven drum and
+bass records the two disagree on went from 83 to 90 up to 166 to 180, which is
+what madmom and the table say. It costs nothing the switch does not cost
+already. The analysis log says when it happens, and the genre is kept with the
+track: measuring the grid again, or analysing with the switch off, keeps its
+octave. `÷2` and `×2` still correct either.
 
 Without the model, or where it is not sure, a file's own genre tag does the
-same: a tag naming one of the three (Drum & Bass, Jungle, Instrumental
-Hip-Hop, Trip-Hop, Dubstep and so on) and no other. On the same 75 records the
-tags alone would have taken Booth from 52 to 57. A tag that names two of them
-says nothing, and nor does one with trap in it.
+same, each genre it names counting as sure; a tag whose genres call different
+octaves says nothing. On the same 75 records the tags alone would have taken
+Booth from 52 to 57.
 
 ## Importing a rekordbox library
 
@@ -2126,8 +2132,9 @@ drive played only on older hardware has a history nothing here can see.
   in Settings, needs the Discogs-EffNet file installed separately, costs about
   thirteen seconds a track on top of the analysis, and files a record where
   Discogs users would have, which is not always where you would. Where it is
-  sure of drum and bass, hip hop or dubstep it also picks the octave of the
-  tempo, and it is as wrong there as it is about the genre. A genre the
+  sure of a genre it also picks the octave of the tempo, from a table of the
+  tempos genres are played at, and it is as wrong there as it is about the
+  genre, or as the table is about the record. A genre the
   file's own tag carries is read in and defended — a disagreement is asked
   about rather than settled — but there is no way yet to type one in by hand.
 - Key detection is right about 37% of the time on a real library, and confuses

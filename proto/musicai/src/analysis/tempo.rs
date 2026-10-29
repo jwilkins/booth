@@ -31,6 +31,37 @@ const MAX_BPM: f64 = 200.0;
 /// the prior stays open, in octaves. Ellis's figures.
 const PRIOR_CENTRE_BPM: f64 = 120.0;
 const PRIOR_WIDTH_OCTAVES: f64 = 1.4;
+/// How far outside the tempos a genre is played at a record's tempo can be
+/// and still be the genre's, in octaves.
+///
+/// The table's ranges are where a scene plays rather than limits, and records
+/// sit outside them; but where both of a record's octaves are this far from a
+/// genre's, the genre has no say on which. House's 120 to 128 is 0.46 of an
+/// octave from 87 and 0.44 from 174, which is a coin toss rather than a call.
+///
+/// On 75 CC records the line could go anywhere from 0.15 up without one tempo
+/// changing. Of the 192 calls the model and the tags made on a record whose
+/// tempo madmom and Essentia agree on or a listener has counted, that tempo
+/// was within 0.18 of an octave of the genre's on all but one (Nosce te Ipsum
+/// at 102, 0.35 from techno, on a call of 0.07), and the octaves either side
+/// were 0.52 or more from it, save on the two records a listener counts
+/// against the table: Snafu, heard as hardcore and counted at 92, and Hard
+/// Epic Dubstep, counted at 70. A third, then, so
+/// that hip hop's 85 reaches the 70 the tracker stops at, as a slow record of
+/// it is, and so that a coin toss stays one.
+const GENRE_NEAR_OCTAVES: f64 = 1.0 / 3.0;
+/// How sure the genres have to be of an octave before it is taken: their calls
+/// for it added up, the model's activations or 1 for a tag.
+///
+/// Added up, because the model spreads a genre over its styles: The Werewolf
+/// scores 0.34 for instrumental hip hop and 0.28 and 0.27 for the two trip
+/// hops. On 75 CC records every tempo this moved came with 0.36 or more, and
+/// the two that would have moved under it would both have gone wrong: Hard
+/// Epic Dubstep, at 0.21, to the 140 of the dubstep and electro it is heard as
+/// a little of, against the 70 a listener counts; and Ryan L's untitled, at
+/// 0.24, from 80 to 160 where madmom and Essentia hear 120. Where in that gap
+/// the line goes is reasoned rather than measured.
+const GENRE_SURE: f32 = 0.3;
 /// How strongly the beat tracker resists a gap that is not one period. Larger
 /// values keep stricter time at the cost of following a real tempo change.
 const TIGHTNESS: f32 = 100.0;
@@ -63,32 +94,43 @@ pub struct Beats {
     /// What the bar lines were placed by, kept so that a downbeat in the wrong
     /// place can be traced to the beats that put it there.
     pub downbeat: Downbeat,
-    /// Where the tempo was moved an octave to the one its genre is counted in,
-    /// what it was heard at first and why.
-    pub moved: Option<Moved>,
+    /// The genre that said which octave of the tempo is the beat, where one
+    /// did, and what the tempo was heard at first where it moved it.
+    pub octave: Option<Octave>,
 }
 
-/// The octave a record's genre is counted in: from `from_bpm` up to twice it,
-/// so that of any tempo exactly one octave is inside.
+/// A genre a record was heard or filed as, and the tempos it is played at.
 ///
 /// Which octave of a tempo is the beat is a convention as much as a
 /// measurement. Hip hop at 86 is counted at 86 and drum and bass at 172 at 172,
 /// though a record of either can repeat as strongly at the other or more so,
 /// and the two are as far either side of the 120 the prior leans towards. The
-/// genre is what the convention follows, so where the genre is known it says.
+/// genre is what the convention follows, so where the genre is known it says:
+/// of a tempo's octaves, the one nearest the tempos it is played at. See
+/// [`super::genre_tempo`] for where they come from.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Octave {
+pub struct Genre {
+    /// What a track keeps it by, to be found again: "drum-and-bass".
+    pub id: &'static str,
+    /// What it is called, for the log: "Drum & Bass".
+    pub name: &'static str,
+    /// The tempos its scene plays it at, which its records are near rather
+    /// than always inside.
     pub from_bpm: f64,
-    /// What it is the octave of, for the log: "drum and bass".
-    pub because: &'static str,
+    pub to_bpm: f64,
+    /// How sure the call was: the model's activation for the style it was
+    /// heard as, or 1 for somebody's word on it.
+    pub sure: f32,
 }
 
-/// A tempo moved into its genre's octave.
+/// The genre that said which octave of a tempo is the beat.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Moved {
-    /// The tempo of the lag first chosen, to the frame.
-    pub heard_bpm: f64,
-    pub octave: Octave,
+pub struct Octave {
+    /// The surest of the genres that said it.
+    pub genre: Genre,
+    /// The tempo first heard, to the frame, where the genre moved it; `None`
+    /// where the tempo was in the genre's octave already.
+    pub moved_from: Option<f64>,
 }
 
 /// The evidence for which beat is the one, beat by beat, what it came to, and
@@ -297,10 +339,14 @@ pub fn detect(features: &Features) -> Beats {
     detect_at(features, None)
 }
 
-/// Track the beats in the octave a record's genre is counted in. A tempo the
-/// caller gives wins over it: see [`detect_at`].
-pub fn detect_within(features: &Features, bpm: Option<f64>, octave: Option<Octave>) -> Beats {
-    track(features, bpm, octave)
+/// Track the beats in the octave a record's genres say it is in.
+///
+/// `says` is what each source says the genres are, asked in turn: the first
+/// whose genres are sure of an octave decides, so the model's ear can come
+/// before a file's tag. A tempo the caller gives wins over all of them: see
+/// [`detect_at`].
+pub fn detect_within(features: &Features, bpm: Option<f64>, says: &[Vec<Genre>]) -> Beats {
+    track(features, bpm, says)
 }
 
 /// Track the beats at a tempo the caller already knows.
@@ -310,26 +356,26 @@ pub fn detect_within(features: &Features, bpm: Option<f64>, octave: Option<Octav
 /// actually are. Correcting a tempo by hand and then keeping a grid derived
 /// from the wrong one would be worse than not correcting it.
 pub fn detect_at(features: &Features, bpm: Option<f64>) -> Beats {
-    track(features, bpm, None)
+    track(features, bpm, &[])
 }
 
-fn track(features: &Features, bpm: Option<f64>, octave: Option<Octave>) -> Beats {
+fn track(features: &Features, bpm: Option<f64>, says: &[Vec<Genre>]) -> Beats {
     if loudest_onsets(&features.flux) < MIN_ONSET_STRENGTH {
         return Beats {
             grid: BeatGrid::default(),
             bpm: 0.0,
             confidence: 0.0,
             downbeat: Downbeat::default(),
-            moved: None,
+            octave: None,
         };
     }
     let envelope = normalised(&features.flux, features.frame_rate);
-    let (period, confidence, moved) = match bpm {
+    let (period, confidence, octave) = match bpm {
         Some(bpm) if bpm > 0.0 => {
             let period = (60.0 * features.frame_rate / bpm).round() as usize;
             (Some(period.max(1)), f32::INFINITY, None)
         }
-        _ => estimate_period(&envelope, features.frame_rate, octave),
+        _ => estimate_period(&envelope, features.frame_rate, says),
     };
     let Some(period) = period else {
         return Beats {
@@ -337,7 +383,7 @@ fn track(features: &Features, bpm: Option<f64>, octave: Option<Octave>) -> Beats
             bpm: 0.0,
             confidence,
             downbeat: Downbeat::default(),
-            moved: None,
+            octave: None,
         };
     };
 
@@ -367,7 +413,7 @@ fn track(features: &Features, bpm: Option<f64>, octave: Option<Octave>) -> Beats
     let downbeat = downbeat(features, &times);
     renumber(&mut grid, downbeat.phase);
 
-    Beats { grid, bpm, confidence, downbeat, moved }
+    Beats { grid, bpm, confidence, downbeat, octave }
 }
 
 /// How strong this track's onsets are: the level the top twentieth of frames
@@ -460,13 +506,13 @@ const LEVELS: [f64; 4] = [0.5, 1.0, 2.0, 4.0];
 /// chosen as before, and where they choose the grid the most periodic lag is
 /// on, nothing changes.
 ///
-/// Unless the genre says which octave: then the lag is moved by octaves into
-/// it, where the tracker's range reaches. See [`Octave`].
+/// Unless the genres say which octave: then the lag is moved by octaves into
+/// it, where the tracker's range reaches. See [`Genre`].
 fn estimate_period(
     envelope: &[f32],
     frame_rate: f64,
-    octave: Option<Octave>,
-) -> (Option<usize>, f32, Option<Moved>) {
+    says: &[Vec<Genre>],
+) -> (Option<usize>, f32, Option<Octave>) {
     let shortest = (60.0 * frame_rate / MAX_BPM).round() as usize;
     let longest = (60.0 * frame_rate / MIN_BPM).round() as usize;
     if envelope.len() < longest * 2 {
@@ -541,27 +587,75 @@ fn estimate_period(
             .unwrap_or(best.0),
     };
 
-    let Some(octave) = octave else {
-        return (Some(period), confidence, None);
-    };
     let bpm = |lag: f64| 60.0 * frame_rate / lag;
-    let mut at = period as f64;
-    // Three octaves either way is further than the tracker's range goes.
-    for _ in 0..3 {
-        if bpm(at) < octave.from_bpm {
-            at /= 2.0;
-        } else if bpm(at) >= octave.from_bpm * 2.0 {
-            at *= 2.0;
+    // The lag's octaves the tracker's range reaches, itself first so that it
+    // wins a tie. Two either way is further than the range goes.
+    let reach = shortest as f64 - 0.5..=longest as f64 + 0.5;
+    let lags: Vec<f64> = [1.0, 2.0, 0.5, 4.0, 0.25]
+        .iter()
+        .map(|m| period as f64 * m)
+        .filter(|lag| reach.contains(lag))
+        .collect();
+    let tempos: Vec<f64> = lags.iter().map(|&lag| bpm(lag)).collect();
+    match octave_among(says, &tempos) {
+        None => (Some(period), confidence, None),
+        Some((0, genre)) => (Some(period), confidence, Some(Octave { genre, moved_from: None })),
+        Some((at, genre)) => {
+            match near(lags[at]).filter(|lag| (shortest..=longest).contains(lag)) {
+                Some(lag) => {
+                    let octave = Octave { genre, moved_from: Some(bpm(period as f64)) };
+                    (Some(lag), confidence, Some(octave))
+                }
+                None => (Some(period), confidence, None),
+            }
         }
     }
-    let moved = near(at).filter(|lag| (shortest..=longest).contains(lag));
-    match moved {
-        Some(lag) if (at - period as f64).abs() >= 1.0 => {
-            let moved = Moved { heard_bpm: bpm(period as f64), octave };
-            (Some(lag), confidence, Some(moved))
+}
+
+/// Which of `tempos`, a tempo's octaves, the genres put it in, and the surest
+/// genre that did.
+///
+/// Each source in `says` is asked in turn, and the first sure of one decides.
+/// Each genre calls the octave nearest the tempos it is played at, where that
+/// is within [`GENRE_NEAR_OCTAVES`] of them, and none where it is not; the
+/// octave called with the most is taken if that comes to [`GENRE_SURE`] and no
+/// other octave was called with as much.
+fn octave_among(says: &[Vec<Genre>], tempos: &[f64]) -> Option<(usize, Genre)> {
+    says.iter().find_map(|genres| {
+        let mut sure = vec![0.0f32; tempos.len()];
+        let mut surest: Vec<Option<Genre>> = vec![None; tempos.len()];
+        for genre in genres {
+            let Some(at) = nearest_octave(genre, tempos) else { continue };
+            sure[at] += genre.sure;
+            if surest[at].is_none_or(|before| genre.sure > before.sure) {
+                surest[at] = Some(*genre);
+            }
         }
-        _ => (Some(period), confidence, None),
-    }
+        let (at, &most) = sure.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))?;
+        let alone = sure.iter().filter(|&&other| other == most).count() == 1;
+        (most >= GENRE_SURE && alone).then_some((at, surest[at]?))
+    })
+}
+
+/// Of `tempos`, the one nearest the tempos `genre` is played at, where one is
+/// near enough; the first of any equally near.
+fn nearest_octave(genre: &Genre, tempos: &[f64]) -> Option<usize> {
+    let outside = |bpm: f64| {
+        if bpm < genre.from_bpm {
+            (genre.from_bpm / bpm).log2()
+        } else if bpm > genre.to_bpm {
+            (bpm / genre.to_bpm).log2()
+        } else {
+            0.0
+        }
+    };
+    tempos
+        .iter()
+        .map(|&bpm| outside(bpm))
+        .enumerate()
+        .filter(|&(_, octaves)| octaves <= GENRE_NEAR_OCTAVES)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(at, _)| at)
 }
 
 /// Choose the beat times: the sequence maximising onset strength minus the cost
@@ -1234,7 +1328,7 @@ mod tests {
 
     /// The beat times the tracker produces, before anything straightens them.
     fn tracked(f: &Features) -> Vec<u32> {
-        let (period, ..) = estimate_period(&normalised(&f.flux, f.frame_rate), f.frame_rate, None);
+        let (period, ..) = estimate_period(&normalised(&f.flux, f.frame_rate), f.frame_rate, &[]);
         let frames = track_beats(&onset_envelope(f), period.unwrap());
         frames.iter().map(|&n| (f.seconds_at(n) * 1000.0).round() as u32).collect()
     }
@@ -1394,27 +1488,73 @@ mod tests {
         assert!((found.bpm - 130.0).abs() < 1.0, "found {:.2} BPM for a 130 BPM track", found.bpm);
     }
 
+    fn played(id: &'static str, from_bpm: f64, to_bpm: f64, sure: f32) -> Genre {
+        Genre { id, name: id, from_bpm, to_bpm, sure }
+    }
+
     #[test]
     fn a_genre_moves_the_tempo_into_its_octave_and_leaves_one_already_in_it() {
-        let hip_hop = Octave { from_bpm: 60.0, because: "hip hop" };
-        let drum_and_bass = Octave { from_bpm: 120.0, because: "drum and bass" };
+        let hip_hop = played("hip-hop", 85.0, 110.0, 1.0);
+        let drum_and_bass = played("drum-and-bass", 170.0, 180.0, 1.0);
         let f = features::extract(&clicks(174.0, 16, true));
-        let moved = detect_within(&f, None, Some(hip_hop));
+        let moved = detect_within(&f, None, &[vec![hip_hop]]);
         assert!((moved.bpm - 87.0).abs() < 1.0, "found {:.2}", moved.bpm);
-        let heard = moved.moved.expect("moved, and said so").heard_bpm;
+        let octave = moved.octave.expect("moved, and said so");
+        assert_eq!(octave.genre.id, "hip-hop");
+        let heard = octave.moved_from.expect("and what from");
         assert!((heard - 174.0).abs() < 4.0, "heard at {heard:.2}");
-        let kept = detect_within(&f, None, Some(drum_and_bass));
+        let kept = detect_within(&f, None, &[vec![drum_and_bass]]);
         assert!((kept.bpm - 174.0).abs() < 1.0, "found {:.2}", kept.bpm);
-        assert_eq!(kept.moved, None);
+        let octave = kept.octave.expect("the genre said so");
+        assert_eq!((octave.genre.id, octave.moved_from), ("drum-and-bass", None));
     }
 
     #[test]
     fn a_tempo_given_by_hand_wins_over_the_genres_octave() {
-        let hip_hop = Octave { from_bpm: 60.0, because: "hip hop" };
+        let hip_hop = played("hip-hop", 85.0, 110.0, 1.0);
         let f = features::extract(&clicks(174.0, 16, true));
-        let found = detect_within(&f, Some(174.0), Some(hip_hop));
+        let found = detect_within(&f, Some(174.0), &[vec![hip_hop]]);
         assert!((found.bpm - 174.0).abs() < 1.0, "found {:.2}", found.bpm);
-        assert_eq!(found.moved, None);
+        assert_eq!(found.octave, None);
+    }
+
+    #[test]
+    fn a_genre_calls_the_octave_nearest_its_tempos_and_none_where_both_are_far() {
+        let house = played("house", 120.0, 128.0, 1.0);
+        let techno = played("techno", 130.0, 140.0, 1.0);
+        // 71 is most of an octave under techno, 142 two hundredths of one over.
+        assert_eq!(nearest_octave(&techno, &[71.0, 142.0]), Some(1));
+        assert_eq!(nearest_octave(&house, &[124.0, 62.0, 248.0]), Some(0));
+        // 87 and 174 are each nearly half an octave from house.
+        assert_eq!(nearest_octave(&house, &[87.0, 174.0]), None);
+    }
+
+    #[test]
+    fn the_octave_called_surest_is_taken_where_it_is_sure_enough_and_alone() {
+        let tempos = [87.0, 174.0];
+        let hip_hop = |sure| played("hip-hop", 85.0, 110.0, sure);
+        let drum_and_bass = |sure| played("drum-and-bass", 170.0, 180.0, sure);
+        let jungle = |sure| played("jungle", 160.0, 180.0, sure);
+        let among =
+            |genres: Vec<Genre>| octave_among(&[genres], &tempos).map(|(at, genre)| (at, genre.id));
+        // Neither alone is sure enough; together they are, and the surer names it.
+        assert_eq!(among(vec![drum_and_bass(0.2)]), None);
+        assert_eq!(among(vec![drum_and_bass(0.2), jungle(0.15)]), Some((1, "drum-and-bass")));
+        assert_eq!(among(vec![hip_hop(0.4), drum_and_bass(0.35)]), Some((0, "hip-hop")));
+        assert_eq!(among(vec![hip_hop(1.0), drum_and_bass(1.0)]), None, "a tie is no call");
+    }
+
+    #[test]
+    fn a_later_source_is_asked_only_where_the_earlier_is_not_sure() {
+        let tempos = [87.0, 174.0];
+        let heard = vec![played("hip-hop", 85.0, 110.0, 0.5)];
+        let tagged = vec![played("drum-and-bass", 170.0, 180.0, 1.0)];
+        let unsure = vec![played("hip-hop", 85.0, 110.0, 0.1)];
+        let among =
+            |says: &[Vec<Genre>]| octave_among(says, &tempos).map(|(at, genre)| (at, genre.id));
+        assert_eq!(among(&[heard, tagged.clone()]), Some((0, "hip-hop")));
+        assert_eq!(among(&[unsure, tagged.clone()]), Some((1, "drum-and-bass")));
+        assert_eq!(among(&[vec![], tagged]), Some((1, "drum-and-bass")));
     }
 
     #[test]

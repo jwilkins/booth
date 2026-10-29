@@ -42,8 +42,9 @@
 use std::path::Path;
 
 use booth_cli::analysis::analyze_with_drums;
+use booth_cli::analysis::genre_tempo;
 use booth_cli::analysis::style::{self, Classifier};
-use booth_cli::analysis::tempo::Moved;
+use booth_cli::analysis::tempo::Octave;
 use booth_cli::audio::decode::decode_file;
 use booth_cli::export::Beat;
 
@@ -125,14 +126,17 @@ const KNOWN: [(&str, &str); 10] = [
     ("ryan_l", "2/3"),
 ];
 
-/// The records Booth is known to miss with the genre model's octave as well:
-/// the [`KNOWN`] misses the genre does not reach. The model calls Heart
-/// electro, Procedure238 and Klassikkos experimental and Ryan L's ambient.
+/// The records Booth is known to miss with the genres' octave as well: the
+/// [`KNOWN`] misses the genre does not reach, which the model hears as
+/// experimental (Procedure238, Klassikkos) and ambient (Ryan L's), and one on
+/// which a listener and the genre tempo table disagree.
 const KNOWN_WITH_GENRE: [(&str, &str); 4] = [
-    ("dillerkopp", "half"),
     ("Procedure238", "a tempo"),
     ("ryan_l", "2/3"),
     ("Klassikkos", "1.11x"),
+    // Counted at 92. The model hears speedcore, hardcore and gabber, and the
+    // table plays hardcore from 150 to 200, so it goes from 92.5 to 185.
+    ("Producer_Snafu", "double"),
 ];
 
 /// What a ratio of two tempos reads as, or the number where it is none of them.
@@ -195,12 +199,12 @@ struct Compared {
     /// Of madmom's ones that land on a beat of Booth's, the share on each of
     /// Booth's four beats of the bar.
     ones_on: [f64; 4],
-    /// Where the genre moved Booth's tempo an octave.
-    moved: Option<Moved>,
+    /// The genre that said which octave Booth's tempo is in.
+    octave: Option<Octave>,
 }
 
-/// One record analysed as the app analyses it: with the genre model's octave
-/// where there is a model.
+/// One record analysed as the app analyses it: where there is a model, with
+/// the octave the genres it hears say, or else the file's genre tag.
 fn compare(record: &Path, reference: &Path, genre: Option<&Classifier>) -> Option<Compared> {
     let text = std::fs::read_to_string(reference).ok()?;
     let found: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -212,9 +216,18 @@ fn compare(record: &Path, reference: &Path, genre: Option<&Classifier>) -> Optio
     let essentia = found["essentia"]["bpm"].as_f64()?;
 
     let audio = decode_file(record).unwrap();
-    let octave = genre.and_then(|model| style::octave(&model.classify(&audio).unwrap()));
+    let genres = match genre {
+        Some(model) => {
+            let tag = booth_cli::tag::read_metadata(record).ok().and_then(|tags| tags.genre);
+            vec![
+                genre_tempo::heard(&model.classify(&audio).unwrap()),
+                genre_tempo::tagged(tag.as_deref().unwrap_or_default()),
+            ]
+        }
+        None => Vec::new(),
+    };
     let bands = booth_cli::export::waveform::analyze(&audio).band_detail;
-    let analysis = analyze_with_drums(&audio, None, &bands, None, octave);
+    let analysis = analyze_with_drums(&audio, None, &bands, None, &genres);
     let grid = &analysis.grid.beats;
     let times: Vec<f64> = madmom.iter().map(|&(t, _)| t).collect();
     let on = times.iter().filter(|&&t| nearest(grid, t).is_some()).count();
@@ -232,7 +245,7 @@ fn compare(record: &Path, reference: &Path, genre: Option<&Classifier>) -> Optio
         essentia,
         on_booth: on as f64 / times.len().max(1) as f64,
         ones_on: ones.map(|n| n as f64 / landed),
-        moved: analysis.moved,
+        octave: analysis.octave,
     })
 }
 
@@ -279,8 +292,9 @@ fn measure(known: &[(&str, &str)], genre: Option<&Classifier>) {
         };
         let ones = r.ones_on.map(|share| format!("{:>3.0}", share * 100.0)).join(" ");
         let moved = r
-            .moved
-            .map(|m| format!("  {} from {:.0}", m.octave.because, m.heard_bpm))
+            .octave
+            .and_then(|octave| Some((octave.genre.id, octave.moved_from?)))
+            .map(|(genre, from)| format!("  {genre} from {from:.0}"))
             .unwrap_or_default();
         let by_ear = match ear {
             Some(Some(bpm)) => format!("  {bpm:.0} by ear"),

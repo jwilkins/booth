@@ -714,10 +714,11 @@ pub struct Track {
     /// once more, on purpose.
     #[serde(default)]
     pub genre_chosen: bool,
-    /// The genre whose octave the tempo was put in — "drum and bass" — when
-    /// the model heard one, or empty. Kept so that measuring the grid again
-    /// without the model, or analysing with it switched off, keeps the octave
-    /// the genre gave rather than going back to the one it overruled.
+    /// The genre that said which octave the tempo is in, by its id in the
+    /// genre tempo table — "drum-and-bass" — when the model or the file's tag
+    /// gave one, or empty. Kept so that measuring the grid again without the
+    /// model, or analysing with it switched off, keeps the octave the genre
+    /// gave rather than going back to the one it overruled.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tempo_octave: String,
     pub beats: usize,

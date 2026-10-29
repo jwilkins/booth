@@ -1,0 +1,1180 @@
+{
+  "schema_version": 1,
+  "generated": "2026-10-28",
+  "description": "Club genre tempo reference for Booth. bpm_min/bpm_max = working range the scene uses (not absolute limits); bpm_typical = where tracks cluster (catalog medians where available). half_time_feel = written at bpm_typical but felt at half. alt_octave_bpm = range where BPM analyzers commonly mis-tag this genre (halved or doubled).",
+  "families": {
+    "hip-hop": "Hip-hop / R&B",
+    "latin": "Latin / Caribbean",
+    "afro": "Afro / South African",
+    "disco": "Disco / Indie Dance",
+    "house": "House",
+    "techno": "Techno",
+    "trance": "Trance",
+    "uk-bass": "UK Garage / UK Bass",
+    "bass": "Bass / Breaks",
+    "hard-dance": "Hard Dance / Hardstyle",
+    "dnb": "Jungle / Drum & Bass",
+    "hardcore": "Hardcore"
+  },
+  "sources": [
+    "https://digitaldjpool.com/blog/dj-bpm-guide/",
+    "https://www.mixgraph.io/tools/edm-genre-chart",
+    "https://www.mixgraph.io/bpm-for/hard-techno",
+    "https://futureproofmusicschool.com/blog/what-is-hard-techno",
+    "https://orphiq.com/resources/what-is-uk-garage",
+    "https://orphiq.com/resources/types-of-electronic-music",
+    "https://undrgrndsounds.com/blogs/news/how-to-produce-speed-garage-the-complete-production-guide",
+    "https://blog.samplefocus.com/blog/ultimate-guide-to-tempo-and-bpm-the-best-bpms-for-hip-hop-trap-dnb-and-more",
+    "https://genreexplorer.futureproofmusicschool.com/genre/afro-house-amapiano",
+    "https://beatstorapon.com/blog/best-amapiano-beats/",
+    "https://www.melodigging.com/genre/hypertechno-52630"
+  ],
+  "genres": [
+    {
+      "id": "rnb",
+      "name": "R&B",
+      "family": "hip-hop",
+      "parent": null,
+      "aliases": [
+        "rnb",
+        "r and b"
+      ],
+      "bpm_min": 70,
+      "bpm_max": 100,
+      "bpm_typical": 92,
+      "half_time_feel": false,
+      "notes": "Slow jams 60-90; club R&B tends 95-105",
+      "alt_octave_bpm": [
+        140,
+        200
+      ]
+    },
+    {
+      "id": "hip-hop",
+      "name": "Hip-Hop",
+      "family": "hip-hop",
+      "parent": null,
+      "aliases": [
+        "rap"
+      ],
+      "bpm_min": 85,
+      "bpm_max": 110,
+      "bpm_typical": 95,
+      "half_time_feel": false,
+      "notes": "Sources split 85-95 vs 90-110; club edits ~95-105",
+      "alt_octave_bpm": [
+        170,
+        220
+      ]
+    },
+    {
+      "id": "reggaeton",
+      "name": "Reggaeton",
+      "family": "latin",
+      "parent": null,
+      "aliases": [
+        "dembow",
+        "urbano"
+      ],
+      "bpm_min": 88,
+      "bpm_max": 100,
+      "bpm_typical": 95,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        176,
+        200
+      ]
+    },
+    {
+      "id": "dancehall",
+      "name": "Dancehall",
+      "family": "latin",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 90,
+      "bpm_max": 100,
+      "bpm_typical": 95,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        180,
+        200
+      ]
+    },
+    {
+      "id": "moombahton",
+      "name": "Moombahton",
+      "family": "latin",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 105,
+      "bpm_max": 112,
+      "bpm_typical": 108,
+      "half_time_feel": false,
+      "notes": "Born by slowing 128 house to 108",
+      "alt_octave_bpm": [
+        210,
+        224
+      ]
+    },
+    {
+      "id": "afrobeats",
+      "name": "Afrobeats",
+      "family": "afro",
+      "parent": null,
+      "aliases": [
+        "afropop"
+      ],
+      "bpm_min": 95,
+      "bpm_max": 115,
+      "bpm_typical": 110,
+      "half_time_feel": false,
+      "notes": "No authoritative published range; catalog median ~110",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "organic-house",
+      "name": "Organic House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [
+        "downtempo house"
+      ],
+      "bpm_min": 100,
+      "bpm_max": 120,
+      "bpm_typical": 112,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "amapiano",
+      "name": "Amapiano",
+      "family": "afro",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 108,
+      "bpm_max": 115,
+      "bpm_typical": 113,
+      "half_time_feel": false,
+      "notes": "Very tight cluster at 112-113",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "three-step",
+      "name": "3-Step",
+      "family": "afro",
+      "parent": "amapiano",
+      "aliases": [
+        "3step"
+      ],
+      "bpm_min": 112,
+      "bpm_max": 126,
+      "bpm_typical": 118,
+      "half_time_feel": false,
+      "notes": "Amapiano x afro house x gqom",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "indie-dance",
+      "name": "Indie Dance",
+      "family": "disco",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 115,
+      "bpm_max": 125,
+      "bpm_typical": 120,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "afro-house",
+      "name": "Afro House",
+      "family": "afro",
+      "parent": "house",
+      "aliases": [
+        "afro tech",
+        "afro melodic"
+      ],
+      "bpm_min": 110,
+      "bpm_max": 126,
+      "bpm_typical": 122,
+      "half_time_feel": false,
+      "notes": "118-124 preferred; Beatport's afro house tag also carries 90-105 afrobeats-leaning cuts",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "disco",
+      "name": "Disco",
+      "family": "disco",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 110,
+      "bpm_max": 130,
+      "bpm_typical": 122,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "nu-disco",
+      "name": "Nu-Disco",
+      "family": "disco",
+      "parent": "disco",
+      "aliases": [
+        "nu disco"
+      ],
+      "bpm_min": 110,
+      "bpm_max": 125,
+      "bpm_typical": 122,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "progressive-house",
+      "name": "Progressive House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [
+        "prog house"
+      ],
+      "bpm_min": 122,
+      "bpm_max": 130,
+      "bpm_typical": 123,
+      "half_time_feel": false,
+      "notes": "Modern prog clusters at the low end (~123)",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "deep-house",
+      "name": "Deep House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [],
+      "bpm_min": 118,
+      "bpm_max": 125,
+      "bpm_typical": 124,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "disco-house",
+      "name": "Disco House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [
+        "french house",
+        "filter house"
+      ],
+      "bpm_min": 118,
+      "bpm_max": 128,
+      "bpm_typical": 124,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "melodic-house",
+      "name": "Melodic House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [
+        "melodic house & techno"
+      ],
+      "bpm_min": 118,
+      "bpm_max": 126,
+      "bpm_typical": 124,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "soulful-house",
+      "name": "Soulful House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [],
+      "bpm_min": 118,
+      "bpm_max": 125,
+      "bpm_typical": 124,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "gqom",
+      "name": "Gqom",
+      "family": "afro",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 120,
+      "bpm_max": 128,
+      "bpm_typical": 124,
+      "half_time_feel": false,
+      "notes": "Broken-beat, Durban",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "dub-techno",
+      "name": "Dub Techno",
+      "family": "techno",
+      "parent": "techno",
+      "aliases": [],
+      "bpm_min": 118,
+      "bpm_max": 128,
+      "bpm_typical": 125,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "house",
+      "name": "House",
+      "family": "house",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 120,
+      "bpm_max": 128,
+      "bpm_typical": 125,
+      "half_time_feel": false,
+      "notes": "Center of gravity of all dance music is ~124-128",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "melodic-techno",
+      "name": "Melodic Techno",
+      "family": "techno",
+      "parent": "techno",
+      "aliases": [],
+      "bpm_min": 120,
+      "bpm_max": 128,
+      "bpm_typical": 125,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "acid-house",
+      "name": "Acid House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [],
+      "bpm_min": 118,
+      "bpm_max": 128,
+      "bpm_typical": 126,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "bass-house",
+      "name": "Bass House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [
+        "g-house"
+      ],
+      "bpm_min": 124,
+      "bpm_max": 132,
+      "bpm_typical": 126,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "future-house",
+      "name": "Future House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [],
+      "bpm_min": 124,
+      "bpm_max": 130,
+      "bpm_typical": 126,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "tech-house",
+      "name": "Tech House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [],
+      "bpm_min": 122,
+      "bpm_max": 130,
+      "bpm_typical": 127,
+      "half_time_feel": false,
+      "notes": "Clusters 126-128, mostly avoids the low end",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "garage-house",
+      "name": "Garage House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [
+        "ny garage"
+      ],
+      "bpm_min": 124,
+      "bpm_max": 130,
+      "bpm_typical": 127,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "minimal-techno",
+      "name": "Minimal Techno",
+      "family": "techno",
+      "parent": "techno",
+      "aliases": [
+        "minimal"
+      ],
+      "bpm_min": 124,
+      "bpm_max": 130,
+      "bpm_typical": 127,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "electro-house",
+      "name": "Electro House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [
+        "electro"
+      ],
+      "bpm_min": 120,
+      "bpm_max": 132,
+      "bpm_typical": 128,
+      "half_time_feel": false,
+      "notes": "Quoted 120-130 but catalog median ~132",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "tribal-house",
+      "name": "Tribal House",
+      "family": "house",
+      "parent": "house",
+      "aliases": [],
+      "bpm_min": 122,
+      "bpm_max": 130,
+      "bpm_typical": 128,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "big-room",
+      "name": "Big Room",
+      "family": "house",
+      "parent": "electro-house",
+      "aliases": [
+        "mainstage",
+        "festival edm"
+      ],
+      "bpm_min": 126,
+      "bpm_max": 132,
+      "bpm_typical": 128,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "baile-funk",
+      "name": "Baile Funk",
+      "family": "latin",
+      "parent": null,
+      "aliases": [
+        "funk carioca",
+        "funk brasileiro"
+      ],
+      "bpm_min": 125,
+      "bpm_max": 135,
+      "bpm_typical": 130,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "detroit-techno",
+      "name": "Detroit Techno",
+      "family": "techno",
+      "parent": "techno",
+      "aliases": [],
+      "bpm_min": 125,
+      "bpm_max": 135,
+      "bpm_typical": 130,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "uk-funky",
+      "name": "UK Funky",
+      "family": "uk-bass",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 128,
+      "bpm_max": 135,
+      "bpm_typical": 130,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "progressive-trance",
+      "name": "Progressive Trance",
+      "family": "trance",
+      "parent": "trance",
+      "aliases": [],
+      "bpm_min": 128,
+      "bpm_max": 138,
+      "bpm_typical": 132,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "uk-garage",
+      "name": "UK Garage",
+      "family": "uk-bass",
+      "parent": null,
+      "aliases": [
+        "ukg",
+        "2-step",
+        "2step"
+      ],
+      "bpm_min": 130,
+      "bpm_max": 138,
+      "bpm_typical": 132,
+      "half_time_feel": false,
+      "notes": "Older refs say 124-132; current producers pushing past 140",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "techno",
+      "name": "Techno",
+      "family": "techno",
+      "parent": null,
+      "aliases": [
+        "peak time techno",
+        "driving techno"
+      ],
+      "bpm_min": 130,
+      "bpm_max": 140,
+      "bpm_typical": 133,
+      "half_time_feel": false,
+      "notes": "125-150 overall, most 128-138; big rooms drifting toward 140+",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "speed-garage",
+      "name": "Speed Garage",
+      "family": "uk-bass",
+      "parent": "uk-garage",
+      "aliases": [],
+      "bpm_min": 130,
+      "bpm_max": 140,
+      "bpm_typical": 134,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "acid-techno",
+      "name": "Acid Techno",
+      "family": "techno",
+      "parent": "techno",
+      "aliases": [],
+      "bpm_min": 130,
+      "bpm_max": 140,
+      "bpm_typical": 135,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "breakbeat",
+      "name": "Breakbeat",
+      "family": "bass",
+      "parent": null,
+      "aliases": [
+        "breaks",
+        "nu-skool breaks"
+      ],
+      "bpm_min": 130,
+      "bpm_max": 150,
+      "bpm_typical": 135,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "hard-groove",
+      "name": "Hard Groove",
+      "family": "techno",
+      "parent": "techno",
+      "aliases": [
+        "hardgroove",
+        "groove techno"
+      ],
+      "bpm_min": 132,
+      "bpm_max": 142,
+      "bpm_typical": 136,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "vocal-trance",
+      "name": "Vocal Trance",
+      "family": "trance",
+      "parent": "trance",
+      "aliases": [],
+      "bpm_min": 132,
+      "bpm_max": 138,
+      "bpm_typical": 136,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "bassline",
+      "name": "Bassline",
+      "family": "uk-bass",
+      "parent": "uk-garage",
+      "aliases": [
+        "niche",
+        "4x4 garage",
+        "bassline house"
+      ],
+      "bpm_min": 128,
+      "bpm_max": 142,
+      "bpm_typical": 138,
+      "half_time_feel": false,
+      "notes": "Sources disagree: 125-130 vs 135-142",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "industrial-techno",
+      "name": "Industrial Techno",
+      "family": "techno",
+      "parent": "techno",
+      "aliases": [],
+      "bpm_min": 130,
+      "bpm_max": 145,
+      "bpm_typical": 138,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "jersey-club",
+      "name": "Jersey Club",
+      "family": "bass",
+      "parent": null,
+      "aliases": [
+        "baltimore club",
+        "bmore"
+      ],
+      "bpm_min": 130,
+      "bpm_max": 140,
+      "bpm_typical": 138,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "trance",
+      "name": "Trance",
+      "family": "trance",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 130,
+      "bpm_max": 145,
+      "bpm_typical": 138,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "hip-hop-trap",
+      "name": "Trap (Hip-Hop)",
+      "family": "hip-hop",
+      "parent": "hip-hop",
+      "aliases": [
+        "trap"
+      ],
+      "bpm_min": 130,
+      "bpm_max": 150,
+      "bpm_typical": 140,
+      "half_time_feel": true,
+      "notes": "Felt at 65-75; frequently stored at the half tempo",
+      "alt_octave_bpm": [
+        65,
+        75
+      ]
+    },
+    {
+      "id": "dubstep",
+      "name": "Dubstep",
+      "family": "bass",
+      "parent": null,
+      "aliases": [
+        "riddim",
+        "brostep",
+        "140"
+      ],
+      "bpm_min": 138,
+      "bpm_max": 145,
+      "bpm_typical": 140,
+      "half_time_feel": true,
+      "notes": "90%+ produced at 140; catalog median 145; felt at 70",
+      "alt_octave_bpm": [
+        69,
+        72
+      ]
+    },
+    {
+      "id": "grime",
+      "name": "Grime",
+      "family": "uk-bass",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 138,
+      "bpm_max": 142,
+      "bpm_typical": 140,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "tech-trance",
+      "name": "Tech Trance",
+      "family": "trance",
+      "parent": "trance",
+      "aliases": [],
+      "bpm_min": 138,
+      "bpm_max": 145,
+      "bpm_typical": 140,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "uplifting-trance",
+      "name": "Uplifting Trance",
+      "family": "trance",
+      "parent": "trance",
+      "aliases": [],
+      "bpm_min": 138,
+      "bpm_max": 145,
+      "bpm_typical": 140,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "psytrance",
+      "name": "Psytrance",
+      "family": "trance",
+      "parent": "trance",
+      "aliases": [
+        "full-on",
+        "psy"
+      ],
+      "bpm_min": 138,
+      "bpm_max": 148,
+      "bpm_typical": 142,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "bounce",
+      "name": "Bounce / Donk",
+      "family": "hard-dance",
+      "parent": "hard-house",
+      "aliases": [
+        "donk",
+        "scouse house"
+      ],
+      "bpm_min": 140,
+      "bpm_max": 150,
+      "bpm_typical": 145,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "hard-house",
+      "name": "Hard House",
+      "family": "hard-dance",
+      "parent": null,
+      "aliases": [
+        "hard dance",
+        "uk hard house"
+      ],
+      "bpm_min": 140,
+      "bpm_max": 150,
+      "bpm_typical": 145,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "hypertechno",
+      "name": "Hypertechno",
+      "family": "techno",
+      "parent": "techno",
+      "aliases": [
+        "hyper techno"
+      ],
+      "bpm_min": 140,
+      "bpm_max": 150,
+      "bpm_typical": 145,
+      "half_time_feel": false,
+      "notes": "Trance/techno hybrid; bridge between hard techno and hard dance",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "trap-edm",
+      "name": "Trap (EDM)",
+      "family": "bass",
+      "parent": null,
+      "aliases": [
+        "festival trap"
+      ],
+      "bpm_min": 140,
+      "bpm_max": 150,
+      "bpm_typical": 145,
+      "half_time_feel": true,
+      "notes": "",
+      "alt_octave_bpm": [
+        70,
+        75
+      ]
+    },
+    {
+      "id": "future-bass",
+      "name": "Future Bass",
+      "family": "bass",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 140,
+      "bpm_max": 160,
+      "bpm_typical": 150,
+      "half_time_feel": true,
+      "notes": "",
+      "alt_octave_bpm": [
+        70,
+        80
+      ]
+    },
+    {
+      "id": "hard-techno",
+      "name": "Hard Techno",
+      "family": "techno",
+      "parent": "techno",
+      "aliases": [],
+      "bpm_min": 140,
+      "bpm_max": 160,
+      "bpm_typical": 150,
+      "half_time_feel": false,
+      "notes": "Floor moved from 120-130 to 145+ after 2021; catalog medians 146-155 depending on source",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "dark-psy",
+      "name": "Dark Psy",
+      "family": "trance",
+      "parent": "psytrance",
+      "aliases": [
+        "forest"
+      ],
+      "bpm_min": 145,
+      "bpm_max": 160,
+      "bpm_typical": 150,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "hardstyle",
+      "name": "Hardstyle",
+      "family": "hard-dance",
+      "parent": null,
+      "aliases": [
+        "euphoric hardstyle"
+      ],
+      "bpm_min": 148,
+      "bpm_max": 155,
+      "bpm_typical": 152,
+      "half_time_feel": false,
+      "notes": "Euphoric ~150; catalog median 155",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "rawstyle",
+      "name": "Rawstyle",
+      "family": "hard-dance",
+      "parent": "hardstyle",
+      "aliases": [
+        "raw hardstyle"
+      ],
+      "bpm_min": 150,
+      "bpm_max": 160,
+      "bpm_typical": 155,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "schranz",
+      "name": "Schranz",
+      "family": "techno",
+      "parent": "hard-techno",
+      "aliases": [],
+      "bpm_min": 150,
+      "bpm_max": 165,
+      "bpm_typical": 155,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "footwork",
+      "name": "Footwork / Juke",
+      "family": "bass",
+      "parent": null,
+      "aliases": [
+        "juke",
+        "footwork"
+      ],
+      "bpm_min": 155,
+      "bpm_max": 165,
+      "bpm_typical": 160,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        77,
+        82
+      ]
+    },
+    {
+      "id": "hardcore",
+      "name": "Hardcore",
+      "family": "hardcore",
+      "parent": null,
+      "aliases": [
+        "gabber",
+        "mainstream hardcore"
+      ],
+      "bpm_min": 150,
+      "bpm_max": 200,
+      "bpm_typical": 170,
+      "half_time_feel": false,
+      "notes": "Mainstream hardcore 150-165; classic gabber 180-200",
+      "alt_octave_bpm": null
+    },
+    {
+      "id": "happy-hardcore",
+      "name": "Happy Hardcore",
+      "family": "hardcore",
+      "parent": "hardcore",
+      "aliases": [],
+      "bpm_min": 160,
+      "bpm_max": 175,
+      "bpm_typical": 170,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        80,
+        87
+      ]
+    },
+    {
+      "id": "uk-hardcore",
+      "name": "UK Hardcore",
+      "family": "hardcore",
+      "parent": "hardcore",
+      "aliases": [],
+      "bpm_min": 165,
+      "bpm_max": 175,
+      "bpm_typical": 170,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        82,
+        87
+      ]
+    },
+    {
+      "id": "jungle",
+      "name": "Jungle",
+      "family": "dnb",
+      "parent": null,
+      "aliases": [],
+      "bpm_min": 160,
+      "bpm_max": 180,
+      "bpm_typical": 172,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        80,
+        90
+      ]
+    },
+    {
+      "id": "drum-and-bass",
+      "name": "Drum & Bass",
+      "family": "dnb",
+      "parent": null,
+      "aliases": [
+        "dnb",
+        "d&b",
+        "drum n bass"
+      ],
+      "bpm_min": 170,
+      "bpm_max": 180,
+      "bpm_typical": 174,
+      "half_time_feel": false,
+      "notes": "Nearly every track is 174-175; analyzers often store at 87",
+      "alt_octave_bpm": [
+        85,
+        90
+      ]
+    },
+    {
+      "id": "liquid-dnb",
+      "name": "Liquid DnB",
+      "family": "dnb",
+      "parent": "drum-and-bass",
+      "aliases": [
+        "liquid funk"
+      ],
+      "bpm_min": 170,
+      "bpm_max": 176,
+      "bpm_typical": 174,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        85,
+        88
+      ]
+    },
+    {
+      "id": "jump-up",
+      "name": "Jump-Up",
+      "family": "dnb",
+      "parent": "drum-and-bass",
+      "aliases": [
+        "jump up"
+      ],
+      "bpm_min": 172,
+      "bpm_max": 178,
+      "bpm_typical": 175,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        86,
+        89
+      ]
+    },
+    {
+      "id": "neurofunk",
+      "name": "Neurofunk",
+      "family": "dnb",
+      "parent": "drum-and-bass",
+      "aliases": [
+        "neuro"
+      ],
+      "bpm_min": 174,
+      "bpm_max": 180,
+      "bpm_typical": 175,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        87,
+        90
+      ]
+    },
+    {
+      "id": "hi-tech",
+      "name": "Hi-Tech Psy",
+      "family": "trance",
+      "parent": "psytrance",
+      "aliases": [
+        "hitech"
+      ],
+      "bpm_min": 160,
+      "bpm_max": 200,
+      "bpm_typical": 180,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        80,
+        100
+      ]
+    },
+    {
+      "id": "hardtekk",
+      "name": "Hardtekk",
+      "family": "hardcore",
+      "parent": null,
+      "aliases": [
+        "hard tek",
+        "tekno"
+      ],
+      "bpm_min": 170,
+      "bpm_max": 195,
+      "bpm_typical": 180,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        85,
+        97
+      ]
+    },
+    {
+      "id": "uptempo",
+      "name": "Uptempo Hardcore",
+      "family": "hardcore",
+      "parent": "hardcore",
+      "aliases": [
+        "uptempo"
+      ],
+      "bpm_min": 180,
+      "bpm_max": 250,
+      "bpm_typical": 200,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        90,
+        125
+      ]
+    },
+    {
+      "id": "frenchcore",
+      "name": "Frenchcore",
+      "family": "hardcore",
+      "parent": "hardcore",
+      "aliases": [],
+      "bpm_min": 190,
+      "bpm_max": 220,
+      "bpm_typical": 200,
+      "half_time_feel": false,
+      "notes": "",
+      "alt_octave_bpm": [
+        95,
+        110
+      ]
+    }
+  ]
+}
