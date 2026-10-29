@@ -46,4 +46,7 @@ others ("same", "half", "3/2" and so on), how many of madmom's beats have one
 of Booth's on them, and where madmom's ones fall in Booth's bar. It fails where
 madmom and Essentia agree on a tempo and Booth's is a different one, except on
 the records it names as known misses, and it says when one of those comes
-right.
+right. A second test does the same with the genre model, where
+`BOOTH_GENRE_MODEL` or `~/.cache/booth/models/` has one, analysing each record
+as the app does with the genre switched on, and says which records the genre
+moved an octave and from what. It takes about fifteen seconds a record more.

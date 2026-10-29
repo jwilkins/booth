@@ -63,6 +63,32 @@ pub struct Beats {
     /// What the bar lines were placed by, kept so that a downbeat in the wrong
     /// place can be traced to the beats that put it there.
     pub downbeat: Downbeat,
+    /// Where the tempo was moved an octave to the one its genre is counted in,
+    /// what it was heard at first and why.
+    pub moved: Option<Moved>,
+}
+
+/// The octave a record's genre is counted in: from `from_bpm` up to twice it,
+/// so that of any tempo exactly one octave is inside.
+///
+/// Which octave of a tempo is the beat is a convention as much as a
+/// measurement. Hip hop at 86 is counted at 86 and drum and bass at 172 at 172,
+/// though a record of either can repeat as strongly at the other or more so,
+/// and the two are as far either side of the 120 the prior leans towards. The
+/// genre is what the convention follows, so where the genre is known it says.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Octave {
+    pub from_bpm: f64,
+    /// What it is the octave of, for the log: "drum and bass".
+    pub because: &'static str,
+}
+
+/// A tempo moved into its genre's octave.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Moved {
+    /// The tempo of the lag first chosen, to the frame.
+    pub heard_bpm: f64,
+    pub octave: Octave,
 }
 
 /// The evidence for which beat is the one, beat by beat, what it came to, and
@@ -271,6 +297,12 @@ pub fn detect(features: &Features) -> Beats {
     detect_at(features, None)
 }
 
+/// Track the beats in the octave a record's genre is counted in. A tempo the
+/// caller gives wins over it: see [`detect_at`].
+pub fn detect_within(features: &Features, bpm: Option<f64>, octave: Option<Octave>) -> Beats {
+    track(features, bpm, octave)
+}
+
 /// Track the beats at a tempo the caller already knows.
 ///
 /// The point of taking the tempo rather than the whole grid is that everything
@@ -278,21 +310,26 @@ pub fn detect(features: &Features) -> Beats {
 /// actually are. Correcting a tempo by hand and then keeping a grid derived
 /// from the wrong one would be worse than not correcting it.
 pub fn detect_at(features: &Features, bpm: Option<f64>) -> Beats {
+    track(features, bpm, None)
+}
+
+fn track(features: &Features, bpm: Option<f64>, octave: Option<Octave>) -> Beats {
     if loudest_onsets(&features.flux) < MIN_ONSET_STRENGTH {
         return Beats {
             grid: BeatGrid::default(),
             bpm: 0.0,
             confidence: 0.0,
             downbeat: Downbeat::default(),
+            moved: None,
         };
     }
     let envelope = normalised(&features.flux, features.frame_rate);
-    let (period, confidence) = match bpm {
+    let (period, confidence, moved) = match bpm {
         Some(bpm) if bpm > 0.0 => {
             let period = (60.0 * features.frame_rate / bpm).round() as usize;
-            (Some(period.max(1)), f32::INFINITY)
+            (Some(period.max(1)), f32::INFINITY, None)
         }
-        _ => estimate_period(&envelope, features.frame_rate),
+        _ => estimate_period(&envelope, features.frame_rate, octave),
     };
     let Some(period) = period else {
         return Beats {
@@ -300,6 +337,7 @@ pub fn detect_at(features: &Features, bpm: Option<f64>) -> Beats {
             bpm: 0.0,
             confidence,
             downbeat: Downbeat::default(),
+            moved: None,
         };
     };
 
@@ -329,7 +367,7 @@ pub fn detect_at(features: &Features, bpm: Option<f64>) -> Beats {
     let downbeat = downbeat(features, &times);
     renumber(&mut grid, downbeat.phase);
 
-    Beats { grid, bpm, confidence, downbeat }
+    Beats { grid, bpm, confidence, downbeat, moved }
 }
 
 /// How strong this track's onsets are: the level the top twentieth of frames
@@ -421,11 +459,18 @@ const LEVELS: [f64; 4] = [0.5, 1.0, 2.0, 4.0];
 /// question, as it always was. So the octave of the grid the levels choose is
 /// chosen as before, and where they choose the grid the most periodic lag is
 /// on, nothing changes.
-fn estimate_period(envelope: &[f32], frame_rate: f64) -> (Option<usize>, f32) {
+///
+/// Unless the genre says which octave: then the lag is moved by octaves into
+/// it, where the tracker's range reaches. See [`Octave`].
+fn estimate_period(
+    envelope: &[f32],
+    frame_rate: f64,
+    octave: Option<Octave>,
+) -> (Option<usize>, f32, Option<Moved>) {
     let shortest = (60.0 * frame_rate / MAX_BPM).round() as usize;
     let longest = (60.0 * frame_rate / MIN_BPM).round() as usize;
     if envelope.len() < longest * 2 {
-        return (None, 0.0);
+        return (None, 0.0, None);
     }
 
     // Every lag up to a bar of the slowest beat, and a frame past it, so that
@@ -465,7 +510,7 @@ fn estimate_period(envelope: &[f32], frame_rate: f64) -> (Option<usize>, f32) {
     // Nothing periodic enough to be a beat. Better to say so than to invent a
     // grid a DJ then has to notice is wrong.
     if best.0 == 0 || confidence < MIN_CONFIDENCE {
-        return (None, confidence);
+        return (None, confidence, None);
     }
 
     // The lag a level falls on, give or take the frame its rounding moved it.
@@ -482,22 +527,41 @@ fn estimate_period(envelope: &[f32], frame_rate: f64) -> (Option<usize>, f32) {
     let peaks = (shortest.max(1)..=longest).filter(|&lag| {
         correlation[lag] >= correlation[lag - 1] && correlation[lag] >= correlation[lag + 1]
     });
-    let Some(grid) = peaks.max_by(|&a, &b| levels(a).total_cmp(&levels(b))) else {
-        return (Some(best.0), confidence);
-    };
     let octaves = |of: usize| [0.5, 1.0, 2.0].map(|m| of as f64 * m);
-    // Within a frame and a half of one of the most periodic lag's octaves: its
-    // own rounding and a doubled one's.
-    if octaves(best.0).iter().any(|&at| (grid as f64 - at).abs() <= 1.5) {
-        return (Some(best.0), confidence);
+    let period = match peaks.max_by(|&a, &b| levels(a).total_cmp(&levels(b))) {
+        None => best.0,
+        // Within a frame and a half of one of the most periodic lag's octaves:
+        // its own rounding and a doubled one's.
+        Some(grid) if octaves(best.0).iter().any(|&at| (grid as f64 - at).abs() <= 1.5) => best.0,
+        Some(grid) => octaves(grid)
+            .into_iter()
+            .filter_map(near)
+            .filter(|lag| (shortest..=longest).contains(lag))
+            .max_by(|&a, &b| weighted(a).total_cmp(&weighted(b)))
+            .unwrap_or(best.0),
+    };
+
+    let Some(octave) = octave else {
+        return (Some(period), confidence, None);
+    };
+    let bpm = |lag: f64| 60.0 * frame_rate / lag;
+    let mut at = period as f64;
+    // Three octaves either way is further than the tracker's range goes.
+    for _ in 0..3 {
+        if bpm(at) < octave.from_bpm {
+            at /= 2.0;
+        } else if bpm(at) >= octave.from_bpm * 2.0 {
+            at *= 2.0;
+        }
     }
-    let period = octaves(grid)
-        .into_iter()
-        .filter_map(near)
-        .filter(|lag| (shortest..=longest).contains(lag))
-        .max_by(|&a, &b| weighted(a).total_cmp(&weighted(b)))
-        .unwrap_or(best.0);
-    (Some(period), confidence)
+    let moved = near(at).filter(|lag| (shortest..=longest).contains(lag));
+    match moved {
+        Some(lag) if (at - period as f64).abs() >= 1.0 => {
+            let moved = Moved { heard_bpm: bpm(period as f64), octave };
+            (Some(lag), confidence, Some(moved))
+        }
+        _ => (Some(period), confidence, None),
+    }
 }
 
 /// Choose the beat times: the sequence maximising onset strength minus the cost
@@ -1170,7 +1234,7 @@ mod tests {
 
     /// The beat times the tracker produces, before anything straightens them.
     fn tracked(f: &Features) -> Vec<u32> {
-        let (period, _) = estimate_period(&normalised(&f.flux, f.frame_rate), f.frame_rate);
+        let (period, ..) = estimate_period(&normalised(&f.flux, f.frame_rate), f.frame_rate, None);
         let frames = track_beats(&onset_envelope(f), period.unwrap());
         frames.iter().map(|&n| (f.seconds_at(n) * 1000.0).round() as u32).collect()
     }
@@ -1328,6 +1392,29 @@ mod tests {
         let audio = layered(130.0, 32, &[(1.0, 60.0, 0.5), (0.5, 6000.0, 0.03), (1.5, 110.0, 1.0)]);
         let found = detect(&features::extract(&audio));
         assert!((found.bpm - 130.0).abs() < 1.0, "found {:.2} BPM for a 130 BPM track", found.bpm);
+    }
+
+    #[test]
+    fn a_genre_moves_the_tempo_into_its_octave_and_leaves_one_already_in_it() {
+        let hip_hop = Octave { from_bpm: 60.0, because: "hip hop" };
+        let drum_and_bass = Octave { from_bpm: 120.0, because: "drum and bass" };
+        let f = features::extract(&clicks(174.0, 16, true));
+        let moved = detect_within(&f, None, Some(hip_hop));
+        assert!((moved.bpm - 87.0).abs() < 1.0, "found {:.2}", moved.bpm);
+        let heard = moved.moved.expect("moved, and said so").heard_bpm;
+        assert!((heard - 174.0).abs() < 4.0, "heard at {heard:.2}");
+        let kept = detect_within(&f, None, Some(drum_and_bass));
+        assert!((kept.bpm - 174.0).abs() < 1.0, "found {:.2}", kept.bpm);
+        assert_eq!(kept.moved, None);
+    }
+
+    #[test]
+    fn a_tempo_given_by_hand_wins_over_the_genres_octave() {
+        let hip_hop = Octave { from_bpm: 60.0, because: "hip hop" };
+        let f = features::extract(&clicks(174.0, 16, true));
+        let found = detect_within(&f, Some(174.0), Some(hip_hop));
+        assert!((found.bpm - 174.0).abs() < 1.0, "found {:.2}", found.bpm);
+        assert_eq!(found.moved, None);
     }
 
     #[test]
