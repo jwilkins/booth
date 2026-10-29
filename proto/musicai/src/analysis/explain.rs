@@ -101,18 +101,17 @@ fn tempo(out: &mut String, analysis: &TrackAnalysis) {
         false => "the tempo was given rather than found".to_string(),
     };
     paragraph(out, &format!("{:.2} BPM, {confidence}.", analysis.bpm));
-    if let Some(moved) = analysis.moved {
-        paragraph(
-            out,
-            &format!(
-                "Heard first at {:.1}, and moved an octave: the record is {}, which is counted \
-                 from {:.0} to {:.0} BPM.",
-                moved.heard_bpm,
-                moved.octave.because,
-                moved.octave.from_bpm,
-                moved.octave.from_bpm * 2.0
-            ),
+    if let Some(octave) = analysis.octave {
+        let genre = octave.genre;
+        let played = format!(
+            "the record is {}, played from {:.0} to {:.0} BPM",
+            genre.name, genre.from_bpm, genre.to_bpm
         );
+        let said = match octave.moved_from {
+            Some(heard) => format!("Heard first at {heard:.1}, and moved an octave: {played}."),
+            None => format!("In its genre's octave already: {played}."),
+        };
+        paragraph(out, &said);
     }
     paragraph(
         out,
@@ -585,7 +584,7 @@ mod tests {
             let audio = decode_file(&path).unwrap();
             let bands = crate::export::waveform::analyze(&audio).band_detail;
             let analysis =
-                super::super::analyze_with_drums(&audio, None, &bands, drums.as_deref(), None);
+                super::super::analyze_with_drums(&audio, None, &bands, drums.as_deref(), &[]);
             let text = explain(&name, &analysis, &bands, drums.as_deref());
             std::fs::write(to.join(format!("{name}.log")), text).unwrap();
             eprintln!("{name}");

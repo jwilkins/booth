@@ -514,8 +514,9 @@ pub struct Analyzed {
     /// was too short for it to hear.
     pub genre: String,
     pub genre_confidence: f32,
-    /// The genre whose octave the tempo was put in, from the model or else the
-    /// file's tag, or empty: see [`crate::library::Track::tempo_octave`].
+    /// The genre that said which octave the tempo is in, from the model or
+    /// else the file's tag, or empty: see
+    /// [`crate::library::Track::tempo_octave`].
     pub tempo_octave: String,
     /// What the file's own genre tag says, trimmed, or empty. Read alongside so
     /// that whoever folds this in can tell a blank to fill from somebody's
@@ -679,14 +680,14 @@ fn is_float_wav(path: &Path) -> bool {
 /// `drums` is its drum stem, where it has one, for finding the breaks the mix
 /// hides. Drawn here rather than read from the collection's pictures, because
 /// an analysis forgets those so that they are drawn again after it. `kept` is
-/// the octave its genre put the tempo in last time, which a pass without the
-/// classifier keeps; with one, what it hears now decides.
+/// the genre that put the tempo in its octave last time, which a pass without
+/// the classifier keeps; with one, what it hears now decides.
 pub fn analyze_file(
     id: u32,
     path: &Path,
     drums: Option<&Path>,
     genre: Option<&booth_cli::analysis::style::Classifier>,
-    kept: Option<booth_cli::analysis::tempo::Octave>,
+    kept: Option<booth_cli::analysis::tempo::Genre>,
 ) -> anyhow::Result<Analyzed> {
     let audio = decode_file(path)?;
     let waveform = booth_cli::export::waveform::analyze(&audio);
@@ -715,25 +716,29 @@ pub fn analyze_file(
     // of decoding, so not made conditional on there being a model; a WAV
     // simply has none.
     let tagged_genre = tagged_genre(path);
-    let tagged = || booth_cli::analysis::style::octave_tagged(&tagged_genre);
-    let octave = match &styles {
-        Some(styles) => booth_cli::analysis::style::octave(styles).or_else(tagged),
-        None => kept.or_else(tagged),
+    let heard_genres = match &styles {
+        Some(styles) => booth_cli::analysis::genre_tempo::heard(styles),
+        None => kept.into_iter().collect(),
     };
+    let tagged_genres = booth_cli::analysis::genre_tempo::tagged(&tagged_genre);
     let analysis = analysis::analyze_with_drums(
         &audio,
         None,
         &waveform.band_detail,
         drum_bands.as_deref(),
-        octave,
+        &[heard_genres, tagged_genres],
     );
-    if let Some(moved) = analysis.moved {
-        crate::info!(
-            "#{id}: tempo heard at {:.1}, moved to {:.2}, the octave {} is counted in",
-            moved.heard_bpm,
-            analysis.bpm,
-            moved.octave.because
-        );
+    if let Some(octave) = analysis.octave {
+        if let Some(heard) = octave.moved_from {
+            crate::info!(
+                "#{id}: tempo heard at {heard:.1}, moved to {:.2}: {} is played from {:.0} to \
+                 {:.0} BPM",
+                analysis.bpm,
+                octave.genre.name,
+                octave.genre.from_bpm,
+                octave.genre.to_bpm
+            );
+        }
     }
     // A debug build leaves the working beside the track, for whoever is
     // finding out why it came out as it did. Not a release: a user's music
@@ -787,7 +792,7 @@ pub fn analyze_file(
         intensity,
         genre: heard.as_ref().map(|style| style.style.to_string()).unwrap_or_default(),
         genre_confidence: heard.as_ref().map(|style| style.confidence).unwrap_or(0.0),
-        tempo_octave: octave.map(|octave| octave.because.to_string()).unwrap_or_default(),
+        tempo_octave: analysis.octave.map(|octave| octave.genre.id.to_string()).unwrap_or_default(),
         tagged_genre,
         beat_ms: bent,
         phrases,
@@ -1647,8 +1652,7 @@ fn analyze_all(
             return;
         }
         let started = std::time::Instant::now();
-        let kept =
-            octaves.get(id).and_then(|named| booth_cli::analysis::style::octave_called(named));
+        let kept = octaves.get(id).and_then(|kept| booth_cli::analysis::genre_tempo::called(kept));
         match analyze_file(
             *id,
             path,
@@ -2362,8 +2366,7 @@ fn regrid_all(
         // Without the genre: this keeps only the tempo and the beats, so
         // hearing what kind of record it is would be thirteen seconds for
         // nothing. The octave the genre gave them last time is kept.
-        let kept =
-            octaves.get(id).and_then(|named| booth_cli::analysis::style::octave_called(named));
+        let kept = octaves.get(id).and_then(|kept| booth_cli::analysis::genre_tempo::called(kept));
         match analyze_file(*id, path, None, None, kept) {
             Ok(measured) => {
                 crate::debug!(
@@ -2623,7 +2626,7 @@ mod tests {
         .unwrap();
         let analyzed = analyze_file(3, &path, None, None, None).unwrap();
         assert!((analyzed.bpm - 87.0).abs() < 1.0, "found {:.2}", analyzed.bpm);
-        assert_eq!(analyzed.tempo_octave, "hip hop");
+        assert_eq!(analyzed.tempo_octave, "hip-hop");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2636,10 +2639,10 @@ mod tests {
         let unheard = analyze_file(3, &path, None, None, None).unwrap();
         assert!((unheard.bpm - 174.0).abs() < 1.0, "found {:.2}", unheard.bpm);
         assert!(unheard.tempo_octave.is_empty());
-        let hip_hop = booth_cli::analysis::style::octave_called("hip hop");
+        let hip_hop = booth_cli::analysis::genre_tempo::called("hip-hop");
         let kept = analyze_file(3, &path, None, None, hip_hop).unwrap();
         assert!((kept.bpm - 87.0).abs() < 1.0, "found {:.2}", kept.bpm);
-        assert_eq!(kept.tempo_octave, "hip hop", "and it is kept for the next time");
+        assert_eq!(kept.tempo_octave, "hip-hop", "and it is kept for the next time");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
