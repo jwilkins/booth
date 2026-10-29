@@ -2102,21 +2102,25 @@ drive played only on older hardware has a history nothing here can see.
 
 ## What it does not do yet
 
-- **Two players read a drive this writes from their own slots, and both are
-  current:** a CDJ-3000X on firmware 1.40 and a CDJ-1500X on firmware 1.10,
-  AlphaTheta's newest. The 1500X also plays off one over DJ-Link with the
-  3000X hosting it, cues and all, but it does not need to — it mounts the
-  stick itself. Two models rather than one is worth having: what goes on the
-  stick is not shaped to a single player's quirks.
-- **No player outside that current generation has been seen to open one, and
-  one refused outright.** A CDJ-3000 on firmware 2.05 rejected the legacy
-  `export.pdb`. The file parses under two independent parsers, so what is
-  wrong is something a parser tolerates and a player does not, and it is not
-  known to be fixed. Choosing an older target in Settings changes what is
-  *checked* and what the drive *carries*, which is real and useful, but it
-  cannot make a database a player refuses acceptable to it. Everything a nexus
-  deck reads is written; whether it loads has not been demonstrated. **Try a
-  stick on the hardware before the night.**
+- **Three players read a drive this writes from their own slots:** a CDJ-3000
+  on firmware 3.22, from the legacy `export.pdb`, which is the only database it
+  reads; and a CDJ-3000X on firmware 1.40 and a CDJ-1500X on firmware 1.10,
+  AlphaTheta's newest, from `exportLibrary.db`. The CDJ-3000 plays over Pro DJ
+  Link too, and the 1500X off one with the 3000X hosting it, cues and all,
+  though it does not need to — it mounts the stick itself. Three models rather
+  than one is worth having: what goes on the stick is not shaped to a single
+  player's quirks.
+- **Nothing older than a CDJ-3000 has been seen to open one.** A CDJ-3000 on
+  firmware 2.05 rejected an earlier `export.pdb` outright, though it parsed
+  under two independent parsers; what it took to get one played on 3.22 is in
+  `docs/onelibrary-gist.md` §6, and which of those changes were necessary is
+  not known. Every older deck reads the same legacy database, so that is the
+  best evidence there is for them short of one. Choosing an
+  older target in Settings changes what is *checked* and what the drive
+  *carries*, which is real and useful, but it cannot make a database a player
+  refuses acceptable to it. Everything a nexus deck reads is written; whether
+  it loads has not been demonstrated. **Try a stick on the hardware before the
+  night.**
 - **Phrase data has now been seen on a player**, drawn under the waveform on a
   CDJ-1500X with the section names and boundaries this program wrote. The
   three-band waveform still has not: it sits in a part of the analysis files

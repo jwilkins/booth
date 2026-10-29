@@ -27,7 +27,7 @@
 </div></div>
 
 <header class="hero"><div class="wrap">
-  <p class="eyebrow">Version 0.0.7 · for macOS and Linux · free</p>
+  <p class="eyebrow">Version 0.0.9 · for macOS and Linux · free</p>
   <h1>Your cues go where<br>the room sings.<br><em>No rekordbox involved.</em></h1>
   <p class="standfirst">Booth holds your collection, listens to every track, and writes the USB
   drive a Pioneer&nbsp;/ AlphaTheta player reads — both of its on-drive databases, from one
@@ -37,7 +37,7 @@
     <a class="btn ghost" href="https://github.com/jwilkins/booth">Read the source</a>
   </div>
   <div class="facts" style="margin-top:38px">
-    <div class="fact"><b>2 decks</b><span>play a drive this writes</span></div>
+    <div class="fact"><b>3 decks</b><span>play a drive this writes</span></div>
     <div class="fact"><b>0</b><span>accounts or uploads</span></div>
     <div class="fact"><b>2009</b><span>oldest deck written for</span></div>
     <div class="fact"><b>~5&nbsp;MB</b><span>to archive a 64&nbsp;GB stick</span></div>
@@ -164,10 +164,13 @@
   <h2>Both databases, from one collection, read back afterwards</h2>
   <div class="col">
     <p class="lede">A drive a player opens has two databases on it that have to agree about what is
-    on the stick: the legacy <code>export.pdb</code> every deck since 2009 reads, and the newer
-    <code>exportLibrary.db</code> that every player sold since 2023 needs. Booth writes both from
-    one collection, so they cannot disagree, and every generation's analysis files go on —
-    <code>.DAT</code>, <code>.EXT</code> and <code>.2EX</code>.</p>
+    on the stick: the legacy <code>export.pdb</code> every deck since 2009 reads, the CDJ-3000
+    among them, and the newer <code>exportLibrary.db</code> that every player sold since 2023
+    needs. Booth writes both from one collection, so they cannot disagree, and every generation's
+    analysis files go on — <code>.DAT</code>, <code>.EXT</code> and <code>.2EX</code>.</p>
+    <p>Both have been read by the hardware they are for. A CDJ-3000 on firmware 3.22 browses a
+    drive from the legacy database and plays from it, from its own slot and over Pro DJ Link; a
+    CDJ-3000X and a CDJ-1500X do the same from the newer one.</p>
     <p>Then it reads the stick back and checks it. You say the oldest player the drive has to work
     on, and the checks use that generation's rules: anything it could not open — a FLAC on a nexus
     deck, a 96&nbsp;kHz file on an NXS2 — is re-encoded to a 320&nbsp;kbps MP3 on the way onto the
@@ -285,13 +288,16 @@
       <tbody>
         <tr>
           <th scope="row">It is tested on every player there is</th>
-          <td>Two decks read a drive this writes from their own slots — a CDJ-3000X on
-          firmware 1.40 and a CDJ-1500X on firmware 1.10 — but both are current models, and a
-          CDJ-3000 on firmware 2.05 refused one outright. Nothing older has been seen to open
-          one. The files are written for every generation back to 2009; whether an older player
-          loads them has not been shown, so try a stick on the hardware before the night. This
-          is the honest headline risk and the <a href="progress.html">progress page</a> has it
-          in full.</td>
+          <td>Three decks read a drive this writes from their own slots: a CDJ-3000 on firmware
+          3.22, from the legacy <code>export.pdb</code>, and a CDJ-3000X on firmware 1.40 and a
+          CDJ-1500X on firmware 1.10, from the newer database. Getting there took eight rounds
+          against the hardware, each a field a real export carries that this did not, and a
+          CDJ-3000 on firmware 2.05 refused an earlier drive outright. Nothing older than a
+          CDJ-3000 has been seen to open one. The files are written for every generation back to
+          2009, and the database a nexus deck reads is the one the CDJ-3000 now takes, but
+          whether an older player loads them has not been shown, so try a stick on the hardware
+          before the night. This is the honest headline risk and the
+          <a href="progress.html">progress page</a> has it in full.</td>
         </tr>
         <tr>
           <th scope="row">It performs</th>
