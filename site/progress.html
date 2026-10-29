@@ -22,10 +22,10 @@
 </div></div>
 
 <header class="hero"><div class="wrap">
-  <p class="eyebrow">Progress · 0.0.9 · 15 October 2026</p>
-  <h1>Nine releases<br>in six weeks.<br><em>Here is where it is.</em></h1>
+  <p class="eyebrow">Progress · 0.1.1 · 29 October 2026</p>
+  <h1>Ten releases<br>in eight weeks.<br><em>Here is where it is.</em></h1>
   <p class="standfirst">Booth has gone from writing its first drive to placing cue points from the
-  words a record sings, and to a drive a CDJ-3000 plays, in six weeks. This page is the honest
+  words a record sings, and to a drive a CDJ-3000 plays, in eight weeks. This page is the honest
   state of it — including the parts that are written but not demonstrated, which on a page like
   this are the parts that matter.</p>
 </div></header>
@@ -38,25 +38,39 @@
     firmware 1.10 all browse and play a drive this writes, each from its own slot</b> — the
     CDJ-3000 from the legacy <code>export.pdb</code>, which is the only database it reads, and
     over Pro DJ Link as well; the other two from <code>exportLibrary.db</code>. Playlists,
-    track list, key search, colour waveforms, beat grid and hot cues on a loaded track, with
-    nothing rekordbox has touched on the stick.</li>
+    track list, key search, colour and three-band waveforms, beat grid, hot cues and phrases on
+    a loaded track, with nothing rekordbox has touched on the stick.</li>
+    <li><b>Writes a failing stick cannot leave half done</b>: every file landed whole and read
+    back off the device past the cache, the audio compared byte for byte, a write that will not
+    fit refused before it starts, and a write that fails stopped with the databases left as the
+    last good one made them.</li>
+    <li><b>An audit of any drive</b>, whoever wrote it: where its two databases disagree, and
+    for each generation of player what it will not open or will not find.</li>
     <li><b>Both on-drive databases from one collection</b>, written in one pass so they cannot
     disagree, and read back and checked afterwards.</li>
     <li><b>Analysis for every generation</b> — <code>.DAT</code>, <code>.EXT</code> and
     <code>.2EX</code> — written from one set of measurements.</li>
     <li><b>Tempo, beat grid, key, phrases, cues and colour waveforms</b>, all measured locally. A
-    record at one tempo comes out gridded at one tempo; one that really moves is gridded
-    moving.</li>
+    record at one tempo comes out on one straight grid on its kick; one that really moves is
+    gridded moving. Tempo is measured against madmom and Essentia: on 75 CC records Booth has
+    the tempo they agree on, or a listener counted, on 58 of 62.</li>
+    <li><b>The genre</b>, one of Discogs's 400 styles, heard by a model you install, and with it
+    which octave the tempo is in: hip hop at 86, drum and bass at 172, from a table of 76 club
+    genres and the tempos they are played at. A file's own genre tag does the same without
+    the model.</li>
     <li><b>A beat grid corrected by hand</b> with the controls a player has had for twenty
     years — halve, double, nudge, slide a beat onto the playhead, say which beat is the one — or
     by marking beats and letting a grid be fitted to them.</li>
     <li><b>Loudness normalisation</b> to EBU R128, by re-encoding or by ReplayGain tags with the
     audio left untouched.</li>
-    <li><b>Stems</b> — vocals, melody and drums — rendered ahead of time and carried to the drive
-    as tracks sorted under their parent.</li>
-    <li><b>Cues from the words</b>: the vocal stem through a speech recogniser, the transcript read
-    for repetition, the hook cued where it first lands, and every memory cue carrying its
-    line.</li>
+    <li><b>Stems</b> — vocals, melody and drums — rendered ahead of time with demucs or a
+    RoFormer, and carried to the drive as tracks sorted under their parent.</li>
+    <li><b>Hot cues that mean the same on every record</b>: A the hook, B the main break, C the
+    hook in a drop, D the main drop, and E to H what a set needs next.</li>
+    <li><b>Cues from the words</b>: the record, cut to where its vocal stem sings, through a
+    speech recogniser, the words read for repetition, the hook cued at its best airing on the
+    bar line before it, every memory cue carrying its line, and a <code>.lrc</code> beside the
+    track.</li>
     <li><b>Lyrics looked up before they are listened for</b>, taken outright when the evidence is
     strong, put up for a yes or no when it is not, and correctable by hand either way.</li>
     <li><b>Fingerprinting</b> through AcoustID and MusicBrainz, and for the records no database has
@@ -91,13 +105,6 @@
           reads is written, and the database it reads is the one the CDJ-3000 now takes; whether
           one loads it has not been shown. <b>Try a stick on the hardware before the
           night.</b></td>
-        </tr>
-        <tr>
-          <th scope="row">The three-band waveform has not been seen on a player</th>
-          <td>The colour waveform, beat grid, hot cues and the phrase strip have — the last
-          of those photographed on a CDJ-1500X, drawing the section names and boundaries this
-          program wrote. The three-band waveform sits in a part of the analysis files nobody
-          has reported on.</td>
         </tr>
         <tr>
           <th scope="row">The waveform colours are a judgement call</th>
@@ -143,7 +150,26 @@
 
 <section id="releases"><div class="wrap">
   <span class="snum">03 — Releases</span>
-  <h2>Six weeks, nine tags</h2>
+  <h2>Eight weeks, ten tags</h2>
+
+  <div class="rel">
+    <div class="v">0.1.1<small>29 October 2026</small></div>
+    <div>
+      <h4>The octave from the genre, and cues that mean the same on every record</h4>
+      <p>The genre, heard by a model you install or read off the file's own tag, says which
+      octave the tempo is in, from a table of 76 club genres and the tempos they are played at.
+      The beats go on the kick, a record at one tempo gets one straight grid through its
+      breakdowns, and the one is read from the backbeat and the harmony where the kick cannot
+      tell. Against madmom and Essentia on 75 CC records, Booth went from 52 of the 62 tempos
+      they agree on, or a listener counted, to 58.</p>
+      <p>A to D mean the same on every record: the hook, the main break, the hook in a drop, the
+      main drop. The words are read off the record cut to where its voice sings, a second
+      separator, RoFormer, cleans that voice, and the lyric goes beside the track as an
+      <code>.lrc</code>. Drive writes are landed whole, read back past the cache and stopped at
+      the first fault, and <code>booth-cli audit</code> says what each player will see on any
+      stick. There was no 0.1.0.</p>
+    </div>
+  </div>
 
   <div class="rel">
     <div class="v">0.0.9<small>15 October 2026</small></div>

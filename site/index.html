@@ -27,7 +27,7 @@
 </div></div>
 
 <header class="hero"><div class="wrap">
-  <p class="eyebrow">Version 0.0.9 · for macOS and Linux · free</p>
+  <p class="eyebrow">Version 0.1.1 · for macOS and Linux · free</p>
   <h1>Your cues go where<br>the room sings.<br><em>No rekordbox involved.</em></h1>
   <p class="standfirst">Booth holds your collection, listens to every track, and writes the USB
   drive a Pioneer&nbsp;/ AlphaTheta player reads — both of its on-drive databases, from one
@@ -71,11 +71,14 @@
     having — the drop is where most mixes turn — but the moment you actually reach for is usually
     the line the crowd sings, and a hook and the verse before it are the same loudness, the same
     instruments and the same key. Nothing in a spectrum tells them apart. The words do.</p>
-    <p>So Booth renders the vocal stem, runs it through a speech recogniser, and reads what comes
-    back for repetition. Lines that say the same thing are grouped loosely, because a recogniser
-    writes one sung phrase four slightly different ways and matching word-for-word would count a
-    hook sung eight times as eight different lines. The group with the most separate airings is
-    the hook, and it becomes a cue where it <em>first</em> lands.</p>
+    <p>So Booth renders the vocal stem, cuts the record to where that stem is singing, runs it
+    through a speech recogniser, and reads what comes back for repetition. The record rather than
+    the stem, because a separated voice carries the separator's scars and a recogniser hears them
+    as syllables. Lines that say the same thing are grouped loosely, because a recogniser writes
+    one sung phrase four slightly different ways and matching word-for-word would count a hook
+    sung eight times as eight different lines. The group with the most separate airings is the
+    hook, and it is cued at its best airing — the one with a clear way in on a bar line — rather
+    than wherever it happened to come first.</p>
     <p>Two things it refuses to do. An ad-lib is not a hook — a line needs at least two words,
     because “yeah” is the most repeated thing in half the vocal stems ever recorded and marks
     nothing. And a recogniser stuck in a loop does not invent one: airings less than four seconds
@@ -135,9 +138,12 @@
   <h2>Eight hot cues, and as many memory cues as the track needs</h2>
   <div class="col">
     <p class="lede">A player holds eight hot cues and a busy track offers more than eight moments.
-    So the buttons are shared rather than ranked against each other — four to the arrangement, four
-    to the words, then whatever the other kind did not want — and everything else worth marking
-    becomes a memory cue, which costs no button at all.</p>
+    So the first four mean the same thing on every record, and a hand that has learnt a pad
+    reaches for the same moment on the next: <b>A</b> the hook, <b>B</b> the main break, <b>C</b>
+    the hook sung in a drop, <b>D</b> the main drop — each left empty on a record that has none of
+    it. E to H are what a set needs next: a way in, a way out, a build, a stretch with nobody
+    singing to lay another vocal over. No two sit within two bars of each other, and everything
+    else worth marking becomes a memory cue, which costs no button at all.</p>
     <p>They are named the way a DJ writes on the markers themselves: <b>Start</b>, then each
     section numbered within its own kind — Build&nbsp;1, Drop&nbsp;1, Break&nbsp;1, Drop&nbsp;2 —
     and <b>End</b> on the last bar. Numbering within the kind is the point; six markers all reading
@@ -145,9 +151,9 @@
     <p>A sung line gets a verse number and <em>the line itself</em>, every time it comes round:
     <code>V1 hold me closer now</code>. A player shows a memory cue's comment while the track is
     loaded, so the words are on the deck in front of you and the number says where in the record
-    you are. Cues from the words are rounded <em>down</em> to the beat rather than to the nearest
-    one — a sung line rarely starts on the beat, and a hook cue that clips its own first word is
-    one nobody presses twice.</p>
+    you are. A cue from the words goes on the bar line before the line where nothing is sung in
+    between, and otherwise on the beat before it — never inside a word, because a hook cue that
+    clips its own first word is one nobody presses twice.</p>
   </div>
   <figure class="figure" data-clip="media/memory-cues.mp4">
     <span class="shot"><img loading="lazy" decoding="async" src="media/waveform-phrases.png" alt="The colour waveform with hot cue markers A and B above it, memory cue triangles along the top, and the phrase bar below reading INTRO 21, BUILD 24, DROP 40, BREAK 24, BUILD 20, DROP 49, OUTRO 24."></span>
@@ -171,6 +177,10 @@
     <p>Both have been read by the hardware they are for. A CDJ-3000 on firmware 3.22 browses a
     drive from the legacy database and plays from it, from its own slot and over Pro DJ Link; a
     CDJ-3000X and a CDJ-1500X do the same from the newer one.</p>
+    <p>Every file is landed whole — written beside its name, flushed and renamed — and read back off
+    the device past the cache, with the audio compared to its source byte for byte, so a failing
+    stick fails the write rather than the gig; a write stopped by one leaves both databases as the
+    last good write made them. A write that will not fit is refused before it starts.</p>
     <p>Then it reads the stick back and checks it. You say the oldest player the drive has to work
     on, and the checks use that generation's rules: anything it could not open — a FLAC on a nexus
     deck, a 96&nbsp;kHz file on an NXS2 — is re-encoded to a 320&nbsp;kbps MP3 on the way onto the

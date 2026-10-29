@@ -77,16 +77,17 @@ afternoon.
 ### Where it has got to
 
 The analysis, the library, the interface, the drive writer and the stem pipeline all
-run, and so does importing a rekordbox library. Drives are verified against an
-independent parser on every write. They have **not yet been played on a CDJ**, which is
-the one thing standing between this and a first release.
+run, and so does importing a rekordbox library. Every write is read back off the device
+and checked by readers that share no code with the writers. **Three players have played a
+drive this wrote**: a CDJ-3000 on firmware 3.22, from the legacy `export.pdb`, and a
+CDJ-3000X and a CDJ-1500X, from `exportLibrary.db` — playlists, key search, colour and
+three-band waveforms, beat grids, hot cues and phrases. The current release is 0.1.1.
 
-Known gaps, so that nothing above reads as more finished than it is: the compatibility
-target is fixed at the CDJ-3000 rather than chosen; the preflight does not yet check the
-filesystem or the folder limits; the beatgrid and key detectors have no measured accuracy
-figures against a labelled set; there is no play history and nothing reads a drive back
-after a gig; and the preview deck is one deck, not two. §14 is the detailed status and
-does not round up.
+Known gaps, so that nothing above reads as more finished than it is: no player older than
+a CDJ-3000 has been tried; the preflight does not check folder depth or the number of
+files in a folder; key detection is right about 37% of the time on a real library; a
+CDJ-3000's play history, which it writes into `export.pdb`, is not read back; and the
+preview deck is one deck, not two. §14 is the detailed status and does not round up.
 
 ### Why the lock-in exists at all
 
@@ -844,35 +845,36 @@ export format).
 
 ## 14. Development status
 
-*Current as of August 2026.*
+*Current as of 0.1.1, 29 October 2026. The detail below the table is older in places; the
+table is what to go by.*
 
-Phase 0 is nearly done: a drive can be written, the tracks on it are analysed rather than
-described by hand, and there is a window to do the preparing in. What is left of it is a
-player — every drive so far has been checked by a parser, which is not the same as being
-played by a CDJ.
+Phase 0 is done: a drive can be written, the tracks on it are analysed rather than
+described by hand, there is a window to do the preparing in, and a drive this wrote has
+played on a CDJ-3000, a CDJ-3000X and a CDJ-1500X. What is left of the player question is
+an older one: nothing before the CDJ-3000 has been tried.
 
 | Area | State |
 |---|---|
-| Analysis — tempo, grid, downbeat, key, structure, cues (ANA-1..5) | Runs on real audio, seconds a track. No accuracy figures against a labelled set yet. |
-| Waveforms, all five packings including the 3-band (ANA-6) | Written and read back. Whether a player draws them, or re-analyses instead, is the open question of §4. |
+| Analysis — tempo, grid, downbeat, key, structure, cues (ANA-1..5) | Runs on real audio, seconds a track. Tempo measured against madmom and Essentia on 75 CC records: the tempo they agree on, or a listener counted, on 58 of 62, with the genre saying which octave. The downbeat right on all eleven records with a sure reference. Key right about 37% of the time on a real library. |
+| Waveforms, all five packings including the 3-band (ANA-6) | Written, read back, and drawn by players from a drive this wrote — colour and three-band waveforms, and phrases under them — with no pause to analyse, so the files are read rather than recomputed. |
 | Loudness and true peak (ANA-7) | Done, from the existing `proto/musicai/src/loudness.rs`. |
-| Drive writer — `export.pdb`, ANLZ, disk image (EXP-1) | Writes a track list and a playlist tree with folders; verified by an independent parser; **unverified on hardware**. |
-| OneLibrary writer — `exportLibrary.db` | Written from the same collection as the legacy database, read back off the drive and counted. No `exportExt.pdb`, no artwork. **A CDJ-3000X browses one** — playlists, track list, key search. Whether it uses the analysis files is unproven. |
+| Drive writer — `export.pdb`, ANLZ, disk image (EXP-1) | Writes a track list and a playlist tree with folders; verified by an independent parser; **played on a CDJ-3000 on firmware 3.22**, from the slot and over Pro DJ Link. Every file is landed whole and read back off the device past the cache, the audio byte for byte, and a write that fails stops with both databases as the last good write left them. |
+| OneLibrary writer — `exportLibrary.db` | Written from the same collection as the legacy database, read back off the drive and counted. No `exportExt.pdb`, no artwork. **A CDJ-3000X and a CDJ-1500X play from one**, analysis files and all. |
 | Delta sync and preflight (EXP-2, SAFE-2) | Done, and the file checks run at import as well as at write. |
-| Medium checks (SAFE-3) | Free space and path length only. Filesystem type, folder depth and per-folder file counts are not checked. |
-| Compatibility target (EXP-3) | Not built. The rules are the CDJ-3000's, in `proto/musicai/src/compat.rs`, and are not yet selectable. |
-| Read-back verification (SAFE-1) | Done, by readers that share no code with the writers. |
+| Medium checks (SAFE-3) | Free space, refused before a byte is written; path length; files of 4 GiB or more on FAT32; and whether the oldest target player mounts exFAT. Folder depth and per-folder file counts are not checked. |
+| Compatibility target (EXP-3) | Done: the oldest player a drive has to work on is chosen in Settings, and what is checked and what the drive carries follow it. `booth-cli audit` says what each generation will see on any drive. |
+| Read-back verification (SAFE-1) | Done, by readers that share no code with the writers, and every file read back off the device past the page cache. |
 | Checking the collection (LIB-6a) | Done for everything a container answers without being decoded. Length, sample rate and channel count are not checked — that means decoding, which is what analysing already does. |
 | Duplicate detection (LIB-6) | Done by hash — the file's, and the audio's with tags skipped — folding what only a copy knows into the one kept, and asking only where two copies disagree. |
 | The library and query language (LIB-1..5) | Done, and saved queries are smart playlists with no cap — but the store is a JSON document, where LIB-1 asks for SQLite under a published schema. It is readable without this program either way; the swap is still owed. |
 | The window (§6) | One window, query bar, browser, prep editor, dock. Built. |
 | Preparation — cues, tags, ratings, bulk and per-track (PREP-1..5) | Done, bar user-chosen cue colours. |
 | Preview deck (PREP-6) | One deck, not two. Enough to audition and set cues. |
-| Stems, rendered and playable (STEM-1..3, 7, 8, 11, 12) | Done: three rows a track, in the window and on the drive, each inheriting the parent's analysis and sorted under it in the exported playlist. Quality scoring (STEM-6) and the drive's loudness pass (STEM-4, STEM-5) are not. |
+| Stems, rendered and playable (STEM-1..3, 7, 8, 11, 12) | Done: three rows a track, folded under it in the window and on the drive, each inheriting the parent's analysis and sorted under it in the exported playlist, from demucs or a RoFormer. Quality scoring (STEM-6) and the drive's loudness pass (STEM-4, STEM-5) are not. |
 | rekordbox import (INTEROP-1) | Done, from the encrypted `master.db`. |
-| OneLibrary (INTEROP-5, EXP-3 for the 3000X) | Reads and dumps a schema; writes one beside the legacy database, verified off the drive and browsed on a real CDJ-3000X. [`docs/onelibrary.md`](onelibrary.md). |
+| OneLibrary (INTEROP-5, EXP-3 for the 3000X) | Reads and dumps a schema; writes one beside the legacy database, verified off the drive and played on a real CDJ-3000X and CDJ-1500X. [`docs/onelibrary.md`](onelibrary.md). |
 | Serato, Traktor, Engine DJ (INTEROP-2) | Not started. |
-| Play history and booth round-trip (HIST-1..3) | Not started. |
+| Play history and booth round-trip (HIST-1..3) | HIST-1 for the newer players: their history is read back off a drive into dated playlists. A CDJ-3000 writes its history into `export.pdb`, which is not read. Cues and loops a deck saved are read back off a stick; merging them as a per-track diff (HIST-2) and the set report (HIST-3) are not done. |
 | Plug-in interface (INTEROP-4) | Not started. |
 
 The rest of this section is what that consists of.
@@ -1117,11 +1119,12 @@ question left in the format — whether a cue point written as type 1 shows up a
 
 ### Next
 
-1. A player, emulated or real. Everything here is checked against a parser, which is not
-   the same as checked against a CDJ, and closing that gap is what is left of phase 0.
-2. Accuracy run over a real library — the harness exists (`examples/eval.rs`); it needs
-   the audio, which means running it on the machine the library lives on. ANA-2 and ANA-4
-   are the only requirements here stated as numbers, and the numbers are still unmeasured.
+1. An older player, emulated or real. The CDJ-3000 now plays from the legacy database every
+   older deck reads too, which is the best evidence there is short of one; a CDJ-2000NXS2
+   under QEMU (`tests/player_firmware.rs`) is ready to be run and has not been.
+2. Accuracy over a real library. Tempo is measured now, against madmom and Essentia on 75
+   CC records (`tests/reference_beats.rs`); key, at about 37%, is the number most worth
+   moving.
 3. Stem quality scoring (STEM-6) and the drive's own loudness pass (STEM-4, STEM-5), which
    are what separate a rendered kit from one that is safe to play loud.
 4. A row of loop and jump buttons on the player, asked for by the owner on 2026-10-23. Loops:

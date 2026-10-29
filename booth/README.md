@@ -2119,10 +2119,11 @@ drive played only on older hardware has a history nothing here can see.
   refuses acceptable to it. Everything a nexus deck reads is written; whether
   it loads has not been demonstrated. **Try a stick on the hardware before the
   night.**
-- **Phrase data has now been seen on a player**, drawn under the waveform on a
-  CDJ-1500X with the section names and boundaries this program wrote. The
-  three-band waveform still has not: it sits in a part of the analysis files
-  nobody has reported on.
+- **Phrase data and the three-band waveform have both been seen on a
+  player.** The phrases were drawn under the waveform on a CDJ-1500X with the
+  section names and boundaries this program wrote, and the three-band waveform
+  has been seen drawn from a drive this wrote since 0.0.9 brought its bytes to
+  the scale and order real files use.
 - The waveform colours are a judgement call rather than a match: what rekordbox
   puts in those three bits for given audio is not published, and ours has never
   been compared against a real export column by column.

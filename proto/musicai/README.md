@@ -9,14 +9,15 @@ It does three things on its own:
 
 - **Normalize** mp3, flac, wav, m4a and aiff files to a consistent loudness (EBU R128 / LUFS), either by
   re-encoding or by writing ReplayGain tags and leaving the audio untouched.
-- **Separate** a mix into three stems — vocals, melody and drums, using demucs.
+- **Separate** a mix into three stems — vocals, melody and drums, using demucs or a RoFormer.
 - **Tag** files by identifying them from their sound, via acoustic fingerprinting and
   MusicBrainz.
 
-Two more commands are the start of something larger: writing a USB drive a Pioneer /
-AlphaTheta DJ player can browse and play. `export` builds a whole drive; `anlz` writes
-just the per-track analysis files. See [Export](#export) for what works and what does
-not yet.
+Two more write a USB drive a Pioneer / AlphaTheta DJ player browses and plays — a
+CDJ-3000, a CDJ-3000X and a CDJ-1500X have played one: `export` builds a whole drive;
+`anlz` writes just the per-track analysis files. `audit` reads any drive and says what
+each generation of player will see on it, and `genre` asks the genre model what kind of
+record a track is. See [Export](#export) for what works and what does not yet.
 
 By default it does the first three, over everything you point it at:
 
