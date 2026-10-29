@@ -22,20 +22,22 @@
 </div></div>
 
 <header class="hero"><div class="wrap">
-  <p class="eyebrow">Progress · 0.0.7 · 4 October 2026</p>
-  <h1>Seven releases<br>in a month.<br><em>Here is where it is.</em></h1>
+  <p class="eyebrow">Progress · 0.0.9 · 15 October 2026</p>
+  <h1>Nine releases<br>in six weeks.<br><em>Here is where it is.</em></h1>
   <p class="standfirst">Booth has gone from writing its first drive to placing cue points from the
-  words a record sings in about five weeks. This page is the honest state of it — including the
-  parts that are written but not demonstrated, which on a page like this are the parts that
-  matter.</p>
+  words a record sings, and to a drive a CDJ-3000 plays, in six weeks. This page is the honest
+  state of it — including the parts that are written but not demonstrated, which on a page like
+  this are the parts that matter.</p>
 </div></header>
 
 <section id="today"><div class="wrap">
   <span class="snum">01 — What works today</span>
   <h2>Demonstrated, on hardware or in the test suite</h2>
   <ul class="plain">
-    <li><b>A CDJ-3000X on firmware 1.40 and a CDJ-1500X on firmware 1.10 — two current models —
-    both browse and play a drive this writes, each from its own slot</b> — playlists,
+    <li><b>A CDJ-3000 on firmware 3.22, a CDJ-3000X on firmware 1.40 and a CDJ-1500X on
+    firmware 1.10 all browse and play a drive this writes, each from its own slot</b> — the
+    CDJ-3000 from the legacy <code>export.pdb</code>, which is the only database it reads, and
+    over Pro DJ Link as well; the other two from <code>exportLibrary.db</code>. Playlists,
     track list, key search, colour waveforms, beat grid and hot cues on a loaded track, with
     nothing rekordbox has touched on the stick.</li>
     <li><b>Both on-drive databases from one collection</b>, written in one pass so they cannot
@@ -45,6 +47,9 @@
     <li><b>Tempo, beat grid, key, phrases, cues and colour waveforms</b>, all measured locally. A
     record at one tempo comes out gridded at one tempo; one that really moves is gridded
     moving.</li>
+    <li><b>A beat grid corrected by hand</b> with the controls a player has had for twenty
+    years — halve, double, nudge, slide a beat onto the playhead, say which beat is the one — or
+    by marking beats and letting a grid be fitted to them.</li>
     <li><b>Loudness normalisation</b> to EBU R128, by re-encoding or by ReplayGain tags with the
     audio left untouched.</li>
     <li><b>Stems</b> — vocals, melody and drums — rendered ahead of time and carried to the drive
@@ -76,13 +81,16 @@
       <thead><tr><th scope="col">The gap</th><th scope="col">Where that leaves you</th></tr></thead>
       <tbody>
         <tr>
-          <th scope="row">Only current players have been seen to open a drive this writes</th>
-          <td>The two that do — a CDJ-3000X and a CDJ-1500X — are both AlphaTheta's current
-          generation. A CDJ-3000 on firmware 2.05 refused the legacy <code>export.pdb</code>
-          outright, and the file parses under two independent parsers, so what is wrong is
-          something a parser tolerates and a player does not. Everything a nexus deck reads is
-          written; whether it loads has not been shown. <b>Try a stick on the hardware before
-          the night.</b></td>
+          <th scope="row">Nothing older than a CDJ-3000 has been seen to open a drive this writes</th>
+          <td>Three players have: a CDJ-3000 on firmware 3.22, from the legacy
+          <code>export.pdb</code>, and a CDJ-3000X and a CDJ-1500X, from the newer database.
+          Getting there took eight rounds against the hardware, each a field a real export
+          carries that this did not, after a CDJ-3000 on firmware 2.05 refused an earlier drive
+          outright though the file parsed under two independent parsers. The last fixes were
+          made together, so which of them a player needs is not known. Everything a nexus deck
+          reads is written, and the database it reads is the one the CDJ-3000 now takes; whether
+          one loads it has not been shown. <b>Try a stick on the hardware before the
+          night.</b></td>
         </tr>
         <tr>
           <th scope="row">The three-band waveform has not been seen on a player</th>
@@ -135,7 +143,37 @@
 
 <section id="releases"><div class="wrap">
   <span class="snum">03 — Releases</span>
-  <h2>Five weeks, seven tags</h2>
+  <h2>Six weeks, nine tags</h2>
+
+  <div class="rel">
+    <div class="v">0.0.9<small>15 October 2026</small></div>
+    <div>
+      <h4>A drive that plays on a CDJ-3000</h4>
+      <p>Eight rounds against two players, each one a field a real export carries that this did
+      not, until a CDJ-3000 on firmware 3.22 browsed a drive and played from it — from its slot
+      and over Pro DJ Link — and a CDJ-3000X drew colour waveforms, hot cues and phrases from the
+      same stick. The CDJ-3000 reads only the legacy <code>export.pdb</code>, and what changed was
+      that file, brought to what every real export carries: a history row, page headers that
+      describe their pages, a spare page for every table, and the browse menu's categories. Then
+      the analysis files, down to the three-band waveform's scale, which had the player hang
+      loading every track.</p>
+      <p>A <b>Loudness</b> setting, off by default: leave files alone, write ReplayGain tags, or
+      re-encode to -14 LUFS beside the original. Only the last is one a CDJ hears.</p>
+    </div>
+  </div>
+
+  <div class="rel">
+    <div class="v">0.0.8<small>7 October 2026</small></div>
+    <div>
+      <h4>The beat grid corrected by hand, and the words where they can be read</h4>
+      <p>Halve and double, nudge and shove, slide a beat onto the playhead, say which beat is the
+      one, type the tempo or step it a tenth at a time, or mark beats and have a grid fitted to
+      them. <b>re-measure</b> listens again for the tempo and the beats and nothing else.</p>
+      <p>The whole lyric in the inspector, each line at the moment it lands, and a hot cue read by
+      the line it lands on. A CDJ-1500X on firmware 1.10 played a drive, which made two current
+      players confirmed rather than one. And this website.</p>
+    </div>
+  </div>
 
   <div class="rel">
     <div class="v">0.0.7<small>4 October 2026</small></div>
@@ -225,12 +263,13 @@
   <span class="snum">04 — What is next</span>
   <h2>In rough order of how much it matters</h2>
   <ul class="plain">
-    <li><b>A drive a player outside the current generation will open.</b> Still the one that
-    matters most and the one that needs hardware rather than code: both confirmations so far are
-    current models, and the one older deck tried refused outright. A nexus-generation player, a
-    stick, and a morning.</li>
-    <li><b>Correcting a bad reading by hand.</b> Landed for the words in 0.0.7; the phrase strip
-    has been correctable since 0.03. What is left is the rest of the analysis.</li>
+    <li><b>A drive a nexus-generation player will open.</b> Still the one that matters most and
+    the one that needs hardware rather than code. The CDJ-3000 now plays from the legacy database
+    every older deck reads, which is the best evidence there is short of one of them; but nothing
+    older than a CDJ-3000 has been tried. A CDJ-2000NXS2, a stick, and a morning.</li>
+    <li><b>Correcting a bad reading by hand.</b> Landed for the words in 0.0.7 and the beat grid
+    in 0.0.8; the phrase strip has been correctable since 0.03. What is left is the rest of the
+    analysis.</li>
     <li><b>Archiving the drive copies.</b> The linked half of a copy cannot be zipped, but the
     copied half can — once there are enough of them to see what they cost.</li>
     <li><b>A second deck.</b> The specification asks for one eventually. The deck here is for
