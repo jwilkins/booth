@@ -568,6 +568,8 @@ pub fn take_prep(track: &mut Track, found: &booth_cli::rekordbox::anlz::Analysis
                 .color
                 .map(|rgb| [rgb.r, rgb.g, rgb.b])
                 .unwrap_or_else(|| crate::job::cue_color(cue.hot_cue)),
+            // A loop the player saved stays one: see [`CueMark::loop_end_ms`].
+            loop_end_ms: crate::job::loop_end(cue),
         })
         .collect();
     track.cues.sort_by_key(|cue| (cue.letter, cue.time_ms));
@@ -619,9 +621,25 @@ pub struct CueMark {
     pub time_ms: u32,
     pub label: String,
     pub color: [u8; 3],
+    /// Where a saved loop ends, for a cue that is one. A player saves a loop as
+    /// a cue with an end, and a collection that could not hold the end turned
+    /// every loop read off a stick or out of rekordbox into a plain cue, and
+    /// wrote it back to the stick that way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_end_ms: Option<u32>,
 }
 
 impl CueMark {
+    /// Move the cue to `time_ms`, taking a loop's end along with it so the
+    /// loop keeps its length rather than stretching, or ending before it
+    /// starts.
+    pub fn move_to(&mut self, time_ms: u32) {
+        if let Some(end) = self.loop_end_ms {
+            self.loop_end_ms = Some(time_ms.saturating_add(end.saturating_sub(self.time_ms)));
+        }
+        self.time_ms = time_ms;
+    }
+
     /// A, B, C… for a hot cue; a bullet for a memory cue.
     pub fn name(&self) -> String {
         match self.letter {
@@ -1035,6 +1053,7 @@ impl Track {
                     time_ms: cue.time_ms,
                     label: cue.label.clone(),
                     color: crate::job::cue_color(cue.letter),
+                    loop_end_ms: cue.loop_end_ms,
                 })
                 .collect();
             touched = true;
@@ -1561,10 +1580,21 @@ impl Library {
     /// before they were recognised can: every folder imported off a stick a
     /// Mac had touched brought one in beside each track. Says which went.
     pub fn forget_apple_doubles(&mut self) -> Vec<PathBuf> {
+        let every: Vec<u32> = self.tracks.iter().map(|track| track.id).collect();
+        self.forget_apple_doubles_among(&every)
+    }
+
+    /// The same, for only these tracks: the ones a list is about to show, or
+    /// an analysis about to read. Says which went.
+    pub fn forget_apple_doubles_among(&mut self, ids: &[u32]) -> Vec<PathBuf> {
         let gone: Vec<(u32, PathBuf)> = self
             .tracks
             .iter()
+            // The name before the list: almost no track is a `._` one, and
+            // asking every track whether it is among ten thousand ids is not
+            // free.
             .filter(|track| track.role == Role::Track && is_apple_double(&track.path, track.bytes))
+            .filter(|track| ids.contains(&track.id))
             .map(|track| (track.id, track.path.clone()))
             .collect();
         for (id, _) in &gone {
@@ -2123,14 +2153,33 @@ impl Library {
 /// The file says, where it can be reached. Where it cannot — the drive it is
 /// on is unplugged — the name and the size the collection noted for it do:
 /// `bytes` under [`booth_cli::discover::APPLE_DOUBLE_SMALL`], or never noted.
+///
+/// The name is asked first, and only a `._` name goes to the disk: this runs
+/// over every track the browser lists, each time it lists them, and a file
+/// system asked ten thousand times whether a file is there is a list that
+/// takes a second to filter — longer, on a drive that has gone to sleep.
 pub fn is_apple_double(path: &Path, bytes: u64) -> bool {
+    if !booth_cli::discover::named_apple_double(path) {
+        return false;
+    }
     match path.exists() {
         true => booth_cli::discover::is_apple_double(path),
-        false => {
-            booth_cli::discover::named_apple_double(path)
-                && bytes < booth_cli::discover::APPLE_DOUBLE_SMALL
-        }
+        false => bytes < booth_cli::discover::APPLE_DOUBLE_SMALL,
     }
+}
+
+/// Delete a `._` file, having asked the file itself first whether it is one:
+/// see [`booth_cli::discover::is_apple_double`]. `Ok(false)` when there was
+/// nothing to delete, or what is there is not one after all.
+///
+/// The collection's word for it is not taken. A track can be judged a `._`
+/// file by its name and the size the collection noted while its drive was
+/// unplugged, and the file at that path today could be something else.
+pub fn delete_apple_double(path: &Path) -> std::io::Result<bool> {
+    if !booth_cli::discover::is_apple_double(path) {
+        return Ok(false);
+    }
+    std::fs::remove_file(path).map(|()| true)
 }
 
 /// A stable id for a derived companion row.
@@ -2561,6 +2610,41 @@ mod tests {
     }
 
     #[test]
+    fn a_pass_over_some_tracks_takes_out_only_the_companions_among_them() {
+        let dir = scratch("companions-among");
+        let real = dir.join("Sirens.flac");
+        std::fs::write(&real, vec![0x66u8; 256 * 1024]).unwrap();
+        let other = dir.join("Tides.flac");
+        std::fs::write(&other, vec![0x66u8; 256 * 1024]).unwrap();
+        let mut library = Library::new();
+        let first = library.add(&apple_double_beside(&real));
+        let second = library.add(&apple_double_beside(&other));
+        library.add(&real);
+
+        assert_eq!(library.forget_apple_doubles_among(&[first]), [dir.join("._Sirens.flac")]);
+        assert!(library.get(first).is_none());
+        assert!(library.get(second).is_some(), "one it was not asked about went too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_companion_is_deleted_only_once_the_file_itself_says_it_is_one() {
+        let dir = scratch("delete-companion");
+        let real = dir.join("Sirens.flac");
+        std::fs::write(&real, vec![0x66u8; 256 * 1024]).unwrap();
+        let fake = apple_double_beside(&real);
+        assert!(delete_apple_double(&fake).unwrap());
+        assert!(!fake.exists());
+        // A real track that happens to start with `._`: no mark, and too big.
+        let lookalike = dir.join("._Intro.flac");
+        std::fs::write(&lookalike, vec![0x66u8; 256 * 1024]).unwrap();
+        assert!(!delete_apple_double(&lookalike).unwrap());
+        assert!(lookalike.exists(), "a real track was deleted");
+        assert!(!delete_apple_double(&dir.join("._gone.flac")).unwrap(), "nothing there");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_companion_on_an_unplugged_drive_goes_by_its_name_and_the_size_noted_for_it() {
         let gone = Path::new("/Volumes/NOT-PLUGGED-IN/Music");
         assert!(is_apple_double(&gone.join("._Sirens.flac"), 4096));
@@ -2657,6 +2741,7 @@ mod tests {
                 letter: 1,
                 time_ms: 30_000,
                 label: "drop".into(),
+                loop_end_ms: None,
             }],
             my_tags: vec!["peak time".into()],
         }
@@ -2698,8 +2783,13 @@ mod tests {
         track.analyzed = true;
         track.has_grid = true;
         track.bpm = 174.0;
-        track.cues =
-            vec![CueMark { letter: 1, time_ms: 1_234, label: "mine".into(), color: [1, 2, 3] }];
+        track.cues = vec![CueMark {
+            letter: 1,
+            time_ms: 1_234,
+            label: "mine".into(),
+            color: [1, 2, 3],
+            loop_end_ms: None,
+        }];
 
         track.fill_from(&rekordbox_track());
 
@@ -2889,8 +2979,13 @@ mod tests {
             track.bpm = 128.5;
             track.key = "8A".into();
             track.has_grid = true;
-            track.cues =
-                vec![CueMark { letter: 1, time_ms: 1000, label: String::new(), color: [1, 2, 3] }];
+            track.cues = vec![CueMark {
+                letter: 1,
+                time_ms: 1000,
+                label: String::new(),
+                color: [1, 2, 3],
+                loop_end_ms: None,
+            }];
         }
         library.add_playlist("Saturday peak", "").unwrap();
         library.playlists[0].tracks.push(other);
@@ -3871,8 +3966,13 @@ mod what_the_deck_did {
         track.duration_secs = 8.0;
         track.bpm = 174.0;
         track.analyzed = true;
-        track.cues =
-            vec![CueMark { letter: 1, time_ms: 1_000, label: "drop".into(), color: [1, 2, 3] }];
+        track.cues = vec![CueMark {
+            letter: 1,
+            time_ms: 1_000,
+            label: "drop".into(),
+            color: [1, 2, 3],
+            loop_end_ms: None,
+        }];
         track
     }
 
@@ -3891,6 +3991,33 @@ mod what_the_deck_did {
         assert_eq!(hot.time_ms, 4_000);
         assert_eq!(hot.label, "hold me closer now");
         assert_eq!(hot.color, [0xe8, 0x3c, 0x9e]);
+    }
+
+    #[test]
+    fn a_loop_moved_keeps_its_length() {
+        let mut cue = CueMark {
+            letter: 3,
+            time_ms: 12_000,
+            label: String::new(),
+            color: [0; 3],
+            loop_end_ms: Some(13_875),
+        };
+        cue.move_to(20_000);
+        assert_eq!((cue.time_ms, cue.loop_end_ms), (20_000, Some(21_875)));
+        cue.move_to(500);
+        assert_eq!((cue.time_ms, cue.loop_end_ms), (500, Some(2_375)));
+    }
+
+    #[test]
+    fn a_loop_the_player_saved_comes_back_a_loop() {
+        // What a deck writes when a loop is saved to a hot cue: the cue, with
+        // where the loop ends. It used to come back a plain cue.
+        let cues = vec![Cue::memory(0), Cue::hot(3, 12_000).looping(13_875)];
+        let mut track = a_track();
+        take_prep(&mut track, &off_the_drive(&cues, None));
+        let looped = track.cues.iter().find(|cue| cue.letter == 3).unwrap();
+        assert_eq!(looped.loop_end_ms, Some(13_875));
+        assert_eq!(track.cues[0].loop_end_ms, None, "the memory cue became a loop");
     }
 
     #[test]

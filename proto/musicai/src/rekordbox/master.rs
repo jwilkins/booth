@@ -49,6 +49,8 @@ pub struct Cue {
     pub letter: u8,
     pub time_ms: u32,
     pub label: String,
+    /// Where a saved loop ends, for a cue that is one.
+    pub loop_end_ms: Option<u32>,
 }
 
 /// A playlist, flattened to the folder it sits in.
@@ -271,7 +273,7 @@ fn join_path(folder: Option<&str>, filename: Option<&str>) -> PathBuf {
     }
 }
 
-const CUE_COLUMNS: [&str; 4] = ["ContentID", "InMsec", "Kind", "Comment"];
+const CUE_COLUMNS: [&str; 5] = ["ContentID", "InMsec", "Kind", "Comment", "OutMsec"];
 
 fn cues_by_track(connection: &rusqlite::Connection) -> Result<HashMap<String, Vec<Cue>>> {
     let present = Present::of(connection, "djmdCue");
@@ -286,11 +288,12 @@ fn cues_by_track(connection: &rusqlite::Connection) -> Result<HashMap<String, Ve
             row.get::<_, Option<f64>>(1).unwrap_or_default(),
             row.get::<_, Option<f64>>(2).unwrap_or_default(),
             row.get::<_, Option<String>>(3).unwrap_or_default(),
+            row.get::<_, Option<f64>>(4).unwrap_or_default(),
         ))
     })?;
 
     let mut found: HashMap<String, Vec<Cue>> = HashMap::new();
-    for (content, at, kind, comment) in rows.flatten() {
+    for (content, at, kind, comment, out) in rows.flatten() {
         let Some(content) = content else { continue };
         let Some(at) = at else { continue };
         if at < 0.0 {
@@ -309,6 +312,9 @@ fn cues_by_track(connection: &rusqlite::Connection) -> Result<HashMap<String, Ve
             letter: letter as u8,
             time_ms: at as u32,
             label: comment.unwrap_or_default(),
+            // rekordbox keeps -1 here for a cue, and the loop's end for a
+            // saved loop: only an end after the start is one.
+            loop_end_ms: out.filter(|&end| end > at).map(|end| end as u32),
         });
     }
     for cues in found.values_mut() {

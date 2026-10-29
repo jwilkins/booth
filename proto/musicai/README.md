@@ -533,11 +533,29 @@ Files a player cannot open are refused rather than copied — a file that fails 
 is worse on the drive than off it — which today means checking the container and the
 sample rate.
 
+A write that will not fit is refused before anything goes on. It is counted as every file
+at its full size plus two megabytes each for its analysis, against what the drive has
+free; a write that runs out of room partway leaves a drive half done, and since the
+databases go on last, it is the databases that do not fit. Replacing tracks already on the
+drive is counted as if they were new, so a nearly full drive can be refused a write that
+would have fitted — `--no-space-check` goes on regardless. Nothing is staged anywhere
+else on the way: every file is written straight to the drive, so the laptop's own disk is
+never what runs out.
+
 Variable-bitrate MP3s get a seek index (`PVBR`) so their hot cues land in the right place
 on the player — see [What it hears](#what-it-hears). Every other format seeks without one.
 
 Once the database is written it is read back off the drive and walked the way a player
 walks it, and the command fails rather than reporting success if that does not work.
+
+Every file written into a folder is landed whole — written beside its name, flushed and
+renamed — and read back off the device rather than out of the page cache, and the audio
+is compared with its source byte for byte. The machine is held awake while the write
+runs (`caffeinate` on macOS, `systemd-inhibit` on Linux, `SetThreadExecutionState` on
+Windows), and `-v` says which or that it could not. A drive that fails a write — gone,
+full, read-only, an I/O error, or a file that reads back different — stops the export
+there and leaves the databases as the last write made them, and the error names the
+drive rather than the track.
 
 `-v` adds a step-by-step account on stderr — which is where the results are not, so
 redirecting stdout still captures only results:

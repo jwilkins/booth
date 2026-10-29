@@ -557,6 +557,16 @@ pub struct ExportArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Write into a folder that looks too small for what is going on it.
+    ///
+    /// An export counts every file named at its full size, and room for its
+    /// analysis, and stops before writing anything when the drive has less
+    /// free. A track replacing one already on the drive is counted as if it
+    /// were new, so a nearly full drive can be refused a write that would have
+    /// fitted, and this says to go on.
+    #[arg(long)]
+    pub no_space_check: bool,
+
     /// The key for the OneLibrary database the newer players read.
     ///
     /// Different from the one `rekordbox read` wants: that opens rekordbox's

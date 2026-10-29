@@ -19,8 +19,15 @@ folder imported off such a drive used to bring a second, silent copy of every
 track. A file whose name starts with `._` and which opens with the AppleDouble
 mark (`00 05 16 07`), or is under 64 KiB, is skipped at import, from a rekordbox
 library and by the command line, and any already in the collection are taken
-out when the window opens. A real track that happens to be named `._…` is
-megabytes, and is kept.
+out when the window opens. One that gets past all of that is taken out when the
+list is about to show it or an analysis is about to read it. Whenever one comes
+out of the collection, the file is deleted too if it is in the library folder or
+on a drive plugged in from outside — a stick is where a Mac leaves them — and is
+left alone anywhere else, which is somebody's own folder. The file is asked again
+before it goes, so a track the collection only judged by its name and noted size
+is not deleted on that. The line at the bottom of the window says which, where
+it was met, and whether it was deleted. A real track that happens to be named
+`._…` is megabytes, and is kept.
 
 On Linux the audio output needs ALSA's headers at build time
 (`apt install libasound2-dev`, or `alsa-lib-devel`). macOS and Windows need
@@ -1544,7 +1551,8 @@ the day AlphaTheta changes the key; the constant is `BUNDLED_KEY` in
 `proto/musicai/src/rekordbox/mod.rs`, and blanking it builds a program that asks for one.
 
 Settings → **Import a rekordbox library** brings across tracks, playlists and
-their folders, beat grids, hot cues, keys, ratings, play counts and My Tags.
+their folders, beat grids, hot cues and the loops saved on them, keys, ratings,
+play counts and My Tags.
 On the command line, `booth-cli rekordbox read <path>` lists what is in one
 without changing anything.
 
@@ -1757,6 +1765,20 @@ command: the database and every analysis file are read back off the drive by a
 parser that shares no code with the writer. Until that passes, the drive is not
 finished.
 
+Each file is written beside its name, flushed to the stick and renamed into
+place, so a write that dies partway leaves the file that was there rather than
+half of a new one. Then it is read back off the stick itself — not out of the
+computer's memory, which still holds what was just written and would pass a
+failing stick every time — and the audio is compared byte for byte with the
+file it came from. The machine is kept from sleeping while the write runs.
+
+A drive that fails a write is named as the problem, not the music: unplugged,
+full, made read-only, or an input/output error, which is the stick or its port.
+The write stops there. The databases are not rewritten, so the drive still plays
+exactly what its last good write put on it, and what this write had added sits
+beside it under names no database points at. A file the collection names that is
+not on the laptop any more is a different thing, and says so.
+
 ### What goes on the drive is what the collection says
 
 The exporter listens to every file it prepares, because it has to — the waveform
@@ -1801,9 +1823,13 @@ Keeping the drive's copy does two things. The track's analysis files on the
 stick are left exactly as the deck left them — it is not prepared again, and its
 row and its place in the playlists carry through untouched — and **what the deck
 did is read back into the collection**, so the cues, their names and colours, the
-phrases and the tempo become the ones Booth shows. Keeping the drive's copy
-therefore means having it, not merely not losing it. The decision is recorded, so
-a settled question is not asked again on every sync.
+phrases and the tempo become the ones Booth shows. A cue the deck saved as a loop
+comes back a loop, with where it ends, and goes back onto the stick as one: the
+collection used to keep only where a cue starts, so a loop read off a stick was
+written back as a plain cue and the loop was gone. The waveform draws a loop's
+length as a bar along the cue's edge, and resting on it says where it ends.
+Keeping the drive's copy therefore means having it, not merely not losing it. The
+decision is recorded, so a settled question is not asked again on every sync.
 
 The one thing that does not come back is the grid itself, only the tempo it was
 written at. A collection keeps a tempo and a downbeat rather than thousands of

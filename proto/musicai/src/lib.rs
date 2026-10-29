@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod audio;
 pub mod audit;
+pub mod awake;
 pub mod cli;
 pub mod clock;
 pub mod commands;
@@ -23,3 +24,4 @@ pub mod report;
 pub mod stems;
 pub mod tag;
 pub mod transcribe;
+pub mod volume;

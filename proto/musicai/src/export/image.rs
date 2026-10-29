@@ -321,31 +321,24 @@ pub enum Destination {
 }
 
 impl Destination {
+    /// Put `bytes` on the drive at `on_drive`. On a folder the file is landed
+    /// whole and read back off the device: see [`super::landing`].
     pub fn write(&self, on_drive: &str, bytes: &[u8]) -> Result<()> {
         match self {
             Destination::Directory(root) => {
-                let out = root.join(on_drive.trim_start_matches('/'));
-                if let Some(parent) = out.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("creating {}", parent.display()))?;
-                }
-                std::fs::write(&out, bytes).with_context(|| format!("writing {}", out.display()))
+                super::landing::put(root, &root.join(on_drive.trim_start_matches('/')), bytes)
             }
             Destination::Image(image) => image.lock().unwrap().write(on_drive, bytes),
         }
     }
 
+    /// Copy the file at `from` onto the drive at `on_drive`. On a folder what
+    /// landed is compared with it, read off the device: see
+    /// [`super::landing`].
     pub fn copy_in(&self, on_drive: &str, from: &Path) -> Result<()> {
         match self {
             Destination::Directory(root) => {
-                let out = root.join(on_drive.trim_start_matches('/'));
-                if let Some(parent) = out.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("creating {}", parent.display()))?;
-                }
-                std::fs::copy(from, &out)
-                    .with_context(|| format!("copying {} to the drive", from.display()))?;
-                Ok(())
+                super::landing::copy(root, from, &root.join(on_drive.trim_start_matches('/')))
             }
             Destination::Image(image) => {
                 image.lock().unwrap().copy_in(on_drive, from)?;
@@ -354,12 +347,15 @@ impl Destination {
         }
     }
 
-    /// Read a file back off the drive, which is how an export checks itself.
+    /// Read a file back off the drive, which is how an export checks itself:
+    /// off the device rather than out of the cache that still holds what was
+    /// written.
     pub fn read(&self, on_drive: &str) -> Result<Vec<u8>> {
         match self {
             Destination::Directory(root) => {
                 let at = root.join(on_drive.trim_start_matches('/'));
-                std::fs::read(&at).with_context(|| format!("reading back {}", at.display()))
+                super::landing::read_from_device(&at)
+                    .map_err(|e| super::landing::DriveFault::from_io(root, &at, &e).into())
             }
             Destination::Image(image) => image.lock().unwrap().read(on_drive),
         }

@@ -756,6 +756,7 @@ dependencies = [
  "flacenc",
  "hound",
  "id3",
+ "libc",
  "metaflac",
  "mp3lame-encoder",
  "mp4ameta",
