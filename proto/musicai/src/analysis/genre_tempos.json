@@ -731,14 +731,14 @@
         "brostep",
         "140"
       ],
-      "bpm_min": 138,
-      "bpm_max": 145,
-      "bpm_typical": 140,
-      "half_time_feel": true,
-      "notes": "90%+ produced at 140; catalog median 145; felt at 70",
+      "bpm_min": 60,
+      "bpm_max": 120,
+      "bpm_typical": 70,
+      "half_time_feel": false,
+      "notes": "Counted where it is felt, 60-120 (typically 70); 90%+ produced at 140, catalog median 145",
       "alt_octave_bpm": [
-        69,
-        72
+        138,
+        145
       ]
     },
     {
@@ -1049,6 +1049,26 @@
       "alt_octave_bpm": [
         85,
         90
+      ]
+    },
+    {
+      "id": "halftime",
+      "name": "Halftime",
+      "family": "dnb",
+      "parent": "drum-and-bass",
+      "aliases": [
+        "half-time",
+        "halftime dnb",
+        "half-time dnb"
+      ],
+      "bpm_min": 80,
+      "bpm_max": 90,
+      "bpm_typical": 87,
+      "half_time_feel": false,
+      "notes": "Drum & bass at 160-180 counted where it is felt, at half",
+      "alt_octave_bpm": [
+        160,
+        180
       ]
     },
     {

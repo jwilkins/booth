@@ -128,15 +128,21 @@ const KNOWN: [(&str, &str); 10] = [
 
 /// The records Booth is known to miss with the genres' octave as well: the
 /// [`KNOWN`] misses the genre does not reach, which the model hears as
-/// experimental (Procedure238, Klassikkos) and ambient (Ryan L's), and one on
-/// which a listener and the genre tempo table disagree.
-const KNOWN_WITH_GENRE: [(&str, &str); 4] = [
+/// experimental (Procedure238, Klassikkos) and ambient (Ryan L's), and those
+/// on which the genre tempo table and the count disagree on the octave.
+const KNOWN_WITH_GENRE: [(&str, &str); 7] = [
     ("Procedure238", "a tempo"),
     ("ryan_l", "2/3"),
     ("Klassikkos", "1.11x"),
     // Counted at 92. The model hears speedcore, hardcore and gabber, and the
     // table plays hardcore from 150 to 200, so it goes from 92.5 to 185.
     ("Producer_Snafu", "double"),
+    // Dubstep, tagged so and heard so, which madmom and Essentia count at the
+    // 140 it is written at and the table at the 70 it is felt at, as a
+    // listener counts Hard Epic Dubstep. The table's is the answer Booth gives.
+    ("Boktor", "half"),
+    ("DeepForest", "half"),
+    ("Backlash", "half"),
 ];
 
 /// What a ratio of two tempos reads as, or the number where it is none of them.

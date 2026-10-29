@@ -44,9 +44,11 @@ const PRIOR_WIDTH_OCTAVES: f64 = 1.4;
 /// tempo madmom and Essentia agree on or a listener has counted, that tempo
 /// was within 0.18 of an octave of the genre's on all but one (Nosce te Ipsum
 /// at 102, 0.35 from techno, on a call of 0.07), and the octaves either side
-/// were 0.52 or more from it, save on the two records a listener counts
-/// against the table: Snafu, heard as hardcore and counted at 92, and Hard
-/// Epic Dubstep, counted at 70. A third, then, so
+/// were 0.52 or more from it, save where the count and the table disagree on
+/// the octave: Snafu, heard as hardcore and counted at 92; four dubstep
+/// records the references count at the 140 it is written at, which the table
+/// counts at the 70 it is felt at; and two weak calls, electro on Hard Epic
+/// Dubstep and halftime on a drum and bass record. A third, then, so
 /// that hip hop's 85 reaches the 70 the tracker stops at, as a slow record of
 /// it is, and so that a coin toss stays one.
 const GENRE_NEAR_OCTAVES: f64 = 1.0 / 3.0;
@@ -55,12 +57,11 @@ const GENRE_NEAR_OCTAVES: f64 = 1.0 / 3.0;
 ///
 /// Added up, because the model spreads a genre over its styles: The Werewolf
 /// scores 0.34 for instrumental hip hop and 0.28 and 0.27 for the two trip
-/// hops. On 75 CC records every tempo this moved came with 0.36 or more, and
-/// the two that would have moved under it would both have gone wrong: Hard
-/// Epic Dubstep, at 0.21, to the 140 of the dubstep and electro it is heard as
-/// a little of, against the 70 a listener counts; and Ryan L's untitled, at
-/// 0.24, from 80 to 160 where madmom and Essentia hear 120. Where in that gap
-/// the line goes is reasoned rather than measured.
+/// hops. On 75 CC records every tempo the model moved came with 0.30 or more,
+/// the lowest Backlash's dubstep, which its tag names too, and the next 0.36;
+/// the one it would have moved under the line would have gone wrong, Ryan L's
+/// untitled at 0.24, from 80 to 160 where madmom and Essentia hear 120. Where
+/// in that gap the line goes is reasoned rather than measured.
 const GENRE_SURE: f32 = 0.3;
 /// How strongly the beat tracker resists a gap that is not one period. Larger
 /// values keep stricter time at the cost of following a real tempo change.

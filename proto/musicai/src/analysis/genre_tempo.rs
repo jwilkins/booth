@@ -1,17 +1,21 @@
 //! The tempos club genres are played at, and finding those genres in what the
 //! model heard and in what a file's tag says.
 //!
-//! The table is `genre_tempos.json` beside this file: 75 genres in twelve
+//! The table is `genre_tempos.json` beside this file: 76 genres in twelve
 //! families, each with the range of tempos its scene plays at, where its
 //! records cluster and the other names it goes by, put together for Booth from
-//! the DJ and production guides its `sources` list. It is kept as it came, so
-//! that a newer one can replace it.
+//! the DJ and production guides its `sources` list. It is kept as it came but
+//! for two genres counted where they are felt rather than where they are
+//! written: dubstep, from 60 to 120 rather than 138 to 145, and halftime,
+//! added at 80 to 90, the half of drum and bass it is. A newer table can
+//! replace it.
 //!
-//! Only the range is read. It is where the grid goes, which for a genre felt
-//! at half is the tempo it is written at: dubstep at 140 rather than the 70 it
-//! is danced to, as a DJ mixing it with grime counts it. `alt_octave_bpm`, the
-//! octave analysers mistake it for, is the range halved or doubled, which is
-//! what the octave rule tries anyway; see [`super::tempo::Genre`].
+//! Only the range is read, and it is where the grid goes. So dubstep and
+//! halftime go at the half they are danced to, and the other genres the table
+//! says are felt at half, trap and future bass, at the tempo they are written
+//! at. `alt_octave_bpm`, the octave analysers mistake a genre for, is the
+//! range halved or doubled, which is what the octave rule tries anyway; see
+//! [`super::tempo::Genre`].
 //!
 //! A genre is found by its name, its id or one of its aliases, in a tag or a
 //! Discogs style alike, so that the model and a tag that say the same thing
@@ -49,15 +53,10 @@ static TABLE: LazyLock<Vec<Played>> = LazyLock::new(|| {
 ///
 /// Trip hop is not in it, and is counted as hip hop is, in hip hop's octave
 /// and sometimes under its range: Jenova 7's Introspect at 82. Boom bap is
-/// hip hop by another name. Halftime is drum and bass written at its tempo and
-/// danced to at half, as dubstep is. And Discogs writes psytrance with a
-/// hyphen, which would otherwise make it plain trance.
-const ALSO: [(&str, &str); 4] = [
-    ("trip hop", "hip-hop"),
-    ("boom bap", "hip-hop"),
-    ("halftime", "drum-and-bass"),
-    ("psy trance", "psytrance"),
-];
+/// hip hop by another name. And Discogs writes psytrance with a hyphen, which
+/// would otherwise make it plain trance.
+const ALSO: [(&str, &str); 3] =
+    [("trip hop", "hip-hop"), ("boom bap", "hip-hop"), ("psy trance", "psytrance")];
 
 /// Every name a genre is found by, as [`words`] writes it, and which genre.
 static WORDS: LazyLock<Vec<(String, usize)>> = LazyLock::new(|| {
@@ -208,7 +207,7 @@ mod tests {
 
     #[test]
     fn the_table_reads_and_no_name_in_it_is_two_genres() {
-        assert_eq!(TABLE.len(), 75);
+        assert_eq!(TABLE.len(), 76);
         for played in TABLE.iter() {
             assert!(played.bpm_min < played.bpm_max, "{}", played.id);
         }
@@ -234,6 +233,16 @@ mod tests {
         assert_eq!(ids(&tagged("IDM, Jungle, Dubstep, Experimental")), ["jungle", "dubstep"]);
         assert!(tagged("Electronic").is_empty());
         assert!(tagged("Trailer").is_empty());
+    }
+
+    #[test]
+    fn dubstep_and_halftime_are_counted_where_they_are_felt() {
+        let dubstep = called("dubstep").unwrap();
+        assert_eq!((dubstep.from_bpm, dubstep.to_bpm), (60.0, 120.0));
+        let found = heard_as(&[("Electronic", "Halftime", 0.4), ("Electronic", "Dubstep", 0.3)]);
+        assert_eq!(ids(&found), ["halftime", "dubstep"]);
+        assert_eq!((found[0].from_bpm, found[0].to_bpm), (80.0, 90.0));
+        assert_eq!(ids(&tagged("Half-Time DnB")), ["halftime"]);
     }
 
     #[test]
