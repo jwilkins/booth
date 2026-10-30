@@ -27,30 +27,42 @@ with a free key.
   against the files it describes.
 - **Listens to every track.** Tempo, beat grid, key, phrases, cue points and the colour waveforms
   a player draws, all measured locally. No analysis step on the player, no waiting in the booth.
-  A record at one tempo is gridded at one tempo — eight beats from anywhere in it are eight beats
-  from anywhere else — and one that really moves is gridded moving.
+  A record at one tempo is gridded at one tempo, on its kick — eight beats from anywhere in it are
+  eight beats from anywhere else — and one that really moves is gridded moving. Measured against
+  madmom and Essentia on 75 CC records, it has the tempo they agree on, or a listener counted,
+  on 58 of 62.
 - **Says what kind of record it is.** One of the 400 styles Discogs files records under — Goa
   trance rather than progressive, tech house rather than hard house — heard by the Music Technology
   Group's Discogs-EffNet model, run locally in pure Rust. The model is theirs and optional: point
   Booth at the file, switch it on, and every track analysed from then on carries a genre, in the
-  collection and on the drive.
+  collection and on the drive. The genre also says which octave the tempo is in — hip hop at 86,
+  drum and bass at 172 — from a table of 76 club genres and the tempos they are played at, and a
+  file's own genre tag does the same without the model.
 - **Levels them.** EBU R128 loudness normalisation, by re-encoding or by ReplayGain tags with the
   audio left untouched.
 - **Names them.** Acoustic fingerprinting through AcoustID and MusicBrainz, and — for the white
   labels and promos no database has heard of — what the file's own path says it is.
-- **Splits them.** Vocals, melody and drums as separate stems, rendered ahead of time.
-- **Reads the words.** The vocal stem goes through a speech recogniser, and what comes back is
-  read for repetition: the line the room sings becomes a cue, every time it comes round becomes a
-  marker that says which line it is, and the whole of it is in the panel — so months later you
-  know which record this is from the thing you actually remember about it.
+- **Splits them.** Vocals, melody and drums as separate stems, rendered ahead of time, with demucs
+  or, for a cleaner voice, a RoFormer.
+- **Reads the words.** The record, cut to where its vocal stem sings, goes through a speech
+  recogniser, and what comes back is read for repetition: the line the room sings becomes a cue,
+  every time it comes round becomes a marker that says which line it is, the whole of it is in the
+  panel and in an `.lrc` beside the track — so months later you know which record this is from
+  the thing you actually remember about it.
+- **Cues the same way on every record.** Hot cue A is the hook, B the main break, C the hook in a
+  drop and D the main drop, each left empty where a record has none, so a hand that has learnt a
+  pad reaches for the same moment on the next record. E to H are what a set needs next.
 - **Writes drives a player will open.** Both on-drive databases from one collection, so they
   cannot disagree about what is on the stick, with everything read back and checked afterwards.
   Every generation's analysis files go on — `.DAT`, `.EXT` and `.2EX` — so one stick works from
-  a 2009 deck to a CDJ-3000X.
+  a 2009 deck to a CDJ-3000X. Every file is landed whole and read back off the device past the
+  cache, the audio compared byte for byte, and a write that will not fit is refused before it
+  starts.
 - **Checks the drive against the booth it is going to.** You say the oldest player it has to
   work on; the checks use that generation's rules, and anything it cannot open — a FLAC on a
   nexus deck, a 96 kHz file on an NXS2 — is re-encoded to a 320 kbps MP3 on the way onto the
-  stick. Your library keeps its lossless copy. (The files for older players are all written, but
+  stick. Your library keeps its lossless copy. `booth-cli audit` says what each generation will see
+  on any stick, whoever wrote it. (The files for older players are all written, but
   only current players have been seen to play a drive from here — a CDJ-3000X, a CDJ-1500X on
   firmware 1.10 and a CDJ-3000 on firmware 3.22; see
   [what it does not do yet](booth/README.md#what-it-does-not-do-yet).)
@@ -122,7 +134,7 @@ It is not in the bundle: run it with `cargo run -p booth-gui`.
 
 ```sh
 scripts/package-macos.sh
-# dist/Booth.app and dist/booth-0.1.0.dmg
+# dist/Booth.app and dist/booth-0.1.1.dmg
 ```
 
 It builds each binary twice and `lipo`s the pairs together, so the result runs natively on either

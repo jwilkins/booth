@@ -1518,9 +1518,10 @@ goes in the octave nearest the tempos that genre is played at.
 Those come from a table of 76 club genres in twelve families, from R&B at 70
 to 100 BPM to frenchcore at 190 to 220, each with the range its scene plays
 at and the names it goes by (`proto/musicai/src/analysis/genre_tempos.json`).
-Dubstep and halftime are counted where they are felt, dubstep from 60 to 120
-and halftime from 80 to 90; the other genres felt at half, trap and future
-bass, are placed where they are written, at 140 and 150. A style the model
+A genre felt at half is placed where it is written, as madmom and Essentia
+count it: dubstep and trap at 140, future bass at 150. Halftime, which the
+table did not have, is its own genre from 80 to 90, the half of drum and bass
+it is felt at. A style the model
 hears, or a word in the file's tag, is found in the table by name or alias;
 Discogs's hip hop styles are all hip hop, and trip hop is counted as hip hop
 is. A few are left out on purpose: Miami bass and cloud rap, which are counted
@@ -1530,24 +1531,21 @@ Each genre among the five styles the model is surest of calls the octave
 nearest its range, as sure as the model was of the style, and has no say where
 both octaves are more than a third of an octave from it. The octave called with
 0.3 or more between them is taken. On 75 CC records, of the 62 tempos madmom
-and Essentia agree on or a listener has counted, this took Booth from 52 to 55
-by those counts, and to 58 counting dubstep where it is felt. Seven records
-read at double or half came right: hip hop, drum and bass, and one the model
-hears as electro, among them a trip hop record both trackers hear at 164 and a
-listener counts at 82. Three dubstep records madmom and Essentia count at the
-140 they are written at now go at 70, where the table counts dubstep and a
-listener counted another. One went wrong: a record a listener counts at 92,
-which the model hears as hardcore, and the table plays hardcore from 150 to
-200. Seven drum and bass records the two disagree on went from 83 to 90 up to
-166 to 180, which is what madmom and the table say. It costs nothing the switch
-does not cost already. The analysis log says when it happens, and the genre is kept with the
-track: measuring the grid again, or analysing with the switch off, keeps its
-octave. `÷2` and `×2` still correct either.
+and Essentia agree on or a listener has counted, this took Booth from 52 to 58.
+Seven records read at double or half came right: hip hop, drum and bass, and
+one the model hears as electro, among them a trip hop record both trackers
+hear at 164 and a listener counts at 82. One went wrong: a record a listener
+counts at 92, which the model hears as hardcore, and the table plays hardcore
+from 150 to 200. Seven drum and bass records the two disagree on went from 83
+to 90 up to 166 to 180, which is what madmom and the table say. It costs
+nothing the switch does not cost already. The analysis log says when it happens, and the genre is
+kept with the track: measuring the grid again, or analysing with the switch
+off, keeps its octave. `÷2` and `×2` still correct either.
 
 Without the model, or where it is not sure, a file's own genre tag does the
 same, each genre it names counting as sure; a tag whose genres call different
 octaves says nothing. On the same 75 records the tags alone would have taken
-Booth from 52 to 54 by those counts.
+Booth from 52 to 57.
 
 ## Importing a rekordbox library
 
@@ -2121,10 +2119,11 @@ drive played only on older hardware has a history nothing here can see.
   refuses acceptable to it. Everything a nexus deck reads is written; whether
   it loads has not been demonstrated. **Try a stick on the hardware before the
   night.**
-- **Phrase data has now been seen on a player**, drawn under the waveform on a
-  CDJ-1500X with the section names and boundaries this program wrote. The
-  three-band waveform still has not: it sits in a part of the analysis files
-  nobody has reported on.
+- **Phrase data and the three-band waveform have both been seen on a
+  player.** The phrases were drawn under the waveform on a CDJ-1500X with the
+  section names and boundaries this program wrote, and the three-band waveform
+  has been seen drawn from a drive this wrote since 0.0.9 brought its bytes to
+  the scale and order real files use.
 - The waveform colours are a judgement call rather than a match: what rekordbox
   puts in those three bits for given audio is not published, and ours has never
   been compared against a real export column by column.

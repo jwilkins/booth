@@ -731,14 +731,14 @@
         "brostep",
         "140"
       ],
-      "bpm_min": 60,
-      "bpm_max": 120,
-      "bpm_typical": 70,
-      "half_time_feel": false,
-      "notes": "Counted where it is felt, 60-120 (typically 70); 90%+ produced at 140, catalog median 145",
+      "bpm_min": 138,
+      "bpm_max": 145,
+      "bpm_typical": 140,
+      "half_time_feel": true,
+      "notes": "90%+ produced at 140; catalog median 145; felt at 70",
       "alt_octave_bpm": [
-        138,
-        145
+        69,
+        72
       ]
     },
     {

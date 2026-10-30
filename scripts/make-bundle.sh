@@ -16,12 +16,15 @@ if [ "$#" -lt 3 ]; then
 	exit 2
 fi
 
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+
 BOOTH_BIN=$1
 CLI_BIN=$2
 OUT_DIR=$3
-VERSION=${4:-0.1.0}
+# The manifest's when none is given, rather than a number written here that
+# is right for one release and wrong for every one after it.
+VERSION=${4:-$(awk -F'"' '/^version = /{print $2; exit}' "$REPO/booth/Cargo.toml")}
 
-REPO=$(cd "$(dirname "$0")/.." && pwd)
 RESOURCES=$REPO/packaging/macos
 APP=$OUT_DIR/Booth.app
 

@@ -7,14 +7,206 @@ made it. Two of them disagree with the website's release list by a day, where
 that page took the date in UTC instead; the tags are what this follows.
 
 The first and third releases were tagged `0.01` and `0.03` and renamed to
-`0.0.1` and `0.0.3`, which is the naming the other six use and the naming used
-here. Both old tags are still in the repository, pointing at the same two
+`0.0.1` and `0.0.3`, which is the naming every other release uses and the naming
+used here. Both old tags are still in the repository, pointing at the same two
 commits as their new names.
 
-## 0.1.0 — unreleased
+## 0.1.1 — 29 October 2026
 
-The manifests say 0.1.0, so this is what is in them; the entry is written when
-the tag is, from what is between the two tags.
+The tempo's octave taken from what kind of record it is, hot cues that mean the
+same thing on every record, the words timed against the record rather than a
+separated voice, and drive writes a failing stick cannot leave half done.
+
+There is no 0.1.0. The manifests carried that number from just after 0.0.9 with
+no tag behind it, and the release that follows 0.0.9 is this one.
+
+**What kind of record it is**
+
+- The genre, as one of the 400 styles Discogs files records under — Goa trance
+  rather than progressive, tech house rather than hard house — heard by the
+  Music Technology Group's Discogs-EffNet model, run in pure Rust. It is a
+  switch in Settings, **Hear the genre of each track analysed**, off by default,
+  and about thirteen seconds a five-minute track; it shows as a Genre column,
+  a line in the inspector with the model's confidence, and the genre on the
+  drive, and `booth-cli genre` asks it from the command line.
+- The model is theirs, under CC BY-NC-SA 4.0, and is neither shipped nor
+  downloaded: Booth looks for it in the setting, then `BOOTH_GENRE_MODEL`, then
+  `~/.cache/booth/models/`. Its front end was checked against Essentia stage by
+  stage: given Essentia's own 16 kHz audio the 400 activations agree to 0.0001,
+  and from an MP3 through Booth's own decoder to 0.061, which is what Essentia's
+  own resampling qualities differ by on the same file.
+- A genre tag is somebody's answer, so the model's genre goes in the way a
+  lookup's names do: a file with none takes it, one that agrees is left alone,
+  and one that disagrees is asked about. What you choose there is kept, and
+  later analyses leave it alone. **Guess genre** on a row's menu listens to one
+  track for its genre and changes nothing else.
+
+**Tempo, the grid and the one**
+
+- The tempo's octave goes by the genre. Hip hop at 86 is counted at 86 and drum
+  and bass at 172 at 172, and the tempo alone cannot tell them apart. With the
+  genre switch on, the genre is heard before the beats are tracked, and each of
+  the model's five surest styles votes for the octave nearest the range its
+  genre is played at, as sure as the model was of it. The ranges are a table of
+  76 club genres in twelve families, from R&B at 70–100 to frenchcore at
+  190–220, each with the names it goes by (`genre_tempos.json`). A genre has no
+  say where both octaves are more than a third of an octave from its range, and
+  an octave is taken at 0.3 or more and ahead of any other.
+- Where the model is off or not sure, the file's genre tag does the same, so a
+  collection with no model still gets it. A genre felt at half is placed where
+  it is written, as madmom and Essentia count it — dubstep and trap at 140 —
+  which a listener agreed with on a second listen of three dubstep records.
+  Halftime, which the table did not have, is its own genre at 80–90.
+- The genre that placed a tempo is kept with the track, so measuring the grid
+  again or analysing with the switch off keeps the octave; the logs say when a
+  tempo was moved and from what. A tempo given by hand wins.
+- The tempo is chosen by the metrical levels around a candidate, not the most
+  periodic lag alone, which on a rhythm in threes over the four is a lag in
+  threes: VogelAudio's Circuit Breaker read 86.67 where madmom and Essentia
+  both have 130, and now reads 130.
+- Measured against madmom and Essentia on 75 CC records, counting the 62
+  tempos the two agree on or a listener has counted: Booth has 52 without the
+  genre and 58 with it. Seven records read at double or half came right; one
+  went wrong, a record a listener counts at 92 that the model hears as hardcore,
+  which the table plays at 150–200.
+- The beats go on the kick. They followed onsets over the whole spectrum, which
+  a hat fills and a kick barely touches, and a record with a quiet hat on every
+  off-beat had all 67 beats on the hat; on 25 CC records the beats sat half a
+  beat off for over a quarter of the way on twelve.
+- A record made at one tempo gets one straight grid, through its breakdowns
+  too: 22 of the 25 now, 20 of them at a whole number of BPM to within a
+  hundredth, where main straightened three. A record whose tempo moves is
+  tracked as it was.
+- The one is read from the backbeat and the harmony where the kick cannot tell
+  — a kick on every beat hits all four alike, and on 8 of 18 records the winner
+  led by 1 to 2 per cent. On eleven records with a sure reference every bar line
+  is now right, where it was 16 per cent of them.
+
+**Hot cues and the drops**
+
+- A to D mean the same thing on every record, so a hand that has learnt a pad
+  reaches for the same moment on the next: **A** the hook sung outside a drop,
+  **B** the main break, **C** the hook sung in a drop at least eight bars from
+  D, **D** the main drop. Each is left empty on a record that has none of it.
+  E to H are the rest in time order, filled by what a set needs next: a way in,
+  a way out, a build, an instrumental stretch of eight bars or more to lay
+  another vocal over (`Instrumental · 20 bars`), and a second line the room
+  sings.
+- D is the first drop after the main break, not the loudest: a club record's
+  drops are mastered about as hard as each other. B is the longest break, and of
+  those within two bars of it the latest, and never one of two bars or less.
+- No two hot cues sit within two bars of each other, because pressed, the
+  earlier reaches the later before a hand finds the second button; the later
+  becomes a marker and the button goes to whatever is next.
+- A line the room sings has one button, at its best airing rather than its
+  first, and a line inside a longer one ("praise you" in "I have to praise you
+  like I should") gives its button to the longer.
+- A word cue goes on the bar line before the line where the way in is clear,
+  and never inside a word, and a line's start is found in the stem's breath
+  before it rather than taken from a lyric timed against another pressing: on
+  material with lyric times thrown off by up to 0.7 s, all 40 starts were found
+  within 40 ms.
+- The main drop and break are found by how much each bar plays — power and how
+  far the low band climbs — rather than by the sections' names. With a kit
+  rendered, the drum stem finds breaks the mix hides, such as a bassline plucked
+  through a breakdown: eight bars of drums below a quarter of their range is a
+  break.
+- A loop a deck saved survives a stick being read back, and a rekordbox import
+  keeps a cue's end; the waveform draws a loop's length along its flag.
+- Each cue type is grabbed from its own third of the waveform, dragging a phrase
+  boundary takes the section's memory cue with it, and a cue named for the
+  words is renamed for the words it is dragged onto.
+
+**The words**
+
+- The recogniser reads the record itself, cut to where the vocal stem is
+  singing, rather than the stem, whose separation scars it hears as syllables.
+  On a spoken lyric over a synthetic band, eight lines: the stem put none
+  within half a second, the whole record two, the record cut by the voice all
+  eight.
+- Words a lyrics server has only as text take their times from what the
+  recogniser hears, lined up in order so a repeated hook's second airing cannot
+  land before its first; each heard word now has its own time.
+- After every change the words are written beside the track as `<name>.lrc`,
+  the file every lyrics program looks for first. A lyric file Booth did not
+  write is never written over.
+- A lyric file is read for repeats the way a person wrote it: whole lines,
+  then the pieces between punctuation, then runs of three words or more.
+- The panels are **Lyrics**, **Cue Analysis** and **Lyric Frequencies**, each
+  expandable; Cue Analysis opens with the buttons and what each is for, and
+  **Copy** and **Copy with times** take the words out.
+- The recogniser model worth having is large-v3-turbo; base.en is for trying
+  the feature.
+
+**Stems**
+
+- A second separator, **RoFormer**, under **Separator** in Settings and
+  `--backend roformer`: a band-split RoFormer for the voice, about three
+  decibels cleaner than Hybrid Demucs, and demucs for the rest. It drives a
+  locally installed `audio-separator` (Python 3.12 or 3.13, about 1 GB of
+  weights), and wants a GPU or Apple Silicon: 29 minutes for 64 seconds on four
+  CPU cores. Demucs stays the default.
+- Stems fold away under their record, behind an arrow, with → and ← to open and
+  close them.
+- Long work no longer holds up the track in front of you: the deck's decode,
+  a clicked row's picture and a re-measure run on a second worker, and the
+  per-track buttons stay pressable and queue. A five-minute MP3 decoded in
+  735 ms beside a demucs render, where it had waited about two minutes behind
+  one.
+
+**The drive**
+
+- Every file written to a drive is landed whole — written beside its name,
+  flushed and renamed — and read back off the device past the page cache, and
+  the audio is compared with its source byte for byte. A drive that fails a
+  write stops the export at the first failure, names the drive, and leaves both
+  databases as the last write made them, so the stick still plays what it did.
+- The machine is held awake while a write runs.
+- A write that will not fit is refused before a byte is written, with both
+  numbers; `--no-space-check` writes regardless. A file of 4 GiB or more is
+  refused on a FAT32 stick before the write starts.
+- `booth-cli audit <drive>`, and **What each player sees** on the sync sheet,
+  read a drive and change nothing: where its two databases disagree, and for
+  each generation of player the audio it cannot open and the analysis files
+  it will not find. It works on drives other programs wrote.
+- A write with no OneLibrary database removes a stale `exportLibrary.db` rather
+  than leaving last week's for a CDJ-3000X to browse, and a write with one bad
+  file keeps every good file's rows.
+- A second write prepares only what changed: one track added to 400 in 0.52 s.
+  The figures are on the site's Speed page, and `scripts/speed.sh` takes them
+  on your own drive.
+
+**Players and emulators**
+
+- The three-band waveform has been seen drawn on a player from a drive this
+  wrote.
+- How to try a drive on a CDJ-2000NXS2's own firmware under QEMU, and on seven
+  older players experimentally, with two ignored tests that boot a deck on a
+  written drive. None of it has been run yet; it is not a hardware result.
+
+**Fixed**
+
+- The `._` files a Mac leaves beside every file on a FAT32 or exFAT drive no
+  longer come in as a second, silent copy of every track. Imports and every
+  command skip them, the window takes out any already in, and one in the
+  library folder or on an external drive is deleted.
+- A failed decode no longer leaves the deck loading for good.
+- A lyric file with a run of lines stamped at one time no longer puts a cue on
+  that time.
+- The report under the cues no longer lists every marker as moved from Start.
+
+**The project**
+
+- Tempo measured against two trackers that are not Booth's, madmom and Essentia,
+  kept in `scripts/reference/` and in ignored tests; seven records counted by
+  ear, and three more agreed.
+- A debug build writes `<file>.log` beside each track it analyses, with the
+  numbers each decision was made on.
+- Six bug reports against rekordbox and other writers turned into tests, which
+  found three of the faults above.
+- `scripts/make-bundle.sh` takes its version from the manifest when it is not
+  given one.
+- The website and the README brought up to 0.0.9 and then to this.
 
 ## 0.0.9 — 15 October 2026
 

@@ -78,7 +78,7 @@ const SLIPS: [(f64, &str); 7] = [
 /// the answer and the references are not asked: the two can agree with each
 /// other and both be wrong. They were an octave out on Introspect and Hard Epic
 /// Dubstep, and gave Procedure238, which has no tempo, one.
-const BY_EAR: [(&str, Option<f64>); 7] = [
+const BY_EAR: [(&str, Option<f64>); 10] = [
     // Trip hop at 82; madmom and Essentia both hear 164.
     ("Jenova_7", Some(82.0)),
     // Half-time dubstep counted at 70; the two both hear 140.
@@ -95,6 +95,12 @@ const BY_EAR: [(&str, Option<f64>); 7] = [
     ("Producer_Snafu", Some(92.0)),
     // Counted at 120; madmom hears 64 and Essentia 120.
     ("Klassikkos", Some(120.0)),
+    // Dubstep at the 140 it is written at, which madmom and Essentia both
+    // hear and a listener agreed on a second listen, over the 70 it is felt
+    // at: so the genre tempo table's dubstep stays at 138 to 145.
+    ("Boktor", Some(140.0)),
+    ("DeepForest", Some(140.0)),
+    ("Backlash", Some(144.0)),
 ];
 
 /// The records Booth is known to read at another tempo than the two agree on,
@@ -128,21 +134,15 @@ const KNOWN: [(&str, &str); 10] = [
 
 /// The records Booth is known to miss with the genres' octave as well: the
 /// [`KNOWN`] misses the genre does not reach, which the model hears as
-/// experimental (Procedure238, Klassikkos) and ambient (Ryan L's), and those
-/// on which the genre tempo table and the count disagree on the octave.
-const KNOWN_WITH_GENRE: [(&str, &str); 7] = [
+/// experimental (Procedure238, Klassikkos) and ambient (Ryan L's), and one on
+/// which a listener and the genre tempo table disagree.
+const KNOWN_WITH_GENRE: [(&str, &str); 4] = [
     ("Procedure238", "a tempo"),
     ("ryan_l", "2/3"),
     ("Klassikkos", "1.11x"),
     // Counted at 92. The model hears speedcore, hardcore and gabber, and the
     // table plays hardcore from 150 to 200, so it goes from 92.5 to 185.
     ("Producer_Snafu", "double"),
-    // Dubstep, tagged so and heard so, which madmom and Essentia count at the
-    // 140 it is written at and the table at the 70 it is felt at, as a
-    // listener counts Hard Epic Dubstep. The table's is the answer Booth gives.
-    ("Boktor", "half"),
-    ("DeepForest", "half"),
-    ("Backlash", "half"),
 ];
 
 /// What a ratio of two tempos reads as, or the number where it is none of them.

@@ -5,17 +5,16 @@
 //! families, each with the range of tempos its scene plays at, where its
 //! records cluster and the other names it goes by, put together for Booth from
 //! the DJ and production guides its `sources` list. It is kept as it came but
-//! for two genres counted where they are felt rather than where they are
-//! written: dubstep, from 60 to 120 rather than 138 to 145, and halftime,
-//! added at 80 to 90, the half of drum and bass it is. A newer table can
-//! replace it.
+//! for one genre added: halftime, at 80 to 90, the half of drum and bass it is
+//! felt at. A newer table can replace it.
 //!
-//! Only the range is read, and it is where the grid goes. So dubstep and
-//! halftime go at the half they are danced to, and the other genres the table
-//! says are felt at half, trap and future bass, at the tempo they are written
-//! at. `alt_octave_bpm`, the octave analysers mistake a genre for, is the
-//! range halved or doubled, which is what the octave rule tries anyway; see
-//! [`super::tempo::Genre`].
+//! Only the range is read, and it is where the grid goes. So the genres the
+//! table says are felt at half — dubstep, trap and future bass — go at the
+//! tempo they are written at, as the references count them and as a listener
+//! agreed of three dubstep records on a second listen. Halftime goes at its
+//! half, where its own range puts it. `alt_octave_bpm`, the octave analysers
+//! mistake a genre for, is the range halved or doubled, which is what the
+//! octave rule tries anyway; see [`super::tempo::Genre`].
 //!
 //! A genre is found by its name, its id or one of its aliases, in a tag or a
 //! Discogs style alike, so that the model and a tag that say the same thing
@@ -236,9 +235,9 @@ mod tests {
     }
 
     #[test]
-    fn dubstep_and_halftime_are_counted_where_they_are_felt() {
+    fn halftime_is_counted_where_it_is_felt_and_dubstep_where_it_is_written() {
         let dubstep = called("dubstep").unwrap();
-        assert_eq!((dubstep.from_bpm, dubstep.to_bpm), (60.0, 120.0));
+        assert_eq!((dubstep.from_bpm, dubstep.to_bpm), (138.0, 145.0));
         let found = heard_as(&[("Electronic", "Halftime", 0.4), ("Electronic", "Dubstep", 0.3)]);
         assert_eq!(ids(&found), ["halftime", "dubstep"]);
         assert_eq!((found[0].from_bpm, found[0].to_bpm), (80.0, 90.0));
