@@ -14,6 +14,10 @@ use crate::theme;
 /// A column, which is both something to draw and something to sort by.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Column {
+    /// Where the track comes in the playlist being shown. A set is an order,
+    /// so in a playlist this is the column the list starts sorted by; it is
+    /// laid out only there, because the collection has no order of its own.
+    Order,
     Artist,
     Title,
     Bpm,
@@ -27,7 +31,8 @@ pub enum Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 8] = [
+    pub const ALL: [Column; 9] = [
+        Column::Order,
         Column::Artist,
         Column::Title,
         Column::Bpm,
@@ -40,6 +45,7 @@ impl Column {
 
     pub fn name(self) -> &'static str {
         match self {
+            Column::Order => "#",
             Column::Artist => "Artist",
             Column::Title => "Title",
             Column::Bpm => "BPM",
@@ -62,6 +68,7 @@ impl Column {
     /// What the column says it is for, in the menu that adds and removes them.
     fn about(self) -> &'static str {
         match self {
+            Column::Order => "Where it comes in the playlist, shown in a playlist",
             Column::Artist => "Who made it",
             Column::Title => "What it is called",
             Column::Bpm => "Tempo, from the grid",
@@ -84,6 +91,9 @@ impl Column {
     /// Breaks", "Italo-Disco" — are eighteen characters.
     pub fn default_width(self) -> f32 {
         match self {
+            // The kit's arrow shares the first column, so this is the arrow's
+            // strip and room for a three-figure position after it.
+            Column::Order => 48.0,
             Column::Artist => 230.0,
             Column::Title => 360.0,
             Column::Bpm => 58.0,
@@ -163,7 +173,14 @@ impl Layout {
         });
         for column in Column::ALL {
             if !seen.contains(&column) {
-                self.columns.push(Slot { column, width: column.default_width(), shown: true });
+                let slot = Slot { column, width: column.default_width(), shown: true };
+                // A playlist's order reads first, as a set list's numbers do,
+                // so a settings file from before it had the column gets it at
+                // the front rather than after the file's location.
+                match column {
+                    Column::Order => self.columns.insert(0, slot),
+                    _ => self.columns.push(slot),
+                }
             }
         }
         for slot in &mut self.columns {
@@ -171,14 +188,16 @@ impl Layout {
                 slot.width = slot.column.default_width();
             }
         }
-        if !self.columns.iter().any(|slot| slot.shown) {
+        if self.showing() == 0 {
             *self = Self::default();
         }
     }
 
-    /// How many columns are on.
+    /// How many columns are on, not counting a playlist's order, which the
+    /// collection does not lay out: a list left with only that one would be
+    /// blank everywhere but in a playlist.
     fn showing(&self) -> usize {
-        self.columns.iter().filter(|slot| slot.shown).count()
+        self.columns.iter().filter(|slot| slot.shown && slot.column != Column::Order).count()
     }
 
     /// Turn a column on or off, refusing to turn the last one off.
@@ -248,8 +267,21 @@ impl Layout {
     /// would be the other answer, and it is the wrong one here — a header that
     /// can be scrolled off is a header that stops saying what a column is.
     pub fn widths(&self, total: f32) -> Widths {
-        let mut shown: Vec<(Column, f32)> =
-            self.columns.iter().filter(|slot| slot.shown).map(|s| (s.column, s.width)).collect();
+        self.lay_out(total, false)
+    }
+
+    /// The same, for a playlist: with its order, where that is turned on.
+    pub fn widths_in_playlist(&self, total: f32) -> Widths {
+        self.lay_out(total, true)
+    }
+
+    fn lay_out(&self, total: f32, in_playlist: bool) -> Widths {
+        let mut shown: Vec<(Column, f32)> = self
+            .columns
+            .iter()
+            .filter(|slot| slot.shown && (in_playlist || slot.column != Column::Order))
+            .map(|s| (s.column, s.width))
+            .collect();
         if shown.is_empty() {
             return Widths(shown);
         }
@@ -288,6 +320,12 @@ impl Sort {
             true => Self { column, descending: !self.descending },
             false => Self { column, descending: column.starts_descending() },
         }
+    }
+
+    /// A playlist in the order it was put together in, which is how every
+    /// playlist opens.
+    pub fn in_playlist_order() -> Self {
+        Self { column: Column::Order, descending: false }
     }
 
     /// The mark next to the column being sorted by.
@@ -642,10 +680,14 @@ pub struct Menu<'a> {
 }
 
 /// Draw one line. Returns what the pointer did, if anything.
+///
+/// `position` is where the track comes in the playlist being shown, from zero,
+/// or nothing outside a playlist and for a stem.
 pub fn row(
     ui: &mut Ui,
     track: &Track,
     branch: Branch,
+    position: Option<usize>,
     selected: bool,
     widths: &Widths,
     menu: Menu<'_>,
@@ -750,6 +792,11 @@ pub fn row(
         };
         let (x, width) = (left + lead, full - lead);
         match column {
+            Column::Order => {
+                if let Some(at) = position {
+                    text(&painter, rect, x, width, &(at + 1).to_string(), theme::dim(), true);
+                }
+            }
             Column::Artist => {
                 let artist = match indented {
                     true => format!("↳ {}", track.artist),
@@ -919,6 +966,9 @@ pub fn compare(a: &Track, b: &Track, sort: Sort) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     let missing = |track: &Track| match sort.column {
+        // A position is the playlist's, not the track's: the list sorts by it
+        // itself, and here it is a tie broken by the names.
+        Column::Order => false,
         Column::Artist => track.artist.trim().is_empty(),
         Column::Title => track.title.trim().is_empty(),
         Column::Bpm => !track.has_grid || track.bpm <= 0.0,
@@ -936,6 +986,7 @@ pub fn compare(a: &Track, b: &Track, sort: Sort) -> std::cmp::Ordering {
     }
 
     let order = match sort.column {
+        Column::Order => Ordering::Equal,
         Column::Artist => text_of(&a.artist).cmp(&text_of(&b.artist)),
         Column::Title => text_of(&a.title).cmp(&text_of(&b.title)),
         Column::Bpm => a.bpm.total_cmp(&b.bpm),
@@ -1131,7 +1182,8 @@ mod tests {
                 "{total} wide came out {}",
                 widths.total()
             );
-            assert_eq!(widths.iter().count(), Column::ALL.len(), "a column went missing");
+            // Every one but a playlist's order, which the collection has none of.
+            assert_eq!(widths.iter().count(), Column::ALL.len() - 1, "a column went missing");
         }
     }
 
@@ -1141,7 +1193,7 @@ mod tests {
         // exactly like one that was turned off — and the way to get it back
         // would be to widen a window nobody knew had to be widened.
         let widths = Layout::default().widths(300.0);
-        assert_eq!(widths.iter().count(), Column::ALL.len());
+        assert_eq!(widths.iter().count(), Column::ALL.len() - 1);
         for (column, width) in widths.iter() {
             assert!(width > 0.0, "{} came out {width}", column.name());
         }
@@ -1153,7 +1205,12 @@ mod tests {
         // thing that can use it — the file path, which is the longest thing in
         // the row — rather than opening a gap at the right.
         let layout = Layout::default();
-        let stored: f32 = layout.columns.iter().map(|slot| slot.width).sum();
+        let stored: f32 = layout
+            .columns
+            .iter()
+            .filter(|slot| slot.column != Column::Order)
+            .map(|slot| slot.width)
+            .sum();
         let widths = layout.widths(stored + 200.0);
         assert_eq!(widths.of(Column::Bpm), Some(Column::Bpm.default_width()));
         assert_eq!(
@@ -1169,12 +1226,44 @@ mod tests {
         layout.toggle(Column::Location);
         let widths = layout.widths(1072.0);
         assert_eq!(widths.of(Column::Location), None, "a hidden column was still laid out");
-        assert_eq!(widths.iter().count(), Column::ALL.len() - 1);
+        assert_eq!(widths.iter().count(), Column::ALL.len() - 2);
         assert!((widths.total() - 1072.0).abs() < 0.01, "the row stopped filling the window");
 
         // And comes back where it was, at the width it had.
         layout.toggle(Column::Location);
-        assert_eq!(layout.widths(1072.0).iter().count(), Column::ALL.len());
+        assert_eq!(layout.widths(1072.0).iter().count(), Column::ALL.len() - 1);
+    }
+
+    #[test]
+    fn a_playlists_order_is_laid_out_first_in_a_playlist_and_nowhere_else() {
+        let layout = Layout::default();
+        assert_eq!(layout.widths(1072.0).of(Column::Order), None);
+        let in_playlist = layout.widths_in_playlist(1072.0);
+        assert_eq!(in_playlist.iter().next().map(|(column, _)| column), Some(Column::Order));
+        assert!((in_playlist.total() - 1072.0).abs() < 0.01, "the row stopped filling it");
+    }
+
+    #[test]
+    fn a_layout_from_before_the_playlists_order_gets_it_at_the_front() {
+        // What a settings file written before the column existed holds.
+        let mut layout = Layout::default();
+        layout.columns.retain(|slot| slot.column != Column::Order);
+        layout.repair();
+        assert_eq!(layout.columns.first().map(|slot| slot.column), Some(Column::Order));
+        assert_eq!(layout.columns.len(), Column::ALL.len());
+    }
+
+    #[test]
+    fn the_order_alone_does_not_count_as_a_column_left_on() {
+        // In the collection it is not laid out, so with everything else off
+        // the list would be blank there.
+        let mut layout = Layout::default();
+        for column in Column::ALL {
+            if column != Column::Order {
+                layout.toggle(column);
+            }
+        }
+        assert!(layout.widths(1072.0).iter().count() >= 1, "the collection was left blank");
     }
 
     #[test]
