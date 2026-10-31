@@ -1284,25 +1284,34 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             // The one thing on a drive the collection cannot make for itself.
             // Read after the copy rather than before it, so that a history this
             // fails to make sense of has still been stored.
+            //
+            // From both databases, because which one a player writes to is a
+            // matter of its generation, and one drive can have been played on
+            // both. Neither failing stops the other being read.
+            let mut sessions = Vec::new();
             if let Some(key) = key {
                 match crate::history::read(&root, &key) {
-                    Ok(sessions) if !sessions.is_empty() => {
-                        let played = sessions.iter().map(|s| s.played.len()).sum::<usize>();
-                        crate::info!(
-                            "{} read off {drive}, {}",
-                            crate::library::plural(sessions.len(), "session"),
-                            crate::library::plural(played, "track")
-                        );
-                        let _ = reporter.tx.send(Update::Played {
-                            drive: drive.clone(),
-                            root: root.clone(),
-                            sessions,
-                        });
-                        (reporter.wake)();
-                    }
-                    Ok(_) => {}
-                    Err(e) => crate::debug!("no history off {drive}: {e:#}"),
+                    Ok(found) => sessions.extend(found),
+                    Err(e) => crate::debug!("no OneLibrary history off {drive}: {e:#}"),
                 }
+            }
+            match crate::history::read_legacy(&root) {
+                Ok(found) => sessions.extend(found),
+                Err(e) => crate::warn!("could not read the history in {drive}'s export.pdb: {e:#}"),
+            }
+            if !sessions.is_empty() {
+                let played = sessions.iter().map(|s| s.played.len()).sum::<usize>();
+                crate::info!(
+                    "{} read off {drive}, {}",
+                    crate::library::plural(sessions.len(), "session"),
+                    crate::library::plural(played, "track")
+                );
+                let _ = reporter.tx.send(Update::Played {
+                    drive: drive.clone(),
+                    root: root.clone(),
+                    sessions,
+                });
+                (reporter.wake)();
             }
             Ok(())
         }

@@ -9,17 +9,21 @@ Flags that are out of date come last, with the on-screen one first among them.
 
 ## Drives and backups
 
-### Read play history from `export.pdb`
+### Keep a drive's history through a sync
 
-`booth/src/history.rs:19`, and the test at `:243`: *"a parser that does not
-exist here yet"*. Also `booth/README.md:2107`, the spec's status table (HIST-1)
-and the site's *What is next*.
+`proto/musicai/src/commands.rs`, where the export builds its database: *"it has
+to be read off before this runs"*. Also `booth/README.md`, *What was played
+comes back*: *"a sync is the end of a drive's history"*.
 
-History is read only from `exportLibrary.db`. A CDJ-3000 writes its own into
-`export.pdb`, and reading rows back out of DeviceSQL is not written: `inspect`
-walks the pages and counts rows without decoding one. A drive played only on
-older hardware has a history Booth does not see, and says so rather than
-reporting it empty.
+Both databases are written with no history in them, so whatever a player
+recorded is gone after the next sync. It is read off when the drive is copied,
+which happens when it is plugged in, unless **Keep a copy of every drive** is
+off — and the sweep that starts a copy waits while another job runs, so a sync
+started straight after plugging in can get there first. Either read the history
+before every write, or carry it into the new databases: the `export.pdb` writer
+can now write a history (`HistoryPlaylist`), with track ids mapped from the old
+database to the new by path, and carrying it would also keep a CDJ-3000's
+numbering going rather than starting at `HISTORY 001` after each sync.
 
 ### Merge a deck's edits back, and report the set
 

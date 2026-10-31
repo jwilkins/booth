@@ -8,7 +8,7 @@
 use std::io::Cursor;
 
 use binrw::BinRead;
-use booth_cli::export::pdb::{Database, Playlist, Track};
+use booth_cli::export::pdb::{Database, HistoryPlaylist, Playlist, Track};
 use rekordcrate::pdb::{Header, PageType, Row};
 
 fn track(id: u32, title: &str, artist: &str) -> Track {
@@ -219,6 +219,41 @@ fn a_playlist_holds_its_tracks_in_order() {
             in_playlist(3)
         );
     }
+}
+
+/// The lists a player keeps of what it played, written the way a player
+/// writes them. Nothing that goes on a drive has any; the window's reading of
+/// a CDJ-3000's history is tested against these, so they had better be what
+/// somebody else's parser reads as one.
+#[test]
+fn a_history_written_as_a_player_writes_one_parses_as_its_lists_and_their_order() {
+    let mut database = demo();
+    database.history = vec![
+        HistoryPlaylist { id: 1, name: "HISTORY 001".into(), track_ids: vec![3, 1] },
+        HistoryPlaylist { id: 2, name: "HISTORY 002".into(), track_ids: vec![2] },
+    ];
+    let all = read_all(&database.to_bytes().unwrap());
+
+    let lists = rows_of(&all, PageType::HistoryPlaylists);
+    assert_eq!(lists.len(), 2);
+    assert!(find(lists, "HISTORY 001").contains("HistoryPlaylistId(1)"));
+    assert!(find(lists, "HISTORY 002").contains("HistoryPlaylistId(2)"));
+
+    let entries = described(rows_of(&all, PageType::HistoryEntries));
+    assert_eq!(entries.len(), 3);
+    for (list, position, track) in [(1, 1, 3), (1, 2, 1), (2, 1, 2)] {
+        assert!(
+            entries.iter().any(|e| e.contains(&format!("track_id: TrackId({track})"))
+                && e.contains(&format!("playlist_id: HistoryPlaylistId({list})"))
+                && e.contains(&format!("entry_index: {position}"))),
+            "list {list} is missing track {track} at position {position}: {entries:?}"
+        );
+    }
+    assert_eq!(
+        rows_of(&all, PageType::PlaylistTree).len(),
+        3,
+        "a history is not a playlist, and leaves the tree alone"
+    );
 }
 
 #[test]
