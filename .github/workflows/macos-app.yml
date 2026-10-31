@@ -39,7 +39,10 @@ concurrency:
 
 jobs:
   package:
-    runs-on: macos-14
+    # macOS 15 rather than 14, which GitHub retires on 2 November 2026: by the
+    # end of October a macos-14 job was cancelled before any runner took it,
+    # twice running, and the 0.1.1 tag had no app until this moved.
+    runs-on: macos-15
     steps:
       # The tag's own code, not the branch's. A release published from the web
       # interface reports the branch it was cut from in `github.ref`, so
