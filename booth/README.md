@@ -414,8 +414,9 @@ loud end, and the choice is remembered between runs.
 **A playlist opens in its own order.** A set is put together in an order, so in
 a playlist a **#** column comes first, giving each track's place in it, and the
 list is sorted by it whatever the collection is sorted by. Clicking another
-heading sorts the playlist by that for as long as it is being looked at; the
-next time a playlist is opened it is in its own order again, and the
+heading sorts that playlist by it, and it stays so — opened again, or after a
+restart — until its **#** is clicked, which puts it back in its own order. Each
+playlist keeps its own, renaming one takes its sort with it, and the
 collection's sort is left as it was. The collection has no order of its own, so
 the **#** column is not laid out there.
 

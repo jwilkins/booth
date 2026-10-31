@@ -219,13 +219,10 @@ pub struct App {
 
     /// The rows the query produced, rebuilt whenever anything changes.
     rows: Vec<Row>,
-    /// Which column the collection is ordered by, kept in the settings.
+    /// Which column the collection is ordered by, kept in the settings. Each
+    /// playlist has its own, in the settings beside it: see
+    /// [`config::Config::playlist_sorts`].
     sort: rows::Sort,
-    /// Which column the playlist being shown is ordered by. Its own order
-    /// whenever one is opened, and not kept: a set is put together in an
-    /// order, and sorting one by artist to find something is a look rather
-    /// than a new way to read every playlist from then on.
-    playlist_sort: rows::Sort,
     selected: Option<u32>,
     /// Every row in the selection, the focused one included.
     ///
@@ -956,7 +953,6 @@ impl App {
             playlist: String::new(),
             rows: Vec::new(),
             sort: config_sort,
-            playlist_sort: rows::Sort::in_playlist_order(),
             selected: None,
             marked: std::collections::HashSet::new(),
             anchor: None,
@@ -1471,22 +1467,61 @@ impl App {
         }
     }
 
-    /// Show a playlist, in the order it was put together in, whatever the last
-    /// one was sorted by.
+    /// Show a playlist, sorted however it was last sorted, which until a
+    /// heading is chosen in it is the order it was put together in.
     fn open_playlist(&mut self, name: &str) {
         self.view = View::Playlist;
         self.playlist = name.to_string();
-        self.playlist_sort = rows::Sort::in_playlist_order();
         self.rebuild();
     }
 
-    /// What the list is ordered by as it is shown: a playlist's own sort in a
-    /// playlist, the collection's everywhere else.
+    /// What the list is ordered by as it is shown: the playlist's own sort in
+    /// a playlist, the collection's everywhere else.
     fn sort_in_view(&self) -> rows::Sort {
         match self.view {
-            View::Playlist => self.playlist_sort,
+            View::Playlist => self
+                .config
+                .playlist_sorts
+                .get(&self.playlist)
+                .copied()
+                .unwrap_or_else(rows::Sort::in_playlist_order),
             _ => self.sort,
         }
+    }
+
+    /// What clicking a heading does: sort what is shown by it, or turn it round.
+    ///
+    /// In a playlist the choice is that playlist's alone, and stays until its
+    /// `#` is pressed. Pressing it puts the playlist back in its own order and
+    /// forgets the heading, rather than keeping a note that says the default:
+    /// a playlist renamed or opened on another machine then has nothing to
+    /// disagree with.
+    fn sort_by(&mut self, column: rows::Column) {
+        let was = self.sort_in_view();
+        let now = was.clicked(column);
+        match self.view {
+            View::Playlist if now == rows::Sort::in_playlist_order() => {
+                self.config.playlist_sorts.remove(&self.playlist);
+            }
+            View::Playlist => {
+                self.config.playlist_sorts.insert(self.playlist.clone(), now);
+            }
+            _ => {
+                self.sort = now;
+                self.config.sort = now;
+            }
+        }
+        if let Err(e) = self.config.save(&self.config_path) {
+            crate::warn!("could not save the sort: {e:#}");
+        }
+        crate::debug!(
+            "sort {} {} (was {} {})",
+            now.column.name(),
+            if now.descending { "descending" } else { "ascending" },
+            was.column.name(),
+            if was.descending { "descending" } else { "ascending" }
+        );
+        self.pending.push(Pending::Resort);
     }
 
     fn rebuild(&mut self) {
@@ -5735,6 +5770,9 @@ impl App {
                             .clicked()
                         {
                             self.library.remove_playlist(&name);
+                            if self.config.playlist_sorts.remove(&name).is_some() {
+                                let _ = self.config.save(&self.config_path);
+                            }
                             if self.playlist == name {
                                 self.view = View::All;
                                 self.playlist.clear();
@@ -5815,6 +5853,14 @@ impl App {
                     // when the list it was showing changes its name.
                     if naming.what == What::RenamePlaylist && self.playlist == naming.subject {
                         self.playlist = naming.text.trim().to_string();
+                    }
+                    // And the heading it was sorted by goes with the name.
+                    if naming.what == What::RenamePlaylist {
+                        if let Some(sort) = self.config.playlist_sorts.remove(&naming.subject) {
+                            let name = naming.text.trim().to_string();
+                            self.config.playlist_sorts.insert(name, sort);
+                            let _ = self.config.save(&self.config_path);
+                        }
                     }
                     // Whatever the name was asked for on behalf of.
                     if !naming.holding.is_empty() {
@@ -6319,24 +6365,7 @@ impl App {
             }
         }
         if let Some(column) = head.sorted {
-            let was = self.sort_in_view();
-            match self.view {
-                View::Playlist => self.playlist_sort = was.clicked(column),
-                _ => {
-                    self.sort = was.clicked(column);
-                    self.config.sort = self.sort;
-                    let _ = self.config.save(&self.config_path);
-                }
-            }
-            let now = self.sort_in_view();
-            crate::debug!(
-                "sort {} {} (was {} {})",
-                now.column.name(),
-                if now.descending { "descending" } else { "ascending" },
-                was.column.name(),
-                if was.descending { "descending" } else { "ascending" }
-            );
-            self.pending.push(Pending::Resort);
+            self.sort_by(column);
         }
         widths
     }
@@ -21337,9 +21366,11 @@ mod tests {
         }
 
         #[test]
-        fn a_playlist_opens_in_the_order_it_was_put_together_in() {
+        fn a_playlist_keeps_the_heading_it_was_sorted_by_until_its_order_is_chosen_again() {
             // A set is an order: sorted by artist, the one built to open on
-            // the warm-up record opens on whoever sorts first.
+            // the warm-up record opens on whoever sorts first. So a playlist
+            // opens in its own order, and a heading chosen in it is that
+            // playlist's until its # is pressed.
             let mut app = app("set-order");
             let ids: Vec<u32> = ["Zola", "Adeyemi", "Mori"]
                 .iter()
@@ -21350,30 +21381,45 @@ mod tests {
                     id
                 })
                 .collect();
-            app.library.add_playlist("peak", "").unwrap();
-            app.add_tracks_to_playlist(&ids, "peak");
+            for name in ["peak", "warmup"] {
+                app.library.add_playlist(name, "").unwrap();
+                app.add_tracks_to_playlist(&ids, name);
+            }
             let listed = |app: &App| -> Vec<u32> {
                 app.rows.iter().filter(|row| !row.indented()).map(|row| row.track.id).collect()
             };
+            let by_artist = [ids[1], ids[2], ids[0]];
 
             app.open_playlist("peak");
             assert_eq!(listed(&app), ids, "not in the playlist's order");
             let positions: Vec<Option<usize>> = app.rows.iter().map(|row| row.position).collect();
             assert_eq!(positions, [Some(0), Some(1), Some(2)]);
 
-            // Sorting it by artist is a look, and the collection's sort is not
-            // touched by it.
+            // Sorted by artist, and the collection's sort is not touched by it.
             let collection = app.sort;
-            app.playlist_sort = app.playlist_sort.clicked(rows::Column::Artist);
+            app.sort_by(rows::Column::Artist);
             app.rebuild();
-            assert_eq!(listed(&app), [ids[1], ids[2], ids[0]]);
+            assert_eq!(listed(&app), by_artist);
             assert_eq!(app.sort, collection);
+            assert_eq!(app.config.sort, collection);
 
-            // Opened again, it is in its own order again.
+            // It stays so, opened again, and it is kept in the settings.
             app.view = View::All;
             app.rebuild();
             app.open_playlist("peak");
-            assert_eq!(listed(&app), ids, "the last sort stuck to the playlist");
+            assert_eq!(listed(&app), by_artist, "the playlist forgot its heading");
+            assert!(app.config.playlist_sorts.contains_key("peak"));
+
+            // Another playlist is its own, and in its own order.
+            app.open_playlist("warmup");
+            assert_eq!(listed(&app), ids, "one playlist's sort reached another");
+
+            // Pressing # puts it back, and forgets the heading.
+            app.open_playlist("peak");
+            app.sort_by(rows::Column::Order);
+            app.rebuild();
+            assert_eq!(listed(&app), ids);
+            assert!(app.config.playlist_sorts.is_empty(), "a note saying the default was kept");
         }
 
         #[test]
