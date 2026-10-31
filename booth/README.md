@@ -411,6 +411,14 @@ Artist, Title, BPM, Key, Energy, Genre, Stems, Location. **Click a heading to so
 it**; click again to reverse. Names start forwards, measurements start at the
 loud end, and the choice is remembered between runs.
 
+**A playlist opens in its own order.** A set is put together in an order, so in
+a playlist a **#** column comes first, giving each track's place in it, and the
+list is sorted by it whatever the collection is sorted by. Clicking another
+heading sorts the playlist by that for as long as it is being looked at; the
+next time a playlist is opened it is in its own order again, and the
+collection's sort is left as it was. The collection has no order of its own, so
+the **#** column is not laid out there.
+
 The header stays put when the list is scrolled, and it is where the columns are
 worked. **Drag a boundary between two headings** to make one wider and the one
 beside it narrower; the pair keeps its total, so nothing further along the row

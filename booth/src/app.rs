@@ -219,8 +219,13 @@ pub struct App {
 
     /// The rows the query produced, rebuilt whenever anything changes.
     rows: Vec<Row>,
-    /// Which column the browser is ordered by.
+    /// Which column the collection is ordered by, kept in the settings.
     sort: rows::Sort,
+    /// Which column the playlist being shown is ordered by. Its own order
+    /// whenever one is opened, and not kept: a set is put together in an
+    /// order, and sorting one by artist to find something is a look rather
+    /// than a new way to read every playlist from then on.
+    playlist_sort: rows::Sort,
     selected: Option<u32>,
     /// Every row in the selection, the focused one included.
     ///
@@ -843,6 +848,9 @@ struct Row {
     /// Where it sits in the tree. Companions are drawn indented, in the dim
     /// colour.
     branch: rows::Branch,
+    /// Where it comes in the playlist being shown, from zero; nothing outside
+    /// a playlist, and for a stem, which comes with its track.
+    position: Option<usize>,
 }
 
 impl Row {
@@ -931,7 +939,12 @@ impl App {
         config_path: PathBuf,
         status: String,
     ) -> Self {
-        let config_sort = config.sort;
+        // A playlist's order is no order for the whole collection, which has
+        // none; a settings file saying so is read as the default.
+        let config_sort = match config.sort.column {
+            rows::Column::Order => rows::Sort::default(),
+            _ => config.sort,
+        };
         let mut app = Self {
             library,
             library_path,
@@ -943,6 +956,7 @@ impl App {
             playlist: String::new(),
             rows: Vec::new(),
             sort: config_sort,
+            playlist_sort: rows::Sort::in_playlist_order(),
             selected: None,
             marked: std::collections::HashSet::new(),
             anchor: None,
@@ -1457,6 +1471,24 @@ impl App {
         }
     }
 
+    /// Show a playlist, in the order it was put together in, whatever the last
+    /// one was sorted by.
+    fn open_playlist(&mut self, name: &str) {
+        self.view = View::Playlist;
+        self.playlist = name.to_string();
+        self.playlist_sort = rows::Sort::in_playlist_order();
+        self.rebuild();
+    }
+
+    /// What the list is ordered by as it is shown: a playlist's own sort in a
+    /// playlist, the collection's everywhere else.
+    fn sort_in_view(&self) -> rows::Sort {
+        match self.view {
+            View::Playlist => self.playlist_sort,
+            _ => self.sort,
+        }
+    }
+
     fn rebuild(&mut self) {
         let started = std::time::Instant::now();
         self.query = Query::parse(&self.text);
@@ -1503,10 +1535,31 @@ impl App {
             in_view.retain(|track| self.library.get(track.id).is_some());
         }
 
+        // Where each track comes in the playlist being shown, which is a fact
+        // about the playlist rather than the track, so it is looked up here.
+        let positions: std::collections::HashMap<u32, usize> = match self.view {
+            View::Playlist => self
+                .library
+                .playlists
+                .iter()
+                .find(|p| p.name == self.playlist)
+                .map(|p| p.tracks.iter().enumerate().map(|(at, &id)| (id, at)).rev().collect())
+                .unwrap_or_default(),
+            _ => Default::default(),
+        };
+
         // Sorted before the companions are added, so a stem stays under the
         // track it came from however the list is ordered.
-        let sort = self.sort;
-        in_view.sort_by(|a, b| rows::compare(a, b, sort));
+        let sort = self.sort_in_view();
+        match sort.column {
+            rows::Column::Order => {
+                in_view.sort_by_key(|track| positions.get(&track.id).copied());
+                if sort.descending {
+                    in_view.reverse();
+                }
+            }
+            _ => in_view.sort_by(|a, b| rows::compare(a, b, sort)),
+        }
 
         // The companions come after the query rather than through it: an
         // acapella is shown because its parent matched, which is what keeps a
@@ -1519,10 +1572,12 @@ impl App {
                 (false, false) => rows::Branch::Closed,
                 (false, true) => rows::Branch::Open,
             };
-            self.rows.push(Row { track, branch });
+            let position = positions.get(&track.id).copied();
+            self.rows.push(Row { track, branch, position });
             if branch == rows::Branch::Open {
                 for companion in companions {
-                    self.rows.push(Row { track: companion, branch: rows::Branch::Stem });
+                    let stem = Row { track: companion, branch: rows::Branch::Stem, position: None };
+                    self.rows.push(stem);
                 }
             }
         }
@@ -1540,7 +1595,7 @@ impl App {
             self.rows.iter().filter(|row| !row.indented()).count(),
             plural(self.library.tracks.len(), "track"),
             plural(self.rows.len(), "row"),
-            self.sort.column.name(),
+            sort.column.name(),
             started.elapsed().as_secs_f64() * 1000.0,
             match self.text.trim().is_empty() {
                 true => String::new(),
@@ -5638,9 +5693,7 @@ impl App {
                         plural(count, "track")
                     ));
                     if response.clicked() {
-                        self.view = View::Playlist;
-                        self.playlist = name.clone();
-                        self.rebuild();
+                        self.open_playlist(&name);
                     }
                     response.context_menu(|ui| {
                         ui.label(RichText::new(&name).color(theme::dim()).size(theme::SMALL));
@@ -6237,8 +6290,12 @@ impl App {
     /// moved this frame lands on the next one, so the names and the rows under
     /// them are never a column apart even for a frame.
     fn header(&mut self, ui: &mut Ui, total: f32) -> rows::Widths {
-        let widths = self.config.columns.widths(total);
-        let head = rows::header_row(ui, &mut self.config.columns, &widths, self.sort);
+        let widths = match self.view {
+            View::Playlist => self.config.columns.widths_in_playlist(total),
+            _ => self.config.columns.widths(total),
+        };
+        let sort = self.sort_in_view();
+        let head = rows::header_row(ui, &mut self.config.columns, &widths, sort);
 
         if head.resized {
             self.layout_moved = true;
@@ -6262,14 +6319,20 @@ impl App {
             }
         }
         if let Some(column) = head.sorted {
-            let was = self.sort;
-            self.sort = self.sort.clicked(column);
-            self.config.sort = self.sort;
-            let _ = self.config.save(&self.config_path);
+            let was = self.sort_in_view();
+            match self.view {
+                View::Playlist => self.playlist_sort = was.clicked(column),
+                _ => {
+                    self.sort = was.clicked(column);
+                    self.config.sort = self.sort;
+                    let _ = self.config.save(&self.config_path);
+                }
+            }
+            let now = self.sort_in_view();
             crate::debug!(
                 "sort {} {} (was {} {})",
-                self.sort.column.name(),
-                if self.sort.descending { "descending" } else { "ascending" },
+                now.column.name(),
+                if now.descending { "descending" } else { "ascending" },
                 was.column.name(),
                 if was.descending { "descending" } else { "ascending" }
             );
@@ -6320,7 +6383,9 @@ impl App {
                 playlists: &playlist_names,
                 dragging: &carrying,
             };
-            if let Some(what) = rows::row(ui, &line.track, line.branch, selected, widths, menu) {
+            let drawn =
+                rows::row(ui, &line.track, line.branch, line.position, selected, widths, menu);
+            if let Some(what) = drawn {
                 hit = Some((line.track.id, what));
             }
         }
@@ -19380,9 +19445,11 @@ mod tests {
                 !layout.columns.iter().any(|s| s.column == rows::Column::Location && s.shown),
                 "the location column is still showing"
             );
+            // Location off, and a playlist's order, which the collection never
+            // lays out.
             assert_eq!(
                 harness.state().config.columns.widths(900.0).iter().count(),
-                rows::Column::ALL.len() - 1
+                rows::Column::ALL.len() - 2
             );
 
             right_click(&mut harness, at);
@@ -21267,6 +21334,46 @@ mod tests {
                 app.rows.iter().filter(|row| !row.indented()).map(|row| row.track.id).collect();
             assert_eq!(showing.len(), 3, "the list did not follow the drops: {showing:?}");
             assert_eq!(showing, ids);
+        }
+
+        #[test]
+        fn a_playlist_opens_in_the_order_it_was_put_together_in() {
+            // A set is an order: sorted by artist, the one built to open on
+            // the warm-up record opens on whoever sorts first.
+            let mut app = app("set-order");
+            let ids: Vec<u32> = ["Zola", "Adeyemi", "Mori"]
+                .iter()
+                .enumerate()
+                .map(|(i, artist)| {
+                    let id = app.library.add(std::path::Path::new(&format!("/music/{i}.flac")));
+                    app.library.get_mut(id).unwrap().artist = artist.to_string();
+                    id
+                })
+                .collect();
+            app.library.add_playlist("peak", "").unwrap();
+            app.add_tracks_to_playlist(&ids, "peak");
+            let listed = |app: &App| -> Vec<u32> {
+                app.rows.iter().filter(|row| !row.indented()).map(|row| row.track.id).collect()
+            };
+
+            app.open_playlist("peak");
+            assert_eq!(listed(&app), ids, "not in the playlist's order");
+            let positions: Vec<Option<usize>> = app.rows.iter().map(|row| row.position).collect();
+            assert_eq!(positions, [Some(0), Some(1), Some(2)]);
+
+            // Sorting it by artist is a look, and the collection's sort is not
+            // touched by it.
+            let collection = app.sort;
+            app.playlist_sort = app.playlist_sort.clicked(rows::Column::Artist);
+            app.rebuild();
+            assert_eq!(listed(&app), [ids[1], ids[2], ids[0]]);
+            assert_eq!(app.sort, collection);
+
+            // Opened again, it is in its own order again.
+            app.view = View::All;
+            app.rebuild();
+            app.open_playlist("peak");
+            assert_eq!(listed(&app), ids, "the last sort stuck to the playlist");
         }
 
         #[test]
