@@ -87,6 +87,23 @@ impl Field {
         }
     }
 
+    /// The key ffmpeg reads this field under from a WMA, or `None` for one it
+    /// does not map. It turns ASF's attributes into these: `Author` into
+    /// `artist`, `WM/AlbumTitle` into `album`, `WM/TrackNumber` into `track`.
+    pub fn ffmpeg_key(self) -> Option<&'static str> {
+        Some(match self {
+            Field::Title => "title",
+            Field::Artist => "artist",
+            Field::Album => "album",
+            Field::AlbumArtist => "album_artist",
+            Field::Date => "date",
+            Field::Genre => "genre",
+            Field::TrackNumber => "track",
+            Field::DiscNumber => "disc",
+            _ => return None,
+        })
+    }
+
     /// Human-readable name for reports.
     pub fn label(self) -> &'static str {
         match self {
@@ -317,6 +334,30 @@ pub fn read_metadata(path: &Path) -> Result<Metadata> {
                 }
             }
         }
+        Some(TagKind::Ogg) => {
+            // Read the same way as a FLAC's: they are the same Vorbis
+            // comments, only in an Ogg stream rather than a FLAC header. As
+            // with an MP4, a file whose comments will not read is left
+            // nameless rather than refused.
+            if let Ok(pairs) = ogg_comments(path) {
+                for field in Field::ALL {
+                    let value = pairs
+                        .iter()
+                        .find(|(key, _)| key.eq_ignore_ascii_case(field.vorbis_key()))
+                        .map(|(_, value)| value.clone());
+                    set_counted(&mut metadata, field, value);
+                }
+            }
+        }
+        Some(TagKind::Wma) => {
+            if let Ok(pairs) = crate::audio::ffmpeg::tags(path) {
+                for field in Field::ALL {
+                    let Some(key) = field.ffmpeg_key() else { continue };
+                    let value = pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+                    set_counted(&mut metadata, field, value);
+                }
+            }
+        }
         Some(TagKind::None) => {}
         None => bail!("cannot tell what kind of file {} is", path.display()),
     }
@@ -346,6 +387,50 @@ fn set_field(metadata: &mut Metadata, field: Field, value: Option<String>) {
     }
 }
 
+/// The same as [`set_field`], except that a track or disc number written as
+/// "2/9" sets the count beside it as well. Vorbis comments and ASF both do
+/// that, where a FLAC written by Picard keeps the two apart.
+fn set_counted(metadata: &mut Metadata, field: Field, value: Option<String>) {
+    let total = match field {
+        Field::TrackNumber => Some(Field::TotalTracks),
+        Field::DiscNumber => Some(Field::TotalDiscs),
+        _ => None,
+    };
+    match (value.as_deref().and_then(|v| v.split_once('/')), total) {
+        (Some((number, of)), Some(total)) => {
+            set_field(metadata, field, Some(number.trim().to_string()));
+            set_field(metadata, total, Some(of.trim().to_string()));
+        }
+        _ => set_field(metadata, field, value),
+    }
+}
+
+/// The Vorbis comments in an Ogg stream, Vorbis or Opus, as Symphonia finds
+/// them while it opens the file. Keys as written: the format says they are
+/// case-insensitive, and files are written both ways.
+fn ogg_comments(path: &Path) -> Result<Vec<(String, String)>> {
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::RawValue;
+
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("ogg");
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, stream, Default::default(), Default::default())
+        .with_context(|| format!("opening {} as Ogg", path.display()))?;
+    let mut found = Vec::new();
+    if let Some(revision) = format.metadata().skip_to_latest() {
+        for tag in &revision.media.tags {
+            if let RawValue::String(value) = &tag.raw.value {
+                found.push((tag.raw.key.clone(), value.to_string()));
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Write `metadata` into the tags of an existing file.
 ///
 /// The audio itself is untouched — only the tag blocks are rewritten.
@@ -362,6 +447,15 @@ pub fn write_tags(
         Some(TagKind::None) => {
             bail!("wav has no standard metadata tag; {} cannot be tagged", path.display())
         }
+        Some(kind @ (TagKind::Ogg | TagKind::Wma)) => bail!(
+            "{}'s tags are read here and not written: no player opens {}, and once it is \
+             converted to FLAC it can be tagged",
+            path.display(),
+            match kind {
+                TagKind::Ogg => "Ogg",
+                _ => "WMA",
+            }
+        ),
         None => bail!("cannot tell what kind of file {} is", path.display()),
     }
     .with_context(|| format!("writing tags to {}", path.display()))
@@ -380,8 +474,23 @@ pub enum TagKind {
     Id3,
     /// iTunes-style `ilst` atoms in an MP4 container.
     Mp4,
+    /// Vorbis comments in an Ogg stream, Vorbis or Opus. Read, not written.
+    Ogg,
+    /// ASF attributes in a WMA, read through ffmpeg. Read, not written.
+    Wma,
     /// The format has nowhere to put them.
     None,
+}
+
+impl TagKind {
+    /// Whether tags can be written into a file of this kind here.
+    ///
+    /// Ogg and WMA are read so that a file arrives with its name, and not
+    /// written, because no player opens either: the thing to do with one is
+    /// convert it, and the FLAC it becomes takes tags.
+    pub fn writable(self) -> bool {
+        matches!(self, TagKind::Flac | TagKind::Id3 | TagKind::Mp4)
+    }
 }
 
 /// What kind of tag block a path's extension implies, or `None` for a file
@@ -392,6 +501,8 @@ pub fn tag_kind(path: &Path) -> Option<TagKind> {
         "flac" => TagKind::Flac,
         "mp3" | "aiff" | "aif" => TagKind::Id3,
         "m4a" | "m4b" | "mp4" | "aac" => TagKind::Mp4,
+        "ogg" | "oga" | "opus" => TagKind::Ogg,
+        "wma" => TagKind::Wma,
         "wav" | "wave" => TagKind::None,
         _ => return None,
     })

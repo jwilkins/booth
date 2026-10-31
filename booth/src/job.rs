@@ -349,6 +349,9 @@ pub enum Update {
     Converted {
         id: u32,
         to: PathBuf,
+        /// The new file's rate, which is not the old one's when the old one
+        /// was above what a player takes.
+        rate: u32,
     },
     /// A file the import walked to, and the record read out of it.
     Imported(Box<Track>),
@@ -1424,7 +1427,10 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
 }
 
 fn import(paths: &[PathBuf], recursive: bool, reporter: &Channel) -> anyhow::Result<()> {
-    let files = booth_cli::discover::collect(paths, recursive)?;
+    // Every format the library takes, including the ones no player opens: an
+    // Ogg or a WMA left out of an import is a record nobody is told about,
+    // where one taken in is asked about and offered a conversion.
+    let files = booth_cli::discover::collect_library(paths, recursive)?;
     let total = files.len();
     crate::info!(
         "walked {} and found {}",
@@ -1828,11 +1834,27 @@ fn convert(tracks: &[Convertible], reporter: &Channel) -> anyhow::Result<()> {
         if reporter.cancelled() {
             break;
         }
-        let result = (|| -> anyhow::Result<PathBuf> {
+        let result = (|| -> anyhow::Result<(PathBuf, u32)> {
             let audio = decode_file(&track.path)?;
+            // Above every player's ceiling, brought down to half or a quarter
+            // of its rate. Through rubato, and into a new file: the original
+            // stays where it was.
+            let audio = match booth_cli::compat::library_rate(audio.sample_rate) {
+                Some(rate) => {
+                    crate::info!(
+                        "resampling {} from {} Hz to {rate} Hz",
+                        track.path.display(),
+                        audio.sample_rate
+                    );
+                    booth_cli::audio::resample::for_library(&audio, rate)?
+                }
+                None => audio,
+            };
             let to = unused_path(&track.path.with_extension("flac"));
             crate::info!("converting {} to {}", track.path.display(), to.display());
-            write_file(&to, &audio, Codec::Flac, &EncodeOptions::default())?;
+            let options =
+                EncodeOptions { bit_depth: flac_depth(&track.path), ..Default::default() };
+            write_file(&to, &audio, Codec::Flac, &options)?;
 
             // The names come with it. A converted file that arrives untitled
             // would look like a different record sitting next to the original.
@@ -1843,12 +1865,12 @@ fn convert(tracks: &[Convertible], reporter: &Channel) -> anyhow::Result<()> {
                 booth_cli::tag::OnExisting::Overwrite,
                 None,
             );
-            Ok(to)
+            Ok((to, audio.sample_rate))
         })();
 
         match result {
-            Ok(to) => {
-                let _ = reporter.tx.send(Update::Converted { id: track.id, to });
+            Ok((to, rate)) => {
+                let _ = reporter.tx.send(Update::Converted { id: track.id, to, rate });
             }
             Err(e) => {
                 let _ = reporter
@@ -1860,6 +1882,21 @@ fn convert(tracks: &[Convertible], reporter: &Channel) -> anyhow::Result<()> {
         (reporter.wake)();
     }
     Ok(())
+}
+
+/// How many bits a conversion keeps.
+///
+/// 24 from anything that was not lossy: a float WAV, whose fix has always
+/// said 24-bit FLAC, and a hi-res file brought down to a rate a player takes.
+/// Both were written at 16 until now. 16 from a lossy file, with dither, whose
+/// decode has nothing below its own noise for the other eight to hold, and
+/// whose FLAC would otherwise be half as large again for it.
+fn flac_depth(source: &Path) -> u16 {
+    let extension = source.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    match extension.to_ascii_lowercase().as_str() {
+        "ogg" | "oga" | "opus" | "wma" | "mp3" => 16,
+        _ => 24,
+    }
 }
 
 /// A path nothing is using yet, so a conversion never lands on top of a file
@@ -2994,6 +3031,79 @@ mod tests {
         let (style, confidence) = heard.as_ref().expect("the model heard nothing");
         assert!(!style.is_empty() && *confidence > 0.0, "{style} {confidence}");
         assert_eq!(*tagged, tagged_genre(&sample));
+    }
+
+    /// A FLAC's rate and bit depth, out of its STREAMINFO block.
+    fn flac_format(path: &Path) -> (u32, u32) {
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(&bytes[0..4], b"fLaC");
+        let packed = u64::from_be_bytes(bytes[18..26].try_into().unwrap());
+        ((packed >> 44) as u32, ((packed >> 36) & 0x1f) as u32 + 1)
+    }
+
+    #[test]
+    fn a_conversion_lands_at_a_rate_and_depth_a_player_takes_with_its_names() {
+        let scratch = std::env::temp_dir().join(format!("booth-convert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../proto/musicai/tests/fixtures/formats");
+        let ogg = scratch.join("tones.ogg");
+        std::fs::copy(fixtures.join("tones.ogg"), &ogg).unwrap();
+        // Two seconds of a tone at 192 kHz, which no player loads.
+        let hires = scratch.join("hires.wav");
+        let tone: Vec<f32> = (0..384_000)
+            .map(|i| 0.25 * (2.0 * std::f32::consts::PI * 1_000.0 * i as f32 / 192_000.0).sin())
+            .collect();
+        let audio = Audio::new(192_000, vec![tone.clone(), tone]).unwrap();
+        write_file(
+            &hires,
+            &audio,
+            Codec::Wav,
+            &EncodeOptions { bit_depth: 24, ..Default::default() },
+        )
+        .unwrap();
+
+        let (tx, rx) = channel();
+        let reporter =
+            Channel { tx, cancel: Arc::new(AtomicBool::new(false)), wake: Arc::new(|| {}) };
+        let tracks = [Convertible { id: 1, path: ogg.clone() }, Convertible { id: 2, path: hires }];
+        convert(&tracks, &reporter).unwrap();
+        drop(reporter);
+        let converted: Vec<(u32, PathBuf, u32)> = rx
+            .iter()
+            .filter_map(|update| match update {
+                Update::Converted { id, to, rate } => Some((id, to, rate)),
+                Update::Failed { message, .. } => panic!("{message}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(converted.len(), 2, "{converted:?}");
+
+        // The Ogg at its own rate, 16 bits being more than its decode holds,
+        // and with the names it came with.
+        let (_, from_ogg, rate) = &converted[0];
+        assert_eq!(*rate, 44_100);
+        assert_eq!(flac_format(from_ogg), (44_100, 16));
+        let tags = booth_cli::tag::read_metadata(from_ogg).unwrap();
+        assert_eq!(tags.title.as_deref(), Some("Two Tones"));
+        assert_eq!(tags.artist.as_deref(), Some("Booth Test"));
+        assert!(ogg.exists(), "the original stays where it was");
+
+        // The 192 kHz file at half its rate, in 24 bits, and the same length.
+        let (_, from_hires, rate) = &converted[1];
+        assert_eq!(*rate, 96_000);
+        assert_eq!(flac_format(from_hires), (96_000, 24));
+        let back = booth_cli::audio::decode::decode_file(from_hires).unwrap();
+        assert_eq!(back.frames(), 192_000);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_float_wav_is_converted_to_the_24_bits_its_fix_promises() {
+        assert_eq!(flac_depth(Path::new("/music/set.wav")), 24);
+        assert_eq!(flac_depth(Path::new("/music/a.OGG")), 16);
+        assert_eq!(flac_depth(Path::new("/music/a.wma")), 16);
     }
 
     #[test]

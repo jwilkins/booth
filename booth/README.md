@@ -1646,23 +1646,30 @@ kilobytes a track and means one stick works everywhere.
 What the target changes is **what the drive carries**. A track this player
 cannot open, or one above its ceiling, is re-encoded on the way onto the stick:
 a **320 kbps MP3** at the highest of MPEG-1's three rates the hardware and the
-source share, preferring a whole-number ratio — 88.2 goes to 44.1, 96 to 48.
-LAME does the resampling, and only ever for a copy bound for a drive. **The
-library keeps its FLAC**, so the same collection writes a lossless stick for a
-CDJ-3000 and an MP3 one for a nexus deck, and nobody has to choose.
+source share, preferring a whole-number ratio — 88.2 goes to 44.1, 96 to 48,
+176.4 to 44.1 and 192 to 48. LAME does the resampling, and only ever for a copy
+bound for a drive. **The library keeps its FLAC**, so the same collection writes
+a lossless stick for a CDJ-3000 and an MP3 one for a nexus deck, and nobody has
+to choose. The same goes for the formats no player opens at all — Ogg Vorbis,
+Opus and WMA — which go on as MP3s for every player.
 
 Because the write fixes it, a FLAC bound for an older booth is not something the
 collection needs attention for. What is:
 
 | | |
 | --- | --- |
-| a container nothing opens | offered a conversion, if it can be decoded here |
-| 32-bit float WAV | offered a conversion to FLAC |
-| above 96 kHz | reported; resample it in an editor first |
+| Ogg Vorbis, Opus | offered a conversion to FLAC |
+| WMA | offered a conversion to FLAC once ffmpeg is installed |
+| a container nothing decodes | reported; re-encode it elsewhere |
+| 32-bit float WAV | offered a conversion to 24-bit FLAC |
+| above 96 kHz | offered a conversion to FLAC at 88.2 or 96 kHz |
 | a protected purchase | reported; nothing here can convert one |
 
-None of those is reachable by re-encoding for a drive, which is why they are
-still asked about at import.
+The formats and the rates go on a drive as MP3s anyway. They are asked about at
+import because every drive would otherwise carry a fresh transcode of a lossy
+file, or a 48 kHz MP3 of a 192 kHz master a CDJ-3000 could have played at 96 —
+and a conversion done once fixes both. A float WAV and a protected file are not
+reachable by re-encoding for a drive at all.
 
 Import is the moment to ask, because it is the moment there is still time to do
 something. The check before a write is the last chance to catch a file that
@@ -1671,13 +1678,27 @@ will not load, and by then the only answer is to leave it behind.
 Converting writes a **FLAC beside the original** and points the collection at
 it. The original is never touched, moved or deleted: a conversion that turns
 out wrong should leave the thing it was made from behind. Names come across
-with it.
+with it, read from the Vorbis comments in an Ogg and through ffmpeg from a WMA.
+The FLAC is 24-bit from a float WAV or a hi-res file, and 16-bit with dither
+from a lossy one, whose decode has nothing below its own noise for more bits to
+hold.
 
-Two things are deliberately not offered *for the library's own files*.
-**Resampling**, because doing it badly once is permanent in a way that saying so
-is not — the drive writer resamples, but only into a copy, and the original is
-still there afterwards. And a **format nothing here decodes** — an offer that
-would fail is worse than no offer, because it costs the time to find out.
+**Resampling** a file above 96 kHz goes through rubato, not the quick resampler
+the speech and genre models are fed by. Halving a 192 kHz signal it keeps
+everything to 40 kHz within 0.0001 dB and folds ultrasonic content back into the
+band at −149 dB or below, measured on tones; the quick one manages −111 dB. A
+176.4 kHz file goes to 88.2 and a 192 kHz one to 96, so the conversion is a
+halving rather than an odd ratio.
+
+**Opus** is decoded by rusty-opus, in Rust, because symphonia has no Opus
+decoder: on a 30-second CC record it lands 83 dB from libopus's own decode,
+closer than ffmpeg's built-in Opus decoder at 70 dB. **WMA** has no decoder in
+Rust at all, so it goes through ffmpeg when one is installed — on `PATH`, in
+Homebrew's two folders, or named by `BOOTH_FFMPEG` — and is reported with the
+command to install it when not.
+
+A **format nothing here decodes** is still not offered: an offer that would
+fail is worse than no offer, because it costs the time to find out.
 
 A protected file is not a broken file: it plays perfectly in whatever sold it.
 It is encrypted, and the only way to a playable copy is to get an unprotected
@@ -2228,6 +2249,7 @@ sync is the end of a drive's history.
 - Playback resamples linearly, which is right for auditioning and is not what
   anyone would master through.
 - Cue colours are assigned by slot rather than chosen.
-- Ogg, Opus and WMA are recognised as unplayable but cannot be converted here:
-  nothing in this build decodes them.
-- Nothing resamples. A file above 96 kHz is reported and left alone.
+- WMA needs ffmpeg installed to be decoded at all; nothing in Rust decodes it.
+- Two files with the same name by the same artist that both go on a drive as
+  an MP3 — a `.ogg` and a `.flac` bound for a nexus deck, say — land on the same
+  path, and the second write replaces the first.
