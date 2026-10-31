@@ -2144,20 +2144,25 @@ anywhere, so those are named for the day the player last wrote the file as well
 as their number: `2026-10-31 HISTORY 001`.
 
 Reading the same drive again replaces those playlists rather than making a
-second set. A numbered session is known again by the tracks in it rather than by
-its name: a sync starts a drive's history over, so a CDJ-3000 calls the first
-session after every sync `HISTORY 001`, and the day in the name moves whenever a
-player writes the file again. A track the drive played that the library does
-not have is left out and counted, rather than making a playlist with holes in it
-that look like tracks.
+second set: a session that comes back as it was, or as it was with more on the
+end, takes the place of the earlier reading. One that carries the same name but
+is not the earlier list grown is another night, and is kept beside it with a
+`(2)` on its name. A numbered session goes by its number rather than its whole
+name, because a sync starts a drive's history over, so a CDJ-3000 calls the
+first session after every sync `HISTORY 001`, and the day in the name moves
+whenever a player writes the file again. A track the drive played that the
+library does not have is left out and counted, rather than making a playlist
+with holes in it that look like tracks.
 
-Two limits worth knowing. The folder is `History/<drive>` — the collection's
+A sync writes both databases with no history in them, so a drive's history
+has to be read before anything is written to it. It is read the moment the drive
+is plugged in, again whenever a player writes to it while it is in, and once
+more just before a sync writes it — whether or not **Keep a copy of every
+drive** is on, and whatever else is running.
+
+One limit worth knowing. The folder is `History/<drive>` — the collection's
 playlists have one level of folder, not two, so that is a name with a prefix
-rather than a folder inside a folder. And because a sync writes both databases
-with no history in them, a drive's history has to be read before anything is
-written to it. It is read when the drive is copied, which happens when it is
-plugged in, so with **Keep a copy of every drive** switched off in Settings, a
-sync is the end of a drive's history.
+rather than a folder inside a folder.
 
 ## What it does not do yet
 

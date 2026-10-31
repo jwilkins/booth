@@ -32,9 +32,24 @@
 //!
 //! So a numbered session is named for the day `export.pdb` was last written as
 //! well as for its number: `2026-10-31 HISTORY 001`. On a drive back from a
-//! night, that is the night, or the morning after it. And it is recognised
-//! again by what it holds rather than by that name, because the date moves
-//! whenever a player writes the file again: see [`Session::is`].
+//! night, that is the night, or the morning after it.
+//!
+//! # Reading a drive again
+//!
+//! A session read before comes back whole, or longer if the player went on
+//! adding to it, and then the new reading replaces the old one. Anything else
+//! is a night of its own and is kept beside it, under a name with a number on
+//! the end if its own is taken. See [`Session::is`].
+//!
+//! # When it is read
+//!
+//! As soon as a drive turns up, and again whenever a player has written to
+//! its databases since — told by [`stamp`], which costs a few `stat`s rather
+//! than a walk of the drive. And once more just before this program writes
+//! the drive, because both databases go on with no history in them: a sync
+//! is the end of whatever a player left there, so it has to have been read by
+//! then. Neither waits for a copy of the drive to be kept, or for keeping
+//! copies to be switched on.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,22 +73,62 @@ pub struct Session {
 
 impl Session {
     /// Whether a playlist already in the drive's folder is this session, read
-    /// off the drive before.
+    /// off the drive before, so that this reading should replace it.
     ///
-    /// By name, for a session named by the day it was played. A numbered one
-    /// is a playlist carrying the same number whose tracks this session's
-    /// begin with: the same list, longer if the player went on adding to it.
-    /// Not by name, because the day in it is when the file was last written,
-    /// and a drive played again without a sync between has its older sessions
-    /// read again under a later day.
+    /// It is when it carries the session's name — the day, for a session named
+    /// by the day it was played; the number, for a numbered one — and this
+    /// reading holds the same tracks, or the same tracks and then more. A
+    /// player only ever adds to the end of a list, so a list that has grown
+    /// begins with what it held before, and one that does not is another
+    /// night with the same name.
+    ///
+    /// A numbered session goes by its number rather than its whole name
+    /// because the day in that name is when the file was last written, and a
+    /// drive played again without a sync between has its older sessions read
+    /// again under a later day.
     pub fn is<T: PartialEq>(&self, name: &str, theirs: &[T], ours: &[T]) -> bool {
-        let Some(number) = &self.numbered else { return name == self.name };
-        let carries = name.split_once(' ').is_some_and(|(_, rest)| {
-            rest == number
-                || rest.strip_prefix(number.as_str()).is_some_and(|r| r.starts_with(" ("))
-        });
-        carries && !theirs.is_empty() && ours.starts_with(theirs)
+        let name = without_count(name);
+        let carries = match &self.numbered {
+            None => name == self.name,
+            Some(number) => name.split_once(' ').is_some_and(|(_, rest)| rest == number),
+        };
+        carries && ours.starts_with(theirs)
     }
+}
+
+/// A playlist's name without the `(2)` [`free_name`] puts on the end of a
+/// second night that came out with the same name.
+fn without_count(name: &str) -> &str {
+    name.strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" ("))
+        .filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(name, |(base, _)| base)
+}
+
+/// What a drive's databases look like from outside: each one's length and
+/// when it was last written, with the OneLibrary database's write-ahead log,
+/// which is where a player's newest rows sit until it is checkpointed.
+///
+/// Compared with the last one taken, so that a drive's history is read when
+/// it turns up and whenever a player has written to it, and not every few
+/// seconds in between. `None` for a drive with neither database on it.
+pub fn stamp(root: &Path) -> Option<String> {
+    let onelibrary = booth_cli::rekordbox::onelibrary::find(root);
+    let files = [
+        Some(root.join(booth_cli::audit::LEGACY_PATH)),
+        onelibrary.as_ref().map(|at| at.with_extension("db-wal")),
+        onelibrary,
+    ];
+    let said: Vec<String> = files
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            let meta = std::fs::metadata(&file).ok()?;
+            let written = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+            Some(format!("{}:{}:{}", file.display(), meta.len(), written.as_nanos()))
+        })
+        .collect();
+    (!said.is_empty()).then(|| said.join("\n"))
 }
 
 /// A name for a new playlist that no playlist in the folder already has.
@@ -498,10 +553,37 @@ mod tests {
     }
 
     #[test]
-    fn a_session_named_by_its_day_is_found_by_that_name_alone() {
+    fn a_session_named_by_its_day_is_the_one_read_before_only_while_it_is_the_same_list() {
         let dated = Session { name: "2026-09-04".into(), ..Session::default() };
-        assert!(dated.is("2026-09-04", &[1], &[2]));
+        assert!(dated.is("2026-09-04", &[1, 2], &[1, 2]), "read again as it was");
+        assert!(dated.is("2026-09-04", &[1, 2], &[1, 2, 3]), "or with more on the end");
+        assert!(!dated.is("2026-09-04", &[1, 2], &[3]), "another night on the same day");
+        assert!(!dated.is("2026-09-04", &[1, 2], &[1]), "nor a list that lost a track");
         assert!(!dated.is("2026-09-11", &[1], &[1]));
+        assert!(dated.is("2026-09-04 (2)", &[3], &[3, 4]), "found under a second name too");
+    }
+
+    #[test]
+    fn only_a_count_on_the_end_comes_off_a_name() {
+        assert_eq!(without_count("2026-10-31 HISTORY 001 (2)"), "2026-10-31 HISTORY 001");
+        assert_eq!(without_count("2026-09-04 (12)"), "2026-09-04");
+        assert_eq!(without_count("Warm-up (live)"), "Warm-up (live)");
+        assert_eq!(without_count("()"), "()");
+        assert_eq!(without_count("2026-09-04"), "2026-09-04");
+    }
+
+    #[test]
+    fn a_drives_stamp_moves_when_a_player_writes_to_it_and_not_otherwise() {
+        let scratch = Scratch::new("stamp");
+        std::fs::create_dir_all(scratch.0.join("PIONEER/rekordbox")).unwrap();
+        assert_eq!(stamp(&scratch.0), None, "no database, nothing to read");
+
+        a_drive_a_cdj_3000_played(&scratch.0, &[("HISTORY 001", &[1])], AFTER_A_NIGHT);
+        let first = stamp(&scratch.0).unwrap();
+        assert_eq!(stamp(&scratch.0).unwrap(), first, "looked at twice, it is the same drive");
+
+        a_drive_a_cdj_3000_played(&scratch.0, &[("HISTORY 001", &[1, 2])], AFTER_A_NIGHT + 60);
+        assert_ne!(stamp(&scratch.0).unwrap(), first, "a player wrote to it");
     }
 
     #[test]

@@ -360,6 +360,9 @@ pub struct App {
     /// nothing.
     looked_for_drives: Option<std::time::Instant>,
     kept_drives: std::collections::HashMap<String, Seen>,
+    /// Each drive's [`crate::history::stamp`] when its history was last read,
+    /// so it is read again only once a player has written to it.
+    history_read: std::collections::HashMap<String, String>,
     /// Kept files whose names a copier wrote, and the name each could go back
     /// to now that what it was copied from has gone. Offered, never done on its
     /// own: renaming somebody's file is not a tidy-up to spring on them.
@@ -1019,6 +1022,7 @@ impl App {
             checked: None,
             looked_for_drives: None,
             kept_drives: std::collections::HashMap::new(),
+            history_read: std::collections::HashMap::new(),
             renames: Vec::new(),
             layout_moved: false,
             pending_save: false,
@@ -4489,7 +4493,12 @@ impl App {
             .map(|set| sync::settings_record(&settings_steps, set, &drive.settings));
 
         self.sheet = false;
-        self.start(Job::Sync { args: Box::new(args), files: carry.files });
+        let history = (!drive.is_image).then(|| job::DriveHistory {
+            root: drive.path.clone(),
+            drive: drive_name(&drive.path, &drive.label),
+            key: booth_cli::rekordbox::onelibrary_key(self.config.onelibrary_key()),
+        });
+        self.start(Job::Sync { args: Box::new(args), files: carry.files, history });
         self.replan();
     }
 
@@ -5248,25 +5257,24 @@ impl App {
         });
     }
 
-    /// Keep the playhead on the deck's position while it plays, and keep the
-    /// window repainting so it moves.
-    ///
-    /// The playhead is the deck's when the deck is running and the window's
-    /// Look through the mounted volumes for a drive worth keeping a copy of.
+    /// Look through the mounted volumes for a player's drive: to read what was
+    /// played off it, and to keep a copy of it.
     ///
     /// Every few seconds rather than every frame: it is a `read_dir` of the
     /// places volumes mount plus a stat of two folders on each, which is
     /// nothing next to a repaint, but it is also not worth doing sixty times a
     /// second to notice something a person did with their hands.
     ///
+    /// The history first, and whatever else is going on: it is gone after the
+    /// next sync, so it is read the moment a drive turns up and again whenever
+    /// a player has written to it, whether or not copies are kept and whatever
+    /// is running. See [`crate::history`].
+    ///
     /// A drive is copied once per state. Plugging the same unchanged stick in
     /// again is not an event; writing to it and plugging it in again is.
     fn look_for_drives(&mut self) {
         const EVERY: std::time::Duration = std::time::Duration::from_secs(4);
 
-        if !self.config.keep_drives || self.running() {
-            return;
-        }
         if self.looked_for_drives.is_some_and(|at| at.elapsed() < EVERY) {
             return;
         }
@@ -5277,6 +5285,21 @@ impl App {
                 continue;
             }
             let name = drive_name(&root, "");
+            if let Some(stamp) = crate::history::stamp(&root) {
+                if self.history_read.get(&name) != Some(&stamp) {
+                    crate::debug!("reading what was played off {name}");
+                    self.history_read.insert(name.clone(), stamp);
+                    self.start(Job::History(job::DriveHistory {
+                        root: root.clone(),
+                        drive: name.clone(),
+                        key: booth_cli::rekordbox::onelibrary_key(self.config.onelibrary_key()),
+                    }));
+                }
+            }
+
+            if !self.config.keep_drives || self.running() {
+                continue;
+            }
             let listing = crate::backup::listing(&root);
             if listing.is_empty() {
                 continue;
@@ -5312,10 +5335,11 @@ impl App {
                 self.remember_drive(&name, &state, listing);
                 continue;
             }
+            // One at a time: the copy is running now, so the check above skips
+            // the copying for every drive after this one until the next look,
+            // and a queue of copies started at once would fight over the same
+            // disk. Their histories are still read on this one.
             self.keep_drive(&root, &name, &state, listing);
-            // One at a time. The next one will be found on the next look, and a
-            // queue of copies started at once would fight over the same disk.
-            return;
         }
     }
 
@@ -5361,28 +5385,37 @@ impl App {
         let (mut made, mut played, mut strangers) = (0usize, 0usize, 0usize);
         for session in sessions {
             let mut tracks = Vec::new();
+            let mut missing = 0usize;
             for track in &session.played {
                 let file = track.file(root);
                 let owner =
                     crate::backup::owner(&by_name, &by_sound, &track.file_name, track.bytes, &file);
                 match owner.and_then(|known| ids.get(&known.path)) {
                     Some(id) => tracks.push(*id),
-                    None => strangers += 1,
+                    None => missing += 1,
                 }
             }
             if tracks.is_empty() {
                 continue;
             }
-            played += tracks.len();
-            made += 1;
-            // Read before, it keeps the name it was given then: a numbered
-            // session's day is when the file was last written, and moves.
-            match self
+            // Read before, the new reading replaces the old: it is the same
+            // list, or the same list and then more. The playlist keeps the
+            // name it was given then, because a numbered session's day is when
+            // the file was last written, and moves.
+            let before = self
                 .library
                 .playlists
                 .iter_mut()
-                .find(|p| p.folder == folder && session.is(&p.name, &p.tracks, &tracks))
-            {
+                .find(|p| p.folder == folder && session.is(&p.name, &p.tracks, &tracks));
+            // A drive is read every time it turns up, so most readings are of
+            // nights already taken, and saying so again would be noise.
+            if before.as_ref().is_some_and(|p| p.tracks == tracks) {
+                continue;
+            }
+            played += tracks.len();
+            strangers += missing;
+            made += 1;
+            match before {
                 Some(existing) => existing.tracks = tracks,
                 None => {
                     let name = crate::history::free_name(&session.name, |name| {
@@ -5449,10 +5482,13 @@ impl App {
             known,
             foreign: self.config.from_other_drives,
             library: self.config.library_path.clone(),
-            key: booth_cli::rekordbox::onelibrary_key(self.config.onelibrary_key()),
         });
     }
 
+    /// Keep the playhead on the deck's position while it plays, and keep the
+    /// window repainting so it moves.
+    ///
+    /// The playhead is the deck's when the deck is running and the window's
     /// when it is not — which is what lets a cue be placed by clicking while
     /// something is paused, without playback dragging the marker away.
     fn follow_playback(&mut self, ctx: &egui::Context) {
@@ -15325,6 +15361,63 @@ mod tests {
                     ("2026-10-24 HISTORY 001", &[1, 2][..]),
                     ("2026-10-31 HISTORY 002", &[3][..]),
                     ("2026-11-07 HISTORY 001", &[3, 1][..]),
+                ]
+            );
+        }
+
+        #[test]
+        fn a_night_read_again_with_more_on_it_replaces_the_first_reading_and_another_night_does_not(
+        ) {
+            use crate::history::{Played, Session};
+            let mut app = app("history-dated");
+            let dir = app.library_path.parent().unwrap().to_path_buf();
+            for id in 1..=4u32 {
+                let mut track = Track::placeholder(id);
+                track.path = dir.join(format!("track{id}.flac"));
+                track.bytes = 100 + u64::from(id);
+                app.library.tracks.push(track);
+            }
+            // As a CDJ-3000X names one, by the day.
+            let night = |day: &str, ids: &[u32]| Session {
+                name: day.to_string(),
+                played: ids
+                    .iter()
+                    .map(|id| Played {
+                        on_drive: format!("/Contents/track{id}.flac"),
+                        file_name: format!("track{id}.flac"),
+                        bytes: 100 + u64::from(*id),
+                    })
+                    .collect(),
+                numbered: None,
+            };
+            let root = std::path::Path::new("/Volumes/STICK");
+            let lists = |app: &App| -> Vec<(String, Vec<u32>)> {
+                app.library
+                    .playlists
+                    .iter()
+                    .filter(|p| p.folder == "History/STICK")
+                    .map(|p| (p.name.clone(), p.tracks.clone()))
+                    .collect()
+            };
+
+            // Read when it was plugged in halfway through the night, and again
+            // at the end of it.
+            app.take_history("STICK", root, vec![night("2026-10-31", &[1, 2])]);
+            app.take_history("STICK", root, vec![night("2026-10-31", &[1, 2, 3])]);
+            assert_eq!(lists(&app), [("2026-10-31".to_string(), vec![1, 2, 3])]);
+
+            // Plugged in again with nothing new on it.
+            app.take_history("STICK", root, vec![night("2026-10-31", &[1, 2, 3])]);
+            assert_eq!(lists(&app), [("2026-10-31".to_string(), vec![1, 2, 3])]);
+
+            // Synced, and played again that same day: not the first list grown,
+            // so it is kept beside it rather than written over it.
+            app.take_history("STICK", root, vec![night("2026-10-31", &[4, 1])]);
+            assert_eq!(
+                lists(&app),
+                [
+                    ("2026-10-31".to_string(), vec![1, 2, 3]),
+                    ("2026-10-31 (2)".to_string(), vec![4, 1]),
                 ]
             );
         }

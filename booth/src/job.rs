@@ -120,8 +120,15 @@ pub enum Job {
     Audit { drive: PathBuf, key: Option<String> },
     /// Fingerprint tracks and ask AcoustID what they are.
     Identify { tracks: Vec<(u32, PathBuf)>, key: String },
-    /// Write a drive.
-    Sync { args: Box<ExportArgs>, files: Vec<PathBuf> },
+    /// Write a drive, reading what the players recorded on it first: the
+    /// write leaves both databases with no history in them. `None` for an
+    /// image, which no player has had.
+    Sync { args: Box<ExportArgs>, files: Vec<PathBuf>, history: Option<DriveHistory> },
+    /// Read what the players recorded on a drive. A few milliseconds of
+    /// reading two databases, so it runs alongside whatever else is going on
+    /// rather than behind it: the history has to be in hand before anything
+    /// writes the drive. See [`crate::history`].
+    History(DriveHistory),
     /// Copy what a drive holds somewhere it will outlive the drive.
     Keep {
         /// The drive, mounted.
@@ -140,11 +147,19 @@ pub enum Job {
         foreign: crate::config::OnForeign,
         /// Where music copied in goes, when that is what was asked for.
         library: PathBuf,
-        /// The key the drive's OneLibrary database is encrypted with, for the
-        /// play history to be read out of it. Without one, only the files are
-        /// kept.
-        key: Option<String>,
     },
+}
+
+/// A drive to read the play history off.
+#[derive(Clone, Debug)]
+pub struct DriveHistory {
+    /// The drive, mounted.
+    pub root: PathBuf,
+    /// What it calls itself, which names the folder its sessions go in.
+    pub drive: String,
+    /// The key its OneLibrary database is encrypted with. Without one, only
+    /// `export.pdb`'s history is read.
+    pub key: Option<String>,
 }
 
 /// Which worker a job runs on.
@@ -176,7 +191,9 @@ impl Job {
         match self {
             #[cfg(test)]
             Job::Hold { lane, .. } => *lane,
-            Job::Decode { .. } | Job::StemEnvelopes { .. } | Job::Regrid(..) => Lane::Foreground,
+            Job::Decode { .. } | Job::StemEnvelopes { .. } | Job::Regrid(..) | Job::History(..) => {
+                Lane::Foreground
+            }
             Job::Draw(rows) if rows.len() <= 1 => Lane::Foreground,
             _ => Lane::Background,
         }
@@ -208,6 +225,7 @@ impl Job {
             Job::Realign { .. } => "placing the words",
             Job::Draw { .. } => "drawing",
             Job::Sync { .. } => "writing",
+            Job::History(..) => "reading what was played",
             Job::Keep { .. } => "copying a drive",
         }
     }
@@ -1134,6 +1152,37 @@ fn decode_sources(sources: &[PathBuf]) -> anyhow::Result<crate::player::Sound> {
     Ok(sound)
 }
 
+/// Read what the players recorded on a drive, and hand it to the window.
+///
+/// From both databases, because which one a player writes to is a matter of
+/// its generation, and one drive can have been played on both. Neither
+/// failing stops the other being read.
+fn read_history(of: &DriveHistory, reporter: &Channel) {
+    let DriveHistory { root, drive, key } = of;
+    let mut sessions = Vec::new();
+    if let Some(key) = key {
+        match crate::history::read(root, key) {
+            Ok(found) => sessions.extend(found),
+            Err(e) => crate::debug!("no OneLibrary history off {drive}: {e:#}"),
+        }
+    }
+    match crate::history::read_legacy(root) {
+        Ok(found) => sessions.extend(found),
+        Err(e) => crate::warn!("could not read the history in {drive}'s export.pdb: {e:#}"),
+    }
+    if sessions.is_empty() {
+        return;
+    }
+    let played = sessions.iter().map(|s| s.played.len()).sum::<usize>();
+    crate::info!(
+        "{} read off {drive}, {}",
+        crate::library::plural(sessions.len(), "session"),
+        crate::library::plural(played, "track")
+    );
+    let _ = reporter.tx.send(Update::Played { drive: drive.clone(), root: root.clone(), sessions });
+    (reporter.wake)();
+}
+
 /// A reporter that forwards a command's own progress to the window.
 struct Channel {
     tx: Sender<Update>,
@@ -1265,7 +1314,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             Ok(())
         }
         Job::Verify { tracks, deep, library } => verify_all(&tracks, deep, &library, reporter),
-        Job::Keep { root, drive, state, into, known, foreign, library, key } => {
+        Job::Keep { root, drive, state, into, known, foreign, library } => {
             let kept = match crate::backup::keep(
                 &root, &into, &drive, &state, &known, foreign, &library,
             ) {
@@ -1280,39 +1329,10 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             };
             let _ = reporter.tx.send(Update::Kept(Box::new(kept)));
             (reporter.wake)();
-
-            // The one thing on a drive the collection cannot make for itself.
-            // Read after the copy rather than before it, so that a history this
-            // fails to make sense of has still been stored.
-            //
-            // From both databases, because which one a player writes to is a
-            // matter of its generation, and one drive can have been played on
-            // both. Neither failing stops the other being read.
-            let mut sessions = Vec::new();
-            if let Some(key) = key {
-                match crate::history::read(&root, &key) {
-                    Ok(found) => sessions.extend(found),
-                    Err(e) => crate::debug!("no OneLibrary history off {drive}: {e:#}"),
-                }
-            }
-            match crate::history::read_legacy(&root) {
-                Ok(found) => sessions.extend(found),
-                Err(e) => crate::warn!("could not read the history in {drive}'s export.pdb: {e:#}"),
-            }
-            if !sessions.is_empty() {
-                let played = sessions.iter().map(|s| s.played.len()).sum::<usize>();
-                crate::info!(
-                    "{} read off {drive}, {}",
-                    crate::library::plural(sessions.len(), "session"),
-                    crate::library::plural(played, "track")
-                );
-                let _ = reporter.tx.send(Update::Played {
-                    drive: drive.clone(),
-                    root: root.clone(),
-                    sessions,
-                });
-                (reporter.wake)();
-            }
+            Ok(())
+        }
+        Job::History(of) => {
+            read_history(&of, reporter);
             Ok(())
         }
         Job::StemEnvelopes { id, kit } => {
@@ -1337,7 +1357,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
         Job::LookUpWords { tracks } => look_up_words(&tracks, reporter),
         Job::Realign { tracks } => realign(tracks, reporter),
         Job::Draw(rows) => draw(&rows, reporter),
-        Job::Sync { args, files } => {
+        Job::Sync { args, files, history } => {
             // The file list was settled when the plan was drawn up, so the
             // command is told exactly what to write rather than walking a
             // folder again and possibly finding something else.
@@ -1383,6 +1403,13 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
                 crate::debug!("  carried: {}", path.display());
             }
             args.input = InputArgs { inputs: files, recursive: false };
+            // Whatever the players left on the drive, before the write takes
+            // it away. Read when the drive turned up too, but a sync can start
+            // before the next look at the mounted drives finds it, and a drive
+            // mounted somewhere those looks do not go is never found by them.
+            if let Some(of) = history.filter(|_| !args.dry_run) {
+                read_history(&of, reporter);
+            }
             // The rows the drive ended up with, so the next write can carry
             // them rather than preparing everything again.
             let began = std::time::Instant::now();
@@ -2967,6 +2994,53 @@ mod tests {
     /// BOOTH_GENRE_MODEL=…/discogs-effnet-bsdynamic-1.onnx BOOTH_GENRE_SAMPLE=…/record.mp3 \
     ///     cargo test -p booth --lib guessing_a_real_record -- --ignored --nocapture
     /// ```
+    #[test]
+    fn a_drive_a_cdj_3000_played_hands_its_history_to_the_window_without_a_key() {
+        use booth_cli::export::pdb::{Database, HistoryPlaylist, Track};
+        let dir = std::env::temp_dir().join(format!("booth-job-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tracks = (1..=2)
+            .map(|id| Track {
+                id,
+                title: format!("Track {id}"),
+                file_path: format!("/Contents/track{id}.flac"),
+                file_size: 100 + id,
+                ..Track::default()
+            })
+            .collect();
+        let history =
+            vec![HistoryPlaylist { id: 1, name: "HISTORY 001".into(), track_ids: vec![2, 1] }];
+        let at = dir.join(booth_cli::audit::LEGACY_PATH);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, Database { tracks, history, ..Default::default() }.to_bytes().unwrap())
+            .unwrap();
+
+        let (tx, rx) = channel();
+        let reporter =
+            Channel { tx, cancel: Arc::new(AtomicBool::new(false)), wake: Arc::new(|| {}) };
+        read_history(
+            &DriveHistory { root: dir.clone(), drive: "STICK".into(), key: None },
+            &reporter,
+        );
+        drop(reporter);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let sessions: Vec<_> = rx
+            .iter()
+            .filter_map(|update| match update {
+                Update::Played { drive, sessions, .. } => Some((drive, sessions)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sessions.len(), 1, "one hand-off for the drive");
+        let (drive, sessions) = &sessions[0];
+        assert_eq!(drive, "STICK");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].numbered.as_deref(), Some("HISTORY 001"));
+        let played: Vec<&str> = sessions[0].played.iter().map(|p| p.file_name.as_str()).collect();
+        assert_eq!(played, ["track2.flac", "track1.flac"]);
+    }
+
     #[test]
     #[ignore = "needs the genre model and a record: BOOTH_GENRE_MODEL, BOOTH_GENRE_SAMPLE"]
     fn guessing_a_real_record_hears_a_genre_and_reads_the_files_tag() {
