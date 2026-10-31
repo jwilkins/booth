@@ -12,7 +12,7 @@ Flags that are out of date come last, with the on-screen one first among them.
 ### Read play history from `export.pdb`
 
 `booth/src/history.rs:19`, and the test at `:243`: *"a parser that does not
-exist here yet"*. Also `booth/README.md:2106`, the spec's status table (HIST-1)
+exist here yet"*. Also `booth/README.md:2107`, the spec's status table (HIST-1)
 and the site's *What is next*.
 
 History is read only from `exportLibrary.db`. A CDJ-3000 writes its own into
@@ -30,7 +30,7 @@ collection as a per-track diff is not done, and neither is the set report.
 
 ### Notice a deck edit that leaves the analysis files alone
 
-`booth/README.md:2164`: *"A deck that edited a track without touching its
+`booth/README.md:2165`: *"A deck that edited a track without touching its
 analysis files would go unnoticed"*.
 
 Nobody has published what a CDJ-3000X writes into OneLibrary's edit counters,
@@ -62,7 +62,7 @@ disk per kit.
 
 ### Formats nothing here converts
 
-`booth/README.md:2178` and `:2180`.
+`booth/README.md:2179` and `:2181`.
 
 Ogg, Opus and WMA are recognised as unplayable but cannot be converted, because
 nothing in this build decodes them. A file above 96 kHz is reported and left
@@ -71,7 +71,7 @@ alone, because nothing resamples.
 ### Zip the copied half of a backup
 
 `booth/src/backup.rs:32`: *"the intended next step once there is a month of
-these to measure"*. Also `booth/README.md:2083` and the site's *What is next*.
+these to measure"*. Also `booth/README.md:2084` and the site's *What is next*.
 
 A backup is a directory: `PIONEER/` copied byte for byte, the audio linked to
 the library's copy. The plan is to zip `PIONEER/` alone into `PIONEER.zip` with
@@ -89,7 +89,7 @@ the code adds:
 
 ### Try a drive on a player older than the CDJ-3000
 
-`booth/README.md:2119`: *"Nothing older than a CDJ-3000 has been seen to open
+`booth/README.md:2120`: *"Nothing older than a CDJ-3000 has been seen to open
 one"*. The site's *What is next* puts it first: *"A CDJ-2000NXS2, a stick, and a
 morning."*
 
@@ -154,7 +154,7 @@ The three-band pictures and the colour preview now follow baken's fit against
 1,070 real analysis files. The rest (the monochrome preview, the scrolling
 monochrome waveform and the colour detail) are still a per-track gain and a
 shaping curve that nobody has compared with what rekordbox writes for the same
-track. `docs/onelibrary.md` §9 and `booth/README.md:2135` say the same of the
+track. `docs/onelibrary.md` §9 and `booth/README.md:2136` say the same of the
 colour waveform's colours: *"a judgement call, not a measurement"*. The hardware
 is here now.
 
@@ -186,19 +186,19 @@ reach a drive.
 
 ### Type in a genre by hand
 
-`booth/README.md:2154`: *"there is no way yet to type one in by hand"*.
+`booth/README.md:2155`: *"there is no way yet to type one in by hand"*.
 
 A genre from the file's tag is read in and defended, and the model can suggest
 one, but a DJ cannot set one.
 
 ### Choose cue colours
 
-`booth/README.md:2177`: *"Cue colours are assigned by slot rather than chosen"*.
+`booth/README.md:2178`: *"Cue colours are assigned by slot rather than chosen"*.
 Also the spec's status table, PREP-1..5: *"bar user-chosen cue colours"*.
 
 ### Keep a grid a player bent
 
-`booth/README.md:2160`.
+`booth/README.md:2161`.
 
 The collection keeps a tempo and a downbeat, not every beat, so a grid a deck
 bent cannot be held, only the tempo it was written at. That is why a track whose
@@ -220,13 +220,13 @@ schema.
 
 ### Key detection
 
-`booth/README.md:2155` and the spec's status table: *"right about 37% of the
+`booth/README.md:2156` and the spec's status table: *"right about 37% of the
 time on a real library"*, and confusing a key with its relative major or minor
 about 18% of the time. It is shown with its confidence for that reason.
 
 ### A second deck
 
-`booth/README.md:2174`, the spec's status table (PREP-6) and the site's *What is
+`booth/README.md:2175`, the spec's status table (PREP-6) and the site's *What is
 next*: *"The specification asks for one eventually"*.
 
 ## Stems
@@ -247,7 +247,7 @@ drive's loudness pass (STEM-4, STEM-5) are not"*.
 
 ### Sign and notarise the macOS app
 
-`.github/workflows/macos-app.yml:63`: *"Set BOOTH_SIGN_IDENTITY and
+`.github/workflows/macos-app.yml:68`: *"Set BOOTH_SIGN_IDENTITY and
 BOOTH_NOTARY_PROFILE here once there is one"*. Also `scripts/package-macos.sh:126`:
 *"Gatekeeper will refuse this on another Mac until it is"*.
 
@@ -275,13 +275,13 @@ to bring them up to date.
 
 ### The sync sheet warns about what has since worked
 
-`booth/src/app.rs:13148` and `:13173`, the two warnings under *Target* in the
+`booth/src/app.rs:13177` and `:13202`, the two warnings under *Target* in the
 sync sheet.
 
 This one is on screen. Writing both databases, the sheet says a CDJ-3000X
 browses the drive but its *"waveforms and grids have not been seen on a player
 since the naming they are found by was corrected"*. They have, on a CDJ-3000X and
-a CDJ-1500X, with hot cues and phrases (`booth/README.md:2109`). For an older
+a CDJ-1500X, with hot cues and phrases (`booth/README.md:2110`). For an older
 target it says *"no player older than a CDJ-3000X has yet been seen to browse a
 drive written here"*, and its comment says the CDJ-3000's refusal on 2.05 *"is
 not known to have been fixed"*. A CDJ-3000 on 3.22 plays these drives, so the
