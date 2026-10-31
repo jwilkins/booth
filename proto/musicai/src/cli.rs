@@ -75,6 +75,9 @@ pub enum Command {
     Rekordbox(RekordboxCommand),
     /// Put a drive image into a CDJ-3000 emulator's USB slot.
     Emulator(EmulatorArgs),
+    /// Say what a drive's My Settings files set the players and the mixer to,
+    /// and anything in them nobody has named yet. Reads; changes nothing.
+    Settings(SettingsArgs),
 }
 
 /// Where to send an image, and which emulator to send it to.
@@ -106,6 +109,14 @@ pub struct EmulatorArgs {
     /// success and should not read as one.
     #[arg(long)]
     pub no_reveal: bool,
+}
+
+/// Which settings to read.
+#[derive(clap::Args, Debug)]
+pub struct SettingsArgs {
+    /// A drive, its `PIONEER` folder, or one of `MYSETTING.DAT`,
+    /// `MYSETTING2.DAT`, `DJMMYSETTING.DAT` and `DEVSETTING.DAT`.
+    pub path: PathBuf,
 }
 
 /// Which drive to audit.
@@ -645,6 +656,15 @@ pub struct ExportArgs {
     /// Not a command-line option: there is no way to type a cue list.
     #[arg(skip)]
     pub prepared: Vec<(PathBuf, crate::export::Prep)>,
+
+    /// Player and mixer settings files to put in the drive's `PIONEER` folder.
+    ///
+    /// Every one named is written, so whether a drive's own should be kept is
+    /// decided before this is filled in: see
+    /// [`crate::export::settings::step`]. Not a command-line option: a set of
+    /// settings comes from a library that has been keeping one.
+    #[arg(skip)]
+    pub settings: Vec<crate::export::settings::File>,
 }
 
 /// One playlist to write onto a drive, named by the files that belong to it.

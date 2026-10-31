@@ -595,6 +595,7 @@ acceptance criterion is not a requirement, it is an aspiration, and belongs in �
 | EXP-7 | Export to rekordbox XML, Serato, Traktor and Engine DJ. | Cues, loops, grids, playlists and ratings survive a round trip; what cannot survive is listed before the export runs, not after. |
 | EXP-8 | The drive carries a machine-readable manifest of what we wrote. | A JSON sidecar in our own namespace records source paths, hashes, analyser versions and the query that produced each playlist — so a drive can be reconstructed, diffed, or re-imported on another machine. |
 | EXP-9 | Nothing on the drive is deleted without being named first. | Removals are listed in the sync sheet with their sizes and require an explicit confirmation; audio is never deleted from the user's own storage by a drive operation, ever. |
+| EXP-10 | The players' and the mixer's My Settings go on the drive, and a drive's own are never written over unasked. | They are edited here, taken from a stick, and written onto a drive that has none; a set a player saved there, or rekordbox put there, stays unless somebody says otherwise for that write. A player loads a set this wrote. |
 
 ### 7.5 Safety and verification (SAFE)
 
@@ -862,6 +863,7 @@ an older one: nothing before the CDJ-3000 has been tried.
 | OneLibrary writer — `exportLibrary.db` | Written from the same collection as the legacy database, read back off the drive and counted. No `exportExt.pdb`, no artwork. **A CDJ-3000X and a CDJ-1500X play from one**, analysis files and all. |
 | Delta sync and preflight (EXP-2, SAFE-2) | Done, and the file checks run at import as well as at write. |
 | Medium checks (SAFE-3) | Free space, refused before a byte is written; path length; files of 4 GiB or more on FAT32; and whether the oldest target player mounts exFAT. Folder depth and per-folder file counts are not checked. |
+| My Settings (EXP-10) | Edited in the window, taken from a stick, and written onto a drive only where it has none of its own, with every byte nobody has named kept. Every value is read by rekordcrate as the same setting. No player has loaded a set written here yet. |
 | Compatibility target (EXP-3) | Done: the oldest player a drive has to work on is chosen in Settings, and what is checked and what the drive carries follow it. `booth-cli audit` says what each generation will see on any drive. |
 | Read-back verification (SAFE-1) | Done, by readers that share no code with the writers, and every file read back off the device past the page cache. |
 | Checking the collection (LIB-6a) | Done for everything a container answers without being decoded. Length, sample rate and channel count are not checked — that means decoding, which is what analysing already does. |
@@ -891,6 +893,8 @@ The rest of this section is what that consists of.
   artists, albums, genres, labels, keys, colours, the browse menu, and the playlist tree.
 - **`mp3.rs`** — an MP3 frame walker that builds the `PVBR` variable-bitrate seek index,
   so a hot cue on a VBR file lands where it should. No decoding: it reads the frame headers.
+- **`settings.rs`** — My Settings: the four `*SETTING.DAT` files a player loads its
+  settings and the mixer's from, kept as bytes with only the named settings changed.
 - **`image.rs`** — the drive as a disk image rather than a folder: a master boot record
   with one FAT32 partition, which is the shape a player reads and the shape an emulator's
   USB slot takes.

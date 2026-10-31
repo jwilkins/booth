@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::library::{Drive, Library, Stamp, Track};
+use booth_cli::export::settings::{self, Kind, Step};
 pub use booth_cli::volume::bytes;
 use booth_cli::volume::{free_space, nearest_existing, ANALYSIS_ALLOWANCE};
 
@@ -34,6 +35,19 @@ pub struct Plan {
     pub new_stems: Vec<(u32, PathBuf)>,
     pub add_bytes: u64,
     pub stem_bytes: u64,
+    /// What happens to each My Settings file, worked out from the drive's
+    /// record. Empty while the collection has no settings to put on drives.
+    pub settings: Vec<SettingsStep>,
+}
+
+/// What a sync does with one of the My Settings files.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingsStep {
+    pub kind: Kind,
+    pub step: Step,
+    /// The SHA-256 of the drive's own file, where it has one and keeps it, so
+    /// the drive's record can say what was kept.
+    pub theirs: Option<String>,
 }
 
 impl Plan {
@@ -42,6 +56,7 @@ impl Plan {
             && self.update.is_empty()
             && self.remove.is_empty()
             && self.new_stems.is_empty()
+            && !self.settings.iter().any(|s| s.step.writes())
     }
 
     /// The line the dock shows, permanently, because it is the number that
@@ -62,6 +77,9 @@ impl Plan {
         }
         if !self.new_stems.is_empty() {
             parts.push(format!("{} stems", self.new_stems.len()));
+        }
+        if self.settings.iter().any(|s| s.step.writes()) {
+            parts.push("settings".to_string());
         }
         parts.join(" · ")
     }
@@ -162,7 +180,98 @@ pub fn plan_also_rewriting(library: &Library, drive: &Drive, broken: &[u32]) -> 
             plan.remove.push(written.id);
         }
     }
+    plan.settings = settings_steps(library, drive, None, false);
     plan
+}
+
+/// What a sync does with each My Settings file, when the collection has a set
+/// to put on drives.
+///
+/// Asked of the stick when `root` is where it is mounted, and of the drive's
+/// record otherwise. The plan is a function of the collection and the record,
+/// so the dock can say settings are waiting without reading a stick on every
+/// change; the sheet and the write ask the stick, which is the one that knows
+/// whether a player has saved its own since.
+///
+/// `over` is somebody having said Booth's may go over the drive's own.
+pub fn settings_steps(
+    library: &Library,
+    drive: &Drive,
+    root: Option<&Path>,
+    over: bool,
+) -> Vec<SettingsStep> {
+    let Some(set) = &library.settings else { return Vec::new() };
+    Kind::ALL
+        .into_iter()
+        .map(|kind| {
+            let ours = set.file(kind);
+            let record = drive.settings.iter().find(|r| r.file == kind.file_name());
+            let last = record.filter(|r| r.ours).map(|r| r.sha256.as_str());
+            let theirs_or = |step: Step, sha256: Option<String>| SettingsStep {
+                kind,
+                step,
+                theirs: (step == Step::Keep).then_some(sha256).flatten(),
+            };
+            match root {
+                Some(root) => {
+                    let at = root.join("PIONEER").join(kind.file_name());
+                    match std::fs::read(&at) {
+                        Ok(there) => theirs_or(
+                            settings::step(ours, Some(&there), last, over),
+                            Some(settings::digest(&there)),
+                        ),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            theirs_or(Step::Write, None)
+                        }
+                        // Not readable is not absent: whatever is there may
+                        // be the drive's own, and a write over it would most
+                        // likely fail as the read did.
+                        Err(_) => theirs_or(if over { Step::Over } else { Step::Keep }, None),
+                    }
+                }
+                None => match record {
+                    None => theirs_or(Step::Write, None),
+                    Some(r) if r.sha256 == ours.digest() => theirs_or(Step::Same, None),
+                    Some(r) if r.ours => theirs_or(Step::Replace, None),
+                    Some(_) if over => theirs_or(Step::Over, None),
+                    Some(r) => theirs_or(Step::Keep, Some(r.sha256.clone())),
+                },
+            }
+        })
+        .collect()
+}
+
+/// What the drive's record says about its settings once a write has done
+/// `steps` with `set`: Booth's file wherever one went on or was already there,
+/// and the drive's own wherever it was kept.
+pub fn settings_record(
+    steps: &[SettingsStep],
+    set: &settings::Settings,
+    before: &[crate::library::SettingsOnDrive],
+) -> Vec<crate::library::SettingsOnDrive> {
+    steps
+        .iter()
+        .filter_map(|s| {
+            let file = s.kind.file_name().to_string();
+            match s.step {
+                Step::Keep => match &s.theirs {
+                    Some(sha256) => Some(crate::library::SettingsOnDrive {
+                        file,
+                        sha256: sha256.clone(),
+                        ours: false,
+                    }),
+                    // Unreadable: whatever the record said before still
+                    // stands, and nothing is claimed about it.
+                    None => before.iter().find(|r| r.file == file).cloned(),
+                },
+                _ => Some(crate::library::SettingsOnDrive {
+                    file,
+                    sha256: set.file(s.kind).digest(),
+                    ours: true,
+                }),
+            }
+        })
+        .collect()
 }
 
 /// What the next write hands the exporter: the rows it can carry rather than
@@ -1030,6 +1139,94 @@ mod tests {
                 .collect(),
             ..Drive::default()
         }
+    }
+
+    fn field(id: &str) -> &'static booth_cli::export::settings::Field {
+        booth_cli::export::settings::FIELDS.iter().find(|f| f.id == id).unwrap()
+    }
+
+    fn steps_of(steps: &[SettingsStep]) -> Vec<(Kind, Step)> {
+        steps.iter().map(|s| (s.kind, s.step)).collect()
+    }
+
+    #[test]
+    fn a_collection_with_no_settings_puts_none_on_a_drive_and_the_plan_says_nothing_of_them() {
+        let (library, ids) = library_with(2);
+        let drive = drive_for(&library, &ids);
+        assert!(settings_steps(&library, &drive, None, false).is_empty());
+        assert_eq!(plan(&library, &drive).delta(), "up to date");
+    }
+
+    #[test]
+    fn settings_a_drive_has_never_had_wait_until_a_write_records_them_as_booths() {
+        let (mut library, ids) = library_with(2);
+        library.settings = Some(settings::Settings::rekordbox());
+        let mut drive = drive_for(&library, &ids);
+        let waiting = plan(&library, &drive);
+        assert_eq!(waiting.delta(), "settings");
+        assert!(waiting.settings.iter().all(|s| s.step == Step::Write));
+
+        let set = library.settings.clone().unwrap();
+        drive.settings = settings_record(&waiting.settings, &set, &drive.settings);
+        assert!(drive.settings.iter().all(|r| r.ours));
+        assert_eq!(plan(&library, &drive).delta(), "up to date");
+
+        library.settings.as_mut().unwrap().set(field("quantize"), 0x80);
+        let changed = plan(&library, &drive);
+        assert_eq!(changed.delta(), "settings");
+        assert_eq!(changed.settings[0].step, Step::Replace);
+        assert!(changed.settings[1..].iter().all(|s| s.step == Step::Same));
+    }
+
+    #[test]
+    fn a_drive_keeps_settings_a_player_saved_and_booths_own_are_replaced_when_they_change() {
+        let root = std::env::temp_dir().join(format!("booth-my-settings-{}", std::process::id()));
+        let pioneer = root.join("PIONEER");
+        std::fs::create_dir_all(&pioneer).unwrap();
+        let (mut library, ids) = library_with(1);
+        let mut set = settings::Settings::rekordbox();
+        let mut drive = drive_for(&library, &ids);
+        drive.path = root.clone();
+
+        // The last write put Booth's set on. Since then a player has saved its
+        // own player settings over MYSETTING2, and the mixer's file is gone.
+        library.settings = Some(set.clone());
+        let first = settings_steps(&library, &drive, Some(&root), false);
+        drive.settings = settings_record(&first, &set, &[]);
+        for file in set.files() {
+            std::fs::write(pioneer.join(file.kind().file_name()), file.bytes()).unwrap();
+        }
+        let mut saved = set.file(Kind::Player2).clone();
+        saved.set(field("beat_jump_beat_value").at, 0x87);
+        std::fs::write(pioneer.join("MYSETTING2.DAT"), saved.bytes()).unwrap();
+        std::fs::remove_file(pioneer.join("DJMMYSETTING.DAT")).unwrap();
+
+        set.set(field("tempo_range"), 0x83);
+        set.set(field("jog_display_mode"), 0x83);
+        library.settings = Some(set.clone());
+        let now = settings_steps(&library, &drive, Some(&root), false);
+        assert_eq!(
+            steps_of(&now),
+            [
+                (Kind::Player, Step::Replace),
+                (Kind::Player2, Step::Keep),
+                (Kind::Mixer, Step::Write),
+                (Kind::General, Step::Same),
+            ]
+        );
+        assert_eq!(now[1].theirs.as_deref(), Some(saved.digest().as_str()));
+        let asked = settings_steps(&library, &drive, Some(&root), true);
+        assert_eq!(asked[1].step, Step::Over);
+
+        // Once written, it is the drive's own in the record, and the plan
+        // drawn from the record alone does not go on asking to write it.
+        drive.settings = settings_record(&now, &set, &drive.settings);
+        let kept = drive.settings.iter().find(|r| r.file == "MYSETTING2.DAT").unwrap();
+        assert!(!kept.ours);
+        let later = plan(&library, &drive);
+        assert_eq!(later.settings[1].step, Step::Keep);
+        assert_eq!(later.delta(), "up to date");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

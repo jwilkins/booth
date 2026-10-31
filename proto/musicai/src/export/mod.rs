@@ -19,6 +19,7 @@ pub mod landing;
 pub mod menu;
 pub mod onelibrary;
 pub mod pdb;
+pub mod settings;
 pub mod waveform;
 
 /// One beat of a beat grid.

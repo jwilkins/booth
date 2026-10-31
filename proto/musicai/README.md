@@ -610,6 +610,19 @@ It reads and changes nothing. It reads `export.pdb` with its own reader, checked
 rekordcrate 0.3.0 finds 6,637 playlist entries and this finds all 7,440, the rest being
 on pages that hold more than 255 rows.
 
+```sh
+booth-cli settings /Volumes/USB
+```
+
+says what a drive's My Settings files set the players and the mixer to, the four
+`*SETTING.DAT` files in `PIONEER`, setting by setting, with rekordbox's value beside each
+one that differs. It names any byte that differs from rekordbox's where no setting is
+known, which is how a file a player saved can be looked at for one nobody has named. It
+takes a drive, its `PIONEER` folder or one of the files, and changes nothing. The meaning
+of each byte is rekordcrate's, checked against the 74 files it keeps from rekordbox 6.6.1;
+the export writes these files when a library hands it a set, and the app decides which,
+never writing over a drive's own.
+
 ## Trying it on a player
 
 The nearest thing to a CDJ that is not a CDJ is

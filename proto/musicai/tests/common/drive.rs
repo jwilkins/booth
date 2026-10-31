@@ -105,6 +105,7 @@ pub fn args_for(inputs: Vec<PathBuf>) -> ExportArgs {
         companions: Vec::new(),
         already: Vec::new(),
         prepared: Vec::new(),
+        settings: Vec::new(),
     }
 }
 
