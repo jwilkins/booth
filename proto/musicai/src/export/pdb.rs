@@ -182,6 +182,21 @@ impl Playlist {
     }
 }
 
+/// One list a player kept of what it played off the drive.
+///
+/// A player writes these, not this program: a drive goes out with none, and a
+/// CDJ adds one, numbered, each time it mounts it. They can be written here so
+/// that a drive can be made the way a player leaves one, which is what reading
+/// a history back is tested against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryPlaylist {
+    pub id: u32,
+    /// `HISTORY 001` and so on, as a player names them.
+    pub name: String,
+    /// The tracks, in the order they were loaded.
+    pub track_ids: Vec<u32>,
+}
+
 /// The eight track colours rekordbox offers, in the order it numbers them. A
 /// track's `color_id` is a row in this table, so the table has to be there even
 /// when nothing is coloured.
@@ -195,6 +210,9 @@ pub struct Database {
     /// The drive's own name, for the history row. Empty is valid — baken's
     /// fixture row has it empty — so nothing here needs it set.
     pub device_name: String,
+    /// What a player recorded playing. Empty on every drive this program
+    /// writes, so writing one starts its history over; see [`HistoryPlaylist`].
+    pub history: Vec<HistoryPlaylist>,
 }
 
 impl Database {
@@ -305,6 +323,21 @@ impl Database {
         }
         rows.insert(Table::PlaylistTree as u8, tree);
         rows.insert(Table::PlaylistEntries as u8, entries);
+
+        let mut histories = Vec::new();
+        let mut played = Vec::new();
+        for history in &self.history {
+            histories.push(id_and_name_row(history.id, &history.name));
+            for (position, track_id) in history.track_ids.iter().enumerate() {
+                played.push(RowData::plain(history_entry_row(
+                    *track_id,
+                    history.id,
+                    position as u32 + 1,
+                )));
+            }
+        }
+        rows.insert(Table::HistoryPlaylists as u8, histories);
+        rows.insert(Table::HistoryEntries as u8, played);
 
         self.lay_out(&rows)
     }
@@ -955,6 +988,15 @@ fn playlist_entry_row(position: u32, track_id: u32, playlist_id: u32) -> Vec<u8>
     put_u32(&mut row, position);
     put_u32(&mut row, track_id);
     put_u32(&mut row, playlist_id);
+    row
+}
+
+/// A playlist entry's three numbers, with the position moved to the end.
+fn history_entry_row(track_id: u32, history_id: u32, position: u32) -> Vec<u8> {
+    let mut row = Vec::new();
+    put_u32(&mut row, track_id);
+    put_u32(&mut row, history_id);
+    put_u32(&mut row, position);
     row
 }
 
@@ -1729,6 +1771,7 @@ mod tests {
             tracks: vec![a_track(1), a_track(2)],
             playlists: Vec::new(),
             device_name: "OVERCUE".into(),
+            ..Default::default()
         };
         let bytes = database.to_bytes().unwrap();
         let history = table(&bytes, Table::History);

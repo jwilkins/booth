@@ -167,6 +167,11 @@ fn the_reader_and_rekordcrate_agree_on_every_track_and_entry_of_a_drive_this_wri
 /// the rows its index marks present, all 94 playlists then run 1 to N with no
 /// gaps, and every entry names a track that exists. The 803 rekordcrate does
 /// not see are on the 26 pages that hold more than 255 rows.
+///
+/// That stick had been played, too, and is the one real history anywhere in
+/// reach: a single list, `HISTORY 001`, of 73 tracks. Read here and by
+/// rekordcrate alike, the list is named with a number and no date, its entries
+/// run 1 to 73, and every one names a track on the stick.
 #[test]
 #[ignore = "needs rekordcrate's fixtures: BOOTH_REKORDCRATE_DATA"]
 fn two_drives_rekordbox_wrote_are_read_in_full() {
@@ -193,4 +198,36 @@ fn two_drives_rekordbox_wrote_are_read_in_full() {
     );
     let node = library.nodes.iter().find(|n| n.id == 48).unwrap();
     assert_eq!((node.parent, node.name.as_str()), (5, "2 - START BEATs 1"));
+
+    let played = booth_cli::rekordbox::pdb::history(&bytes).unwrap();
+    assert_eq!(
+        played.lists.iter().map(|h| (h.id, h.name.as_str())).collect::<Vec<_>>(),
+        [(1, "HISTORY 001")]
+    );
+    let positions: Vec<u32> = played.entries.iter().map(|e| e.index).collect();
+    assert_eq!(positions, (1..=73).collect::<Vec<_>>());
+    assert!(played.entries.iter().all(|e| e.playlist == 1));
+    assert!(played.entries.iter().all(|e| library.tracks.iter().any(|t| t.id == e.track)));
+    let first = library.tracks.iter().find(|t| t.id == played.entries[0].track).unwrap();
+    assert_eq!(
+        (first.file_name.as_str(), first.file_size),
+        ("02 - Roland King - The Rowdy Swing.aiff", 55_720_044)
+    );
+    assert_eq!(theirs(&bytes, rekordcrate::pdb::PageType::HistoryPlaylists), 1);
+    assert_eq!(theirs(&bytes, rekordcrate::pdb::PageType::HistoryEntries), 73);
+}
+
+/// How many rows rekordcrate reads in one table.
+fn theirs(bytes: &[u8], table: rekordcrate::pdb::PageType) -> usize {
+    use binrw::BinRead;
+    let mut cursor = std::io::Cursor::new(bytes);
+    let header = rekordcrate::pdb::Header::read(&mut cursor).unwrap();
+    let table = header.tables.iter().find(|t| t.page_type == table).unwrap();
+    header
+        .read_pages(&mut cursor, binrw::Endian::Little, (&table.first_page, &table.last_page))
+        .unwrap()
+        .iter()
+        .filter(|page| page.has_data())
+        .flat_map(|page| page.row_groups.iter().flat_map(|group| group.present_rows()))
+        .count()
 }

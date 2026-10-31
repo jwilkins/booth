@@ -5,6 +5,11 @@
 //! albums, keys, colours, the browse menu — is how those rows are shown, not
 //! what is on the drive, and is not read.
 //!
+//! Also what those players write back: the history, a numbered list of the
+//! tracks loaded each time the drive was mounted, in two tables of its own.
+//! That is read on its own, by [`history`], so that a history this cannot make
+//! sense of does not stop the drive itself being read.
+//!
 //! Written from Deep Symmetry's notes on the format rather than from
 //! [`crate::export::pdb`], and sharing no code with it, for the same reason
 //! [`crate::export::pdb::inspect`] does not: a reader built from the writer
@@ -19,6 +24,8 @@ use anyhow::{bail, Context, Result};
 const TRACKS: u32 = 0;
 const PLAYLIST_TREE: u32 = 7;
 const PLAYLIST_ENTRIES: u32 = 8;
+const HISTORY_PLAYLISTS: u32 = 11;
+const HISTORY_ENTRIES: u32 = 12;
 
 /// Every page starts with this much header before its heap; row offsets are
 /// counted from the end of it.
@@ -35,6 +42,7 @@ const TRACK_STRINGS: usize = 21;
 /// Which of those strings are which.
 const ANALYZE_PATH: usize = 14;
 const TITLE: usize = 17;
+const FILE_NAME: usize = 19;
 const FILE_PATH: usize = 20;
 
 /// One track as the database lists it.
@@ -44,6 +52,10 @@ pub struct Track {
     pub title: String,
     /// Where the audio is on the drive, from its root: `/Contents/…`.
     pub file_path: String,
+    /// The last part of that, which the row keeps as a string of its own.
+    pub file_name: String,
+    /// Bytes, as the database was told when the drive was written.
+    pub file_size: u32,
     /// Where its `.DAT` is, the same way: `/PIONEER/USBANLZ/…/ANLZ0000.DAT`.
     pub analyze_path: String,
     pub sample_rate: u32,
@@ -73,6 +85,17 @@ pub struct Entry {
     pub track: u32,
 }
 
+/// One of the lists a player keeps of what it played.
+///
+/// A new one each time the drive is mounted, named by the player as a number —
+/// `HISTORY 001`, `HISTORY 002` — and not dated: the row holds the id and the
+/// name and nothing else.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct History {
+    pub id: u32,
+    pub name: String,
+}
+
 /// What a player can browse on a drive: read out of `export.pdb` here, or out
 /// of a OneLibrary database by [`super::onelibrary::library`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -82,6 +105,16 @@ pub struct Library {
     /// By id.
     pub nodes: Vec<Node>,
     /// By playlist, then position.
+    pub entries: Vec<Entry>,
+}
+
+/// What the players have recorded playing off a drive.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Histories {
+    /// By id.
+    pub lists: Vec<History>,
+    /// The tracks in each, by list, then position: the order they were loaded
+    /// in. `playlist` is the list's id.
     pub entries: Vec<Entry>,
 }
 
@@ -119,6 +152,32 @@ pub fn read(bytes: &[u8]) -> Result<Library> {
     Ok(Library { tracks, nodes, entries })
 }
 
+/// Read the history the players have written into an `export.pdb`.
+///
+/// The entries name tracks by id, which [`read`] gives the rows of.
+pub fn history(bytes: &[u8]) -> Result<Histories> {
+    let file = File::new(bytes)?;
+    let mut lists = Vec::new();
+    for row in file.rows(HISTORY_PLAYLISTS)? {
+        lists.push(History {
+            id: u32_at(row, 0x00)?,
+            name: string_at(row, 0x04).context("a history's name")?,
+        });
+    }
+    // The same three numbers as a playlist entry, in a different order.
+    let mut entries = Vec::new();
+    for row in file.rows(HISTORY_ENTRIES)? {
+        entries.push(Entry {
+            track: u32_at(row, 0x00)?,
+            playlist: u32_at(row, 0x04)?,
+            index: u32_at(row, 0x08)?,
+        });
+    }
+    lists.sort();
+    entries.sort();
+    Ok(Histories { lists, entries })
+}
+
 fn track(row: &[u8]) -> Result<Track> {
     let string = |which: usize| -> Result<String> {
         let at = u16_at(row, TRACK_STRINGS_AT + 2 * which)? as usize;
@@ -130,7 +189,9 @@ fn track(row: &[u8]) -> Result<Track> {
     Ok(Track {
         id: u32_at(row, 0x48)?,
         sample_rate: u32_at(row, 0x08)?,
+        file_size: u32_at(row, 0x10)?,
         title: string(TITLE)?,
+        file_name: string(FILE_NAME)?,
         file_path: string(FILE_PATH)?,
         analyze_path: string(ANALYZE_PATH)?,
     })
@@ -321,6 +382,49 @@ mod tests {
         assert_eq!(read.tracks[999].title, "Track 1000");
         assert_eq!(read.entries.len(), 1000);
         assert_eq!((read.entries[0].index, read.entries[0].track), (1, 1000));
+    }
+
+    #[test]
+    fn a_players_history_reads_back_as_its_numbered_lists_in_the_order_it_loaded_them() {
+        let mut database = written::Database::new();
+        database.tracks = vec![
+            a_track(1, "Hold Me", "/Contents/Peverelist/a.flac"),
+            a_track(2, "Roll With The Punches", "/Contents/Peverelist/b.flac"),
+        ];
+        database.tracks[1].file_size = 55_720_044;
+        database.history = vec![
+            written::HistoryPlaylist {
+                id: 1,
+                name: "HISTORY 001".into(),
+                track_ids: vec![2, 1, 2],
+            },
+            written::HistoryPlaylist { id: 2, name: "HISTORY 002".into(), track_ids: vec![1] },
+        ];
+        let bytes = database.to_bytes().unwrap();
+        let played = history(&bytes).unwrap();
+
+        assert_eq!(
+            played.lists.iter().map(|h| (h.id, h.name.as_str())).collect::<Vec<_>>(),
+            [(1, "HISTORY 001"), (2, "HISTORY 002")]
+        );
+        assert_eq!(
+            played.entries.iter().map(|e| (e.playlist, e.index, e.track)).collect::<Vec<_>>(),
+            [(1, 1, 2), (1, 2, 1), (1, 3, 2), (2, 1, 1)],
+            "a track loaded twice is in the list twice"
+        );
+        let read = read(&bytes).unwrap();
+        assert!(read.nodes.is_empty() && read.entries.is_empty(), "a history is not a playlist");
+        assert_eq!(
+            (read.tracks[1].file_name.as_str(), read.tracks[1].file_size),
+            ("b.flac", 55_720_044)
+        );
+    }
+
+    #[test]
+    fn a_drive_no_player_has_written_to_has_no_history() {
+        let mut database = written::Database::new();
+        database.tracks = vec![a_track(1, "Hold Me", "/Contents/a.flac")];
+        assert_eq!(history(&database.to_bytes().unwrap()).unwrap(), Histories::default());
     }
 
     #[test]

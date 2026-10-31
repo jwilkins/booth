@@ -480,7 +480,16 @@ pub fn export(
         // rekordbox-written stick is called, so it is the right answer for an
         // image and a harmless one for a drive that is already named
         // something else: nothing reads this field back.
-        let database = pdb::Database { tracks, playlists, device_name: args.label.clone() };
+        //
+        // No history: whatever a player recorded on this drive is not carried
+        // into the new database, so it has to be read off before this runs.
+        // See booth's `history`.
+        let database = pdb::Database {
+            tracks,
+            playlists,
+            device_name: args.label.clone(),
+            history: Vec::new(),
+        };
         let building = std::time::Instant::now();
         let bytes = database.to_bytes()?;
         report::detail(

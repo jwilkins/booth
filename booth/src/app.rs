@@ -5337,7 +5337,10 @@ impl App {
     /// One playlist per session, named the way the player named it, in a folder
     /// of the drive's own. Re-reading a drive replaces those playlists rather
     /// than making a second set: a night that has been read once and is read
-    /// again is the same night.
+    /// again is the same night. What counts as the same night is
+    /// [`crate::history::Session::is`], since a CDJ-3000 numbers its sessions
+    /// from one again after every sync and its numbers alone would make every
+    /// night the first.
     ///
     /// A track the library does not have is left out and counted. It cannot be
     /// a row in a playlist without being a row in the collection, and adding
@@ -5372,19 +5375,25 @@ impl App {
             }
             played += tracks.len();
             made += 1;
-            let playlist = crate::library::Playlist {
-                name: session.name.clone(),
-                folder: folder.clone(),
-                tracks,
-            };
+            // Read before, it keeps the name it was given then: a numbered
+            // session's day is when the file was last written, and moves.
             match self
                 .library
                 .playlists
                 .iter_mut()
-                .find(|p| p.name == playlist.name && p.folder == folder)
+                .find(|p| p.folder == folder && session.is(&p.name, &p.tracks, &tracks))
             {
-                Some(existing) => *existing = playlist,
-                None => self.library.playlists.push(playlist),
+                Some(existing) => existing.tracks = tracks,
+                None => {
+                    let name = crate::history::free_name(&session.name, |name| {
+                        self.library.playlists.iter().any(|p| p.folder == folder && p.name == name)
+                    });
+                    self.library.playlists.push(crate::library::Playlist {
+                        name,
+                        folder: folder.clone(),
+                        tracks,
+                    });
+                }
             }
         }
 
@@ -15261,6 +15270,63 @@ mod tests {
             let paths: Vec<_> = app.library.tracks.iter().map(|t| t.path.clone()).collect();
             assert_eq!(paths, [real], "{said}");
             assert!(said.contains("1 macOS ._ file left out"), "{said}");
+        }
+
+        #[test]
+        fn a_cdj_3000s_nights_each_keep_a_playlist_though_it_numbers_every_one_from_one() {
+            use crate::history::{Played, Session};
+            let mut app = app("history-nights");
+            let dir = app.library_path.parent().unwrap().to_path_buf();
+            for id in 1..=3u32 {
+                let mut track = Track::placeholder(id);
+                track.path = dir.join(format!("track{id}.flac"));
+                track.bytes = 100 + u64::from(id);
+                app.library.tracks.push(track);
+            }
+            // Matched to the library by name and length, as a drive's file is.
+            let session = |day: &str, number: &str, ids: &[u32]| Session {
+                name: format!("{day} {number}"),
+                played: ids
+                    .iter()
+                    .map(|id| Played {
+                        on_drive: format!("/Contents/Peverelist/track{id}.flac"),
+                        file_name: format!("track{id}.flac"),
+                        bytes: 100 + u64::from(*id),
+                    })
+                    .collect(),
+                numbered: Some(number.to_string()),
+            };
+            let root = std::path::Path::new("/Volumes/STICK");
+
+            app.take_history("STICK", root, vec![session("2026-10-24", "HISTORY 001", &[1, 2])]);
+            // Played again a week later with no sync between: the file was
+            // written again, so its day moved, and the first list is still on it.
+            app.take_history(
+                "STICK",
+                root,
+                vec![
+                    session("2026-10-31", "HISTORY 001", &[1, 2]),
+                    session("2026-10-31", "HISTORY 002", &[3]),
+                ],
+            );
+            // Synced, then played: the player starts again at one.
+            app.take_history("STICK", root, vec![session("2026-11-07", "HISTORY 001", &[3, 1])]);
+
+            let lists: Vec<(&str, &[u32])> = app
+                .library
+                .playlists
+                .iter()
+                .filter(|p| p.folder == "History/STICK")
+                .map(|p| (p.name.as_str(), p.tracks.as_slice()))
+                .collect();
+            assert_eq!(
+                lists,
+                [
+                    ("2026-10-24 HISTORY 001", &[1, 2][..]),
+                    ("2026-10-31 HISTORY 002", &[3][..]),
+                    ("2026-11-07 HISTORY 001", &[3, 1][..]),
+                ]
+            );
         }
 
         /// A real track and the `._` file macOS left beside it, both in the

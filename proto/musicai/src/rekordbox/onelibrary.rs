@@ -53,7 +53,8 @@ pub fn library(connection: &rusqlite::Connection) -> Result<super::pdb::Library>
 
     let number = |value: Option<i64>| value.unwrap_or(0).clamp(0, i64::from(u32::MAX)) as u32;
     let mut statement = connection.prepare(
-        "SELECT content_id, title, path, analysisDataFilePath, samplingRate FROM content",
+        "SELECT content_id, title, path, analysisDataFilePath, samplingRate, fileName, fileSize \
+         FROM content",
     )?;
     let mut tracks = statement
         .query_map([], |row| {
@@ -63,6 +64,8 @@ pub fn library(connection: &rusqlite::Connection) -> Result<super::pdb::Library>
                 file_path: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 analyze_path: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 sample_rate: number(row.get(4)?),
+                file_name: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                file_size: number(row.get(6)?),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

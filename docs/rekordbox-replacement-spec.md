@@ -85,8 +85,7 @@ three-band waveforms, beat grids, hot cues and phrases. The current release is 0
 
 Known gaps, so that nothing above reads as more finished than it is: no player older than
 a CDJ-3000 has been tried; the preflight does not check folder depth or the number of
-files in a folder; key detection is right about 37% of the time on a real library; a
-CDJ-3000's play history, which it writes into `export.pdb`, is not read back; and the
+files in a folder; key detection is right about 37% of the time on a real library; and the
 preview deck is one deck, not two. §14 is the detailed status and does not round up.
 
 ### Why the lock-in exists at all
@@ -876,7 +875,7 @@ an older one: nothing before the CDJ-3000 has been tried.
 | rekordbox import (INTEROP-1) | Done, from the encrypted `master.db`. |
 | OneLibrary (INTEROP-5, EXP-3 for the 3000X) | Reads and dumps a schema; writes one beside the legacy database, verified off the drive and played on a real CDJ-3000X and CDJ-1500X. [`docs/onelibrary.md`](onelibrary.md). |
 | Serato, Traktor, Engine DJ (INTEROP-2) | Not started. |
-| Play history and booth round-trip (HIST-1..3) | HIST-1 for the newer players: their history is read back off a drive into dated playlists. A CDJ-3000 writes its history into `export.pdb`, which is not read. Cues and loops a deck saved are read back off a stick; merging them as a per-track diff (HIST-2) and the set report (HIST-3) are not done. |
+| Play history and booth round-trip (HIST-1..3) | HIST-1: the history every player writes is read back off a drive into playlists — the newer players' out of the OneLibrary database, already dated, and a CDJ-3000's and every older player's out of `export.pdb`, where it is numbered rather than dated and is named for the day the file was last written. A sync writes both databases without one, so it is read when the drive is copied, before anything is written. Cues and loops a deck saved are read back off a stick; merging them as a per-track diff (HIST-2) and the set report (HIST-3) are not done. |
 | Plug-in interface (INTEROP-4) | Not started. |
 
 The rest of this section is what that consists of.
