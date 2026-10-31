@@ -570,6 +570,10 @@ pub fn export(
         }
     }
 
+    if !args.settings.is_empty() {
+        lines.push(put_settings(&args.settings, destination.as_ref(), reporter)?);
+    }
+
     if let Some(destination) = destination {
         // For an image this is where the filesystem is flushed and the file
         // closed — the point at which a write that looked finished can still
@@ -841,6 +845,32 @@ fn put_onelibrary(
         summary.tracks,
         summary.playlists
     ))
+}
+
+/// Put the player and mixer settings files on the drive and read each back.
+///
+/// A settings file a player does not like is one it ignores on LOAD, with
+/// nothing to say so, so the bytes that landed are compared with the ones
+/// meant to rather than trusted.
+fn put_settings(
+    files: &[crate::export::settings::File],
+    destination: Option<&Destination>,
+    reporter: &dyn Reporter,
+) -> Result<String> {
+    let names = files.iter().map(|file| file.kind().file_name()).collect::<Vec<_>>().join(", ");
+    let Some(destination) = destination else {
+        return Ok(format!("would write My Settings: {names}"));
+    };
+    let writing = std::time::Instant::now();
+    for file in files {
+        let on_drive = file.kind().on_drive();
+        destination.write(&on_drive, file.bytes())?;
+        if destination.read(&on_drive)? != file.bytes() {
+            bail!("{on_drive} did not read back off the drive as it was written");
+        }
+    }
+    report::detail(reporter, format!("wrote My Settings and read them back in {}", took(writing)));
+    Ok(format!("wrote My Settings to {}: {names}, verified", destination.describe()))
 }
 
 /// Where this export is going, and — for an image — how big it needs to be.
@@ -2467,6 +2497,19 @@ pub fn audit(args: &crate::cli::AuditArgs, reporter: &dyn Reporter) -> Result<()
         true => "every player sees the same drive, and everything on it loads".into(),
         false => "see above for what differs between players".into(),
     }));
+    Ok(())
+}
+
+pub fn settings(args: &crate::cli::SettingsArgs, reporter: &dyn Reporter) -> Result<()> {
+    use crate::report::Event;
+
+    let files = crate::export::settings::describe(&args.path)?;
+    for (file, lines) in files {
+        reporter.event(Event::Heading(file));
+        for line in lines {
+            reporter.event(Event::Line(line));
+        }
+    }
     Ok(())
 }
 
