@@ -1862,6 +1862,48 @@ it looked like, so its tracks are never treated as edited: no evidence is not
 evidence of a change, and the alternative would make every older drive
 unwritable.
 
+## My Settings
+
+**My Settings**, beside Settings in the dock, is the players' and the mixer's
+settings rather than this program's: quantize, tempo range, auto cue, jog mode,
+the language, the waveform colour, the crossfader curve, 46 in all, grouped as
+rekordbox's preferences group them. They go on a drive as the four files
+rekordbox puts there (`MYSETTING.DAT`, `MYSETTING2.DAT`, `DJMMYSETTING.DAT`,
+`DEVSETTING.DAT`) and a player takes them with MY SETTINGS, then LOAD.
+
+The collection has none until somebody sets one. A stick that carries settings
+changes how a player behaves when they are loaded, and a DJ who never asked for
+that should not find Quantize back on, so nothing goes on a drive until a
+setting is changed here or a drive's are taken. **rekordbox's** starts a set
+from rekordbox's defaults and **None** stops putting them on drives (the ones
+already on a drive stay there).
+
+**Take a drive's** uses the settings on a stick, a file at a time: the ones a
+player saved there with SAVE, or rekordbox put there. A file that does not read
+is left out and named, and the others are still taken.
+
+A sync puts them on a drive **only where it has none of its own**. A file a
+player saved there, or rekordbox did, is somebody's choice, and rekordbox does
+not write over one either; third-party exporters that do are a pain point of
+their own. The drive's record says which files Booth put there, so the set can
+change and those files follow it. A file a player has saved over since is the
+drive's own again. The sync sheet has a Settings line saying what happens to
+each file. Where the drive has its own, **Put mine over the drive's own**
+replaces them for that one write.
+
+Each file is kept as its bytes, and only the bytes of the 46 settings are ever
+changed. A file a player saved, or a newer rekordbox wrote, may hold a setting
+nobody has named yet, and a file written back from fields would lose it.
+`booth-cli settings /Volumes/USB` says what a drive's files set and names any
+byte that differs where no setting is known.
+
+What each byte means is rekordcrate's work, checked against the 74 files it
+keeps from rekordbox 6.6.1 with one setting changed in each. Every value of
+every setting Booth writes is read by rekordcrate as that setting and that
+value. **No player has loaded a set Booth wrote yet**, and no file a CDJ-3000
+saved has been looked at, so what a player does with a byte nobody has named is
+not known.
+
 ## The collection against its files
 
 A collection is a set of claims about files other programs can also move,

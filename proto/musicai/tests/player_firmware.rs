@@ -136,6 +136,7 @@ fn export_image(inputs: Vec<PathBuf>, image: &Path) -> Vec<String> {
         companions: Vec::new(),
         already: Vec::new(),
         prepared: Vec::new(),
+        settings: Vec::new(),
     };
     let reporter = Collected::new();
     commands::export(&args, &reporter).expect("export to an image failed");

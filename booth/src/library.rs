@@ -1485,6 +1485,27 @@ pub struct Drive {
     pub skip_stems: bool,
     pub bytes: u64,
     pub last_sync: Option<u64>,
+    /// The My Settings files on it after the last sync, and whose they are.
+    ///
+    /// A file Booth put there is Booth's to replace when the settings change.
+    /// One that was there already, a player's or rekordbox's, is somebody's
+    /// choice, and stays until somebody says otherwise. Empty for a drive
+    /// written before settings went on drives, and for one written while the
+    /// collection had none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<SettingsOnDrive>,
+}
+
+/// One My Settings file on a drive after its last sync.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsOnDrive {
+    /// `MYSETTING.DAT` and so on.
+    pub file: String,
+    /// The SHA-256 of the file that was there, so that one changed since, by
+    /// a player saving its own, is known not to be Booth's any more.
+    pub sha256: String,
+    /// Whether Booth put it there, or found it there and kept it.
+    pub ours: bool,
 }
 
 impl Drive {
@@ -1526,6 +1547,14 @@ pub struct Library {
     pub folders: Vec<String>,
     pub saved: Vec<SavedQuery>,
     pub drives: Vec<Drive>,
+    /// The player and mixer settings that go on drives, or none until somebody
+    /// sets some.
+    ///
+    /// None rather than rekordbox's, because a stick carrying settings changes
+    /// how a player behaves when they are loaded, and a DJ who never asked for
+    /// that should not find Quantize back on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<booth_cli::export::settings::Settings>,
     next_id: u32,
 }
 

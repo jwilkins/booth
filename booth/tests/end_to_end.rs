@@ -204,6 +204,69 @@ fn a_folder_of_music_becomes_a_drive_a_player_can_read() {
     );
 }
 
+/// My Settings on a stick a player has saved its own to: the player's file
+/// stays as it is, the rest go on, and the drive's record says which is whose.
+#[test]
+fn a_sync_puts_my_settings_beside_the_ones_a_player_saved_and_not_over_them() {
+    use booth_cli::export::settings::{File, Kind, Settings, Step, FIELDS};
+
+    let scratch = Scratch::new("settings");
+    let song = scratch.0.join("music/a.wav");
+    write_beats(&song, 128.0, 8);
+    let drive_path = scratch.0.join("USB");
+    std::fs::create_dir_all(drive_path.join("PIONEER")).unwrap();
+    let mut saved = File::rekordbox(Kind::Player);
+    saved.set(FIELDS.iter().find(|f| f.id == "jog_mode").unwrap().at, 0x80);
+    std::fs::write(drive_path.join("PIONEER/MYSETTING.DAT"), saved.bytes()).unwrap();
+
+    let mut collection = Library::new();
+    let id = collection.add(&song);
+    collection.playlists.push(Playlist {
+        name: "tonight".into(),
+        folder: String::new(),
+        tracks: vec![id],
+    });
+    collection.drives.push(library::Drive {
+        label: "TEST-USB".into(),
+        path: drive_path.clone(),
+        playlist: "tonight".into(),
+        ..library::Drive::default()
+    });
+    let mut set = Settings::rekordbox();
+    set.set(FIELDS.iter().find(|f| f.id == "tempo_range").unwrap(), 0x83);
+    collection.settings = Some(set.clone());
+
+    let steps = sync::settings_steps(&collection, &collection.drives[0], Some(&drive_path), false);
+    assert_eq!(
+        steps.iter().map(|s| s.step).collect::<Vec<_>>(),
+        [Step::Keep, Step::Write, Step::Write, Step::Write]
+    );
+    let mut args = booth_cli::cli::ExportArgs::defaults();
+    args.drive = Some(drive_path.clone());
+    args.playlist = "tonight".into();
+    args.input = booth_cli::cli::InputArgs { inputs: vec![song.clone()], recursive: false };
+    args.settings =
+        steps.iter().filter(|s| s.step.writes()).map(|s| set.file(s.kind).clone()).collect();
+    booth_cli::commands::export(&args, &booth_cli::report::Collected::new())
+        .expect("the drive should write");
+
+    let on_drive =
+        |kind: Kind| std::fs::read(drive_path.join("PIONEER").join(kind.file_name())).unwrap();
+    assert_eq!(on_drive(Kind::Player), saved.bytes(), "the player's own was written over");
+    for kind in [Kind::Player2, Kind::Mixer, Kind::General] {
+        assert_eq!(on_drive(kind), set.file(kind).bytes(), "{}", kind.file_name());
+    }
+
+    let record = sync::settings_record(&steps, &set, &[]);
+    collection.drives[0].settings = record;
+    let again = sync::settings_steps(&collection, &collection.drives[0], Some(&drive_path), false);
+    assert_eq!(
+        again.iter().map(|s| s.step).collect::<Vec<_>>(),
+        [Step::Keep, Step::Same, Step::Same, Step::Same],
+        "the next sync has nothing to do but keep the player's"
+    );
+}
+
 /// A stem written to a drive carries its parent's grid and cues.
 ///
 /// The reason this matters: a hot cue set on the track has to land in the same

@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use booth_cli::cli::ExportArgs;
+use booth_cli::export::settings::Step;
 use eframe::egui::{self, Color32, RichText, Ui};
 
 use crate::config::{Config, OnExternal};
@@ -303,6 +304,21 @@ pub struct App {
     audited: Option<(String, Vec<String>, bool)>,
     /// Set while the settings sheet is open.
     settings: bool,
+    /// Set while the My Settings sheet is open: the players' and the mixer's
+    /// settings, as against this program's.
+    my_settings: bool,
+    /// What the last import of a drive's My Settings took and refused.
+    settings_taken: Option<String>,
+    /// Somebody has said, on the sync sheet, that the collection's My
+    /// Settings may go over the ones the drive has of its own. Asked again for
+    /// every write, so it is cleared by one.
+    settings_over: bool,
+    /// What the drive's record is to say about its My Settings once the write
+    /// under way reports back, and not before. Recorded ahead, a write that
+    /// failed would leave Booth's old file on the stick and a record naming
+    /// the new one, and the next sync would take the old file for the
+    /// drive's own and keep it for good.
+    settings_writing: Option<Vec<crate::library::SettingsOnDrive>>,
     /// Whether the inspector's lyric sheet is opened out to [`EXPANDED_ROWS`]
     /// rather than the few lines that fit in [`WORDS_HEIGHT`]. Not kept across
     /// runs: it is where somebody is reading, not a setting.
@@ -864,6 +880,8 @@ enum Picking {
     Drive,
     Image,
     LibraryFolder,
+    /// A drive, or its PIONEER folder, to take My Settings from.
+    Settings,
 }
 
 impl App {
@@ -982,6 +1000,10 @@ impl App {
             details: false,
             audited: None,
             settings: false,
+            my_settings: false,
+            settings_taken: None,
+            settings_over: false,
+            settings_writing: None,
             words_expanded: false,
             decided_expanded: false,
             asking: Vec::new(),
@@ -1046,6 +1068,11 @@ impl App {
         #[cfg(feature = "screenshot")]
         if std::env::var_os("BOOTH_OPEN_SETTINGS").is_some() {
             app.settings = true;
+            cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
+        }
+        #[cfg(feature = "screenshot")]
+        if std::env::var_os("BOOTH_OPEN_MY_SETTINGS").is_some() {
+            app.my_settings = true;
             cc.egui_ctx.style_mut(|style| style.animation_time = 0.0);
         }
         #[cfg(feature = "screenshot")]
@@ -3683,6 +3710,12 @@ impl App {
                             None => written.stems.push((from, row)),
                         }
                     }
+                    // A write that reports back put its settings on: they go
+                    // after the databases, and a failure there is an error, not
+                    // a partial write.
+                    if let Some(record) = self.settings_writing.take() {
+                        drive.settings = record;
+                    }
                     changed = true;
 
                     // A drive has just been written, which is the moment its
@@ -4356,6 +4389,30 @@ impl App {
         } else {
             args.drive = Some(drive.path.clone());
         }
+        // My Settings, decided against the stick itself at the moment of
+        // writing: a file a player saved there is the drive's own, and stays
+        // unless the sheet was told otherwise for this write.
+        let settings_steps = sync::settings_steps(
+            &self.library,
+            &drive,
+            (!drive.is_image).then_some(drive.path.as_path()),
+            std::mem::take(&mut self.settings_over),
+        );
+        if let Some(set) = &self.library.settings {
+            args.settings = match drive.is_image {
+                // An image is made from nothing every time: there is nothing
+                // on it of its own to keep.
+                true => set.files().to_vec(),
+                false => settings_steps
+                    .iter()
+                    .filter(|s| s.step.writes())
+                    .map(|s| set.file(s.kind).clone())
+                    .collect(),
+            };
+            for s in &settings_steps {
+                crate::info!("{}: {}", s.kind.file_name(), s.step.describe());
+            }
+        }
         args.player = self.config.oldest_player;
         // The sheet has asked already, with the plan's own sums — which count a
         // track being replaced at nothing, as it is — and offered to write
@@ -4425,6 +4482,11 @@ impl App {
             drive.written = written;
             drive.last_sync = Some(now());
         }
+        self.settings_writing = self
+            .library
+            .settings
+            .as_ref()
+            .map(|set| sync::settings_record(&settings_steps, set, &drive.settings));
 
         self.sheet = false;
         self.start(Job::Sync { args: Box::new(args), files: carry.files });
@@ -4480,6 +4542,7 @@ impl App {
             skip_stems: false,
             bytes: 0,
             last_sync: None,
+            settings: Vec::new(),
         });
         self.drive = self.library.drives.len() - 1;
         self.replan();
@@ -4820,6 +4883,9 @@ impl eframe::App for App {
         if self.settings {
             self.settings_sheet(ctx);
         }
+        if self.my_settings {
+            self.my_settings_sheet(ctx);
+        }
         if !self.asking.is_empty() {
             self.adopt_sheet(ctx);
         }
@@ -5117,6 +5183,9 @@ impl App {
             return true;
         }
         if std::mem::take(&mut self.settings) {
+            return true;
+        }
+        if std::mem::take(&mut self.my_settings) {
             return true;
         }
         // Before the sheet it was opened from, or one press would shut both
@@ -8989,6 +9058,24 @@ impl App {
             {
                 self.settings = true;
             }
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(theme::label_text("My Settings"))
+                            .size(theme::LABEL)
+                            .color(theme::dim())
+                            .strong(),
+                    )
+                    .fill(theme::booth()),
+                )
+                .on_hover_text(
+                    "What the players and the mixer are set to when a drive's settings are \
+                     loaded: quantize, tempo range, auto cue, language and the rest",
+                )
+                .clicked()
+            {
+                self.my_settings = true;
+            }
             self.log_button(ui);
             ui.separator();
             ui.label(
@@ -11890,6 +11977,224 @@ impl App {
         }
     }
 
+    /// The players' and the mixer's settings: what a drive carries for a
+    /// player to LOAD, changed a setting at a time or taken from a stick.
+    fn my_settings_sheet(&mut self, ctx: &egui::Context) {
+        use booth_cli::export::settings::{Kind, Section, Settings, FIELDS};
+
+        let mut open = true;
+        let mut pick = false;
+        let mut take_from: Option<PathBuf> = None;
+        // The stick on the dock, when it is here and has settings: the one a
+        // DJ's own are most likely to be on, saved there from a player.
+        let here = self
+            .library
+            .drives
+            .get(self.drive)
+            .filter(|drive| !drive.is_image && plugged_in(drive))
+            .filter(|drive| {
+                let folder = booth_cli::export::settings::folder(&drive.path);
+                Kind::ALL.iter().any(|kind| folder.join(kind.file_name()).is_file())
+            })
+            .map(|drive| (drive.label.clone(), drive.path.clone()));
+        let before = self.library.settings.clone();
+        let mut set = before.clone().unwrap_or_default();
+        let mut none = before.is_none();
+
+        egui::Window::new("My Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .max_height(sheet_height(ctx))
+            .frame(sheet_frame())
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "What a player and a mixer are set to when a drive's settings are \
+                         loaded: on the player, MY SETTINGS, then LOAD. They go on a drive at \
+                         its next sync where it has none of its own. Settings a player saved \
+                         onto a stick, or rekordbox put there, stay unless the sync sheet is \
+                         told otherwise.",
+                    )
+                    .color(theme::dim())
+                    .size(theme::SMALL),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(match none {
+                        true => "None go on drives yet. Changing one below, or taking a \
+                                 drive's, starts a set from rekordbox's."
+                            .to_string(),
+                        false => match set.changed().len() {
+                            0 => "These go on drives: rekordbox's, unchanged.".to_string(),
+                            n => format!(
+                                "These go on drives: {} different from rekordbox's.",
+                                plural(n, "setting")
+                            ),
+                        },
+                    })
+                    .size(theme::SMALL),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if let Some((label, path)) = &here {
+                        if ui
+                            .button(format!("Take {label}'s"))
+                            .on_hover_text(
+                                "Use the settings on this drive, a file at a time: the ones a \
+                                 player saved there with SAVE, or rekordbox put there.",
+                            )
+                            .clicked()
+                        {
+                            take_from = Some(path.clone());
+                        }
+                    }
+                    if ui
+                        .button("Take a drive's\u{2026}")
+                        .on_hover_text(
+                            "Choose a drive, or its PIONEER folder, to use the settings on.",
+                        )
+                        .clicked()
+                    {
+                        pick = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            none || !set.changed().is_empty(),
+                            egui::Button::new("rekordbox's"),
+                        )
+                        .on_hover_text(
+                            "Every setting as rekordbox has it before anybody changes one.",
+                        )
+                        .clicked()
+                    {
+                        set = Settings::rekordbox();
+                        none = false;
+                    }
+                    if ui
+                        .add_enabled(!none, egui::Button::new("None"))
+                        .on_hover_text(
+                            "Put no settings on drives. The ones already on a drive stay \
+                             there.",
+                        )
+                        .clicked()
+                    {
+                        none = true;
+                    }
+                });
+                if let Some(said) = &self.settings_taken {
+                    ui.label(RichText::new(said).color(theme::dim()).size(theme::SMALL));
+                }
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for section in Section::ALL {
+                        pane_label(ui, section.label());
+                        egui::Grid::new(section.label()).num_columns(2).spacing([16.0, 4.0]).show(
+                            ui,
+                            |ui| {
+                                for field in FIELDS.iter().filter(|f| f.section == section) {
+                                    let value = set.get(field);
+                                    let theirs = field.rekordbox();
+                                    let theirs_named = field.label(theirs).unwrap_or_default();
+                                    ui.label(RichText::new(field.name).color(
+                                        match value == theirs {
+                                            true => theme::dim(),
+                                            false => theme::text(),
+                                        },
+                                    ))
+                                    .on_hover_text(format!("rekordbox's: {theirs_named}"));
+                                    let shown =
+                                        field.label(value).map(str::to_string).unwrap_or_else(
+                                            || format!("{value:#04x}, not a value Booth knows"),
+                                        );
+                                    let mut chosen = value;
+                                    egui::ComboBox::from_id_salt(field.id)
+                                        .selected_text(shown)
+                                        .width(170.0)
+                                        .show_ui(ui, |ui| {
+                                            for &(known, named) in field.values {
+                                                ui.selectable_value(&mut chosen, known, named)
+                                                    .on_hover_text(match known == theirs {
+                                                        true => {
+                                                            "What rekordbox has it at.".to_string()
+                                                        }
+                                                        false => format!(
+                                                            "rekordbox has it at {theirs_named}."
+                                                        ),
+                                                    });
+                                            }
+                                        });
+                                    if chosen != value {
+                                        set.set(field, chosen);
+                                        none = false;
+                                    }
+                                    ui.end_row();
+                                }
+                            },
+                        );
+                        ui.add_space(10.0);
+                    }
+                });
+            });
+
+        let after = (!none).then_some(set);
+        if after != before {
+            self.library.settings = after;
+            self.save();
+            self.replan();
+        }
+        if pick {
+            self.want_pick = Some(Picking::Settings);
+        }
+        if let Some(path) = take_from {
+            self.take_settings(&path);
+        }
+        if !open {
+            self.my_settings = false;
+            self.settings_taken = None;
+        }
+    }
+
+    /// Take the My Settings a drive has into the collection's set, a file at
+    /// a time.
+    ///
+    /// A file that does not read is left out and named, and the others are
+    /// still taken: a stick whose mixer file is damaged has nothing wrong with
+    /// its player's.
+    fn take_settings(&mut self, path: &std::path::Path) {
+        let found = booth_cli::export::settings::read(path);
+        let taken: Vec<&str> = found.files.iter().map(|f| f.kind().file_name()).collect();
+        let unnamed: usize = found.files.iter().map(|f| f.unnamed().len()).sum();
+        let mut said = match taken.is_empty() {
+            true => format!("{} has no settings to take", path.display()),
+            false => format!("took {} from {}", taken.join(", "), path.display()),
+        };
+        // Kept as they are, and worth saying: they are a setting a player has
+        // and nobody has named yet, which is what `booth-cli settings` is for.
+        if unnamed > 0 {
+            said.push_str(&format!(
+                ", with {} no setting is known for, kept as they are",
+                plural(unnamed, "byte")
+            ));
+        }
+        for (kind, why) in &found.refused {
+            said.push_str(&format!("; left {} out: {why}", kind.file_name()));
+        }
+        crate::info!("{said}");
+        if !taken.is_empty() {
+            let mut set = self.library.settings.clone().unwrap_or_default();
+            for file in found.files {
+                set.take(file);
+            }
+            self.library.settings = Some(set);
+            self.save();
+            self.replan();
+        }
+        self.settings_taken = Some(said);
+    }
+
     /// What to do about tracks that turned up from outside the library.
     ///
     /// Only ever shown when the policy is to ask. It offers the same three
@@ -13126,6 +13431,17 @@ impl App {
         // clone of the drive, and the plan under it was worked out before this
         // frame. Read back after the window closes, so one change redraws once.
         let mut with_stems = !drive.skip_stems;
+        let mut over = self.settings_over;
+        // Asked of the stick, as the write will ask it: whether a player has
+        // saved its own settings there since is something only the stick
+        // knows. Four files of under two hundred bytes, as cheap as the
+        // free-space check the sheet also makes every frame.
+        let settings_steps = sync::settings_steps(
+            &self.library,
+            &drive,
+            (!drive.is_image && plugged_in(&drive)).then_some(drive.path.as_path()),
+            over,
+        );
         egui::Window::new(format!("SYNC → {}", drive.label))
             .open(&mut open)
             .collapsible(false)
@@ -13315,6 +13631,22 @@ impl App {
                         );
                     });
 
+                    sheet_line(
+                        ui,
+                        "Settings",
+                        &settings_text(&settings_steps, self.library.settings.is_some()),
+                        "—",
+                    );
+                    if settings_steps.iter().any(|s| matches!(s.step, Step::Keep | Step::Over)) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(74.0);
+                            ui.checkbox(&mut over, "Put mine over the drive's own").on_hover_text(
+                                "The drive has settings of its own, saved there on a player or \
+                                 put there by rekordbox, and a sync leaves them alone. Ticked, \
+                                 this one write replaces them with the ones in My Settings.",
+                            );
+                        });
+                    }
                     ui.add_space(12.0);
                     for check in &checks {
                         ui.horizontal(|ui| {
@@ -13427,6 +13759,11 @@ impl App {
         if forget {
             self.forget_drive_contents();
         }
+        // Said for this drive, this sheet and this write. The write is
+        // started from inside the sheet, takes the answer and shuts the
+        // sheet, so `self.sheet` is false after one and the answer is not put
+        // back for the next write to find already given.
+        self.settings_over = over && open && self.sheet;
         if !open {
             self.sheet = false;
         }
@@ -13620,6 +13957,12 @@ impl App {
                     .iter()
                     .map(|f| f.path().to_path_buf())
                     .collect(),
+                Picking::Settings => {
+                    block_on(dialog.set_title("The drive to take My Settings from").pick_folder())
+                        .into_iter()
+                        .map(|f| f.path().to_path_buf())
+                        .collect()
+                }
                 Picking::Drive => block_on(dialog.set_title("Choose the drive").pick_folder())
                     .into_iter()
                     .map(|f| f.path().to_path_buf())
@@ -13684,6 +14027,11 @@ impl App {
                     if let Err(e) = self.config.save(&self.config_path) {
                         self.note(format!("could not save the settings: {e:#}"), theme::alert());
                     }
+                }
+            }
+            Picking::Settings => {
+                if let Some(path) = paths.into_iter().next() {
+                    self.take_settings(&path);
                 }
             }
             Picking::Music => {}
@@ -14672,6 +15020,25 @@ fn snap_to(beats: &[u32], time_ms: u32, every: usize) -> u32 {
 /// rounds down. Falls back to the moment itself where there is no grid.
 fn snap_back(beats: &[u32], time_ms: u32) -> u32 {
     beats.iter().rev().find(|beat| **beat <= time_ms).copied().unwrap_or(time_ms)
+}
+
+/// The sync sheet's Settings line: each file and what the write does with it.
+fn settings_text(steps: &[sync::SettingsStep], have: bool) -> String {
+    if !have {
+        return "none \u{2014} My Settings sets them".to_string();
+    }
+    if steps.iter().all(|s| s.step == Step::Same) {
+        return "already on".to_string();
+    }
+    [Step::Write, Step::Replace, Step::Over, Step::Keep, Step::Same]
+        .into_iter()
+        .filter_map(|step| {
+            let files: Vec<&str> =
+                steps.iter().filter(|s| s.step == step).map(|s| s.kind.file_name()).collect();
+            (!files.is_empty()).then(|| format!("{}: {}", step.describe(), files.join(", ")))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn sheet_line(ui: &mut Ui, operation: &str, what: &str, size: &str) {
@@ -20742,6 +21109,78 @@ mod tests {
                 harness.state().settings,
                 "\u{2318}, did not open Settings, which is where every other program keeps it"
             );
+        }
+
+        /// A stick with a PIONEER folder holding a player settings file a
+        /// player saved, with the tempo range at Wide.
+        fn stick_with_saved_settings(app: &mut App, name: &str) -> PathBuf {
+            use booth_cli::export::settings::{File, Kind};
+            let stick = app.library_path.parent().unwrap().join(name);
+            std::fs::create_dir_all(stick.join("PIONEER")).unwrap();
+            let mut saved = File::rekordbox(Kind::Player);
+            saved.set(36, 0x83);
+            std::fs::write(stick.join("PIONEER/MYSETTING.DAT"), saved.bytes()).unwrap();
+            app.library.drives.push(Drive {
+                label: name.into(),
+                path: stick.clone(),
+                ..Default::default()
+            });
+            app.drive = app.library.drives.len() - 1;
+            stick
+        }
+
+        #[test]
+        fn my_settings_start_as_none_and_take_a_sticks_a_file_at_a_time() {
+            use booth_cli::export::settings::{Kind, Settings, FIELDS};
+            let mut app = app("my-settings-take");
+            stick_with_saved_settings(&mut app, "USB");
+            let mut harness =
+                Harness::new_state(|ctx, app: &mut App| app.my_settings_sheet(ctx), app);
+            harness.run();
+            assert!(harness.state().library.settings.is_none());
+            harness.get_by_label_contains("None go on drives yet");
+
+            harness.get_by_label("Take USB's").click();
+            harness.run();
+            let set = harness.state().library.settings.clone().expect("nothing was taken");
+            let tempo = FIELDS.iter().find(|f| f.id == "tempo_range").unwrap();
+            assert_eq!(set.get(tempo), 0x83);
+            // Only the player file was there, so the others are still rekordbox's.
+            assert_eq!(set.file(Kind::Mixer), Settings::rekordbox().file(Kind::Mixer));
+            harness.get_by_label_contains("took MYSETTING.DAT from");
+            harness.get_by_label_contains("1 setting different from rekordbox's");
+
+            harness.get_by_label("None").click();
+            harness.run();
+            assert!(harness.state().library.settings.is_none());
+            harness.get_by_label("rekordbox's").click();
+            harness.run();
+            assert_eq!(harness.state().library.settings, Some(Settings::rekordbox()));
+            let saved = Library::load(&harness.state().library_path).unwrap();
+            assert_eq!(saved.settings, Some(Settings::rekordbox()), "it was not saved");
+        }
+
+        #[test]
+        fn the_sync_sheet_keeps_a_drives_own_settings_until_told_to_put_mine_over_them() {
+            use booth_cli::export::settings::Settings;
+            let mut app = app("my-settings-sync");
+            stick_with_saved_settings(&mut app, "USB");
+            app.library.settings = Some(Settings::rekordbox());
+            app.sheet = true;
+            app.replan();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(900.0, 1_200.0))
+                .build_state(|ctx, app: &mut App| app.sync_sheet(ctx), app);
+            harness.run();
+            harness.get_by_label_contains("the drive's own is kept: MYSETTING.DAT");
+            harness
+                .get_by_label_contains("goes on: MYSETTING2.DAT, DJMMYSETTING.DAT, DEVSETTING.DAT");
+            assert!(!harness.state().settings_over);
+
+            harness.get_by_label("Put mine over the drive's own").click();
+            harness.run();
+            assert!(harness.state().settings_over);
+            harness.get_by_label_contains("goes on over the drive's own, as asked: MYSETTING.DAT");
         }
 
         #[test]
