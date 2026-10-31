@@ -1612,13 +1612,13 @@ carries it, as it carries the one for rekordbox's own library — they are
 different keys, and both are in `proto/musicai/src/rekordbox/mod.rs` with where they came
 from. The sheet says which databases a drive will carry before it writes them.
 
-**A CDJ-3000X and a CDJ-3000 have both played from one.** Playlists, track
-list, key search, colour and three-band waveforms, beat grid, hot cues and
-phrases all came up off a drive this wrote, with no pause for the player to
-measure anything of its own — so the analysis files are read, not recomputed.
-The CDJ-3000 reads the legacy database rather than this one, and getting it to
-play took bringing that file and the analysis files to what every real export
-carries; the account is in `docs/onelibrary-gist.md`, §6.
+**A CDJ-3000X and a CDJ-1500X have both played from one**, and a CDJ-3000
+from the legacy database written beside it. Playlists, track list, key search,
+colour and three-band waveforms, beat grid, hot cues and phrases all came up
+off a drive this wrote, with no pause for the player to measure anything of its
+own — so the analysis files are read, not recomputed. Getting the CDJ-3000 to
+play took bringing the legacy database and the analysis files to what every
+real export carries; the account is in `docs/onelibrary-gist.md`, §6.
 
 ## What a player will actually open
 
