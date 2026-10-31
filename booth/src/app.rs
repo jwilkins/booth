@@ -3826,9 +3826,13 @@ impl App {
                     self.levelled(id, to);
                     changed = true;
                 }
-                Update::Converted { id, to } => {
+                Update::Converted { id, to, rate } => {
                     crate::info!("#{id} converted to {}", to.display());
                     if let Some(track) = self.library.get_mut(id) {
+                        // Now rather than at the next analysis, so a file
+                        // brought down from 192 kHz stops being one the
+                        // sidebar says needs attention the moment it is not.
+                        track.sample_rate = rate;
                         // The record follows the new file. The original stays
                         // where it was — a conversion that turns out wrong
                         // should leave the thing it was made from behind.
@@ -8954,6 +8958,16 @@ impl App {
                 self.note(format!("a .{} has nowhere to keep tags", track.format), theme::amber());
                 return;
             }
+            Some(kind) if !kind.writable() => {
+                self.note(
+                    format!(
+                        "a .{}'s tags are read, not written: convert it to FLAC to tag it",
+                        track.format
+                    ),
+                    theme::amber(),
+                );
+                return;
+            }
             None => {
                 self.note(
                     format!("a .{} is not a file whose tags can be written", track.format),
@@ -9017,11 +9031,11 @@ impl App {
             return;
         }
         match booth_cli::tag::tag_kind(&track.path) {
-            Some(booth_cli::tag::TagKind::None) | None => {
+            Some(kind) if kind.writable() => {}
+            Some(_) | None => {
                 crate::debug!("#{id}: a .{} has nowhere to keep a genre", track.format);
                 return;
             }
-            Some(_) => {}
         }
         crate::debug!(
             "queueing the genre {genre} for {} ({on_existing:?})",

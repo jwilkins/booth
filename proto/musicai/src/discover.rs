@@ -7,13 +7,41 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use walkdir::WalkDir;
 
-/// Extensions we can decode.
+/// Extensions the command-line pipelines take: ones they can decode and write
+/// back in the same format.
 pub const SUPPORTED: [&str; 7] = ["mp3", "flac", "wav", "m4a", "aac", "aiff", "aif"];
 
+/// Extensions the library takes: everything above, and the formats no player
+/// opens that are decoded to be converted or carried onto a drive as an mp3.
+///
+/// Kept apart from [`SUPPORTED`] because `normalize` writes its output in the
+/// format it was given, and has no way to write an Ogg, an Opus or a WMA: a
+/// folder with one in it would stop the whole command.
+pub const LIBRARY: [&str; 11] =
+    ["mp3", "flac", "wav", "m4a", "aac", "aiff", "aif", "ogg", "oga", "opus", "wma"];
+
 pub fn is_supported(path: &Path) -> bool {
+    has_extension(path, &SUPPORTED)
+}
+
+/// Whether the library takes a file with this extension, whether or not it
+/// can decode it on this machine: see [`decodable`].
+pub fn is_library(path: &Path) -> bool {
+    has_extension(path, &LIBRARY)
+}
+
+/// Whether a file with this extension can be decoded here and now: a WMA only
+/// when ffmpeg is installed.
+pub fn decodable(extension: &str) -> bool {
+    let extension = extension.to_ascii_lowercase();
+    LIBRARY.contains(&extension.as_str())
+        && (!crate::audio::ffmpeg::needed_for(&extension) || crate::audio::ffmpeg::find().is_some())
+}
+
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| SUPPORTED.contains(&e.to_ascii_lowercase().as_str()))
+        .map(|e| extensions.contains(&e.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
 }
 
@@ -63,6 +91,16 @@ pub fn is_apple_double(path: &Path) -> bool {
 /// and there only recognised extensions are picked up. Either way a macOS `._`
 /// companion is left out: there is no audio in one however it is asked for.
 pub fn collect(inputs: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>> {
+    collect_of(inputs, recursive, &SUPPORTED)
+}
+
+/// The same, for the library: every format it takes, including the ones it
+/// can only convert. See [`LIBRARY`].
+pub fn collect_library(inputs: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>> {
+    collect_of(inputs, recursive, &LIBRARY)
+}
+
+fn collect_of(inputs: &[PathBuf], recursive: bool, extensions: &[&str]) -> Result<Vec<PathBuf>> {
     let mut found = BTreeSet::new();
 
     for input in inputs {
@@ -75,7 +113,7 @@ pub fn collect(inputs: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>> {
                 if recursive { WalkDir::new(input) } else { WalkDir::new(input).max_depth(1) };
             for entry in walker.into_iter().filter_map(|e| e.ok()) {
                 if entry.file_type().is_file()
-                    && is_supported(entry.path())
+                    && has_extension(entry.path(), extensions)
                     && !is_apple_double(entry.path())
                 {
                     found.insert(entry.into_path());
@@ -87,7 +125,7 @@ pub fn collect(inputs: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>> {
     }
 
     if found.is_empty() {
-        bail!("no audio files found (looked for {})", SUPPORTED.join(", "));
+        bail!("no audio files found (looked for {})", extensions.join(", "));
     }
     Ok(found.into_iter().collect())
 }
@@ -127,6 +165,17 @@ mod tests {
         assert!(is_supported(Path::new("x.flac")));
         assert!(!is_supported(Path::new("x.ogg")));
         assert!(!is_supported(Path::new("x")));
+    }
+
+    #[test]
+    fn the_library_takes_the_formats_no_player_opens_and_the_pipelines_do_not() {
+        for name in ["x.ogg", "x.OPUS", "x.oga", "x.wma"] {
+            assert!(is_library(Path::new(name)), "{name}");
+            assert!(!is_supported(Path::new(name)), "{name}");
+        }
+        assert!(decodable("ogg") && decodable("Opus"));
+        assert_eq!(decodable("wma"), crate::audio::ffmpeg::find().is_some());
+        assert!(!decodable("ape"));
     }
 
     #[test]

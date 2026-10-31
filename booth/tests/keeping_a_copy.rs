@@ -379,7 +379,7 @@ fn converting_a_file_leaves_the_original_alone() {
     let to = updates
         .iter()
         .find_map(|u| match u {
-            Update::Converted { id: 1, to } => Some(to.clone()),
+            Update::Converted { id: 1, to, .. } => Some(to.clone()),
             _ => None,
         })
         .expect("it should have converted");

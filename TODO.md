@@ -64,13 +64,15 @@ A deck can play melody and drums together as an instrumental, but a CDJ only
 has what was written for it. Writing the sum as its own file costs a third more
 disk per kit.
 
-### Formats nothing here converts
+### Two files that go on a drive under one name
 
-`booth/README.md:2179` and `:2181`.
+`booth/README.md`, *What it does not do yet*.
 
-Ogg, Opus and WMA are recognised as unplayable but cannot be converted, because
-nothing in this build decodes them. A file above 96 kHz is reported and left
-alone, because nothing resamples.
+A file re-encoded on the way onto a drive is named after its own file with
+`.mp3` on the end, and nothing checks the name is free. A `.ogg` and a `.flac`
+of the same name by the same artist, both bound for a nexus deck, both land on
+`/Contents/<artist>/<name>.mp3`, and two rows point at whichever was written
+last. Seen writing three fixtures called `beat.ogg`, `beat.opus` and `beat.wma`.
 
 ### Zip the copied half of a backup
 
