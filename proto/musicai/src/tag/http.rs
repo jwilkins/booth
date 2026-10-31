@@ -100,9 +100,9 @@ impl Http {
         mut attempt: impl FnMut() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     ) -> Result<ureq::http::Response<ureq::Body>> {
         let mut backoff = Duration::from_millis(500);
-        let mut last_status = 0;
+        let mut last = (0, String::new());
 
-        for _ in 0..=MAX_RETRIES {
+        for tried in 0..=MAX_RETRIES {
             self.throttle(url);
             let mut response =
                 attempt().map_err(|e| anyhow::anyhow!("could not reach {url}: {e}"))?;
@@ -112,18 +112,21 @@ impl Http {
                 return Ok(response);
             }
             if is_backoff(status) {
-                last_status = status;
-                std::thread::sleep(backoff);
-                backoff *= 2;
+                // Kept for the error, since what the service says is the only
+                // way to tell one asking to be asked less often from one that
+                // is down.
+                last = (status, response.body_mut().read_to_string().unwrap_or_default());
+                // Not after the last try, which nothing follows.
+                if tried < MAX_RETRIES {
+                    std::thread::sleep(backoff);
+                    backoff *= 2;
+                }
                 continue;
             }
             return Err(status_error(url, status, &mut response));
         }
 
-        Err(anyhow::anyhow!(
-            "{url} is still rate limiting us (HTTP {last_status}) after {MAX_RETRIES} retries; \
-             raise the interval between requests and try again"
-        ))
+        Err(gave_up(url, last.0, &last.1))
     }
 
     /// GET a URL and return the body as text.
@@ -226,14 +229,45 @@ fn status_error(
     }
 }
 
+/// What to say when a service is still turning a request away after every
+/// retry.
+///
+/// Not "still rate limiting us", which is what this said of every 503, and
+/// not to raise the interval between requests, which nothing lets anybody
+/// do. MusicBrainz answers 503 when it wants a client to slow down; LRCLIB
+/// answers 503 when it is overloaded, which slowing down does not help. On 31
+/// October 2026 it gave every lookup it had not cached that answer for over
+/// ten minutes, a made-up song included, with `retry-after: 1` and the body
+/// `{"message":"The server is busy, please retry in a moment",
+/// "name":"ServerOverloaded","statusCode":503}`. What the service said tells
+/// the two apart, so that is what is reported.
+fn gave_up(url: &str, status: u16, body: &str) -> anyhow::Error {
+    let tries = MAX_RETRIES + 1;
+    match service_message(body) {
+        Some(message) => {
+            anyhow::anyhow!("{url} answered HTTP {status} {tries} times in a row: {message}")
+        }
+        None if status == 429 => anyhow::anyhow!(
+            "{url} answered HTTP 429, too many requests, {tries} times in a row; try again later"
+        ),
+        None => anyhow::anyhow!(
+            "{url} answered HTTP {status} {tries} times in a row, which is a service that is busy \
+             or turning requests away; try again later"
+        ),
+    }
+}
+
 /// Pull a human-readable message out of a JSON error body.
 ///
-/// AcoustID nests it as `{"error": {"message": ...}}` while MusicBrainz uses a
-/// plain `{"error": "..."}`, so both shapes are accepted.
+/// AcoustID nests it as `{"error": {"message": ...}}`, MusicBrainz uses a
+/// plain `{"error": "..."}`, and LRCLIB puts it at the top, beside a name for
+/// it: `{"name": "ServerOverloaded", "message": "..."}`. All three are read.
 fn service_message(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    let message = error.get("message").and_then(|m| m.as_str()).or_else(|| error.as_str())?;
+    let message = match value.get("error") {
+        Some(error) => error.get("message").and_then(|m| m.as_str()).or_else(|| error.as_str()),
+        None => value.get("message").and_then(|m| m.as_str()),
+    }?;
 
     let message = message.trim();
     if message.is_empty() {
@@ -366,6 +400,45 @@ mod tests {
         // MusicBrainz's shape.
         let musicbrainz = r#"{"help": "...", "error": "Not Found"}"#;
         assert_eq!(service_message(musicbrainz).as_deref(), Some("Not Found"));
+
+        // LRCLIB's.
+        assert_eq!(
+            service_message(LRCLIB_OVERLOADED).as_deref(),
+            Some("The server is busy, please retry in a moment")
+        );
+    }
+
+    /// LRCLIB's answer to a lookup while it is overloaded, as it gave it on 31
+    /// October 2026.
+    const LRCLIB_OVERLOADED: &str = r#"{"message":"The server is busy, please retry in a moment","name":"ServerOverloaded","statusCode":503}"#;
+
+    #[test]
+    fn an_overloaded_service_is_reported_in_its_own_words_rather_than_as_limiting_us() {
+        let said = gave_up("https://lrclib.net/api/get?x", 503, LRCLIB_OVERLOADED).to_string();
+        assert_eq!(
+            said,
+            "https://lrclib.net/api/get?x answered HTTP 503 4 times in a row: \
+             The server is busy, please retry in a moment"
+        );
+        assert!(!said.contains("rate limiting") && !said.contains("interval"), "{said}");
+    }
+
+    #[test]
+    fn a_service_asking_to_be_asked_less_often_says_so_in_its_own_words_too() {
+        let musicbrainz = r#"{"error": "Your requests are exceeding the allowable rate limit."}"#;
+        let said = gave_up("https://musicbrainz.org/ws/2/x", 503, musicbrainz).to_string();
+        assert!(
+            said.ends_with(": Your requests are exceeding the allowable rate limit."),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_nothing_said_is_still_told_apart_by_its_status() {
+        let busy = gave_up("https://x.example/a", 503, "<html>busy</html>").to_string();
+        assert!(busy.contains("busy or turning requests away; try again later"), "{busy}");
+        let limited = gave_up("https://x.example/a", 429, "").to_string();
+        assert!(limited.contains("HTTP 429, too many requests"), "{limited}");
     }
 
     #[test]

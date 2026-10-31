@@ -230,3 +230,22 @@ fn a_track_the_database_has_never_heard_of_is_a_miss_and_not_a_failure() {
         .expect("a miss should not be an error");
     assert!(found.is_none(), "{found:?}");
 }
+
+#[test]
+#[ignore = "hits the live lrclib service"]
+fn when_lrclib_turns_a_lookup_away_its_own_reason_is_what_is_reported() {
+    // On 31 October 2026 lrclib answered every lookup it had not cached with a
+    // 503 and `{"name":"ServerOverloaded","message":"The server is busy, please
+    // retry in a moment"}`, and this reported it as lrclib rate limiting us.
+    // While lrclib is well this is the miss above; while it is not, the error
+    // has to carry lrclib's reason rather than a guess at one.
+    let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
+    match client.lookup("A Label Nobody Pressed", "A Track Nobody Cut", Some(200.0)) {
+        Ok(found) => assert!(found.is_none(), "{found:?}"),
+        Err(e) => {
+            let said = format!("{e:#}");
+            assert!(said.contains("times in a row: "), "no reason given: {said}");
+            assert!(!said.contains("rate limiting us"), "{said}");
+        }
+    }
+}
