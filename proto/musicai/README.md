@@ -591,11 +591,13 @@ on it is choking on, and a drive carrying only the first does. It is for finding
 out, not for a drive that has to play in an unknown booth, which needs both.
 
 **What has been tried on real hardware:** a CDJ-3000X browses and plays a drive this
-writes, with colour waveforms, hot cues and phrases on a loaded track, and a CDJ-3000 on
-firmware 3.22 does the same, from the slot and over Pro DJ Link. Getting there took eight
-rounds against the players, each one a field a real export carries that this did not; the
-account is in [`docs/onelibrary-gist.md`](../../docs/onelibrary-gist.md), §6. What has not
-been tried is a club.
+writes, with colour waveforms, hot cues and phrases on a loaded track, and so does a
+CDJ-3000 on firmware 3.22, from the slot and over Pro DJ Link. A CDJ-1500X on firmware
+1.10 mounts one from its own slot and plays it, with the phrases drawn under the waveform.
+Getting there took eight rounds against the players, each one a field a real export
+carries that this did not; the account is in
+[`docs/onelibrary-gist.md`](../../docs/onelibrary-gist.md), §6. What has not been tried is
+a club.
 
 ```sh
 booth-cli audit /Volumes/USB
@@ -840,7 +842,8 @@ plan this belongs to, and [`docs/onelibrary.md`](../../docs/onelibrary.md) is wh
 about OneLibrary — the database the CDJ-3000X and the other newer players read instead
 of `export.pdb`. `export` writes one alongside the legacy database, under the key every
 drive uses (overridable with `--onelibrary-key` or `ONELIBRARY_KEY`). A CDJ-3000X and a
-CDJ-3000 have both browsed and played from one, analysis files included.
+CDJ-1500X have both browsed and played from one, analysis files included; a CDJ-3000 reads
+the legacy database beside it.
 
 ## Notes
 

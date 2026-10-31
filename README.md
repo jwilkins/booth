@@ -3,10 +3,10 @@
 A DJ library that prepares tracks and writes the USB drives a Pioneer / AlphaTheta player reads —
 without rekordbox anywhere in the process.
 
-A **CDJ-3000X** and a **CDJ-3000 on firmware 3.22** both browse and play a drive this writes,
-with nothing rekordbox has touched on it: playlists, track list, key search, colour and
-three-band waveforms, beat grid, hot cues and phrases on a loaded track, from the slot and over
-Pro DJ Link. That covers both on-drive database formats — the legacy one every player since
+A **CDJ-3000X**, a **CDJ-1500X** and a **CDJ-3000 on firmware 3.22** all browse and play a drive
+this writes, with nothing rekordbox has touched on it: playlists, track list, key search, colour
+and three-band waveforms, beat grid, hot cues and phrases on a loaded track, from the slot and
+over Pro DJ Link. That covers both on-drive database formats — the legacy one every player since
 2009 reads, and the newer one every player sold since 2023 needs, which no other free tool had
 been seen to write.
 
