@@ -536,6 +536,7 @@ mod tests {
             file_path: format!("/Contents/{file}"),
             analyze_path: format!("/PIONEER/USBANLZ/P00{id}/ANLZ0000.DAT"),
             sample_rate: 44_100,
+            ..Track::default()
         }
     }
 
