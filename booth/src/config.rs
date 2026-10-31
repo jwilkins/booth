@@ -464,6 +464,12 @@ pub struct Config {
     /// of the collection: it describes how this person likes to look at their
     /// music, not anything about the music.
     pub sort: crate::rows::Sort,
+    /// The heading each playlist was sorted by, for a playlist that is not in
+    /// its own order. A playlist sorted by artist stays so, opened again or
+    /// after a restart, until its `#` is pressed; one with no entry here is in
+    /// the order it was put together in. By name, as the sidebar knows them.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub playlist_sorts: std::collections::BTreeMap<String, crate::rows::Sort>,
     /// Which columns the browser shows, and how wide each was left. Also a
     /// preference: it says how this person reads a list, not what is in it.
     #[serde(default)]
@@ -852,6 +858,7 @@ impl Default for Config {
             stems_in: StemsIn::default(),
             on_external: OnExternal::default(),
             sort: crate::rows::Sort::default(),
+            playlist_sorts: std::collections::BTreeMap::new(),
             columns: crate::rows::Layout::default(),
             popped: Vec::new(),
             panels: Panels::default(),
@@ -1140,6 +1147,27 @@ mod tests {
 
     fn config_in(dir: &Path) -> Config {
         Config { library_path: dir.join("library"), ..Config::default() }
+    }
+
+    #[test]
+    fn a_playlists_heading_is_kept_across_a_restart_and_none_writes_nothing() {
+        let dir = scratch("playlist-sorts");
+        let path = dir.join("settings.json");
+
+        // A settings file with no playlist sorted says nothing about them, so
+        // one written before they were kept reads the same as before.
+        config_in(&dir).save(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("playlist_sorts"), "{written}");
+
+        let mut config = config_in(&dir);
+        let by_artist =
+            crate::rows::Sort { column: crate::rows::Column::Artist, descending: false };
+        config.playlist_sorts.insert("peak".into(), by_artist);
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).playlist_sorts.get("peak"), Some(&by_artist));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
