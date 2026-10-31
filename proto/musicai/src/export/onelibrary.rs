@@ -57,9 +57,11 @@
 //! the directory naming — the hash in `docs/onelibrary.md` §5.1 is the name
 //! the player looks under, and `analysisDataFilePath` is decoration.
 //!
-//! What is still wrong is narrower. The browse column's preview is monochrome
-//! where a rekordbox drive's is not, and a CDJ-3000 reboots when it loads a
-//! track off one of these. See §6 of that document for both.
+//! A CDJ-3000 plays one too, from the legacy database beside it. It used to
+//! reboot loading a track, and a CDJ-3000X drew the browse column's preview in
+//! monochrome: both were the three-band waveform bytes, written on a 0–255
+//! scale in a format that stops at 127. See [`super::waveform`] and §6 of
+//! `docs/onelibrary-gist.md`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
