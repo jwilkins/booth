@@ -1915,19 +1915,33 @@ tag that answers something the collection answers differently.
 
 Most of those are facts about the file, so the collection is simply out of date
 and *Take the files' word* brings it up to date in one go. Nothing there is
-written back to a file: a name goes into a file's tags through the tag
-write-back and nowhere else.
+written back to a file.
 
 One kind is not a fault, and is treated differently. **A file's own name is
 evidence too**, and when it says something else entirely — the collection has
 *Peverelist — Roll With The Punches*, the file is filed as
 `Batu/Marius/01 - Marius.flac` — there are two answers and both might be right.
 It could be a fingerprint that landed on the wrong record, a file somebody
-renamed, or an edit filed under the original's name; only a person knows which.
-So it is shown as a pair of radio buttons, the tags on one and the file name on
-the other, and nothing happens until you press the button that takes the ones
-you switched. It is never swept up by *Take the files' word*, which is a button
-somebody pressed to mean something else.
+renamed, or an edit filed under the original's name; only a person knows which —
+and sometimes neither answer is quite it. So each one is a row of its own: both
+answers, each with a **use** button that puts it in the boxes below, and the
+boxes themselves — the artist, the title and the file name the track is to have,
+all typed into freely. **after the names** fills the file name in as
+*Artist - Title*.
+
+A row only changes anything once its **Change** box is ticked, and typing in it
+ticks it; untick it and the track is left alone whatever the boxes say. Then
+the button that counts them, *Change 2 ticked tracks*, does what each says.
+This is the one place the check writes to your files, because it is a row you
+ticked and typed into: the file is renamed on disk, with any lyric file beside
+it under the same name, the names go into the collection, and they go into the
+file's own tags too wherever those say something else. A name a drive would not take is refused
+before anything happens — `/ \ : * ? " < > |`, or a dot at the end — and so is
+a file name that is taken, and a track left without an artist or a title; one
+row like that and nothing changes at all, rather than half of what was asked
+for. None of it is ever swept
+up by *Take the files' word*, which is a button somebody pressed to mean
+something else.
 
 That comparison is only made when the path names both an artist and a title.
 `Downloads/track04.flac` disagrees with everything and has nothing to offer in
