@@ -230,10 +230,6 @@ fn seek_index(path: &Path) -> Option<[u32; 401]> {
 
 // -- export ----------------------------------------------------------------
 
-/// The file formats a CDJ-3000 will play. Anything else is copied nowhere: a
-/// file the player cannot open is worse on the drive than off it, because it
-/// looks fine until the moment it is loaded.
-const PLAYABLE: [&str; 7] = ["mp3", "flac", "wav", "aiff", "aif", "m4a", "aac"];
 /// The longest path a player will follow, counting every folder name.
 const MAX_DRIVE_PATH: usize = 255;
 
@@ -1005,8 +1001,14 @@ fn prepare(
     let name = short(path);
     let extension =
         path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-    if !PLAYABLE.contains(&extension.as_str()) {
-        bail!("a player cannot open a .{extension} file");
+    // A format no player opens is re-encoded below, like a FLAC bound for a
+    // nexus deck, as long as something here decodes it. What nothing decodes
+    // stays off: a WMA without ffmpeg, or a format nobody has asked for.
+    if !crate::discover::decodable(&extension) {
+        if crate::audio::ffmpeg::needed_for(&extension) {
+            return Err(crate::audio::ffmpeg::missing(path));
+        }
+        bail!("a player cannot open a .{extension} file, and nothing here decodes one");
     }
 
     let began = std::time::Instant::now();
@@ -1021,9 +1023,6 @@ fn prepare(
             took(began)
         ),
     );
-    if audio.sample_rate > 96_000 {
-        bail!("{} Hz is above the 96 kHz a player will accept", audio.sample_rate);
-    }
     let metadata = crate::tag::read_metadata(path).unwrap_or_default();
 
     // The track this file was cut from, when it is a stem of one, and what that
@@ -1324,11 +1323,6 @@ pub fn on_drive_path(artist: &str, filename: &str) -> String {
 /// before it is written.
 pub const MAX_ON_DRIVE_PATH: usize = MAX_DRIVE_PATH;
 
-/// Whether a player can open a file with this extension.
-pub fn is_playable(extension: &str) -> bool {
-    PLAYABLE.contains(&extension.to_ascii_lowercase().as_str())
-}
-
 /// A folder name a FAT filesystem and a player will both accept.
 fn safe_component(name: &str) -> String {
     let cleaned: String = name
@@ -1501,10 +1495,10 @@ impl Tagged {
 /// already said so" from "it said something else and was kept", and the
 /// person reading the line wants to know which.
 fn tag_genre(path: &Path, style: &str, on_existing: crate::tag::OnExisting) -> Result<Tagged> {
-    use crate::tag::{tag_kind, Field, Metadata, TagKind};
+    use crate::tag::{tag_kind, Field, Metadata};
     match tag_kind(path) {
-        Some(TagKind::None) | None => return Ok(Tagged::Nowhere),
-        Some(_) => {}
+        Some(kind) if kind.writable() => {}
+        Some(_) | None => return Ok(Tagged::Nowhere),
     }
     let before = crate::tag::read_metadata(path)
         .ok()

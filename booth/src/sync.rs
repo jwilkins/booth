@@ -764,17 +764,19 @@ pub fn preflight(
 
     // -- formats a player cannot open
     //
-    // Two different failures, kept apart because what happens to the file is
-    // different. A format the writer itself refuses never reaches the drive.
-    // A format this generation does not take but a newer one does — a FLAC
-    // bound for a nexus deck — is written, copies, browses, and will not load,
-    // which is a warning about the booth rather than about the write.
-    let refused: Vec<&&Track> =
-        tracks.iter().filter(|t| !booth_cli::commands::is_playable(&t.format)).collect();
+    // Two different outcomes, kept apart because what happens to the file is
+    // different. A format nothing here decodes never reaches the drive: a WMA
+    // with no ffmpeg installed. One this player does not open but that can be
+    // decoded goes on as an mp3 — a FLAC bound for a nexus deck, and an Ogg,
+    // an Opus or a WMA bound for anything — and the library keeps its file.
+    let refused: Vec<&&Track> = tracks
+        .iter()
+        .filter(|t| !t.format.is_empty() && !booth_cli::discover::decodable(&t.format))
+        .collect();
     let too_new: Vec<&&Track> = tracks
         .iter()
         .filter(|t| !t.format.is_empty())
-        .filter(|t| booth_cli::commands::is_playable(&t.format) && !player.opens(&t.format))
+        .filter(|t| booth_cli::discover::decodable(&t.format) && !player.opens(&t.format))
         .collect();
     checks.push(match refused.len() {
         0 => Check {
@@ -784,8 +786,12 @@ pub fn preflight(
         n => Check {
             level: Level::Bad,
             text: format!(
-                "{n} files a player cannot open ({}) \u{2014} they will be skipped",
+                "{n} files nothing here decodes ({}) \u{2014} they will be skipped{}",
                 list(refused.iter().map(|t| t.format.as_str())),
+                match refused.iter().any(|t| booth_cli::audio::ffmpeg::needed_for(&t.format)) {
+                    true => "; installing ffmpeg brings WMA in",
+                    false => "",
+                },
             ),
         },
     });
@@ -817,40 +823,27 @@ pub fn preflight(
 
     // -- sample rates
     //
-    // Split for the same reason as the formats above: past 96 kHz the writer
-    // refuses the file, and between this generation's ceiling and that one it
-    // writes a file this player will not load.
-    // The writer's own ceiling, which is the newest player's: past it the
-    // export bails on the file rather than putting something unplayable on.
-    let refused_above = booth_cli::compat::Player::ALL[0].max_sample_rate();
+    // Anything above this player's ceiling goes on as an mp3 at the most it
+    // takes, LAME bringing it down on the way: 176.4 and 192 kHz as well as
+    // 96, which LAME takes as readily, measured. A file above every player's
+    // ceiling is also offered a conversion in the library, which this does
+    // not wait for.
     let ceiling = player.max_sample_rate();
     let khz = ceiling as f64 / 1000.0;
-    let refused = tracks.iter().filter(|t| t.sample_rate > refused_above).count();
-    let over =
-        tracks.iter().filter(|t| t.sample_rate > ceiling && t.sample_rate <= refused_above).count();
-    checks.push(match refused {
-        0 => Check {
-            level: Level::Ok,
-            text: format!("all sample rates are {:.0} kHz or below", refused_above as f64 / 1000.0),
-        },
+    let over = tracks.iter().filter(|t| t.sample_rate > ceiling).count();
+    checks.push(match over {
+        0 => {
+            Check { level: Level::Ok, text: format!("all sample rates are {khz:.0} kHz or below") }
+        }
         n => Check {
-            level: Level::Bad,
+            level: Level::Warn,
             text: format!(
-                "{n} files are above the {:.0} kHz a player will accept",
-                refused_above as f64 / 1000.0
+                "{n} files are above the {khz:.0} kHz a {} will take \u{2014} they go on as \
+                 mp3 at 44.1 or 48 kHz, and stay as they are here",
+                player.name()
             ),
         },
     });
-    if over > 0 {
-        checks.push(Check {
-            level: Level::Warn,
-            text: format!(
-                "{over} files are above the {khz:.0} kHz a {} will take \u{2014} they go on as \
-                 {khz:.0} kHz mp3, and stay as they are here",
-                player.name()
-            ),
-        });
-    }
 
     // -- path lengths, worked out with the writer's own rule
     //
@@ -1776,7 +1769,7 @@ mod tests {
             older.contains("Warn") && older.contains("48 kHz a CDJ-2000NXS2 will take"),
             "{older}"
         );
-        assert!(older.contains("go on as 48 kHz mp3"), "{older}");
+        assert!(older.contains("go on as mp3 at 44.1 or 48 kHz"), "{older}");
         assert!(older.contains("stay as they are here"), "{older}");
 
         // A generation back it is the format, and the same thing happens to
@@ -1824,20 +1817,28 @@ mod tests {
     }
 
     #[test]
-    fn a_format_no_player_opens_is_still_reported_as_skipped() {
-        // The other half: what the writer itself refuses never reaches the
-        // drive, whichever booth is being targeted, and "they will be skipped"
-        // is the true thing to say about those.
-        let (mut library, ids) = library_with(1);
-        library.get_mut(ids[0]).unwrap().format = "ogg".into();
+    fn a_format_nothing_decodes_is_skipped_and_one_no_player_opens_goes_on_as_mp3() {
+        // What nothing here decodes never reaches the drive, whichever booth
+        // is being targeted, and "they will be skipped" is the true thing to
+        // say about it. An Ogg is decoded, and goes on as an mp3 everywhere.
+        let (mut library, ids) = library_with(2);
+        library.get_mut(ids[0]).unwrap().format = "ape".into();
+        library.get_mut(ids[1]).unwrap().format = "ogg".into();
         let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
         for player in booth_cli::compat::Player::ALL {
             let checks = preflight(&library, &plan, Path::new("/tmp"), false, player, None);
+            let skipped =
+                checks.iter().find(|c| c.level == Level::Bad && c.text.contains("be skipped"));
             assert!(
-                checks
-                    .iter()
-                    .any(|c| c.level == Level::Bad && c.text.contains("they will be skipped")),
+                skipped.is_some_and(|c| c.text.starts_with("1 files") && c.text.contains("ape")),
+                "{}: {checks:#?}",
+                player.name()
+            );
+            assert!(
+                checks.iter().any(|c| c.level == Level::Warn
+                    && c.text.contains("(ogg)")
+                    && c.text.contains("go on as 320 kbps mp3")),
                 "{}: {checks:#?}",
                 player.name()
             );
@@ -2075,8 +2076,8 @@ mod tests {
         library.get_mut(ids[0]).unwrap().float_samples = true;
         library.get_mut(ids[1]).unwrap().sample_rate = 192_000;
         library.get_mut(ids[2]).unwrap().has_grid = false;
-        // A file no player opens.
-        library.get_mut(ids[3]).unwrap().format = "ogg".into();
+        // A file nothing here decodes.
+        library.get_mut(ids[3]).unwrap().format = "ape".into();
 
         let drive = drive_for(&library, &[]);
         let plan = plan(&library, &drive);
@@ -2093,7 +2094,7 @@ mod tests {
         assert!(text.contains("float"), "{text}");
         assert!(text.contains("96 kHz"), "{text}");
         assert!(text.contains("beat grid"), "{text}");
-        assert!(text.contains("cannot open"), "{text}");
+        assert!(text.contains("nothing here decodes"), "{text}");
         assert_eq!(checks.iter().map(|c| c.level).max().unwrap(), Level::Bad);
     }
 

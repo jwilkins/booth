@@ -13,8 +13,6 @@
 
 mod common;
 
-use booth_cli::audio::encode::{write_file, Codec, EncodeOptions};
-use booth_cli::audio::Audio;
 use booth_cli::cli::{ExportArgs, PlaylistSpec};
 use booth_cli::commands::{self, PartialWrite};
 use booth_cli::export::Prep;
@@ -223,11 +221,11 @@ fn one_bad_file_costs_neither_the_rest_of_the_drive_nor_its_rows() {
     let drive = scratch.path("USB");
     let good = write_song(&scratch, "good.flac");
     let also = write_song(&scratch, "also.flac");
-    // 192 kHz is past what any current player accepts, so the writer refuses
-    // it rather than putting something unplayable on.
-    let bad = scratch.path("bad.wav");
-    let fast = Audio::new(192_000, vec![vec![0.1; 192_000]]).unwrap();
-    write_file(&bad, &fast, Codec::Wav, &EncodeOptions::default()).unwrap();
+    // A format nothing here decodes, so the writer refuses it rather than
+    // putting something unplayable on. It used to be a 192 kHz WAV, which the
+    // writer now carries as an mp3.
+    let bad = scratch.path("bad.ape");
+    std::fs::write(&bad, b"MAC \x96\x0f not a file anything here decodes").unwrap();
 
     let mut args = ExportArgs {
         drive: Some(drive.clone()),
@@ -248,8 +246,8 @@ fn one_bad_file_costs_neither_the_rest_of_the_drive_nor_its_rows() {
         })
         .collect();
     assert_eq!(failed.len(), 1, "{failed:?}");
-    assert!(failed[0].0.ends_with("bad.wav"), "{failed:?}");
-    assert!(failed[0].1.contains("192000 Hz"), "the reason is the reason: {failed:?}");
+    assert!(failed[0].0.ends_with("bad.ape"), "{failed:?}");
+    assert!(failed[0].1.contains("nothing here decodes"), "the reason is the reason: {failed:?}");
 
     // The drive holds the two that landed, in both databases, and the playlist
     // names those two and nothing else — not a row pointing at a file that is
@@ -258,7 +256,7 @@ fn one_bad_file_costs_neither_the_rest_of_the_drive_nor_its_rows() {
     assert_eq!(on_drive.len(), 2, "{on_drive:#?}");
     let entries = legacy_playlist_entries(&drive);
     assert_eq!(entries.len(), 2, "{entries:?}");
-    assert!(!drive.join("Contents").join("bad.wav").exists());
+    assert!(!drive.join("Contents").join("bad.ape").exists());
 
     // And the rows come back with the error, so the next write carries them.
     let partial = error

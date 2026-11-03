@@ -530,9 +530,11 @@ Title, artist, album, year and track number come from the file's own tags where 
 them. Everything named goes into one playlist, `--playlist` names it, and `--dry-run`
 reports what would be written without touching the drive.
 
-Files a player cannot open are refused rather than copied — a file that fails at the gig
-is worse on the drive than off it — which today means checking the container and the
-sample rate.
+A file the oldest target player cannot open goes on as a 320 kbps MP3 at the best rate it
+takes, and the file named stays as it is: a FLAC bound for a nexus deck, a 192 kHz master,
+and the formats no player opens — Ogg Vorbis and Opus, decoded here, and WMA, decoded
+through ffmpeg when it is installed. A file nothing here decodes is refused rather than
+copied, because a file that fails at the gig is worse on the drive than off it.
 
 A write that will not fit is refused before anything goes on. It is counted as every file
 at its full size plus two megabytes each for its analysis, against what the drive has

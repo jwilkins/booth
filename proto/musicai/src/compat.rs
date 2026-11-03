@@ -162,6 +162,12 @@ impl Player {
         RATES.into_iter().find(|rate| *rate <= ceiling).unwrap_or(RATES[2])
     }
 
+    /// The highest rate any player takes, which is the writer's own ceiling
+    /// for a file it copies rather than re-encodes.
+    pub fn highest_rate() -> u32 {
+        Player::ALL[0].max_sample_rate()
+    }
+
     /// The bitrate to write it at: the most a player will take, which is the
     /// most LAME will write.
     ///
@@ -170,6 +176,23 @@ impl Player {
     /// table, so a cue lands where it was set without depending on a `PVBR`
     /// section being read correctly.
     pub const MP3_KBPS: u32 = 320;
+}
+
+/// The rate to convert a file above every player's ceiling to, for the
+/// library, or `None` for a file that is not.
+///
+/// The highest rate a player takes that divides the source evenly, so the
+/// conversion is a halving or a quartering: 176.4 kHz goes to 88.2, 192 to 96,
+/// 384 to 96. A rate in neither family goes to 96 kHz.
+pub fn library_rate(source: u32) -> Option<u32> {
+    let ceiling = Player::highest_rate();
+    if source <= ceiling {
+        return None;
+    }
+    Some(match source % 88_200 == 0 {
+        true => 88_200,
+        false => ceiling,
+    })
 }
 
 /// Why a file will not play on the hardware.
@@ -219,10 +242,15 @@ impl Problem {
             // For an older deck that is a FLAC, and there is nothing to do
             // about it: a drive written for that deck carries the track as an
             // mp3 and leaves the library's own copy alone.
-            Problem::Format { player, .. } if !player.opens("flac") => {
+            Problem::Format { player, extension }
+                if !player.opens("flac") && crate::discover::decodable(extension) =>
+            {
                 "nothing — a drive for this player carries it as mp3"
             }
             Problem::Format { .. } if self.convertible() => "convert it to FLAC",
+            Problem::Format { extension, .. } if crate::audio::ffmpeg::needed_for(extension) => {
+                "install ffmpeg, then convert it to FLAC — nothing built in decodes WMA"
+            }
             Problem::Format { .. } => "re-encode it elsewhere — this cannot decode it",
             // Not a limitation of this program: a protected file is encrypted,
             // and the only lawful way to a playable copy is to get one from
@@ -230,24 +258,29 @@ impl Problem {
             // more use than an offer that would fail.
             Problem::Protected => "buy or rip an unprotected copy — this cannot convert it",
             Problem::FloatSamples => "convert it to 24-bit FLAC",
-            Problem::TooFast { .. } => "resample it to 48 kHz in an editor first",
+            Problem::TooFast { .. } if self.convertible() => "convert it to FLAC at 88.2 or 96 kHz",
+            // Above an older deck's 48 kHz and within what the current line
+            // takes: the library's file is right as it is, and a drive for
+            // that deck carries it as an mp3.
+            Problem::TooFast { .. } => "nothing — a drive for this player carries it as mp3",
         }
     }
 
     /// Whether converting the file here would actually fix it.
     ///
-    /// Two things are deliberately not offered. Resampling, because there is no
-    /// resampler in this program worth writing somebody's library through, and
-    /// doing it badly once is permanent in a way that saying so is not. And a
-    /// format nothing here decodes — an offer that would fail is worse than no
-    /// offer, because it costs the time to find out.
+    /// A format is offered when it can be decoded on this machine: an offer
+    /// that would fail is worse than no offer, because it costs the time to
+    /// find out, so a WMA is offered only once ffmpeg is installed. A rate is
+    /// offered only above what every player takes; below that the library's
+    /// file is right, and a drive for an older deck re-encodes it on the way
+    /// on. The conversion resamples through rubato and leaves the original
+    /// where it is, so a result nobody likes costs a delete.
     pub fn convertible(&self) -> bool {
         match self {
             Problem::FloatSamples => true,
-            Problem::Format { extension, .. } => {
-                crate::discover::SUPPORTED.contains(&extension.as_str())
-            }
-            Problem::Protected | Problem::TooFast { .. } => false,
+            Problem::Format { extension, .. } => crate::discover::decodable(extension),
+            Problem::TooFast { rate, .. } => *rate > Player::highest_rate(),
+            Problem::Protected => false,
         }
     }
 }
@@ -316,26 +349,46 @@ mod tests {
     }
 
     #[test]
-    fn the_things_that_fail_are_named_and_only_some_can_be_converted() {
-        // Nothing here decodes Vorbis, so it is reported and not offered a
-        // conversion that would fail after making somebody wait for it.
-        let format = problems(Player::default(), nowhere(), "ogg", 44_100, false);
-        assert_eq!(
-            format,
-            vec![Problem::Format { extension: "ogg".into(), player: Player::default() }]
-        );
-        assert!(!format[0].convertible());
-        assert!(format[0].fix().contains("cannot decode"));
+    fn the_things_that_fail_are_named_and_only_what_can_be_decoded_is_offered() {
+        for extension in ["ogg", "opus"] {
+            let format = problems(Player::default(), nowhere(), extension, 48_000, false);
+            assert_eq!(
+                format,
+                vec![Problem::Format { extension: extension.into(), player: Player::default() }]
+            );
+            assert!(format[0].convertible(), "{extension}");
+            assert_eq!(format[0].fix(), "convert it to FLAC");
+        }
+        // A WMA only once ffmpeg is there to decode it, and the fix says so
+        // when it is not.
+        let wma = problems(Player::default(), nowhere(), "wma", 44_100, false);
+        assert_eq!(wma[0].convertible(), crate::audio::ffmpeg::find().is_some());
+        if !wma[0].convertible() {
+            assert!(wma[0].fix().contains("install ffmpeg"), "{}", wma[0].fix());
+        }
+        let ape = problems(Player::default(), nowhere(), "ape", 44_100, false);
+        assert!(!ape[0].convertible());
+        assert!(ape[0].fix().contains("cannot decode"));
 
         let float = problems(Player::default(), nowhere(), "wav", 44_100, true);
         assert_eq!(float, vec![Problem::FloatSamples]);
         assert!(float[0].convertible());
 
-        // Resampling is a thing to be told about, not a thing to be done here.
         let fast = problems(Player::default(), nowhere(), "flac", 192_000, false);
         assert_eq!(fast, vec![Problem::TooFast { rate: 192_000, player: Player::default() }]);
-        assert!(!fast[0].convertible());
+        assert!(fast[0].convertible());
         assert!(fast[0].what().contains("192.0 kHz"));
+    }
+
+    #[test]
+    fn a_file_above_every_player_is_converted_to_half_or_a_quarter_of_its_rate() {
+        assert_eq!(library_rate(96_000), None);
+        assert_eq!(library_rate(48_000), None);
+        assert_eq!(library_rate(176_400), Some(88_200));
+        assert_eq!(library_rate(192_000), Some(96_000));
+        assert_eq!(library_rate(352_800), Some(88_200));
+        assert_eq!(library_rate(384_000), Some(96_000));
+        assert_eq!(library_rate(110_000), Some(96_000), "in neither family");
     }
 
     #[test]
@@ -357,7 +410,10 @@ mod tests {
         assert_eq!(older, vec![Problem::TooFast { rate: 96_000, player: Player::Cdj2000Nxs2 }]);
         // Named, so nobody has to know which generation 48 kHz belongs to.
         assert!(older[0].what().contains("48 kHz a CDJ-2000NXS2 will take"), "{}", older[0].what());
-        assert!(!older[0].convertible(), "resampling is a thing to be told about, not done here");
+        // And nothing to convert: the library's 96 kHz file is right for the
+        // current line, and a drive for this deck carries it as an mp3.
+        assert!(!older[0].convertible());
+        assert!(older[0].fix().contains("carries it as mp3"), "{}", older[0].fix());
     }
 
     #[test]

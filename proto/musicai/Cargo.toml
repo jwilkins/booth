@@ -51,7 +51,24 @@ symphonia = { version = "0.6", default-features = false, features = [
     "aac",
     "alac",
     "aiff",
+    # Ogg, for Vorbis and for Opus. No player opens either, so they are decoded
+    # to be analysed, converted to FLAC, or re-encoded on the way onto a drive.
+    # Opus itself is decoded by rusty-opus below: symphonia has no decoder.
+    "ogg",
+    "vorbis",
 ] }
+# Opus, which symphonia demuxes and cannot decode. Pure Rust, no build step. On
+# a 30-second CC record encoded at 160 kbps it decodes in 96 ms and lands 83 dB
+# from libopus's own float decode; ffmpeg's built-in Opus decoder is 70 dB from
+# libopus on the same file. `opus-decoder`, the other pure-Rust choice, was 87 dB
+# and took 12.6 s for the same 30 seconds.
+rusty-opus = "1.0.2"
+# For the one resampling written into the library: a file above the 96 kHz a
+# player takes, converted to FLAC at half or a quarter of its rate. Halving a
+# 192 kHz signal it keeps 40 kHz flat to 0.0001 dB and folds ultrasonic tones
+# back at -149 dB or below, where `audio::resample` manages -111 dB; it was
+# already compiled in, by rusty-chromaprint.
+rubato = "0.16.2"
 ureq = "3.2.1"
 walkdir = "2"
 sha2 = "0.10.9"

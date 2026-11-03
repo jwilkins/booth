@@ -22,11 +22,13 @@ jobs:
       - uses: actions/checkout@v4
 
       # The audio output binds ALSA at build time, so the headers are needed
-      # even though nothing here opens a device.
-      - name: Install ALSA headers
+      # even though nothing here opens a device. ffmpeg is what decodes WMA,
+      # and with it installed the WMA tests decode a file rather than only
+      # checking that its absence is explained.
+      - name: Install ALSA headers and ffmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev
+          sudo apt-get install -y libasound2-dev ffmpeg
 
       - uses: dtolnay/rust-toolchain@stable
         with:

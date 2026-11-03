@@ -2,6 +2,7 @@
 
 pub mod decode;
 pub mod encode;
+pub mod ffmpeg;
 pub mod mp3;
 pub mod mp4;
 pub mod resample;
