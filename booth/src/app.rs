@@ -9178,7 +9178,7 @@ impl App {
                     ),
                     theme::amber(),
                 );
-                return;
+                return None;
             }
             None => {
                 self.note(
