@@ -730,11 +730,12 @@ enum Pending {
         id: u32,
         write: bool,
     },
-    /// Pick which of a track's two names is right: the tags, or the file's own
-    /// name. Recorded rather than acted on — the sheet's button applies them.
-    ChooseName {
+    /// What a track whose file name disagrees with its names should become,
+    /// as its row in the check's sheet now says. Recorded rather than acted
+    /// on — the sheet's button applies the ticked ones.
+    EditName {
         id: u32,
-        from_path: bool,
+        edit: NameEdit,
     },
     /// Move the deck to a position in a track, if that track is on it.
     SeekDeck {
@@ -4986,10 +4987,44 @@ struct Checked {
     /// Whether it read every byte, which is what the wording turns on: a quick
     /// check finding nothing means less than a thorough one finding nothing.
     deep: bool,
-    /// Which answer has been picked for each track whose file name disagrees
-    /// with its names. Absent means the tags, which is the default: a choice
-    /// nobody has made is not a reason to change anything.
-    naming: std::collections::HashMap<u32, bool>,
+    /// What each track whose file name disagrees with its names is to become.
+    /// Absent means nobody has touched its row, which leaves it alone: a
+    /// choice nobody has made is not a reason to change anything.
+    names: std::collections::HashMap<u32, NameEdit>,
+}
+
+/// One row of the check's sheet for a track whose file name disagrees with its
+/// names: whether to change it, and what to.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct NameEdit {
+    /// Ticked, the track becomes what the boxes say. Unticked, it is left
+    /// alone whatever they say, so a row half typed into is not half applied.
+    change: bool,
+    artist: String,
+    title: String,
+    /// The file's name without its extension, which stays as it is.
+    file: String,
+}
+
+impl NameEdit {
+    /// A row nobody has touched: the names the collection has, the name the
+    /// file has, and not ticked.
+    fn of(track: &Track) -> Self {
+        Self {
+            change: false,
+            artist: track.artist.clone(),
+            title: track.title.clone(),
+            file: track.path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Why this row cannot be applied as it stands, if it cannot.
+    fn problem(&self) -> Option<String> {
+        if self.artist.trim().is_empty() || self.title.trim().is_empty() {
+            return Some("a track needs an artist and a title".to_string());
+        }
+        crate::verify::file_name_problem(&self.file)
+    }
 }
 
 /// One group of copies as the sheet is showing it this frame.
@@ -5051,12 +5086,119 @@ fn path_label(ui: &mut Ui, path: &std::path::Path, color: egui::Color32) {
     );
 }
 
-/// The most a sheet may be, so that it always fits on the screen.
+/// One row of the check's sheet for a track whose file name disagrees with its
+/// names: the two answers, each with a button that puts it in the boxes, and
+/// the boxes — the artist, the title and the file name the track is to have —
+/// with the tick that says to change it at all.
 ///
-/// A window taller than the viewport is still centred on it, which puts the
-/// title bar — and with it the close button, the only way out — off the top of
-/// the screen, and cuts the bottom off too. Capping the height and scrolling
-/// the body inside it is what keeps a long sheet closable on a small display.
+/// Typing in a box ticks the row, because nobody types a name they mean to
+/// leave unused; unticking it leaves the track alone whatever the boxes say.
+/// `answers` is each answer as shown, whose it is, and its artist and title.
+fn name_row(
+    ui: &mut Ui,
+    id: u32,
+    edit: &NameEdit,
+    answers: &[(String, &str, String, String)],
+    extension: &str,
+    pending: &mut Vec<Pending>,
+) {
+    let mut changed: Option<NameEdit> = None;
+    for (shown, whose, artist, title) in answers {
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(10.0);
+            ui.label(RichText::new(shown).font(theme::mono(10.0)).color(theme::text()));
+            ui.label(RichText::new(*whose).size(theme::SMALL).color(theme::dim()));
+            if ui
+                .small_button("use")
+                .on_hover_text(format!("Put {whose}' artist and title in the boxes below"))
+                .clicked()
+            {
+                changed = Some(NameEdit {
+                    change: true,
+                    artist: artist.clone(),
+                    title: title.clone(),
+                    ..edit.clone()
+                });
+            }
+        });
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(10.0);
+        let mut change = edit.change;
+        if ui
+            .checkbox(&mut change, "Change")
+            .on_hover_text(
+                "Ticked, the track becomes what these boxes say. Unticked, it is left alone",
+            )
+            .changed()
+        {
+            changed = Some(NameEdit { change, ..edit.clone() });
+        }
+        let mut artist = edit.artist.clone();
+        let mut title = edit.title.clone();
+        let caption = ui.label(RichText::new("artist").size(theme::SMALL).color(theme::dim()));
+        let artist_box = ui
+            .add(
+                egui::TextEdit::singleline(&mut artist)
+                    .id_salt(("check-artist", id))
+                    .desired_width(170.0),
+            )
+            .labelled_by(caption.id)
+            .on_hover_text("The artist it is to have, in the collection and in the file's tags");
+        let caption = ui.label(RichText::new("title").size(theme::SMALL).color(theme::dim()));
+        let title_box = ui
+            .add(
+                egui::TextEdit::singleline(&mut title)
+                    .id_salt(("check-title", id))
+                    .desired_width(230.0),
+            )
+            .labelled_by(caption.id)
+            .on_hover_text("The title it is to have, in the collection and in the file's tags");
+        if artist_box.changed() || title_box.changed() {
+            changed = Some(NameEdit { change: true, artist, title, ..edit.clone() });
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(10.0);
+        let caption = ui.label(RichText::new("file").size(theme::SMALL).color(theme::dim()));
+        let mut file = edit.file.clone();
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut file)
+                    .id_salt(("check-file", id))
+                    .font(theme::mono(10.0))
+                    .desired_width(320.0),
+            )
+            .labelled_by(caption.id)
+            .on_hover_text("What the file is to be called on disk. Its extension stays as it is")
+            .changed()
+        {
+            changed = Some(NameEdit { change: true, file, ..edit.clone() });
+        }
+        ui.label(RichText::new(extension).font(theme::mono(10.0)).color(theme::dim()));
+        if ui
+            .small_button("after the names")
+            .on_hover_text("Name the file Artist - Title, from the boxes above")
+            .clicked()
+        {
+            changed = Some(NameEdit {
+                change: true,
+                file: crate::verify::file_name_for(&edit.artist, &edit.title),
+                ..edit.clone()
+            });
+        }
+    });
+    if let Some(problem) = edit.problem().filter(|_| edit.change) {
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(10.0);
+            ui.label(RichText::new(problem).size(theme::SMALL).color(theme::alert()));
+        });
+    }
+    if let Some(edit) = changed {
+        pending.push(Pending::EditName { id, edit });
+    }
+}
+
 /// A span of seconds the way somebody waiting for it would say it.
 ///
 /// Rounded on purpose. An estimate read off three timed separations does not
@@ -5108,6 +5250,12 @@ const WORDS_HEIGHT: f32 = 180.0;
 /// four hundred rows between the tags and the file.
 const EXPANDED_ROWS: usize = 50;
 
+/// The most a sheet may be, so that it always fits on the screen.
+///
+/// A window taller than the viewport is still centred on it, which puts the
+/// title bar — and with it the close button, the only way out — off the top of
+/// the screen, and cuts the bottom off too. Capping the height and scrolling
+/// the body inside it is what keeps a long sheet closable on a small display.
 fn sheet_height(ctx: &egui::Context) -> f32 {
     (ctx.content_rect().height() - 72.0).max(240.0)
 }
@@ -8488,9 +8636,9 @@ impl App {
                         touched = true;
                     }
                 }
-                Pending::ChooseName { id, from_path } => {
+                Pending::EditName { id, edit } => {
                     if let Some(checked) = &mut self.checked {
-                        checked.naming.insert(id, from_path);
+                        checked.names.insert(id, edit);
                     }
                 }
                 Pending::TogglePlayback(id) => self.toggle_playback(id),
@@ -8943,7 +9091,35 @@ impl App {
     /// lookup fills in blanks and leaves anything already there alone, because
     /// nobody asked it to have an opinion about a value they typed.
     fn write_tags(&mut self, id: u32, on_existing: booth_cli::tag::OnExisting) {
-        let Some(track) = self.library.get(id) else { return };
+        let Some(write) = self.names_to_write(id, on_existing) else { return };
+
+        // A file whose own name has nothing in common with the names about to
+        // go into it is the shape of a mistake worth stopping for: a
+        // fingerprint that found the wrong record, or the wrong row acted on.
+        // Tagging is the one thing here that writes to somebody's files, and
+        // the wrong answer written into forty of them is a bad afternoon.
+        let file_name = write.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if crate::guess::resembles(&file_name, &write.artist, &write.title) {
+            self.to_retag.push(write);
+            return;
+        }
+        crate::warn!(
+            "{file_name} would be tagged {} \u{2014} {}, which its name says nothing about; asking first",
+            write.artist,
+            write.title
+        );
+        self.unlike.push(write);
+    }
+
+    /// One track's names as a write to its file's tags, taking any write
+    /// already waiting for it out of the queues so it is not written twice.
+    /// `None`, having said why, for a file that has nowhere to keep them.
+    fn names_to_write(
+        &mut self,
+        id: u32,
+        on_existing: booth_cli::tag::OnExisting,
+    ) -> Option<Retag> {
+        let track = self.library.get(id)?;
         // Asked of the writer rather than answered again here. This was a
         // second list of formats, and it had already fallen behind the first:
         // it still said FLAC and MP3 after the writer learned MP4, so an
@@ -8952,14 +9128,14 @@ impl App {
         match booth_cli::tag::tag_kind(&track.path) {
             Some(booth_cli::tag::TagKind::None) => {
                 self.note(format!("a .{} has nowhere to keep tags", track.format), theme::amber());
-                return;
+                return None;
             }
             None => {
                 self.note(
                     format!("a .{} is not a file whose tags can be written", track.format),
                     theme::amber(),
                 );
-                return;
+                return None;
             }
             Some(_) => {}
         }
@@ -8974,7 +9150,7 @@ impl App {
         // different errand with its own policy, and stays in the queue.
         self.to_retag.retain(|waiting| waiting.id != track.id || waiting.is_genre_only());
         self.unlike.retain(|waiting| waiting.id != track.id);
-        let write = Retag {
+        Some(Retag {
             id: track.id,
             path: track.path.clone(),
             artist: track.artist.clone(),
@@ -8983,24 +9159,7 @@ impl App {
             date: track.year.map(|year| year.to_string()),
             genre: None,
             on_existing,
-        };
-
-        // A file whose own name has nothing in common with the names about to
-        // go into it is the shape of a mistake worth stopping for: a
-        // fingerprint that found the wrong record, or the wrong row acted on.
-        // Tagging is the one thing here that writes to somebody's files, and
-        // the wrong answer written into forty of them is a bad afternoon.
-        let file_name = track.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        if crate::guess::resembles(&file_name, &write.artist, &write.title) {
-            self.to_retag.push(write);
-            return;
-        }
-        crate::warn!(
-            "{file_name} would be tagged {} — {}, which its name says nothing about; asking first",
-            write.artist,
-            write.title
-        );
-        self.unlike.push(write);
+        })
     }
 
     /// Queue the genre a track now has for its file's tag block.
@@ -10419,15 +10578,38 @@ impl App {
         for (id, to) in doing {
             let Some(track) = self.library.get(*id) else { continue };
             let from = track.path.clone();
-            if to.exists() {
+            // Unless it is this same file: on a disk that ignores case, a name
+            // that differs only in case is already "there", and is itself.
+            let same = std::fs::canonicalize(&from).ok() == std::fs::canonicalize(to).ok();
+            if to.exists() && !same {
                 crate::warn!("not renaming {}: {} is taken", from.display(), to.display());
                 continue;
             }
+            // The words somebody filed beside it, found before the rename
+            // while they still share its name.
+            let words = booth_cli::tag::lyrics::beside(&from);
             match std::fs::rename(&from, to) {
                 Ok(()) => {
                     crate::info!("renamed {} to {}", from.display(), to.display());
                     if let Some(track) = self.library.get_mut(*id) {
                         track.path = to.clone();
+                    }
+                    // Or they are beside nothing, and the next look for them
+                    // finds none.
+                    if let Some(words) = words {
+                        let follows = to.with_extension(words.extension().unwrap_or_default());
+                        match follows.exists() {
+                            true => crate::warn!(
+                                "left {} where it was: {} is taken",
+                                words.display(),
+                                follows.display()
+                            ),
+                            false => {
+                                if let Err(e) = std::fs::rename(&words, &follows) {
+                                    crate::warn!("could not rename {}: {e}", words.display());
+                                }
+                            }
+                        }
                     }
                     done += 1;
                 }
@@ -10485,12 +10667,12 @@ impl App {
         let (running, deep, looked_at) = (checked.running, checked.deep, checked.looked_at);
         let reports = checked.troubles.clone();
         let orphans = checked.orphans.clone();
-        let naming = checked.naming.clone();
+        let names = checked.names.clone();
         let mut open = true;
         let mut fix: Vec<u32> = Vec::new();
         let mut forget: Vec<u32> = Vec::new();
         let mut adopt_strays = false;
-        let mut rename = false;
+        let mut change_names = false;
 
         let fixable: Vec<u32> = reports
             .iter()
@@ -10622,63 +10804,47 @@ impl App {
                                             }
                                         });
                                         // The one trouble with two answers that
-                                        // might both be right, so it is picked
-                                        // between rather than corrected.
+                                        // might both be right, or neither: the
+                                        // row shows both, and what the track is
+                                        // to become, as boxes to type in.
                                         if let crate::verify::Trouble::Unlike {
                                             stored,
                                             from_path,
                                         } = trouble
                                         {
-                                            let taking =
-                                                naming.get(&report.id).copied().unwrap_or(false);
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.add_space(10.0);
-                                                if ui
-                                                    .radio(!taking, "")
-                                                    .on_hover_text("Leave it as it is")
-                                                    .clicked()
-                                                {
-                                                    self.pending.push(Pending::ChooseName {
-                                                        id: report.id,
-                                                        from_path: false,
-                                                    });
-                                                }
-                                                ui.label(
-                                                    RichText::new(stored)
-                                                        .font(theme::mono(10.0))
-                                                        .color(theme::text()),
+                                            if let Some(track) = self.library.get(report.id) {
+                                                let edit = names
+                                                    .get(&report.id)
+                                                    .cloned()
+                                                    .unwrap_or_else(|| NameEdit::of(track));
+                                                let answers = [
+                                                    (
+                                                        stored.clone(),
+                                                        "the tags",
+                                                        track.artist.clone(),
+                                                        track.title.clone(),
+                                                    ),
+                                                    (
+                                                        from_path.describe(),
+                                                        "the file name",
+                                                        from_path.artist.clone(),
+                                                        from_path.title.clone(),
+                                                    ),
+                                                ];
+                                                let extension = report
+                                                    .path
+                                                    .extension()
+                                                    .map(|e| format!(".{}", e.to_string_lossy()))
+                                                    .unwrap_or_default();
+                                                name_row(
+                                                    ui,
+                                                    report.id,
+                                                    &edit,
+                                                    &answers,
+                                                    &extension,
+                                                    &mut self.pending,
                                                 );
-                                                ui.label(
-                                                    RichText::new("the tags")
-                                                        .size(theme::SMALL)
-                                                        .color(theme::dim()),
-                                                );
-                                            });
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.add_space(10.0);
-                                                if ui
-                                                    .radio(taking, "")
-                                                    .on_hover_text(
-                                                        "Take the names the file is filed under",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    self.pending.push(Pending::ChooseName {
-                                                        id: report.id,
-                                                        from_path: true,
-                                                    });
-                                                }
-                                                ui.label(
-                                                    RichText::new(from_path.describe())
-                                                        .font(theme::mono(10.0))
-                                                        .color(theme::text()),
-                                                );
-                                                ui.label(
-                                                    RichText::new("the file name")
-                                                        .size(theme::SMALL)
-                                                        .color(theme::dim()),
-                                                );
-                                            });
+                                            }
                                         }
                                     }
                                 });
@@ -10785,28 +10951,32 @@ impl App {
                     {
                         adopt_strays = true;
                     }
-                    // Only when something has actually been picked. A button
+                    // Only when something has actually been ticked. A button
                     // that does nothing is worse than no button.
-                    let chosen = naming.values().filter(|from_path| **from_path).count();
-                    if chosen > 0
+                    let ticked: Vec<&NameEdit> = names.values().filter(|e| e.change).collect();
+                    let stuck = ticked.iter().find_map(|edit| edit.problem());
+                    if !ticked.is_empty()
                         && ui
-                            .add(
+                            .add_enabled(
+                                stuck.is_none(),
                                 egui::Button::new(
                                     RichText::new(format!(
-                                        "Take the file name for {}",
-                                        plural(chosen, "track")
+                                        "Change {}",
+                                        plural(ticked.len(), "ticked track")
                                     ))
                                     .strong(),
                                 )
                                 .fill(theme::booth_2()),
                             )
                             .on_hover_text(
-                                "Only the ones set to the file name. Nothing is written to \
-                                 any file — this changes what the collection calls them",
+                                "Each ticked track takes the names and file name in its boxes: \
+                                 the names go into the collection and into the file's tags, and \
+                                 the file is renamed on disk. Unticked ones are left alone",
                             )
+                            .on_disabled_hover_text(stuck.unwrap_or_default())
                             .clicked()
                     {
-                        rename = true;
+                        change_names = true;
                     }
                 });
             });
@@ -10823,8 +10993,8 @@ impl App {
             self.rebuild();
             self.save();
         }
-        if rename {
-            self.take_the_names_off_the_files();
+        if change_names {
+            self.change_the_ticked_names();
         }
         if adopt_strays {
             self.import(orphans);
@@ -10835,60 +11005,111 @@ impl App {
         }
     }
 
-    /// Rename the tracks whose radio was set to the file's own name.
+    /// Change the tracks ticked in the check's sheet to what their boxes say.
     ///
-    /// The collection only: a name is written into a file by the tag write-back
-    /// and nowhere else, and a check that quietly rewrote somebody's tags would
-    /// be a check nobody could safely run.
-    fn take_the_names_off_the_files(&mut self) {
+    /// The files first, renamed on disk, so that the tags then go into each
+    /// under its new name; then the names, into the collection, and into the
+    /// file's own tags wherever those say something else. Unlike anything else
+    /// the check does, this writes to somebody's files — which is why it is a
+    /// row they ticked and typed into, and never a button that sweeps.
+    ///
+    /// Nothing is changed if any ticked row cannot be applied: a name or a
+    /// file name it may not have, which also keeps the button from being
+    /// offered, or a file name that is taken. A row found wanting partway
+    /// through would leave half of what was asked for done.
+    fn change_the_ticked_names(&mut self) {
         let Some(checked) = &self.checked else { return };
-        let chosen: Vec<(u32, crate::guess::Guess)> = checked
+        // Each with whether the file's tags already say what was typed.
+        let ticked: Vec<(u32, NameEdit, bool)> = checked
             .troubles
             .iter()
-            .filter(|report| checked.naming.get(&report.id).copied().unwrap_or(false))
+            .filter(|report| report.troubles.iter().any(|trouble| trouble.is_a_choice()))
             .filter_map(|report| {
-                report.troubles.iter().find_map(|trouble| match trouble {
-                    crate::verify::Trouble::Unlike { from_path, .. } => {
-                        Some((report.id, from_path.clone()))
-                    }
-                    _ => None,
-                })
+                let edit = checked.names.get(&report.id).filter(|edit| edit.change)?;
+                let says = report.fresh.as_ref().is_some_and(|file| {
+                    file.artist == edit.artist.trim() && file.title == edit.title.trim()
+                });
+                Some((report.id, edit.clone(), says))
             })
             .collect();
-
-        let mut renamed = 0usize;
-        for (id, from_path) in chosen {
-            let Some(track) = self.library.get_mut(id) else { continue };
-            crate::info!(
-                "#{id} renamed from its file: {} — {} becomes {}",
-                track.artist,
-                track.title,
-                from_path.describe()
-            );
-            if !from_path.artist.is_empty() {
-                track.artist.clone_from(&from_path.artist);
-            }
-            if !from_path.title.is_empty() {
-                track.title.clone_from(&from_path.title);
-            }
-            if track.album.trim().is_empty() && !from_path.album.is_empty() {
-                track.album.clone_from(&from_path.album);
-            }
-            // The names came off the path, not out of the file, so a later
-            // fingerprint is still allowed to correct them without asking.
-            track.from_tags = false;
-            renamed += 1;
+        if ticked.is_empty() {
+            return;
+        }
+        if let Some(problem) = ticked.iter().find_map(|(_, edit, _)| edit.problem()) {
+            self.note(format!("nothing changed: {problem}"), theme::amber());
+            return;
         }
 
-        if renamed > 0 {
-            self.note(
-                format!("{} renamed from their files", plural(renamed, "track")),
-                theme::text(),
-            );
-            self.checked = None;
-            self.rebuild();
-            self.save();
+        // All at once, so that what could not be renamed is said in one place.
+        let renames: Vec<(u32, PathBuf)> = ticked
+            .iter()
+            .filter_map(|(id, edit, _)| {
+                let path = &self.library.get(*id)?.path;
+                let stem = edit.file.trim();
+                if path.file_stem().is_some_and(|now| now.to_string_lossy() == stem) {
+                    return None;
+                }
+                let extension = path
+                    .extension()
+                    .map(|e| format!(".{}", e.to_string_lossy()))
+                    .unwrap_or_default();
+                Some((*id, path.with_file_name(format!("{stem}{extension}"))))
+            })
+            .collect();
+        // A name that is taken, or that two rows both want, is found out here
+        // like a name a drive would not take, before anything is done.
+        let mut wanted = std::collections::HashSet::new();
+        for (id, to) in &renames {
+            let from = self.library.get(*id).map(|track| track.path.clone()).unwrap_or_default();
+            let same = std::fs::canonicalize(&from).ok() == std::fs::canonicalize(to).ok();
+            if (to.exists() && !same) || !wanted.insert(to.clone()) {
+                let name = to.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                self.note(format!("nothing changed: {name} is taken"), theme::amber());
+                return;
+            }
         }
+        if !renames.is_empty() {
+            self.rename_files(&renames);
+        }
+
+        for (id, edit, says) in &ticked {
+            let (artist, title) = (edit.artist.trim().to_string(), edit.title.trim().to_string());
+            let Some(track) = self.library.get_mut(*id) else { continue };
+            if track.artist != artist || track.title != title {
+                crate::info!(
+                    "#{id} renamed in the check: {} \u{2014} {} becomes {artist} \u{2014} {title}",
+                    track.artist,
+                    track.title
+                );
+                track.artist.clone_from(&artist);
+                track.title.clone_from(&title);
+            }
+            // Straight into the queue rather than through the question
+            // `write_tags` asks of a name its file looks nothing like: the
+            // person who typed both has already answered it.
+            let in_the_file = match says {
+                true => true,
+                false => match self.names_to_write(*id, booth_cli::tag::OnExisting::Overwrite) {
+                    Some(write) => {
+                        self.to_retag.push(write);
+                        true
+                    }
+                    None => false,
+                },
+            };
+            // What somebody typed, and what the file now says: a fingerprint
+            // that disagrees later is a question, not a correction.
+            if in_the_file {
+                if let Some(track) = self.library.get_mut(*id) {
+                    track.from_tags = true;
+                }
+            }
+        }
+
+        self.note(format!("{} changed as ticked", plural(ticked.len(), "track")), theme::text());
+        self.checked = None;
+        self.rebuild();
+        self.save();
     }
 
     /// Bring the collection up to date with what its files actually say.
@@ -21580,6 +21801,242 @@ mod tests {
             assert_eq!(track.bytes, 43, "the size was not brought up to date");
             assert!(track.stems.vocals.is_none(), "the kit still lists a stem that is not there");
             assert!(app.checked.is_none(), "the answer is stale once it has been acted on");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// Two tracks the check found filed under other names: the
+        /// collection calls both Peverelist, the files are Batu's. And a lyric
+        /// file beside the first, under its name.
+        fn two_tracks_filed_otherwise(name: &str) -> (App, PathBuf, u32, u32) {
+            let dir = std::env::temp_dir().join(format!("booth-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut app = app(name);
+            let mut ids = Vec::new();
+            for file in ["Batu - Marius.flac", "Batu - Lithe.flac"] {
+                let path = dir.join(file);
+                std::fs::write(&path, b"not really a flac").unwrap();
+                let id = app.library.add(&path);
+                let track = app.library.get_mut(id).unwrap();
+                track.artist = "Peverelist".into();
+                track.title = "Roll With The Punches".into();
+                ids.push(id);
+            }
+            std::fs::write(dir.join("Batu - Marius.lrc"), b"[00:01.00]hold on").unwrap();
+            let troubles = ids
+                .iter()
+                .map(|id| {
+                    let path = app.library.get(*id).unwrap().path.clone();
+                    crate::verify::Report {
+                        id: *id,
+                        troubles: vec![crate::verify::Trouble::Unlike {
+                            stored: "Peverelist \u{2014} Roll With The Punches".into(),
+                            from_path: crate::guess::from_path(&path),
+                        }],
+                        path,
+                        fresh: None,
+                    }
+                })
+                .collect();
+            app.checked = Some(Checked { troubles, ..Default::default() });
+            (app, dir, ids[0], ids[1])
+        }
+
+        /// A name row on its own, and what pressing and typing in it asked for.
+        fn a_name_row() -> Harness<'static, (NameEdit, Vec<Pending>)> {
+            let untouched = NameEdit {
+                change: false,
+                artist: "Peverelist".into(),
+                title: "Roll With The Punches".into(),
+                file: "Batu - Marius".into(),
+            };
+            let mut harness =
+                Harness::builder().with_size(egui::vec2(900.0, 300.0)).build_ui_state(
+                    |ui, (edit, pending): &mut (NameEdit, Vec<Pending>)| {
+                        let answers = [
+                            (
+                                "Peverelist \u{2014} Roll With The Punches".to_string(),
+                                "the tags",
+                                "Peverelist".to_string(),
+                                "Roll With The Punches".to_string(),
+                            ),
+                            (
+                                "Batu \u{2014} Marius".to_string(),
+                                "the file name",
+                                "Batu".to_string(),
+                                "Marius".to_string(),
+                            ),
+                        ];
+                        name_row(ui, 7, edit, &answers, ".flac", pending);
+                        // Applied as the window applies its own, between frames.
+                        for want in pending.drain(..) {
+                            if let Pending::EditName { edit: wanted, .. } = want {
+                                *edit = wanted;
+                            }
+                        }
+                    },
+                    (untouched, Vec::new()),
+                );
+            harness.run();
+            harness
+        }
+
+        #[test]
+        fn typing_a_name_into_a_row_ticks_it() {
+            let mut harness = a_name_row();
+            harness.get_by_role_and_label(accesskit::Role::TextInput, "artist").focus();
+            harness.run();
+            harness
+                .get_by_role_and_label(accesskit::Role::TextInput, "artist")
+                .type_text(" & Batu");
+            harness.run();
+            let (edit, _) = harness.state();
+            assert!(edit.change, "typed into and still not ticked");
+            assert!(edit.artist.contains("& Batu"), "{:?}", edit.artist);
+            assert_eq!(edit.file, "Batu - Marius", "the file name was not touched");
+        }
+
+        #[test]
+        fn using_an_answer_puts_it_in_the_boxes_and_naming_the_file_after_them_follows() {
+            let mut harness = a_name_row();
+            // The second "use" is the file name's.
+            harness.get_all_by_label("use").nth(1).unwrap().click();
+            harness.run();
+            assert_eq!(
+                (harness.state().0.artist.as_str(), harness.state().0.title.as_str()),
+                ("Batu", "Marius")
+            );
+            assert!(harness.state().0.change);
+
+            harness.get_by_label("after the names").click();
+            harness.run();
+            assert_eq!(harness.state().0.file, "Batu - Marius");
+            // And unticking leaves the boxes as they are, but the track alone.
+            harness.get_by_label("Change").click();
+            harness.run();
+            assert!(!harness.state().0.change);
+            assert_eq!(harness.state().0.artist, "Batu");
+        }
+
+        #[test]
+        fn a_ticked_name_row_renames_the_file_and_retags_it_and_an_unticked_one_is_left_alone() {
+            let (mut app, dir, ticked, unticked) = two_tracks_filed_otherwise("check-names");
+            let checked = app.checked.as_mut().unwrap();
+            checked.names.insert(
+                ticked,
+                NameEdit {
+                    change: true,
+                    artist: " Batu ".into(),
+                    title: "Marius (Edit)".into(),
+                    file: "Batu - Marius (Edit)".into(),
+                },
+            );
+            // Typed into and then unticked: somebody changed their mind.
+            checked.names.insert(
+                unticked,
+                NameEdit {
+                    change: false,
+                    artist: "Batu".into(),
+                    title: "Lithe".into(),
+                    file: "something else".into(),
+                },
+            );
+
+            app.change_the_ticked_names();
+
+            let track = app.library.get(ticked).unwrap();
+            assert_eq!((track.artist.as_str(), track.title.as_str()), ("Batu", "Marius (Edit)"));
+            assert_eq!(track.path, dir.join("Batu - Marius (Edit).flac"));
+            assert!(track.path.exists() && !dir.join("Batu - Marius.flac").exists());
+            assert!(track.from_tags, "typed names are not a fingerprint's to replace");
+            assert!(
+                dir.join("Batu - Marius (Edit).lrc").exists(),
+                "the words went with the track they are beside"
+            );
+            let write = app.to_retag.iter().find(|w| w.id == ticked).expect("no tags queued");
+            assert_eq!((write.artist.as_str(), write.title.as_str()), ("Batu", "Marius (Edit)"));
+            assert_eq!(write.path, track.path, "the tags go into the file under its new name");
+            assert!(app.unlike.is_empty(), "nobody is asked again about names they typed");
+
+            let other = app.library.get(unticked).unwrap();
+            assert_eq!(other.artist, "Peverelist");
+            assert_eq!(other.path, dir.join("Batu - Lithe.flac"));
+            assert!(!app.to_retag.iter().any(|w| w.id == unticked));
+            assert!(app.checked.is_none(), "the check is stale once it has been acted on");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_ticked_row_that_cannot_be_applied_changes_nothing_at_all() {
+            let (mut app, dir, first, second) = two_tracks_filed_otherwise("check-refused");
+            let checked = app.checked.as_mut().unwrap();
+            checked.names.insert(
+                first,
+                NameEdit {
+                    change: true,
+                    artist: "Batu".into(),
+                    title: "Marius".into(),
+                    file: "fine".into(),
+                },
+            );
+            checked.names.insert(
+                second,
+                NameEdit {
+                    change: true,
+                    artist: "AC/DC".into(),
+                    title: "What?".into(),
+                    file: "AC/DC - What?".into(),
+                },
+            );
+
+            app.change_the_ticked_names();
+
+            assert_eq!(app.library.get(first).unwrap().artist, "Peverelist", "half was done");
+            assert!(dir.join("Batu - Marius.flac").exists());
+            assert!(app.to_retag.is_empty());
+            assert!(app.checked.is_some(), "the sheet stays, for the row to be put right");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_file_name_that_is_taken_changes_nothing_rather_than_half() {
+            let (mut app, dir, first, second) = two_tracks_filed_otherwise("check-taken");
+            app.checked.as_mut().unwrap().names.insert(
+                first,
+                NameEdit {
+                    change: true,
+                    artist: "Batu".into(),
+                    title: "Lithe".into(),
+                    file: "Batu - Lithe".into(),
+                },
+            );
+            app.change_the_ticked_names();
+            let track = app.library.get(first).unwrap();
+            assert_eq!(track.path, dir.join("Batu - Marius.flac"));
+            assert_eq!(track.artist, "Peverelist", "the names went in without the file");
+            assert!(app.to_retag.is_empty());
+            assert_eq!(std::fs::read(dir.join("Batu - Lithe.flac")).unwrap(), b"not really a flac");
+            assert!(dir.join("Batu - Marius.lrc").exists(), "its words stayed with it");
+
+            // Nor may two rows both take one name that is free.
+            let checked = app.checked.as_mut().unwrap();
+            for id in [first, second] {
+                checked.names.insert(
+                    id,
+                    NameEdit {
+                        change: true,
+                        artist: "Batu".into(),
+                        title: "Marius".into(),
+                        file: "the same name".into(),
+                    },
+                );
+            }
+            app.change_the_ticked_names();
+            assert!(!dir.join("the same name.flac").exists());
+            assert_eq!(app.library.get(second).unwrap().artist, "Peverelist");
 
             let _ = std::fs::remove_dir_all(&dir);
         }

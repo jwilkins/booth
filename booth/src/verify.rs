@@ -245,10 +245,76 @@ pub fn orphans(library: &Path, known: &[PathBuf]) -> Vec<PathBuf> {
     found.into_iter().filter(|path| !known.contains(path.as_path())).collect()
 }
 
+/// What a FAT or exFAT stick will not have in a file name.
+const NOT_ON_A_STICK: &str = "/\\:*?\"<>|";
+
+/// Why a file name typed into the check's sheet cannot be used, or `None` if
+/// it can. The extension is not part of it; that stays as it is.
+///
+/// Stricter than the disk the library is on, because a file this program puts
+/// on a drive keeps its name there, and a name the stick will not take is
+/// found out on the night rather than here: anything FAT and exFAT refuse is
+/// refused, and so is a name ending in a dot, which they drop.
+pub fn file_name_problem(stem: &str) -> Option<String> {
+    let stem = stem.trim();
+    if stem.is_empty() {
+        return Some("a file needs a name".to_string());
+    }
+    if let Some(c) = stem.chars().find(|c| c.is_control() || NOT_ON_A_STICK.contains(*c)) {
+        return Some(match c.is_control() {
+            true => "a file name cannot hold a control character".to_string(),
+            false => format!("a drive will not take {c} in a file name"),
+        });
+    }
+    if stem.ends_with('.') {
+        return Some("a drive drops a dot at the end of a file name".to_string());
+    }
+    None
+}
+
+/// A file name for a track called `artist — title`: `Artist - Title`, with
+/// whatever [`file_name_problem`] would refuse put as `_`.
+pub fn file_name_for(artist: &str, title: &str) -> String {
+    let name = format!("{} - {}", artist.trim(), title.trim());
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c.is_control() || NOT_ON_A_STICK.contains(c) {
+            true => '_',
+            false => c,
+        })
+        .collect();
+    cleaned.trim().trim_end_matches('.').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::library::Library;
+
+    #[test]
+    fn a_file_name_a_stick_would_refuse_is_refused_here_first() {
+        assert_eq!(file_name_problem("Peverelist - Roll With The Punches"), None);
+        assert_eq!(file_name_problem("Ø - Ünlaut (Edit)"), None, "any letter will do");
+        assert!(file_name_problem("").is_some());
+        assert!(file_name_problem("   ").is_some());
+        assert!(file_name_problem("AC/DC - Thunderstruck").unwrap().contains('/'));
+        assert!(file_name_problem("What?").unwrap().contains('?'));
+        assert!(file_name_problem("Mix: Part 1").is_some());
+        assert!(file_name_problem("left\\right").unwrap().contains('\\'));
+        assert!(file_name_problem("a\tb").is_some(), "a control character");
+        assert!(file_name_problem("Unfinished.").is_some());
+    }
+
+    #[test]
+    fn a_file_named_after_a_track_is_one_a_stick_will_take() {
+        assert_eq!(
+            file_name_for("Peverelist", "Roll With The Punches"),
+            "Peverelist - Roll With The Punches"
+        );
+        assert_eq!(file_name_for("AC/DC", "What?"), "AC_DC - What_");
+        assert_eq!(file_name_for(" Batu ", " Marius... "), "Batu - Marius");
+        assert_eq!(file_name_problem(&file_name_for("A:B", "C*D")), None);
+    }
 
     /// A directory with one real file in it, and the track that describes it.
     fn a_file(name: &str, bytes: &[u8]) -> (PathBuf, Library, u32) {
