@@ -9,22 +9,6 @@ Flags that are out of date come last, with the on-screen one first among them.
 
 ## Drives and backups
 
-### Keep a drive's history through a sync
-
-`proto/musicai/src/commands.rs`, where the export builds its database: *"it has
-to be read off before this runs"*. Also `booth/README.md`, *What was played
-comes back*: *"a sync is the end of a drive's history"*.
-
-Both databases are written with no history in them, so whatever a player
-recorded is gone after the next sync. It is read off when the drive is copied,
-which happens when it is plugged in, unless **Keep a copy of every drive** is
-off — and the sweep that starts a copy waits while another job runs, so a sync
-started straight after plugging in can get there first. Either read the history
-before every write, or carry it into the new databases: the `export.pdb` writer
-can now write a history (`HistoryPlaylist`), with track ids mapped from the old
-database to the new by path, and carrying it would also keep a CDJ-3000's
-numbering going rather than starting at `HISTORY 001` after each sync.
-
 ### Merge a deck's edits back, and report the set
 
 `docs/rekordbox-replacement-spec.md:877`, HIST-2 and HIST-3: *"are not done"*.
