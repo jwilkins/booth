@@ -304,6 +304,15 @@ pub struct App {
     audited: Option<(String, Vec<String>, bool)>,
     /// Set while the settings sheet is open.
     settings: bool,
+    /// The set being recorded, if one is.
+    recording: Option<crate::recorder::Capture>,
+    /// What the meter beside the recording shows: each channel's peak, falling
+    /// back slowly so a transient is there long enough to be seen.
+    record_meter: [f32; 2],
+    /// Whether a recording that stopped on its own has been said.
+    record_failure_said: bool,
+    /// The inputs a set can be recorded from, listed when the settings open.
+    inputs: Option<Vec<crate::recorder::Input>>,
     /// Set while the My Settings sheet is open: the players' and the mixer's
     /// settings, as against this program's.
     my_settings: bool,
@@ -884,6 +893,8 @@ enum Picking {
     Drive,
     Image,
     LibraryFolder,
+    /// Where a recorded set goes.
+    RecordingsFolder,
     /// A drive, or its PIONEER folder, to take My Settings from.
     Settings,
 }
@@ -1004,6 +1015,10 @@ impl App {
             details: false,
             audited: None,
             settings: false,
+            recording: None,
+            record_meter: [0.0; 2],
+            record_failure_said: false,
+            inputs: None,
             my_settings: false,
             settings_taken: None,
             settings_over: false,
@@ -4941,6 +4956,9 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        // Closed here rather than left to the drop, so the log says how long
+        // the set was and where it went, the same as pressing stop.
+        self.stop_recording();
         self.save();
     }
 }
@@ -9295,6 +9313,7 @@ impl App {
                 self.my_settings = true;
             }
             self.log_button(ui);
+            self.record_button(ui);
             ui.separator();
             ui.label(
                 RichText::new(theme::label_text("Drives"))
@@ -9522,6 +9541,195 @@ impl App {
     }
 
     /// The button that opens the log's own window, on the dock's top row.
+    /// Record the set: what the input in Settings hears, into a WAV.
+    ///
+    /// rekordbox put recording behind its paid plan, and recording what the
+    /// mixer sends is something a laptop at the side of the booth can do on
+    /// its own. In the dock because it is pressed once at the start of a set
+    /// and once at the end, and has to be findable without a menu.
+    fn record_button(&mut self, ui: &mut Ui) {
+        let Some(capture) = &self.recording else {
+            let from = match &self.config.recording.device {
+                Some(_) => {
+                    self.config.recording.device_name.as_deref().unwrap_or("the chosen input")
+                }
+                None => "the default input",
+            };
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(theme::label_text("Rec"))
+                            .size(theme::LABEL)
+                            .color(theme::dim())
+                            .strong(),
+                    )
+                    .fill(theme::booth()),
+                )
+                .on_hover_text(format!(
+                    "Record the set from {from}, channels {}, into a WAV in {}. The input is \
+                     chosen in Settings.",
+                    channel_pair(self.config.recording.first_channel),
+                    self.config.recording.folder.display()
+                ))
+                .clicked()
+            {
+                self.start_recording();
+            }
+            return;
+        };
+
+        let levels = capture.levels();
+        for (shown, level) in self.record_meter.iter_mut().zip(levels) {
+            *shown = level.max(*shown * 0.85);
+        }
+        let failed = capture.failed();
+        let text = format!("\u{25cf} {}", crate::recorder::clock(capture.seconds()));
+        let stop = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(text).size(theme::LABEL).color(theme::booth()).strong(),
+                )
+                .fill(match failed {
+                    Some(_) => theme::amber(),
+                    None => theme::alert(),
+                }),
+            )
+            .on_hover_text(format!(
+                "Recording {} into {}. Press to stop.",
+                capture.device,
+                capture.file.display()
+            ))
+            .clicked();
+        record_meter(ui, self.record_meter);
+        // A meter has to move while nothing else does.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
+
+        if let Some(why) = failed {
+            if !std::mem::replace(&mut self.record_failure_said, true) {
+                self.note(
+                    format!(
+                        "the recording stopped: {why}. What was recorded up to then is in {}",
+                        self.recording
+                            .as_ref()
+                            .map(|c| c.file.display().to_string())
+                            .unwrap_or_default()
+                    ),
+                    theme::alert(),
+                );
+            }
+        }
+        if stop {
+            self.stop_recording();
+        }
+    }
+
+    fn start_recording(&mut self) {
+        let settings = self.config.recording.clone();
+        // UTC, as every other name this program writes is: a set that runs
+        // past midnight, or past a clock change, still sorts where it began.
+        let name = format!("Set {}", booth_cli::clock::folder(now()));
+        let capture = match crate::recorder::Capture::start(&settings, &name) {
+            Ok(capture) => capture,
+            Err(e) => {
+                self.note(format!("could not start recording: {e:#}"), theme::alert());
+                return;
+            }
+        };
+        let per_hour = booth_cli::audio::record::bytes_per_hour(capture.rate, capture.channels);
+        let hours = booth_cli::volume::nearest_existing(&settings.folder)
+            .and_then(|at| booth_cli::volume::free_space(&at))
+            .map(|free| free as f64 / per_hour as f64);
+        crate::info!(
+            "recording {} at {} Hz, {} channel{}, into {}{}",
+            capture.device,
+            capture.rate,
+            capture.channels,
+            if capture.channels == 1 { "" } else { "s" },
+            capture.file.display(),
+            match hours {
+                Some(hours) => format!(" \u{2014} room for {hours:.1} hours"),
+                None => String::new(),
+            }
+        );
+        if !capture.awake {
+            crate::warn!(
+                "could not keep the machine awake: if it sleeps mid-set the recording stops"
+            );
+        }
+        match hours {
+            Some(hours) if hours < 1.0 => self.note(
+                format!(
+                    "recording, but the disk has room for only {} more",
+                    crate::recorder::clock(hours * 3_600.0)
+                ),
+                theme::amber(),
+            ),
+            _ => self.note(format!("recording into {}", capture.file.display()), theme::dim()),
+        }
+        self.record_meter = [0.0; 2];
+        self.record_failure_said = false;
+        self.recording = Some(capture);
+    }
+
+    fn stop_recording(&mut self) {
+        let Some(capture) = self.recording.take() else { return };
+        let dropped = capture.dropped_seconds();
+        match capture.stop() {
+            Ok(done) => {
+                let mut said = format!(
+                    "recorded {} into {}",
+                    crate::recorder::clock(done.seconds),
+                    done.parts.first().map(|p| p.display().to_string()).unwrap_or_default()
+                );
+                if done.parts.len() > 1 {
+                    said.push_str(&format!(
+                        ", carried on in {} more beside it",
+                        plural(done.parts.len() - 1, "part")
+                    ));
+                }
+                // A refused microphone is not an error anywhere: macOS hands
+                // over zeros. Exact zeros for a whole set is never a set.
+                if done.peak == 0.0 && done.seconds > 0.0 {
+                    let why = match cfg!(target_os = "macos") {
+                        true => {
+                            ": if macOS was told no when it asked about the microphone, allow \
+                             Booth in System Settings \u{203a} Privacy & Security \u{203a} \
+                             Microphone"
+                        }
+                        false => ", so check the input and the pair in Settings",
+                    };
+                    let silent = format!("the recording is silence from start to end{why}");
+                    // Where it went first, and the warning last, because the
+                    // last line is the one the dock shows.
+                    self.note(said, theme::dim());
+                    self.note(silent, theme::amber());
+                    return;
+                }
+                // Said, because both are things to fix before the next set and
+                // neither is audible until somebody listens back.
+                if done.clipped > 0 {
+                    crate::warn!(
+                        "{} samples of the recording were at full scale: the send was in the red",
+                        done.clipped
+                    );
+                }
+                if dropped > 0.0 {
+                    crate::warn!(
+                        "{dropped:.2} seconds of the set were lost to a disk that could not keep up"
+                    );
+                }
+                let colour = match done.clipped > 0 || dropped > 0.0 {
+                    true => theme::amber(),
+                    false => theme::dim(),
+                };
+                self.note(said, colour);
+            }
+            Err(e) => {
+                self.note(format!("closing the recording: {e:#}"), theme::alert());
+            }
+        }
+    }
+
     fn log_button(&mut self, ui: &mut Ui) {
         if ui
             .add(
@@ -11536,6 +11744,11 @@ impl App {
         let mut open = true;
         let mut changed = false;
         let mut pick_library = false;
+        let mut pick_recordings = false;
+        // Asked once a time the sheet is opened, not every frame.
+        if self.inputs.is_none() {
+            self.inputs = Some(crate::recorder::inputs());
+        }
 
         egui::Window::new("Settings")
             .open(&mut open)
@@ -12241,6 +12454,130 @@ impl App {
                             self.pending.extend(outside.into_iter().map(Pending::Adopt));
                         }
                     }
+
+                    ui.add_space(14.0);
+                    pane_label(ui, "Recording");
+                    ui.label(
+                        RichText::new(
+                            "What Rec in the dock records: a mixer's USB send, or an \
+                             interface's input. A DJM sends several stereo pairs, and the master \
+                             is on whichever the mixer is set to send it on.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+                    let inputs = self.inputs.clone().unwrap_or_default();
+                    let current = self.config.recording.device.clone();
+                    let shown = match &current {
+                        // Said as missing, so a mixer left at home is not a
+                        // surprise at the start of the set.
+                        Some(id) => match inputs.iter().find(|input| &input.id == id) {
+                            Some(input) => input.name.clone(),
+                            None => format!(
+                                "{} (not plugged in)",
+                                self.config.recording.device_name.as_deref().unwrap_or(id)
+                            ),
+                        },
+                        None => "the default input".into(),
+                    };
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("record input")
+                            .width(ui.available_width() - 110.0)
+                            .selected_text(shown)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(current.is_none(), "the default input")
+                                    .on_hover_text("Whatever the machine's own settings say.")
+                                    .clicked()
+                                {
+                                    self.config.recording.device = None;
+                                    self.config.recording.device_name = None;
+                                    changed = true;
+                                }
+                                for input in &inputs {
+                                    if ui
+                                        .selectable_label(
+                                            current.as_deref() == Some(input.id.as_str()),
+                                            format!(
+                                                "{}  ({} channels, {:.1} kHz)",
+                                                input.name,
+                                                input.channels,
+                                                input.rate as f64 / 1000.0
+                                            ),
+                                        )
+                                        .on_hover_text("Record from this input.")
+                                        .clicked()
+                                    {
+                                        self.config.recording.device = Some(input.id.clone());
+                                        self.config.recording.device_name =
+                                            Some(input.name.clone());
+                                        self.config.recording.first_channel = 0;
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        if ui
+                            .button("Look again")
+                            .on_hover_text("List the inputs again, after plugging one in.")
+                            .clicked()
+                        {
+                            self.inputs = None;
+                        }
+                    });
+                    if inputs.is_empty() {
+                        ui.label(
+                            RichText::new("no inputs found").color(theme::amber()).size(theme::SMALL),
+                        );
+                    }
+                    let channels = match &current {
+                        Some(id) => inputs.iter().find(|i| &i.id == id),
+                        None => inputs.first(),
+                    }
+                    .map(|input| input.channels)
+                    .unwrap_or(2);
+                    if channels > 2 {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Channels").size(theme::SMALL));
+                            for first in (0..channels.saturating_sub(1)).step_by(2) {
+                                if ui
+                                    .selectable_label(
+                                        self.config.recording.first_channel == first,
+                                        channel_pair(first),
+                                    )
+                                    .on_hover_text(
+                                        "The pair the master arrives on. On a DJM it is whichever \
+                                         the mixer's USB send is set to.",
+                                    )
+                                    .clicked()
+                                {
+                                    self.config.recording.first_channel = first;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        let mut shown = self.config.recording.folder.display().to_string();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut shown)
+                                    .desired_width(ui.available_width() - 90.0)
+                                    .font(theme::mono(11.0)),
+                            )
+                            .on_hover_text("Where recordings go: one WAV a set.")
+                            .changed()
+                        {
+                            self.config.recording.folder = PathBuf::from(shown.trim());
+                            changed = true;
+                        }
+                        if ui
+                            .button("Choose\u{2026}")
+                            .on_hover_text("Pick the folder recordings go in.")
+                            .clicked()
+                        {
+                            pick_recordings = true;
+                        }
+                    });
                 });
             });
 
@@ -12249,11 +12586,16 @@ impl App {
                 self.note(format!("could not save the settings: {e:#}"), theme::alert());
             }
         }
+        if pick_recordings {
+            self.want_pick = Some(Picking::RecordingsFolder);
+        }
         if pick_library {
             self.want_pick = Some(Picking::LibraryFolder);
         }
         if !open {
             self.settings = false;
+            // So the next opening lists what is plugged in then.
+            self.inputs = None;
         }
     }
 
@@ -14253,6 +14595,12 @@ impl App {
                         .map(|f| f.path().to_path_buf())
                         .collect()
                 }
+                Picking::RecordingsFolder => {
+                    block_on(dialog.set_title("Where recordings go").pick_folder())
+                        .into_iter()
+                        .map(|f| f.path().to_path_buf())
+                        .collect()
+                }
                 Picking::Rekordbox => block_on(
                     dialog
                         .set_title("rekordbox master.db")
@@ -14299,6 +14647,14 @@ impl App {
             Picking::Image => {
                 if let Some(path) = paths.into_iter().next() {
                     self.add_drive(path, true);
+                }
+            }
+            Picking::RecordingsFolder => {
+                if let Some(path) = paths.into_iter().next() {
+                    self.config.recording.folder = path;
+                    if let Err(e) = self.config.save(&self.config_path) {
+                        self.note(format!("could not save the settings: {e:#}"), theme::alert());
+                    }
                 }
             }
             Picking::LibraryFolder => {
@@ -15300,6 +15656,34 @@ fn snap_to(beats: &[u32], time_ms: u32, every: usize) -> u32 {
 /// rounds down. Falls back to the moment itself where there is no grid.
 fn snap_back(beats: &[u32], time_ms: u32) -> u32 {
     beats.iter().rev().find(|beat| **beat <= time_ms).copied().unwrap_or(time_ms)
+}
+
+/// A channel pair as a mixer's manual writes it: `1–2`, counted from one.
+fn channel_pair(first: u16) -> String {
+    format!("{}\u{2013}{}", first + 1, first + 2)
+}
+
+/// Two thin bars, one a channel, for the level of a recording: green, amber
+/// in the last 6 dB, red at full scale.
+fn record_meter(ui: &mut Ui, levels: [f32; 2]) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(46.0, 14.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 1.0, theme::booth_2());
+    for (row, level) in levels.into_iter().enumerate() {
+        let db = 20.0 * level.max(1e-6).log10();
+        let fraction = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
+        let top = rect.top() + 2.0 + row as f32 * 5.5;
+        let bar = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 2.0, top),
+            egui::vec2((rect.width() - 4.0) * fraction, 4.0),
+        );
+        let colour = match level {
+            l if l >= 0.999 => theme::alert(),
+            _ if db > -6.0 => theme::amber(),
+            _ => theme::go(),
+        };
+        painter.rect_filled(bar, 0.0, colour);
+    }
 }
 
 /// The sync sheet's Settings line: each file and what the write does with it.
@@ -21503,6 +21887,26 @@ mod tests {
                 harness.state().settings,
                 "\u{2318}, did not open Settings, which is where every other program keeps it"
             );
+        }
+
+        #[test]
+        fn rec_with_its_input_unplugged_says_so_and_leaves_no_file_behind() {
+            let mut app = app("record-unplugged");
+            app.config.recording.device = Some("coreaudio:AppleUSBAudioEngine:nothing".into());
+            app.config.recording.device_name = Some("A Mixer Nobody Plugged In".into());
+            app.config.recording.folder = app.library_path.parent().unwrap().join("Recordings");
+            let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.dock(ui), app);
+            harness.run();
+            harness.get_by_label(&theme::label_text("Rec")).click();
+            harness.run();
+
+            assert!(harness.state().recording.is_none(), "it says it is recording");
+            // Whether listing the inputs worked here or not, which a machine
+            // with no sound card decides, nothing is recording.
+            assert!(logged("could not start recording"));
+            let folder = harness.state().config.recording.folder.clone();
+            let made = std::fs::read_dir(&folder).map(|dir| dir.count()).unwrap_or(0);
+            assert_eq!(made, 0, "a file was started in {}", folder.display());
         }
 
         /// A stick with a PIONEER folder holding a player settings file a

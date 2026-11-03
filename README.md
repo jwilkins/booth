@@ -71,6 +71,11 @@ with a free key.
   Music on the stick the collection does not have is copied in, and a track the collection
   names but the disk has lost is put back — because the stick that could fix it will not be
   there for ever.
+- **Records the set.** Whatever the mixer's USB send or an interface's input hears, into a
+  24-bit WAV that still opens after a crash or a pulled cable, carried on in a second file
+  before a WAV runs out of room, with a meter, the machine kept awake and a warning if the
+  master was in the red. No plan to pay for. Not yet tried against a real mixer; see
+  [recording a set](booth/README.md#recording-a-set).
 - **Adds a track in seconds, not hours.** A second write carries every row the drive already has
   and prepares only what changed, so adding one track to a full stick costs one track. rekordbox's
   Sync rewrites the whole stick; its users report hours. Booth's figures are measured by the test

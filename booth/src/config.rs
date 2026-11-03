@@ -588,6 +588,9 @@ pub struct Config {
     /// Whether a drive is copied when it is written or plugged in.
     #[serde(default = "yes")]
     pub keep_drives: bool,
+    /// Recording a set: which input, which of its channels, and where to.
+    #[serde(default)]
+    pub recording: Recording,
     /// What to do about music on a drive that the library has no copy of.
     #[serde(default)]
     /// Named for what it answers rather than for the old spelling, on purpose.
@@ -884,6 +887,7 @@ impl Default for Config {
             help_delay_ms: default_help_delay_ms(),
             oldest_player: booth_cli::compat::Player::default(),
             keep_drives: true,
+            recording: Recording::default(),
             from_other_drives: OnForeign::default(),
             whisper: Whisper::default(),
             genre: Genre::default(),
@@ -899,6 +903,44 @@ fn default_backups_path() -> PathBuf {
         .parent()
         .map(|at| at.join("booth-drives"))
         .unwrap_or_else(|| data_dir().join("drives"))
+}
+
+/// What a set is recorded from, and where it goes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Recording {
+    /// The input, as the sound system identifies it, or `None` for the
+    /// machine's default input.
+    ///
+    /// The identifier rather than the name: on a Mac it is the device's UID,
+    /// which outlives a rename and tells two of the same interface apart, and
+    /// on Linux a name is a description several PCMs can share.
+    pub device: Option<String>,
+    /// What the input was called when it was chosen, to say which is missing
+    /// when it is not plugged in.
+    pub device_name: Option<String>,
+    /// The first of the two channels recorded, counted from 0: 0 is 1–2.
+    ///
+    /// A mixer's USB send is several pairs, and the master is on whichever
+    /// the mixer is set to send it on; an interface's line in is usually 1–2.
+    pub first_channel: u16,
+    /// Beside the library, in the music folder: a set is a recording somebody
+    /// will want to find, listen back to and send on.
+    pub folder: PathBuf,
+}
+
+impl Default for Recording {
+    fn default() -> Self {
+        Self {
+            device: None,
+            device_name: None,
+            first_channel: 0,
+            folder: default_library_path()
+                .parent()
+                .map(|music| music.join("Booth Recordings"))
+                .unwrap_or_else(|| data_dir().join("recordings")),
+        }
+    }
 }
 
 /// Serde needs a function to call for a default that is not `false`.
