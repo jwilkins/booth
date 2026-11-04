@@ -28,6 +28,10 @@
 	     background modes: closing the window is quitting. -->
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.music</string>
+	<!-- Recording a set opens an audio input, and macOS asks before an app
+	     may: without this key it does not ask, and the input is silence. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Booth records your sets from the mixer or audio interface you choose in Settings. Nothing is recorded until you press Rec, and recordings stay on this Mac.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Jonathan Wilkins. Booth Public Source License. Everything runs locally.</string>
 	<!-- Dropping files on the Dock icon, and "Open With", both go through

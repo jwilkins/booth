@@ -28,6 +28,7 @@ pub mod library;
 pub mod log;
 pub mod player;
 pub mod query;
+pub mod recorder;
 pub mod rows;
 pub mod storage;
 pub mod sync;

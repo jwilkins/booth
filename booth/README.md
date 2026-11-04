@@ -2063,8 +2063,8 @@ the order it appears: the library folder and what to do about music from
 elsewhere; stem quality and where kits go; which generation of player the drives
 have to work on; how long hover help waits; the colour scheme; how a track's
 length reads; the AcoustID key and how sure a lookup has to be before it is
-applied without asking; the rekordbox and OneLibrary keys; and whether a copy is
-kept of every drive.
+applied without asking; the rekordbox and OneLibrary keys; whether a copy is
+kept of every drive; and what **REC** records from, and where it puts it.
 
 ## Where things are kept
 
@@ -2198,6 +2198,65 @@ drive** is on, and whatever else is running.
 One limit worth knowing. The folder is `History/<drive>` — the collection's
 playlists have one level of folder, not two, so that is a name with a prefix
 rather than a folder inside a folder.
+
+## Recording a set
+
+**REC**, in the dock beside **LOG**, records what an input hears into a WAV,
+and pressing it again stops. While it runs it reads as the time recorded, in
+red, with a meter beside it for each channel, which turns amber within 6 dB of
+full scale and red at it. rekordbox now asks for its paid plan for this.
+
+What it records from is in Settings, under **Recording**: the machine's
+default input, or any other one plugged in, and which of its channels carry
+the master. A DJM's USB send is several stereo pairs, and the master is on
+whichever the mixer is set to send it on, so with more than two channels
+there is a choice of pair. Set the mixer and Settings to the same one. An
+interface's line in is usually 1–2. The input is kept by the identifier the
+sound system gives it rather than by its name, so two of the same interface
+are told apart; one that is not plugged in says so in Settings, and pressing
+**REC** says so again rather than recording something else.
+
+Sets go in `~/Music/Booth Recordings`, beside the library, unless Settings says
+somewhere else. Each one is named for when it started, as every other name
+Booth writes is, in UTC: `Set 2026-11-03 231403.wav`, so a set that runs past
+midnight or a clock change still sorts where it began.
+
+The file is 24-bit at whatever rate the input runs at, and it survives the
+night going wrong:
+
+- **A crash, a pulled cable or a flat battery** leaves a file that opens. The
+  header is rewritten every two seconds, so what is lost is at most the last
+  two.
+- **A long set** carries on in a second file before the first reaches the
+  4 GB a WAV can hold: `Set … (part 2).wav`. At 48 kHz that is nearly four
+  hours a file.
+- **The disk** is never waited on by the input. What the input sends is
+  queued for a writer of its own, and if the disk stalls for longer than the
+  queue holds, the time lost is counted and said when the set stops rather
+  than heard as a stutter later.
+- **The machine** is kept awake while it records, because a laptop that
+  sleeps mid-set stops the recording.
+- **Room on the disk** is worked out when it starts and logged as hours, with
+  a warning if there is less than one.
+
+When it stops, the log says how long the set was and where it went, and
+whether any of it was at full scale: a send in the red is something to turn
+down before the next set, and it cannot be heard until somebody listens back.
+
+On a Mac the first press asks for the microphone, which is what macOS calls
+any audio input. Say yes: without it the recording is silence, which macOS
+does not count as an error. A set that comes back as nothing but zeros is said
+to be, with where to allow it.
+
+Recording has not been tried against a real mixer yet. It has been run from
+Linux's `null` input, end to end, which shows the file side and the
+dropping. Whether a DJM's send arrives at the length it was recorded for is
+what `booth/tests/recording_live.rs` measures, run beside one:
+
+```sh
+BOOTH_RECORD_INPUT="DJM-900NXS2" BOOTH_RECORD_PAIR=3 \
+    cargo test -p booth --test recording_live -- --ignored --nocapture
+```
 
 ## What it does not do yet
 

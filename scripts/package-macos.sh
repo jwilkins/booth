@@ -87,8 +87,11 @@ APP=$("$REPO/scripts/make-bundle.sh" \
 echo "==> signing"
 if [ -n "${BOOTH_SIGN_IDENTITY:-}" ]; then
 	# The hardened runtime is what notarization requires. Nothing here loads
-	# plugins or JIT-compiles, so no entitlements are needed with it.
+	# plugins or JIT-compiles; the one entitlement is the audio input, which
+	# the hardened runtime otherwise refuses however the user answers the
+	# microphone prompt, so a recorded set would be silence.
 	codesign --force --deep --options runtime --timestamp \
+		--entitlements "$REPO/packaging/macos/booth.entitlements" \
 		--sign "$BOOTH_SIGN_IDENTITY" "$APP"
 	codesign --verify --strict --verbose=2 "$APP"
 else

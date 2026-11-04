@@ -257,3 +257,33 @@ fn the_icon_is_a_real_icns_with_the_sizes_macos_wants() {
         assert!(kinds.iter().any(|k| k == wanted), "missing {wanted}; have {kinds:?}");
     }
 }
+
+#[test]
+fn a_signed_app_is_allowed_an_audio_input_and_says_why_it_wants_one() {
+    // Both are needed, and neither fails loudly when missing: without the
+    // plist key macOS never asks and the input is silence, and without the
+    // entitlement the hardened runtime keeps it silent whatever the answer.
+    let dir = Scratch::new("microphone");
+    let app = bundle(&dir.0, "1.0.0");
+    let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
+    let key = plist
+        .split("<key>NSMicrophoneUsageDescription</key>")
+        .nth(1)
+        .expect("the bundle does not say why it wants the microphone");
+    let said =
+        key.trim_start().strip_prefix("<string>").and_then(|rest| rest.split_once("</string>"));
+    assert!(said.is_some_and(|(said, _)| said.contains("Rec")), "{key:.200}");
+
+    let entitlements = repo().join("packaging/macos/booth.entitlements");
+    let granted = std::fs::read_to_string(&entitlements).unwrap();
+    let after = granted
+        .split("<key>com.apple.security.device.audio-input</key>")
+        .nth(1)
+        .expect("the entitlements leave out the audio input");
+    assert!(after.trim_start().starts_with("<true/>"), "{granted}");
+    let script = std::fs::read_to_string(repo().join("scripts/package-macos.sh")).unwrap();
+    assert!(
+        script.contains("--entitlements \"$REPO/packaging/macos/booth.entitlements\""),
+        "the signing step does not hand codesign the entitlements"
+    );
+}
