@@ -399,6 +399,77 @@ fn drums_out(drums: &[f32]) -> Vec<(usize, usize)> {
 mod tests {
     use super::*;
 
+    /// SCRATCH: every bar of every record in `BOOTH_DRUM_RECORDS`, band by
+    /// band, into `BOOTH_EXPLAIN_TO/<name>.bars.csv`, for measuring drops.
+    #[test]
+    #[ignore = "needs records on disk"]
+    fn scratch_bars_band_by_band() {
+        use crate::audio::decode::decode_file;
+        let var = |name: &str| std::env::var_os(name).map(std::path::PathBuf::from);
+        let (Some(records), Some(to)) = (var("BOOTH_DRUM_RECORDS"), var("BOOTH_EXPLAIN_TO")) else {
+            return;
+        };
+        std::fs::create_dir_all(&to).unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(&records)
+            .unwrap()
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "mp3" || ext == "flac"))
+            .collect();
+        names.sort();
+        for path in names {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let Ok(audio) = decode_file(&path) else {
+                eprintln!("{name}: will not decode");
+                continue;
+            };
+            let bands = crate::export::waveform::analyze(&audio).band_detail;
+            let analysis = crate::analysis::analyze_drawn(&audio, None, &bands);
+            let Some(first) = analysis.grid.beats.iter().position(|b| b.number == 1) else {
+                continue;
+            };
+            let grid: Vec<u32> = analysis.grid.beats[first..].iter().map(|b| b.time_ms).collect();
+            let columns = bands.len() / 3;
+            let band = |c: usize, b: usize| f32::from(bands[c * 3 + b]) / 127.0;
+            let mut low = Vec::with_capacity(columns);
+            let mut sum = 0.0;
+            for c in 0..columns {
+                sum += band(c, 0);
+                if c >= SMOOTH_COLUMNS {
+                    sum -= band(c - SMOOTH_COLUMNS, 0);
+                }
+                low.push(sum / (c + 1).min(SMOOTH_COLUMNS) as f32);
+            }
+            let column = |ms: u32| ms as usize * COLUMNS_PER_SECOND / 1000;
+            let mut out = String::from("bar,ms,energy,kick,low,mid,high\n");
+            let energies = bars(&bands, &grid);
+            for (bar, energy) in energies.iter().enumerate() {
+                let from = column(grid[bar * BEATS_PER_BAR]);
+                let to = grid
+                    .get((bar + 1) * BEATS_PER_BAR)
+                    .map(|&ms| column(ms))
+                    .unwrap_or(columns)
+                    .min(columns);
+                if to <= from {
+                    break;
+                }
+                let width = (to - from) as f32;
+                let kick =
+                    (from.max(1)..to).map(|c| (low[c] - low[c - 1]).max(0.0)).sum::<f32>() / width;
+                let power = |b: usize| (from..to).map(|c| band(c, b).powi(2)).sum::<f32>() / width;
+                out.push_str(&format!(
+                    "{},{},{energy:.5},{kick:.5},{:.5},{:.5},{:.5}\n",
+                    bar + 1,
+                    grid[bar * BEATS_PER_BAR],
+                    power(0),
+                    power(1),
+                    power(2)
+                ));
+            }
+            std::fs::write(to.join(format!("{name}.bars.csv")), out).unwrap();
+            eprintln!("{name}: {} bars at {:.2} bpm", energies.len(), analysis.bpm);
+        }
+    }
+
     /// Bars at these levels, `count` of each, in order.
     fn record(parts: &[(f32, usize)]) -> Vec<f32> {
         parts.iter().flat_map(|&(level, count)| std::iter::repeat_n(level, count)).collect()
