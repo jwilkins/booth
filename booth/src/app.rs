@@ -2891,7 +2891,7 @@ impl App {
             return false;
         }
         crate::info!("asking a lyrics server about {}", plural(asking.len(), "track"));
-        self.start(Job::LookUpWords { tracks: asking });
+        self.start(Job::LookUpWords { tracks: asking, servers: self.config.lyrics.servers() });
         true
     }
 
@@ -3060,7 +3060,7 @@ impl App {
         // recogniser pass — and a separation too where there is no stem yet.
         if !asking.is_empty() {
             crate::info!("asking a lyrics server about {}", plural(asking.len(), "track"));
-            self.start(Job::LookUpWords { tracks: asking });
+            self.start(Job::LookUpWords { tracks: asking, servers: self.config.lyrics.servers() });
         }
 
         if reading.is_empty() && rendering.is_empty() {
@@ -12274,6 +12274,37 @@ impl App {
                         .changed()
                     {
                         self.config.whisper.language = language.trim().to_string();
+                        changed = true;
+                    }
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "Before listening, the words are looked up on lrclib.net. A mirror \
+                         of it — lrclib's own server run on its database dump, see the README — \
+                         can be asked first, or instead: list the servers in order. A server \
+                         that fails three lookups in a row is passed over for the rest of the \
+                         batch.",
+                        )
+                        .color(theme::dim())
+                        .size(theme::SMALL),
+                    );
+                    let mut servers = self.config.lyrics.servers.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut servers)
+                                .desired_width(ui.available_width())
+                                .hint_text(booth_cli::tag::lyrics::LRCLIB)
+                                .font(theme::mono(11.0)),
+                        )
+                        .on_hover_text(
+                            "Lyrics servers, in the order they are asked, separated by commas: \
+                             `nas.local:3300, https://lrclib.net` asks a mirror and then \
+                             lrclib.net when the mirror fails. A bare host is plain HTTP. \
+                             BOOTH_LYRICS_SERVERS when this is empty, then lrclib.net alone.",
+                        )
+                        .changed()
+                    {
+                        self.config.lyrics.servers = servers.trim().to_string();
                         changed = true;
                     }
 
