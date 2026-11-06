@@ -614,6 +614,9 @@ pub struct Config {
     /// that says it lives.
     #[serde(default)]
     pub genre: Genre,
+    /// Which servers to look the words up on.
+    #[serde(default)]
+    pub lyrics: Lyrics,
 }
 
 /// What to run when nothing says otherwise: whisper.cpp's own binary name, as
@@ -754,6 +757,40 @@ impl Genre {
     }
 }
 
+/// Where to look a track's words up before listening for them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Lyrics {
+    /// The servers to ask, in order, separated by commas or spaces: lrclib.net,
+    /// or a mirror of it run from lrclib's own code and its database dump.
+    /// Each lookup goes to the first one that is answering; a server that
+    /// fails three lookups in a row is passed over for the rest of the batch.
+    ///
+    /// Empty means fall back to `BOOTH_LYRICS_SERVERS`, and then to lrclib.net
+    /// alone. A list without lrclib.net in it never asks lrclib.net.
+    pub servers: String,
+}
+
+impl Lyrics {
+    /// The settings first, then the environment, then lrclib.net: the order
+    /// [`Whisper::chosen`] gives, and kept apart from the environment for the
+    /// reason it gives.
+    fn servers_from(stored: &str, from_env: Option<String>) -> Vec<String> {
+        let chosen = Whisper::chosen(stored, from_env)
+            .map(|list| booth_cli::tag::lyrics::servers(&list))
+            .unwrap_or_default();
+        match chosen.is_empty() {
+            true => vec![booth_cli::tag::lyrics::LRCLIB.to_string()],
+            false => chosen,
+        }
+    }
+
+    /// The servers a lookup asks, in order.
+    pub fn servers(&self) -> Vec<String> {
+        Self::servers_from(&self.servers, std::env::var("BOOTH_LYRICS_SERVERS").ok())
+    }
+}
+
 /// The panel sizes, in points, as the window was last left.
 ///
 /// A preference about this person's screen and how they like to work, which is
@@ -891,6 +928,7 @@ impl Default for Config {
             from_other_drives: OnForeign::default(),
             whisper: Whisper::default(),
             genre: Genre::default(),
+            lyrics: Lyrics::default(),
         }
     }
 }
@@ -1597,6 +1635,22 @@ mod whisper_settings {
         // An empty variable is an unset one. Passed through as `-l ""`,
         // whisper transcribes nothing at all.
         assert_eq!(Whisper::chosen("", Some("  ".into())), None);
+    }
+
+    #[test]
+    fn the_lyrics_servers_come_from_the_settings_then_the_environment_then_lrclib() {
+        let from_env = || Some("nas.local:3300 https://lrclib.net".to_string());
+        assert_eq!(
+            Lyrics::servers_from("http://mirror.example, ", from_env()),
+            ["http://mirror.example"],
+            "a list without lrclib.net in it does not ask it"
+        );
+        assert_eq!(
+            Lyrics::servers_from("", from_env()),
+            ["http://nas.local:3300", "https://lrclib.net"]
+        );
+        assert_eq!(Lyrics::servers_from("  ", None), ["https://lrclib.net"]);
+        assert_eq!(Lyrics::servers_from(" , ", None), ["https://lrclib.net"], "nothing usable");
     }
 
     #[test]

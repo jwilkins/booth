@@ -128,6 +128,32 @@ fn synthetic_audio(seconds: usize) -> booth_cli::audio::Audio {
     booth_cli::audio::Audio::new(sample_rate as u32, vec![plane.clone(), plane]).unwrap()
 }
 
+/// A mirror listed first that is not running is passed over for lrclib.net,
+/// and after three lookups in a row is not tried again. Measured on 6 November
+/// 2026: the three come back from lrclib.net with their times, and the mirror
+/// is the one server given up on.
+#[test]
+#[ignore = "hits the live lrclib service"]
+fn a_mirror_that_is_not_running_is_passed_over_for_lrclib_and_then_left_alone() {
+    let off = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    };
+    let mut client = lyrics::Client::asking(
+        &[off.clone(), lyrics::LRCLIB.to_string()],
+        lyrics::DEFAULT_MIN_INTERVAL,
+    );
+    for _ in 0..lyrics::GIVE_UP_AFTER {
+        let found = client
+            .lookup("Radiohead", "Creep", Some(239.0))
+            .expect("lrclib.net should have answered for the mirror")
+            .expect("Creep should be in any lyrics database");
+        assert!(!found.synced.lines.is_empty());
+    }
+    assert_eq!(client.given_up_on(), [off.as_str()]);
+    assert!(!client.given_up());
+}
+
 #[test]
 #[ignore = "hits the live lrclib service"]
 fn lrclib_returns_words_with_times_on_them() {

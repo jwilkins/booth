@@ -56,13 +56,65 @@ use anyhow::{Context, Result};
 use super::http::Http;
 use crate::transcribe::{Line, Transcript};
 
-/// Where to ask. Documented at <https://lrclib.net/docs>.
-const GET_URL: &str = "https://lrclib.net/api/get";
+/// Where to ask when nobody has said otherwise. Documented at
+/// <https://lrclib.net/docs>.
+pub const LRCLIB: &str = "https://lrclib.net";
 
-/// One request a second. LRCLIB publishes no limit and asks only that clients
-/// identify themselves, so this is the courtesy a service that costs nothing
-/// is owed rather than a rule being obeyed.
+/// Where on a server the lookup by artist, title and length is: the same path
+/// on lrclib.net and on a mirror of it, which runs lrclib.net's own code.
+const GET_PATH: &str = "/api/get";
+
+/// One request a second. LRCLIB's documentation, read on 6 November 2026,
+/// allows a client that names itself about 90 a minute and asks for 200 to
+/// 500 ms between requests in a batch; a second leaves room under both, for a
+/// service that costs nothing.
 pub const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How many lookups in a row a server can fail before the rest of a batch
+/// stops asking it.
+///
+/// Three. A server that is busy has already been asked four times for each
+/// failure, waiting between as long as it asked, so three is a dozen refusals
+/// over twelve seconds or more, and a server that busy is not coming back
+/// within a batch. On 31 October 2026 lrclib.net turned away every lookup it
+/// had not cached for over ten minutes; a batch asking through that asks four
+/// times for every track, logs a warning for each, and holds each track's
+/// recogniser pass back until the answer that is not coming. One failure is
+/// not enough: a single dropped connection to a working server would end the
+/// batch's lookups for nothing.
+pub const GIVE_UP_AFTER: u32 = 3;
+
+/// A server's address as this asks it: with a scheme, without a trailing
+/// slash or the lookup's own path. `None` for nothing at all.
+///
+/// A bare host — `nas.local:3300` — is taken as plain HTTP, because the place
+/// such an address comes from is a mirror on somebody's own network, and
+/// lrclib's server serves plain HTTP on port 3300 unless something is put in
+/// front of it. Somebody pasting the lookup's whole URL gets the server it is
+/// on.
+pub fn server(address: &str) -> Option<String> {
+    let address = address.trim().trim_end_matches('/');
+    let address = address.strip_suffix(GET_PATH).unwrap_or(address).trim_end_matches('/');
+    if address.is_empty() {
+        return None;
+    }
+    match address.contains("://") {
+        true => Some(address.to_string()),
+        false => Some(format!("http://{address}")),
+    }
+}
+
+/// The servers in a list of addresses separated by commas, spaces or new
+/// lines, in the order given and each once.
+pub fn servers(list: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for address in list.split([',', ' ', '\n', '\t']).filter_map(server) {
+        if !out.contains(&address) {
+            out.push(address);
+        }
+    }
+    out
+}
 
 /// How far a track's length may be from the one a lyric was written against
 /// and still be taken for the same pressing.
@@ -289,14 +341,56 @@ pub fn write_beside(track: &Path, sidecar: &Sidecar) -> Result<Wrote> {
     Ok(Wrote::Written(file))
 }
 
-/// A rate-limited LRCLIB client.
+/// A rate-limited client for LRCLIB and servers that speak its API.
+///
+/// It lasts a batch: what it learns about which servers are answering is
+/// forgotten with it, so the next batch asks a server this one gave up on.
 pub struct Client {
     http: Http,
+    servers: Vec<Server>,
+}
+
+/// One server a client asks, and how it has been answering.
+struct Server {
+    /// Where it is, as [`server`] writes an address.
+    base: String,
+    /// Lookups it has failed since it last answered one.
+    failed: u32,
+}
+
+impl Server {
+    fn given_up(&self) -> bool {
+        self.failed >= GIVE_UP_AFTER
+    }
 }
 
 impl Client {
+    /// Asking lrclib.net alone.
     pub fn new(min_interval: Duration) -> Self {
-        Self { http: Http::new(min_interval) }
+        Self::asking(&[LRCLIB.to_string()], min_interval)
+    }
+
+    /// Asking these servers, in this order, each as [`server`] writes it.
+    ///
+    /// Each lookup goes to the first that has not been given up on, and on to
+    /// the next only when that one fails. A miss is an answer, not a failure:
+    /// a server that says it has never heard of a track is not asked to be
+    /// second-guessed by another, which would double the requests for most of
+    /// a crate of white labels — the tracks no database has.
+    pub fn asking(servers: &[String], min_interval: Duration) -> Self {
+        let servers = servers.iter().map(|base| Server { base: base.clone(), failed: 0 }).collect();
+        Self { http: Http::new(min_interval), servers }
+    }
+
+    /// Whether every server has failed [`GIVE_UP_AFTER`] lookups in a row, so
+    /// that nothing more will be asked.
+    pub fn given_up(&self) -> bool {
+        self.servers.iter().all(Server::given_up)
+    }
+
+    /// The servers given up on so far, in the order they are asked.
+    pub fn given_up_on(&self) -> Vec<&str> {
+        self.servers.iter().filter(|s| s.given_up()).map(|s| s.base.as_str()).collect()
     }
 
     /// Ask for one track's words: this pressing if the server has it, the
@@ -321,6 +415,10 @@ impl Client {
     /// record a remix was built on. The second request is only ever made after
     /// a miss, and what comes back at another length is for
     /// [`verdict`] to be careful with rather than for this to refuse.
+    ///
+    /// Asked of each server in turn as [`Client::asking`] says, until one
+    /// answers. An error is the last server's failure, or, once every server
+    /// has been given up on, says so without asking anybody.
     pub fn lookup(
         &mut self,
         artist: &str,
@@ -330,34 +428,72 @@ impl Client {
         if artist.trim().is_empty() || title.trim().is_empty() {
             return Ok(None);
         }
-        if let Some(secs) = duration_secs.filter(|secs| *secs > 0.0) {
-            if let Some(found) = self.ask(artist, title, Some(secs))? {
-                return Ok(Some(found));
+        let Client { http, servers } = self;
+        let mut failure = None;
+        for server in servers.iter_mut().filter(|server| !server.given_up()) {
+            match look_up_on(http, &server.base, artist, title, duration_secs) {
+                Ok(found) => {
+                    server.failed = 0;
+                    return Ok(found);
+                }
+                Err(e) => {
+                    server.failed += 1;
+                    failure = Some(e);
+                }
             }
         }
-        self.ask(artist, title, None)
+        Err(failure.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "not asking {} again in this batch: each failed {GIVE_UP_AFTER} lookups in a row",
+                servers.iter().map(|s| s.base.as_str()).collect::<Vec<_>>().join(", ")
+            )
+        }))
     }
+}
 
-    /// One request, for exactly the length asked for or for any length.
-    fn ask(&mut self, artist: &str, title: &str, secs: Option<f64>) -> Result<Option<Found>> {
-        let mut url = format!(
-            "{GET_URL}?artist_name={}&track_name={}",
-            urlencoding(artist.trim()),
-            urlencoding(title.trim())
-        );
-        if let Some(secs) = secs {
-            url.push_str(&format!("&duration={}", secs.round() as u64));
+/// One server's answer, with the length and then without it: see
+/// [`Client::lookup`]. A failure on the first request is the server's answer,
+/// and the second is not made.
+fn look_up_on(
+    http: &mut Http,
+    base: &str,
+    artist: &str,
+    title: &str,
+    duration_secs: Option<f64>,
+) -> Result<Option<Found>> {
+    if let Some(secs) = duration_secs.filter(|secs| *secs > 0.0) {
+        if let Some(found) = ask(http, base, artist, title, Some(secs))? {
+            return Ok(Some(found));
         }
-
-        let value = match self.http.get_json(&url) {
-            Ok(value) => value,
-            // A track the database has never heard of is the ordinary case,
-            // not a failure: most of a crate of white labels will be misses.
-            Err(e) if is_not_found(&e) => return Ok(None),
-            Err(e) => return Err(e).context("asking lrclib for the words"),
-        };
-        Ok(Some(read(&value)?))
     }
+    ask(http, base, artist, title, None)
+}
+
+/// One request, for exactly the length asked for or for any length.
+fn ask(
+    http: &mut Http,
+    base: &str,
+    artist: &str,
+    title: &str,
+    secs: Option<f64>,
+) -> Result<Option<Found>> {
+    let mut url = format!(
+        "{base}{GET_PATH}?artist_name={}&track_name={}",
+        urlencoding(artist.trim()),
+        urlencoding(title.trim())
+    );
+    if let Some(secs) = secs {
+        url.push_str(&format!("&duration={}", secs.round() as u64));
+    }
+
+    let value = match http.get_json(&url) {
+        Ok(value) => value,
+        // A track the database has never heard of is the ordinary case,
+        // not a failure: most of a crate of white labels will be misses.
+        Err(e) if is_not_found(&e) => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("asking {base} for the words")),
+    };
+    Ok(Some(read(&value)?))
 }
 
 /// Whether an error is the service saying it has never heard of the track.
@@ -889,6 +1025,150 @@ mod tests {
         let found = written(&["hold me closer now"], 240.0);
         assert_eq!(how_much_agrees(&found, &Transcript::default()), None);
         assert_eq!(how_much_agrees(&found, &sung(&["nothing like it"])), Some(0.0));
+    }
+
+    #[test]
+    fn a_servers_address_is_read_however_it_was_typed_in() {
+        assert_eq!(server("nas.local:3300").as_deref(), Some("http://nas.local:3300"));
+        assert_eq!(server(" https://lrclib.net/ ").as_deref(), Some(LRCLIB));
+        assert_eq!(server("https://lrclib.net/api/get").as_deref(), Some(LRCLIB));
+        assert_eq!(server("   "), None);
+        assert_eq!(
+            servers("nas.local:3300, https://lrclib.net\nhttps://lrclib.net/"),
+            ["http://nas.local:3300", LRCLIB],
+            "in the order given, each once"
+        );
+    }
+
+    /// A server on this machine answering each request with the next of
+    /// `answers`, over again from the first after the last, and counting how
+    /// many it was asked.
+    struct StandIn {
+        base: String,
+        asked: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl StandIn {
+        fn asked(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn stand_in(answers: &[(u16, &'static str)]) -> StandIn {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (counter, answers) = (asked.clone(), answers.to_vec());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut head = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !head.windows(4).any(|end| end == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => head.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                let (status, body) = answers[counter.fetch_add(1, SeqCst) % answers.len()];
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} Answer\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        StandIn { base, asked }
+    }
+
+    use std::sync::atomic::Ordering::SeqCst;
+
+    /// LRCLIB's code's answer to an error it did not expect.
+    const BROKEN: (u16, &str) =
+        (500, r#"{"message":"boom","name":"UnknownError","statusCode":500}"#);
+    /// And to a track it has never heard of.
+    const MISSING: (u16, &str) = (
+        404,
+        r#"{"message":"Failed to find specified track","name":"TrackNotFound","statusCode":404}"#,
+    );
+    const FOUND: (u16, &str) = (200, ANSWER);
+
+    #[test]
+    fn a_server_that_fails_three_lookups_in_a_row_is_not_asked_again_and_the_next_one_is() {
+        let (mirror, lrclib) = (stand_in(&[BROKEN]), stand_in(&[FOUND]));
+        let mut client =
+            Client::asking(&[mirror.base.clone(), lrclib.base.clone()], Duration::ZERO);
+        for _ in 0..5 {
+            let found = client.lookup("Radiohead", "Creep", Some(239.0)).unwrap();
+            assert_eq!(found.map(|found| found.artist).as_deref(), Some("Radiohead"));
+        }
+        assert_eq!(mirror.asked(), GIVE_UP_AFTER as usize, "once a lookup, then not at all");
+        assert_eq!(lrclib.asked(), 5);
+        assert_eq!(client.given_up_on(), [mirror.base.as_str()]);
+        assert!(!client.given_up());
+    }
+
+    #[test]
+    fn once_every_server_has_been_given_up_on_nothing_more_is_asked() {
+        let lrclib = stand_in(&[BROKEN]);
+        let mut client = Client::asking(std::slice::from_ref(&lrclib.base), Duration::ZERO);
+        for _ in 0..GIVE_UP_AFTER {
+            let said = format!("{:#}", client.lookup("Radiohead", "Creep", None).unwrap_err());
+            assert!(said.starts_with(&format!("asking {} for the words", lrclib.base)), "{said}");
+            assert!(said.ends_with("returned HTTP 500: boom"), "{said}");
+        }
+        assert!(client.given_up());
+        let said = format!("{:#}", client.lookup("Radiohead", "Creep", None).unwrap_err());
+        assert_eq!(
+            said,
+            format!(
+                "not asking {} again in this batch: each failed 3 lookups in a row",
+                lrclib.base
+            )
+        );
+        assert_eq!(lrclib.asked(), GIVE_UP_AFTER as usize);
+    }
+
+    #[test]
+    fn a_miss_is_an_answer_so_the_next_server_is_not_asked_and_nothing_is_given_up() {
+        let (mirror, lrclib) = (stand_in(&[MISSING]), stand_in(&[FOUND]));
+        let mut client =
+            Client::asking(&[mirror.base.clone(), lrclib.base.clone()], Duration::ZERO);
+        for _ in 0..5 {
+            assert_eq!(client.lookup("Objekt", "Ganzfeld", Some(400.0)).unwrap(), None);
+        }
+        assert_eq!(mirror.asked(), 10, "with the length and without, each time");
+        assert_eq!(lrclib.asked(), 0);
+        assert!(client.given_up_on().is_empty());
+    }
+
+    #[test]
+    fn an_answer_between_failures_starts_the_count_again() {
+        let lrclib = stand_in(&[BROKEN, BROKEN, FOUND]);
+        let mut client = Client::asking(std::slice::from_ref(&lrclib.base), Duration::ZERO);
+        let answered: Vec<bool> =
+            (0..9).map(|_| client.lookup("Radiohead", "Creep", None).is_ok()).collect();
+        assert_eq!(answered, [false, false, true].repeat(3));
+        assert!(!client.given_up());
+    }
+
+    #[test]
+    fn a_mirror_that_is_switched_off_is_passed_over_for_the_next_server() {
+        // A port nothing is listening on: refused at once, as a mirror on a
+        // machine that is asleep or a container that is stopped would be.
+        let off = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let lrclib = stand_in(&[FOUND]);
+        let mut client = Client::asking(&[off.clone(), lrclib.base.clone()], Duration::ZERO);
+        for _ in 0..4 {
+            assert!(client.lookup("Radiohead", "Creep", None).unwrap().is_some());
+        }
+        assert_eq!(client.given_up_on(), [off.as_str()]);
+        assert_eq!(lrclib.asked(), 4);
     }
 
     #[test]

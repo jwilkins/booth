@@ -1238,6 +1238,60 @@ one**: airings less than four seconds apart are one airing, which is true of a
 chorus that sings its line twice over and true of Whisper emitting "thanks for
 watching" forty times over a breakdown.
 
+### Looking the words up
+
+Before anything is listened to, the words are asked for: a lyric file beside
+the track first, and then [lrclib.net](https://lrclib.net), which is free, needs
+no key and times its lyrics line by line. One request that comes back with the
+words, or with the record marked as an instrumental, saves a separation and a
+recogniser pass. Most of a crate of white labels is not there, and a miss costs
+a request and nothing else.
+
+**A server that keeps failing is left alone for the rest of the batch.** Each
+failed lookup has already been tried four times, waiting at least as long as
+the server's `Retry-After` asked and up to a third longer at random; lrclib's
+documentation says a client must, and that one that does not may be banned for
+a while. After three failures in a row the batch stops asking that server: the
+next one in the list is asked instead, and once none is left the rest of the
+tracks go without, which the log says once rather than once a track. On 31
+October 2026 lrclib.net turned away every lookup it had not cached for over ten
+minutes, and a batch asking through that asked four times for every track. A
+server asking to be left alone for more than a minute is not waited for: that
+lookup fails, and counts towards the three.
+
+**Other servers.** No other lyrics service is free, keyless and timed. The
+libraries that fetch timed lyrics from NetEase, Megalobiz or Musixmatch do it by
+scraping them, Musixmatch only with a user's token, and list in their own
+READMEs the ones that have stopped working. What there is instead is
+lrclib.net itself, twice over: its server is open source
+([tranxuanthang/lrclib](https://github.com/tranxuanthang/lrclib), MIT), and its
+whole database is published as one SQLite file at
+[lrclib.net/db-dumps](https://lrclib.net/db-dumps), 45.9 GiB gzipped on 30
+October 2026. Run on that, the server is a mirror that answers the lookup Booth
+makes with lrclib.net's own code — the same path and parameters, the same shape
+of answer, the same 404 for a track it does not have — so it goes in the list
+like any other server:
+
+1. Download the dump. It is one file; `curl -C - -O
+   https://db-dumps.lrclib.net/<the name the page gives>` picks up where it left
+   off if the connection drops. Unpack it with `gunzip`, which needs room for
+   the unpacked file beside the packed one while it works.
+2. Run lrclib's server on it. From a checkout of its repository, `podman build
+   -t lrclib-oss -f Dockerfile .` (or `docker build`), then put the unpacked
+   file in a folder as `db.sqlite3` and `podman run -d -v <that
+   folder>:/data -p 3300:3300 lrclib-oss`. Or, with Rust installed, `cargo run
+   --release -- serve --database <the file>`. It listens on port 3300, over
+   plain HTTP.
+3. List it in **Settings → Words**, before lrclib.net to ask the mirror first —
+   `nas.local:3300, https://lrclib.net` — or after it, to ask the mirror only
+   when lrclib.net fails. `BOOTH_LYRICS_SERVERS` takes the same list.
+
+A miss is an answer, so the next server is asked only when one fails: a track
+the mirror has never heard of is not asked of lrclib.net as well, which would
+double the requests for every white label. The dump is a snapshot, so the
+mirror first misses what has been added to lrclib.net since; lrclib.net first
+misses nothing, and leaves the mirror for the days lrclib.net is busy.
+
 ### Where the words really were
 
 Whisper's timing on a stem is not to be taken at face value, and it is wrong in

@@ -84,8 +84,9 @@ pub enum Job {
     Draw(Vec<Drawable>),
     /// Read the words off tracks' vocal stems.
     Transcribe { tracks: Vec<Transcribable>, whisper: crate::config::Whisper },
-    /// Ask a lyrics server for words, rather than listening for them.
-    LookUpWords { tracks: Vec<Askable> },
+    /// Ask a lyrics server for words, rather than listening for them: the
+    /// servers in order, as `crate::config::Lyrics::servers` gives them.
+    LookUpWords { tracks: Vec<Askable>, servers: Vec<String> },
     /// Move words already read onto the onsets measured off their stem.
     Realign { tracks: Vec<Realigning> },
     /// Decode one track into memory so it can be auditioned.
@@ -1357,7 +1358,7 @@ fn run(job: Job, reporter: &Channel) -> anyhow::Result<()> {
             separate(&tracks, &stems_in, backend, quality, reporter)
         }
         Job::Transcribe { tracks, whisper } => transcribe(&tracks, &whisper, reporter),
-        Job::LookUpWords { tracks } => look_up_words(&tracks, reporter),
+        Job::LookUpWords { tracks, servers } => look_up_words(&tracks, &servers, reporter),
         Job::Realign { tracks } => realign(tracks, reporter),
         Job::Draw(rows) => draw(&rows, reporter),
         Job::Sync { args, files, history } => {
@@ -2161,7 +2162,13 @@ fn separate(
 /// the service could not be reached about. The window holds a track's
 /// recogniser pass back while this is outstanding, so a track that went
 /// unanswered would be one whose words were never read at all.
-fn look_up_words(tracks: &[Askable], reporter: &Channel) -> anyhow::Result<()> {
+///
+/// `servers` are asked in order, each lookup going on to the next only when
+/// one fails, and a server that fails [`lyrics::GIVE_UP_AFTER`] lookups in a
+/// row is not asked again in this batch. Once none is left, the rest of the
+/// tracks are answered at once with nothing, which is what a failure would
+/// have answered them with after a dozen requests each.
+fn look_up_words(tracks: &[Askable], servers: &[String], reporter: &Channel) -> anyhow::Result<()> {
     use booth_cli::tag::lyrics;
 
     /// Nothing came back for this track, which is an answer like any other.
@@ -2176,18 +2183,43 @@ fn look_up_words(tracks: &[Askable], reporter: &Channel) -> anyhow::Result<()> {
         (reporter.wake)();
     }
 
-    let mut client = lyrics::Client::new(lyrics::DEFAULT_MIN_INTERVAL);
+    let mut client = lyrics::Client::asking(servers, lyrics::DEFAULT_MIN_INTERVAL);
+    let mut given_up = 0;
     let batch = Batch {
         inner: reporter,
         done: std::sync::atomic::AtomicUsize::new(0),
         total: tracks.len(),
     };
-    for track in tracks {
+    for (at, track) in tracks.iter().enumerate() {
         if reporter.cancelled() {
             break;
         }
         batch.starting();
-        let found = match client.lookup(&track.artist, &track.title, Some(track.duration_secs)) {
+        if client.given_up() {
+            nothing(track, &batch, reporter);
+            continue;
+        }
+        let looked = client.lookup(&track.artist, &track.title, Some(track.duration_secs));
+        // Said once, when it happens, rather than as a warning for every
+        // track after it.
+        let gone = client.given_up_on();
+        for server in gone.iter().skip(given_up) {
+            let still = servers.iter().find(|s| !gone.contains(&s.as_str()));
+            match still {
+                Some(next) => crate::warn!(
+                    "{server} failed {} lookups in a row; asking {next} for the rest of this batch",
+                    lyrics::GIVE_UP_AFTER
+                ),
+                None => crate::warn!(
+                    "{server} failed {} lookups in a row, so the other {} in this batch are not \
+                     being asked: try again later",
+                    lyrics::GIVE_UP_AFTER,
+                    crate::library::plural(tracks.len() - at - 1, "track")
+                ),
+            }
+        }
+        given_up = gone.len();
+        let found = match looked {
             Ok(Some(found)) => found,
             Ok(None) => {
                 crate::debug!("#{}: no lyrics for {} — {}", track.id, track.artist, track.title);

@@ -93,7 +93,8 @@ impl Http {
     ///
     /// MusicBrainz answers with 503 rather than 429 when it wants a client to
     /// back off, and expects the client to wait and try again rather than
-    /// treat it as a hard failure.
+    /// treat it as a hard failure. Each wait is at least what the service's
+    /// `Retry-After` asked for: see [`wait_before_retry`].
     fn with_retry(
         &self,
         url: &str,
@@ -112,13 +113,19 @@ impl Http {
                 return Ok(response);
             }
             if is_backoff(status) {
+                let asked = retry_after(
+                    response.headers().get("retry-after").and_then(|value| value.to_str().ok()),
+                );
                 // Kept for the error, since what the service says is the only
                 // way to tell one asking to be asked less often from one that
                 // is down.
                 last = (status, response.body_mut().read_to_string().unwrap_or_default());
                 // Not after the last try, which nothing follows.
                 if tried < MAX_RETRIES {
-                    std::thread::sleep(backoff);
+                    let Some(wait) = wait_before_retry(asked, backoff) else {
+                        return Err(asked_to_wait(url, status, asked.unwrap_or_default(), &last.1));
+                    };
+                    std::thread::sleep(wait);
                     backoff *= 2;
                 }
                 continue;
@@ -209,6 +216,75 @@ fn is_not_found(error: &anyhow::Error) -> bool {
 /// Statuses that mean "try again later" rather than "this failed".
 fn is_backoff(status: u16) -> bool {
     matches!(status, 429 | 503)
+}
+
+/// The longest a service can ask to be left alone and still be waited for
+/// before the next try: a minute.
+///
+/// A batch asks one track at a time, so every second waited is a second every
+/// track behind it waits too. A service asking for longer than this is not
+/// retried at all, which honours what it asked as well as waiting would, and
+/// leaves the caller to decide whether to come back.
+const LONGEST_WAIT: Duration = Duration::from_secs(60);
+
+/// What a `Retry-After` header asks for, where it gives a number of seconds.
+///
+/// The header may instead give a date, which none of these services sends:
+/// that, or anything unreadable, is taken as nothing asked, and the backoff
+/// alone decides.
+fn retry_after(value: Option<&str>) -> Option<Duration> {
+    let secs: f64 = value?.trim().parse().ok()?;
+    (secs.is_finite() && secs >= 0.0).then(|| Duration::from_secs_f64(secs))
+}
+
+/// How long to wait before trying again, or `None` where the service asked
+/// for longer than [`LONGEST_WAIT`].
+///
+/// At least what it asked, and at least the backoff, and then up to a third
+/// longer again. LRCLIB's documentation, read on 6 November 2026, says a
+/// client must wait at least `Retry-After` and should add up to 30% at random
+/// "so that many clients throttled at the same moment do not retry in a
+/// synchronized wave", and that one that does not may be banned for a while.
+/// Retrying after half a second, which this did whatever the service said,
+/// was a retry before a 503's `Retry-After: 1`.
+fn wait_before_retry(asked: Option<Duration>, backoff: Duration) -> Option<Duration> {
+    if asked.is_some_and(|asked| asked > LONGEST_WAIT) {
+        return None;
+    }
+    let wait = asked.unwrap_or_default().max(backoff);
+    Some(wait.mul_f64(1.0 + JITTER * spread()))
+}
+
+/// The most a wait is lengthened at random, as a fraction of it.
+const JITTER: f64 = 0.3;
+
+/// A number from 0 up to 1 that differs from one call to the next.
+///
+/// From the clock rather than a random number generator, which would be a
+/// dependency for one number nobody needs to be unpredictable: two copies of
+/// this program throttled in the same instant read different nanoseconds.
+fn spread() -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.subsec_nanos())
+        .unwrap_or(0);
+    f64::from(nanos % 1_000) / 1_000.0
+}
+
+/// What to say when a service asked to be left alone for longer than this
+/// will wait: see [`LONGEST_WAIT`].
+fn asked_to_wait(url: &str, status: u16, asked: Duration, body: &str) -> anyhow::Error {
+    let secs = asked.as_secs();
+    match service_message(body) {
+        Some(message) => anyhow::anyhow!(
+            "{url} answered HTTP {status} and asked not to be asked again for {secs} s: {message}"
+        ),
+        None => {
+            anyhow::anyhow!(
+                "{url} answered HTTP {status} and asked not to be asked again for {secs} s"
+            )
+        }
+    }
 }
 
 /// Build an error for a failed status, keeping whatever the service said.
@@ -439,6 +515,47 @@ mod tests {
         assert!(busy.contains("busy or turning requests away; try again later"), "{busy}");
         let limited = gave_up("https://x.example/a", 429, "").to_string();
         assert!(limited.contains("HTTP 429, too many requests"), "{limited}");
+    }
+
+    #[test]
+    fn a_retry_after_in_seconds_is_read_and_a_date_or_nonsense_is_not() {
+        assert_eq!(retry_after(Some("1")), Some(Duration::from_secs(1)));
+        assert_eq!(retry_after(Some(" 30 ")), Some(Duration::from_secs(30)));
+        assert_eq!(retry_after(Some("Fri, 06 Nov 2026 05:00:00 GMT")), None);
+        assert_eq!(retry_after(Some("-4")), None);
+        assert_eq!(retry_after(None), None);
+    }
+
+    #[test]
+    fn a_retry_waits_at_least_what_the_service_asked_and_at_most_a_third_longer() {
+        let half = Duration::from_millis(500);
+        for _ in 0..50 {
+            // LRCLIB's 503 says one second; the first backoff is half that.
+            let wait = wait_before_retry(Some(Duration::from_secs(1)), half).unwrap();
+            assert!(wait >= Duration::from_secs(1), "{wait:?}");
+            assert!(wait <= Duration::from_millis(1_300), "{wait:?}");
+            // Nothing asked, or less than the backoff: the backoff.
+            let wait = wait_before_retry(None, Duration::from_secs(2)).unwrap();
+            assert!(wait >= Duration::from_secs(2) && wait <= Duration::from_millis(2_600));
+        }
+    }
+
+    #[test]
+    fn a_service_asking_for_more_than_a_minute_is_not_retried_and_says_so() {
+        assert_eq!(wait_before_retry(Some(Duration::from_secs(61)), Duration::ZERO), None);
+        assert!(wait_before_retry(Some(LONGEST_WAIT), Duration::ZERO).is_some());
+        let said = asked_to_wait(
+            "https://lrclib.net/api/get?x",
+            429,
+            Duration::from_secs(600),
+            r#"{"message":"Too many requests from this IP address.","name":"RateLimitExceeded","statusCode":429,"scope":"ip"}"#,
+        )
+        .to_string();
+        assert_eq!(
+            said,
+            "https://lrclib.net/api/get?x answered HTTP 429 and asked not to be asked again for \
+             600 s: Too many requests from this IP address."
+        );
     }
 
     #[test]
