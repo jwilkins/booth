@@ -313,7 +313,8 @@ pub const APART_BARS: usize = 2;
 /// `bands` is the track's three-band picture, which the main drop and the main
 /// break are found in: see [`super::energy::bars`]. `drums` is its drum stem's,
 /// where it has one, which finds the breaks the mix cannot: see
-/// [`super::energy::shape_with_drums`].
+/// [`super::energy::shape_with_drums`]. And `arranged` is how its kind of
+/// record arranges its main drop: see [`super::energy::Arranged`].
 pub fn suggest(
     features: &Features,
     bands: &[u8],
@@ -321,6 +322,7 @@ pub fn suggest(
     beat_times: &[u32],
     structure: &Structure,
     bar_phase: usize,
+    arranged: super::energy::Arranged,
 ) -> Vec<Cue> {
     if beat_times.is_empty() {
         return Vec::new();
@@ -333,7 +335,7 @@ pub fn suggest(
     // The main drop and the main break, by how much each bar plays — from the
     // first downbeat, which is where the bars are counted from.
     let bars = &beat_times[bar_phase.min(beat_times.len())..];
-    let shape = super::energy::read(bands, drums, bars);
+    let shape = super::energy::read(bands, drums, bars).arranged_as(arranged);
     mark_the_main_ones(&mut candidates, bars, &shape);
 
     // The memory cue is where the track begins as far as a player is
@@ -1101,6 +1103,7 @@ mod tests {
     use super::super::features;
     use super::super::structure::Section;
     use super::*;
+    use crate::analysis::energy::Arranged;
     use crate::audio::Audio;
     use crate::export::CueKind;
 
@@ -1180,7 +1183,15 @@ mod tests {
             ],
         };
         let audio = with_voice(4.0, 10.0, 10.0);
-        let cues = suggest(&features::extract(&audio), &[], None, &beats(128), &structure, 0);
+        let cues = suggest(
+            &features::extract(&audio),
+            &[],
+            None,
+            &beats(128),
+            &structure,
+            0,
+            Arranged::UNKNOWN,
+        );
 
         // The first section is the memory cue rather than a hot one: the
         // player already parks at the top of the record, so a hot cue there is
@@ -1211,6 +1222,7 @@ mod tests {
             &beats(128),
             &structure,
             0,
+            Arranged::UNKNOWN,
         );
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
 
@@ -1233,6 +1245,7 @@ mod tests {
             &beats(64),
             &structure,
             0,
+            Arranged::UNKNOWN,
         );
         assert!(!cues[0].is_hot());
         assert_eq!(cues[0].time_ms, 0);
@@ -1245,7 +1258,7 @@ mod tests {
         let audio = with_voice(20.0, 10.0, 20.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &[], None, &beats(80), &structure, 0);
+        let cues = suggest(&f, &[], None, &beats(80), &structure, 0, Arranged::UNKNOWN);
 
         let vocal = cues.iter().find(|c| c.comment.as_deref() == Some("vocal"));
         let vocal = vocal.unwrap_or_else(|| panic!("no vocal cue in {cues:?}"));
@@ -1258,7 +1271,7 @@ mod tests {
         let audio = with_voice(20.0, 100.0, 100.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &[], None, &beats(80), &structure, 0);
+        let cues = suggest(&f, &[], None, &beats(80), &structure, 0, Arranged::UNKNOWN);
         assert!(cues.iter().all(|c| c.comment.as_deref() != Some("vocal")), "{cues:?}");
     }
 
@@ -1267,7 +1280,7 @@ mod tests {
         let audio = with_voice(20.0, 10.3, 20.0);
         let f = features::extract(&audio);
         let structure = Structure { sections: vec![section(0, 10, Kind::Intro, -20.0)] };
-        let cues = suggest(&f, &[], None, &beats(80), &structure, 0);
+        let cues = suggest(&f, &[], None, &beats(80), &structure, 0, Arranged::UNKNOWN);
         for cue in &cues {
             assert_eq!(cue.time_ms % BEAT_MS, 0, "a cue at {} ms is off the grid", cue.time_ms);
         }
@@ -1300,6 +1313,7 @@ mod tests {
             &beats(400),
             &structure,
             0,
+            Arranged::UNKNOWN,
         );
 
         let hot: Vec<&Cue> = cues.iter().filter(|c| c.is_hot()).collect();
@@ -1344,7 +1358,15 @@ mod tests {
 
         // Half-second beats, so skipping one beat is 500 ms.
         for (phase, expected) in [(0usize, 0u32), (1, 500), (2, 1_000), (3, 1_500)] {
-            let cues = suggest(&features, &[], None, &times, &Structure::default(), phase);
+            let cues = suggest(
+                &features,
+                &[],
+                None,
+                &times,
+                &Structure::default(),
+                phase,
+                Arranged::UNKNOWN,
+            );
             let start = cues.iter().find(|cue| !cue.is_hot()).expect("no memory cue at all");
             assert_eq!(
                 start.time_ms, expected,
@@ -1360,7 +1382,8 @@ mod tests {
         // followed by the first of the next.
         let times = beats(64);
         let features = features::extract(&with_voice(4.0, 10.0, 10.0));
-        let cues = suggest(&features, &[], None, &times, &Structure::default(), 4);
+        let cues =
+            suggest(&features, &[], None, &times, &Structure::default(), 4, Arranged::UNKNOWN);
         let start = cues.iter().find(|cue| !cue.is_hot()).unwrap();
         assert_eq!(start.time_ms, 0, "a phase of four is a phase of none");
     }
@@ -2384,6 +2407,7 @@ mod tests {
             &[],
             &Structure::default(),
             0,
+            Arranged::UNKNOWN,
         );
         assert!(cues.is_empty());
     }

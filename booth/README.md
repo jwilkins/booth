@@ -1071,9 +1071,12 @@ which would put the hand on the wrong moment:
   empty, and a break that short is a marker rather than any button.
 - **C, the hook in a drop**, the best airing of the hook inside one, if it is at
   least eight bars from D. Nearer, the two pads play into the same moment.
-- **D, the main drop**, the drop that answers the record's breakdown: the first
-  after its main break. A record with no breakdown has the drop with the most
-  energy in it.
+- **D, the main drop**, the biggest: the drop that climbs furthest out of the
+  stretch before it, in the part of the record its genre puts the main drop in
+  — before halfway for drum and bass and dubstep, after the first third for
+  everything else. A record where nothing there climbs far enough has the drop
+  after its breakdown, and one with no breakdown the drop with the most energy
+  in it.
 
 E to H are the rest, in time order, filled by what a set needs next: a way in,
 the intro or the build before the first drop; a way out, the outro; a build
@@ -1108,19 +1111,46 @@ breakdown as B, where loudness alone read the breakdown as the drop and onsets
 alone read the hats as drops too. The command line and the app read the same
 picture, so they agree on D.
 
-**D is the drop after the breakdown, not the loudest drop.** A club record is
-mastered so that its drops play about as hard as each other, and which one
-measures a hair louder is not something the record decided. Read that way, of
-eighteen records from archive.org, D landed on bar one of an intro with its
-drums already in, on the drop before a 33-bar breakdown rather than the one
-after it (by 0.96 against 0.95), on a drop before the breakdown by 0.93
-against 0.91, and on a stretch whose drums were barely in. What the record
-does decide is where it holds back, and the drop that answers that is the one a
-set is built round. The other fourteen records come out the same either way. A
-breakdown is the main break when it is quieter than every drop; one that is not
-— read with the drum stem, a stretch with the drums out and the synths at full
-can be — is a dip between two loud stretches, and the record is treated as
-having no breakdown.
+**D is the biggest drop, not the loudest.** A club record is mastered so that
+its drops play about as hard as each other, and which one measures a hair
+louder is not something the record decided. Read that way, of eighteen records
+from archive.org, D landed on bar one of an intro with its drums already in, on
+the drop before a 33-bar breakdown rather than the one after it (by 0.96
+against 0.95), on a drop before the breakdown by 0.93 against 0.91, and on a
+stretch whose drums were barely in. What the record does decide is where it
+holds back, and how far the drop out of that climbs: D is the drop that plays
+the most times harder than the eight bars before it. It has to climb at least
+one and a half times to count. Of 31 records, the drops out of a stretch that
+held back climbed 1.8 to 33 times, and the loud stretches of records that never
+hold back, which still read as drops, 0.99 to 1.45.
+
+Not the first drop after the breakdown, which is what D was before. That is a
+place in the arrangement rather than how hard a drop hits, and on the records
+here it is often not the biggest: on one, the drop out of a 32-bar breakdown
+climbs 2.35 times and the one out of an eight-bar break later, with the drums
+taken out, 2.94. Measured against the whole breakdown rather than its last
+eight bars, the first climbs less still.
+
+Where nothing climbs far enough, D is still the drop after the breakdown, and
+with no breakdown the drop with the most energy, because a record that never
+holds back still has its loud part. A breakdown is the main break when it is
+quieter than every drop; one that is not — read with the drum stem, a stretch
+with the drums out and the synths at full can be — is a dip between two loud
+stretches, and the record is treated as having no breakdown.
+
+**The genre says where the main drop falls.** Drum and bass and dubstep put
+their drop after an intro of a phrase or more, and the drop after the breakdown
+halfway through is the same drop again, often with less above it: for those, D
+is the biggest drop before halfway, and of two within a tenth of each other the
+earlier. House, techno, trance and the rest build to theirs, the intro's first
+drop being the groove setting out: D is the biggest after the first third, and
+of two as big the later. A trance breakdown takes the drums out and keeps the
+melody, so for trance a drop the drums drop out before — the bars before it
+keeping a third of its kick or less — is taken over a bigger one the kick
+played through. The genre is the file's tag, or the one the genre model heard;
+a record with neither is read as house and techno are. Breakbeat, which the
+genre table files beside dubstep, is read as house: the two progressive breaks
+records here are built that way.
 
 **A record with stems is read with its drum stem too.** The kick is the half
 of the measure a mix can fake: a bassline plucked through a breakdown rises in

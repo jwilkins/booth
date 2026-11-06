@@ -37,6 +37,7 @@ struct Table {
 struct Played {
     id: String,
     name: String,
+    family: String,
     aliases: Vec<String>,
     bpm_min: f64,
     bpm_max: f64,
@@ -123,6 +124,7 @@ fn genre(at: usize, sure: f32) -> Genre {
     Genre {
         id: &played.id,
         name: &played.name,
+        family: &played.family,
         from_bpm: played.bpm_min,
         to_bpm: played.bpm_max,
         sure,

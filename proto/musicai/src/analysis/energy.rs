@@ -58,6 +58,21 @@ const COLUMNS_PER_SECOND: usize = 150;
 /// against 0.59.
 const SMOOTH_COLUMNS: usize = 8;
 
+/// How many bars before a drop it is measured against: a phrase, the eight a
+/// build or the end of a breakdown takes.
+pub const BEFORE_BARS: usize = 8;
+
+/// How little of a drop's kick the bars before it can keep and still count as
+/// the drums having dropped out: about a third.
+///
+/// In the gap the records leave. Before the drops of 31 records, where the
+/// drums had gone the bars kept 0.05 to 0.30 of the drop's kick (Upside,
+/// tou207c, Aku, Blunted My Transistor); where the kick played on and the bass
+/// or the chords were taken out instead, 0.38 to 0.9 (Signal, tou207a,
+/// toulp2d). The low band's rises are the kick and the bassline both, so a
+/// bassline playing through a drum break keeps some.
+pub const DRUMS_OUT: f32 = 0.35;
+
 /// A stretch of bars, `from` up to but not including `to`, counted from the
 /// first bar of the grid, and how much is being played across it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,6 +80,15 @@ pub struct Run {
     pub from: usize,
     pub to: usize,
     pub energy: f32,
+    /// For a drop, how many times harder it plays than the [`BEFORE_BARS`]
+    /// before it. `None` for a break, and for a drop with fewer bars than that
+    /// before it, which has no section of its own to climb out of.
+    pub lift: Option<f32>,
+    /// For a drop, how much of its kick those bars kept, against its own first
+    /// [`BEFORE_BARS`]: near nothing where the drums dropped out, near one
+    /// where the kick played on and something else was taken out. `None` where
+    /// the kick was not measured.
+    pub kept_kick: Option<f32>,
 }
 
 impl Run {
@@ -77,16 +101,188 @@ impl Run {
     }
 }
 
+/// Where a kind of record puts its main drop, how far that drop climbs over
+/// the bars before it, and what those bars take out.
+///
+/// A drop comes after a stretch that holds back, and plays a good deal harder
+/// than it: that much is every kind of club record. What differs is where the
+/// one a set is built round falls, and what the stretch before it leaves out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arranged {
+    /// Which part of the record the main drop is in, and of two drops that
+    /// climb about as far, which is the main one.
+    pub half: Half,
+    /// How many times harder than the [`BEFORE_BARS`] before it a drop has to
+    /// play to count as climbing out of anything.
+    pub lift: f32,
+    /// Whether the main drop is one the drums drop out before, where the
+    /// record has one.
+    pub drums_out: bool,
+    /// The genre this is for, as the genre tempo table names it, or empty.
+    pub genre: &'static str,
+}
+
+/// Which part of a record its main drop is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Half {
+    /// Before halfway, and of two as big, the earlier. Drum and bass and
+    /// dubstep put their drop after an intro of a phrase or more, and that
+    /// drop is the one a DJ cues: what follows the breakdown halfway through
+    /// is the same drop again, often with less above it.
+    First,
+    /// After the first third, and of two as big, the later: house, techno,
+    /// trance, where the intro's first drop is the groove setting out and the
+    /// drop the record builds to comes after it, at a third of the way in or
+    /// later — on the records here, from 0.37 of the way through.
+    Later,
+}
+
+impl Half {
+    /// Whether a drop starting at `bar` is in this part of a record `bars`
+    /// long.
+    fn holds(self, bar: usize, bars: usize) -> bool {
+        match self {
+            Half::First => bar * 2 < bars,
+            Half::Later => bar * 3 >= bars,
+        }
+    }
+}
+
+impl Arranged {
+    /// A record nobody has said the kind of: as house and techno arrange it,
+    /// which is most of what a club DJ plays.
+    ///
+    /// A lift of one and a half. The drops that answer a breakdown on the 31
+    /// records climbed 1.8 to 33 times over the eight bars before; the
+    /// stretches of records that never hold back, which the shape still reads
+    /// as drops, 0.99 to 1.45.
+    pub const UNKNOWN: Arranged =
+        Arranged { half: Half::Later, lift: 1.5, drums_out: false, genre: "" };
+
+    /// How a genre arranges its main drop.
+    ///
+    /// By genre rather than by the table's family where the two part: the
+    /// family it files dubstep under also holds breakbeat, and the two
+    /// progressive breaks records here are built as house is, their drop
+    /// after a long breakdown.
+    pub fn of(genre: &super::tempo::Genre) -> Arranged {
+        let arranged =
+            |half, drums_out| Arranged { half, drums_out, genre: genre.name, ..Self::UNKNOWN };
+        match (genre.family, genre.id) {
+            ("dnb", _) | (_, "dubstep" | "trap-edm" | "future-bass") => {
+                arranged(Half::First, false)
+            }
+            // A trance breakdown takes the drums out and keeps the melody,
+            // and the drop it builds to brings them back.
+            ("trance", _) => arranged(Half::Later, true),
+            _ => arranged(Half::Later, false),
+        }
+    }
+
+    /// How the surest of `genres` arranges its main drop, or
+    /// [`Arranged::UNKNOWN`] where there are none. Of two as sure, the first:
+    /// a tag reading "Jungle, Dubstep" is filed under jungle before anything.
+    pub fn of_genres(genres: &[super::tempo::Genre]) -> Arranged {
+        genres
+            .iter()
+            .reduce(|surest, genre| if genre.sure > surest.sure { genre } else { surest })
+            .map_or(Self::UNKNOWN, Self::of)
+    }
+}
+
+impl Default for Arranged {
+    fn default() -> Self {
+        Self::UNKNOWN
+    }
+}
+
+/// How the main drop was chosen, for the log to say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chosen {
+    /// The drop that climbs furthest, in the part of the record its kind puts
+    /// the main drop in.
+    Biggest,
+    /// Nothing climbs far enough where it should, so as before: the drop
+    /// after the breakdown, or the one with the most energy.
+    AsBefore,
+}
+
+/// A lift within a tenth of the biggest counts as as big, and then the kind of
+/// record says which is the main drop: see [`Half`]. Three drops each after an
+/// eight-bar break, at 6.11, 6.69 and 6.48, are three answers to the same
+/// question, and which measures a hair higher is not something the record
+/// chose.
+const ALIKE_LIFT: f32 = 0.9;
+
 /// A record's drops and breaks, by energy.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shape {
     pub drops: Vec<Run>,
     pub breaks: Vec<Run>,
+    /// How many bars the record runs to, for where in it a drop falls.
+    pub bars: usize,
+    /// How its kind arranges its main drop: [`Arranged::UNKNOWN`] until
+    /// somebody says what kind of record it is.
+    pub arranged: Arranged,
 }
 
 impl Shape {
-    /// The drop a DJ means by "the drop": the first after the record's
-    /// breakdown, where it has one.
+    /// The same shape, for a kind of record.
+    pub fn arranged_as(self, arranged: Arranged) -> Shape {
+        Shape { arranged, ..self }
+    }
+
+    /// The drop a DJ means by "the drop", for the kind of record this is: see
+    /// [`Arranged`] and [`Shape::choose`].
+    pub fn main_drop(&self) -> Option<Run> {
+        self.choose().0
+    }
+
+    /// The main drop, and how it was chosen.
+    ///
+    /// The biggest drop: the one that climbs furthest over the bars before it,
+    /// of those in the part of the record its kind puts the main drop in that
+    /// climb at least [`Arranged::lift`] times — and where the kind wants the
+    /// drums out before its drop and some of those have them out, of those.
+    /// Where nothing there climbs far enough, as before — see
+    /// [`Shape::after_the_breakdown`] — because a record that never holds back
+    /// still has its loud part.
+    ///
+    /// Not the first drop after the breakdown, which is what this was, nor the
+    /// first drop that climbs far enough. Either is a place in the arrangement
+    /// rather than how hard a drop hits, and the drop a DJ cues is the one that
+    /// hits hardest. On the records here the drop after the longest break is
+    /// often not that one: Brain Dance climbs 2.35 times out of its 32-bar
+    /// breakdown and 2.94 out of the eight-bar break that takes the drums out
+    /// later. Measured over the whole stretch since the drop before rather than
+    /// the last eight bars, the breakdown's drop climbs less still, 1.86.
+    pub fn choose(&self) -> (Option<Run>, Chosen) {
+        let Arranged { half, lift: need, drums_out, .. } = self.arranged;
+        let mut climbing: Vec<Run> = self
+            .drops
+            .iter()
+            .copied()
+            .filter(|run| half.holds(run.from, self.bars))
+            .filter(|run| run.lift.is_some_and(|lift| lift >= need))
+            .collect();
+        let dropped_out = |run: &Run| run.kept_kick.is_some_and(|kept| kept <= DRUMS_OUT);
+        if drums_out && climbing.iter().any(dropped_out) {
+            climbing.retain(dropped_out);
+        }
+        let Some(biggest) = climbing.iter().filter_map(|run| run.lift).reduce(f32::max) else {
+            return (self.after_the_breakdown(), Chosen::AsBefore);
+        };
+        let as_big = |run: &&Run| run.lift.is_some_and(|lift| lift >= ALIKE_LIFT * biggest);
+        let run = match half {
+            Half::First => climbing.iter().find(as_big),
+            Half::Later => climbing.iter().rfind(as_big),
+        };
+        (run.copied(), Chosen::Biggest)
+    }
+
+    /// The drop after the record's breakdown, where it has one: what the main
+    /// drop was for every kind of record before kinds were told apart, and
+    /// still is where none climbs far enough.
     ///
     /// Not the drop with the most energy in it, which is what this was. A club
     /// record is mastered so that its drops play about as hard as each other,
@@ -103,7 +299,7 @@ impl Shape {
     /// with its drums barely in — and then, as with no break at all, the main
     /// drop is the one with the most energy, between two alike the longer,
     /// then the earlier.
-    pub fn main_drop(&self) -> Option<Run> {
+    pub fn after_the_breakdown(&self) -> Option<Run> {
         let after_the_breakdown = self
             .main_break()
             .filter(|quiet| self.drops.iter().all(|drop| quiet.energy < drop.energy))
@@ -161,6 +357,18 @@ impl Shape {
 /// `grid` is every beat from the first downbeat; a bar the picture does not
 /// reach, or a last bar without all its beats, is left out.
 pub fn bars(bands: &[u8], grid: &[u32]) -> Vec<f32> {
+    measured(bands, grid).into_iter().map(|(energy, _)| energy).collect()
+}
+
+/// How hard each bar's kick hits: how far, column by column, its low band
+/// climbs, the half of [`bars`] that is the drums. For telling a break that
+/// took the drums out from one that kept them: see [`DRUMS_OUT`].
+pub fn kicks(bands: &[u8], grid: &[u32]) -> Vec<f32> {
+    measured(bands, grid).into_iter().map(|(_, kick)| kick).collect()
+}
+
+/// Each bar's [`bars`] and its [`kicks`].
+fn measured(bands: &[u8], grid: &[u32]) -> Vec<(f32, f32)> {
     let columns = bands.len() / 3;
     let band = |column: usize, band: usize| f32::from(bands[column * 3 + band]) / 127.0;
     // A running mean over the last few columns, so that it can be read across
@@ -184,12 +392,12 @@ pub fn bars(bands: &[u8], grid: &[u32]) -> Vec<f32> {
                 .sum::<f32>()
                 / width;
             let rises = (from.max(1)..to).map(|c| (low[c] - low[c - 1]).max(0.0)).sum::<f32>();
-            (power * rises / width).sqrt()
+            ((power * rises / width).sqrt(), rises / width)
         })
     })
 }
 
-fn each_bar(grid: &[u32], measure: impl Fn(u32, u32) -> Option<f32>) -> Vec<f32> {
+fn each_bar<T>(grid: &[u32], measure: impl Fn(u32, u32) -> Option<T>) -> Vec<T> {
     let mut bars = Vec::new();
     for bar in grid.chunks(BEATS_PER_BAR) {
         if bar.len() < BEATS_PER_BAR {
@@ -203,7 +411,7 @@ fn each_bar(grid: &[u32], measure: impl Fn(u32, u32) -> Option<f32>) -> Vec<f32>
             .copied()
             .unwrap_or_else(|| bar[3] + bar[3].saturating_sub(bar[2]));
         match measure(bar[0], to) {
-            Some(energy) => bars.push(energy),
+            Some(measured) => bars.push(measured),
             None => break,
         }
     }
@@ -225,11 +433,7 @@ pub fn shape(bars: &[f32]) -> Shape {
     }
     let middle = (quiet + loud) / 2.0;
 
-    let run = |from: usize, to: usize| Run {
-        from,
-        to,
-        energy: bars[from..to].iter().sum::<f32>() / (to - from) as f32,
-    };
+    let run = |from: usize, to: usize| stretch(bars, from, to);
     let runs = || -> Vec<Run> {
         let mut runs: Vec<(usize, usize)> = Vec::new();
         for (bar, &energy) in bars.iter().enumerate() {
@@ -243,7 +447,7 @@ pub fn shape(bars: &[f32]) -> Shape {
         }
         runs.into_iter()
             .filter(|(from, to)| to - from >= RUN_BARS)
-            .map(|(from, to)| run(from, to))
+            .map(|(from, to)| as_drop(bars, from, to))
             .collect()
     };
     let drops = runs();
@@ -257,7 +461,53 @@ pub fn shape(bars: &[f32]) -> Shape {
         .filter(|(from, to)| to - from >= RUN_BARS)
         .map(|(from, to)| run(from, to))
         .collect();
-    Shape { drops, breaks }
+    Shape { drops, breaks, bars: bars.len(), ..Shape::default() }
+}
+
+/// Bars `from` to `to`, and how much they play.
+fn stretch(bars: &[f32], from: usize, to: usize) -> Run {
+    Run {
+        from,
+        to,
+        energy: bars[from..to].iter().sum::<f32>() / (to - from) as f32,
+        lift: None,
+        kept_kick: None,
+    }
+}
+
+/// Bars `from` to `to` as a drop: how much they play, and how far that climbs
+/// over the [`BEFORE_BARS`] before them where there are that many.
+fn as_drop(bars: &[f32], from: usize, to: usize) -> Run {
+    let run = stretch(bars, from, to);
+    let lift = (from >= BEFORE_BARS).then(|| {
+        let before = bars[from - BEFORE_BARS..from].iter().sum::<f32>() / BEFORE_BARS as f32;
+        run.energy / before.max(f32::MIN_POSITIVE)
+    });
+    Run { lift, ..run }
+}
+
+/// How much of each drop's kick the bars before it kept: see
+/// [`Run::kept_kick`].
+fn with_kicks(shape: Shape, kicks: &[f32]) -> Shape {
+    let mean = |from: usize, to: usize| {
+        let to = to.min(kicks.len());
+        (to > from).then(|| kicks[from..to].iter().sum::<f32>() / (to - from) as f32)
+    };
+    let drops = shape
+        .drops
+        .into_iter()
+        .map(|run| {
+            let kept_kick = (run.from >= BEFORE_BARS)
+                .then(|| {
+                    let before = mean(run.from - BEFORE_BARS, run.from)?;
+                    let inside = mean(run.from, run.to.min(run.from + BEFORE_BARS))?;
+                    Some(before / inside.max(f32::MIN_POSITIVE))
+                })
+                .flatten();
+            Run { kept_kick, ..run }
+        })
+        .collect();
+    Shape { drops, ..shape }
 }
 
 /// How far up the drum stem's own range a bar has to come for its drums to
@@ -303,12 +553,6 @@ pub fn shape_with_drums(mix: &[f32], drums: &[f32]) -> Shape {
     if out.is_empty() {
         return from_mix;
     }
-    let run = |from: usize, to: usize| Run {
-        from,
-        to,
-        energy: mix[from..to].iter().sum::<f32>() / (to - from) as f32,
-    };
-
     let mut drops = Vec::new();
     for drop in &from_mix.drops {
         let mut pieces = vec![(drop.from, drop.to)];
@@ -322,7 +566,10 @@ pub fn shape_with_drums(mix: &[f32], drums: &[f32]) -> Shape {
                 .collect();
         }
         drops.extend(
-            pieces.into_iter().filter(|(from, to)| to - from >= RUN_BARS).map(|(f, t)| run(f, t)),
+            pieces
+                .into_iter()
+                .filter(|(from, to)| to - from >= RUN_BARS)
+                .map(|(f, t)| as_drop(mix, f, t)),
         );
     }
 
@@ -338,17 +585,19 @@ pub fn shape_with_drums(mix: &[f32], drums: &[f32]) -> Shape {
             _ => merged.push((from, to)),
         }
     }
-    Shape { drops, breaks: merged.into_iter().map(|(f, t)| run(f, t)).collect() }
+    let breaks = merged.into_iter().map(|(f, t)| stretch(mix, f, t)).collect();
+    Shape { drops, breaks, ..from_mix }
 }
 
 /// A record's drops and breaks from its picture, and from its drum stem's
 /// where it has one. `grid` is every beat from the first downbeat.
 pub fn read(bands: &[u8], drums: Option<&[u8]>, grid: &[u32]) -> Shape {
-    let mix = bars(bands, grid);
-    match drums {
+    let (mix, kicks): (Vec<f32>, Vec<f32>) = measured(bands, grid).into_iter().unzip();
+    let shape = match drums {
         Some(drums) => shape_with_drums(&mix, &bars(drums, grid)),
         None => shape(&mix),
-    }
+    };
+    with_kicks(shape, &kicks)
 }
 
 /// Where a drum stem's drums are out for [`RUN_BARS`] or more, between bars
@@ -399,80 +648,161 @@ fn drums_out(drums: &[f32]) -> Vec<(usize, usize)> {
 mod tests {
     use super::*;
 
-    /// SCRATCH: every bar of every record in `BOOTH_DRUM_RECORDS`, band by
-    /// band, into `BOOTH_EXPLAIN_TO/<name>.bars.csv`, for measuring drops.
-    #[test]
-    #[ignore = "needs records on disk"]
-    fn scratch_bars_band_by_band() {
-        use crate::audio::decode::decode_file;
-        let var = |name: &str| std::env::var_os(name).map(std::path::PathBuf::from);
-        let (Some(records), Some(to)) = (var("BOOTH_DRUM_RECORDS"), var("BOOTH_EXPLAIN_TO")) else {
-            return;
-        };
-        std::fs::create_dir_all(&to).unwrap();
-        let mut names: Vec<_> = std::fs::read_dir(&records)
-            .unwrap()
-            .filter_map(|entry| Some(entry.ok()?.path()))
-            .filter(|path| path.extension().is_some_and(|ext| ext == "mp3" || ext == "flac"))
-            .collect();
-        names.sort();
-        for path in names {
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            let Ok(audio) = decode_file(&path) else {
-                eprintln!("{name}: will not decode");
-                continue;
-            };
-            let bands = crate::export::waveform::analyze(&audio).band_detail;
-            let analysis = crate::analysis::analyze_drawn(&audio, None, &bands);
-            let Some(first) = analysis.grid.beats.iter().position(|b| b.number == 1) else {
-                continue;
-            };
-            let grid: Vec<u32> = analysis.grid.beats[first..].iter().map(|b| b.time_ms).collect();
-            let columns = bands.len() / 3;
-            let band = |c: usize, b: usize| f32::from(bands[c * 3 + b]) / 127.0;
-            let mut low = Vec::with_capacity(columns);
-            let mut sum = 0.0;
-            for c in 0..columns {
-                sum += band(c, 0);
-                if c >= SMOOTH_COLUMNS {
-                    sum -= band(c - SMOOTH_COLUMNS, 0);
-                }
-                low.push(sum / (c + 1).min(SMOOTH_COLUMNS) as f32);
-            }
-            let column = |ms: u32| ms as usize * COLUMNS_PER_SECOND / 1000;
-            let mut out = String::from("bar,ms,energy,kick,low,mid,high\n");
-            let energies = bars(&bands, &grid);
-            for (bar, energy) in energies.iter().enumerate() {
-                let from = column(grid[bar * BEATS_PER_BAR]);
-                let to = grid
-                    .get((bar + 1) * BEATS_PER_BAR)
-                    .map(|&ms| column(ms))
-                    .unwrap_or(columns)
-                    .min(columns);
-                if to <= from {
-                    break;
-                }
-                let width = (to - from) as f32;
-                let kick =
-                    (from.max(1)..to).map(|c| (low[c] - low[c - 1]).max(0.0)).sum::<f32>() / width;
-                let power = |b: usize| (from..to).map(|c| band(c, b).powi(2)).sum::<f32>() / width;
-                out.push_str(&format!(
-                    "{},{},{energy:.5},{kick:.5},{:.5},{:.5},{:.5}\n",
-                    bar + 1,
-                    grid[bar * BEATS_PER_BAR],
-                    power(0),
-                    power(1),
-                    power(2)
-                ));
-            }
-            std::fs::write(to.join(format!("{name}.bars.csv")), out).unwrap();
-            eprintln!("{name}: {} bars at {:.2} bpm", energies.len(), analysis.bpm);
-        }
-    }
-
     /// Bars at these levels, `count` of each, in order.
     fn record(parts: &[(f32, usize)]) -> Vec<f32> {
         parts.iter().flat_map(|&(level, count)| std::iter::repeat_n(level, count)).collect()
+    }
+
+    /// A genre, as the table files it, for a test.
+    fn genre(id: &'static str, family: &'static str, sure: f32) -> super::super::tempo::Genre {
+        super::super::tempo::Genre { id, name: id, family, from_bpm: 0.0, to_bpm: 0.0, sure }
+    }
+
+    /// Intro 32, drop 32, break 16, drop 32 a little louder, outro 16: drum
+    /// and bass as it is usually built, with the drop after a long intro.
+    fn after_a_long_intro() -> Vec<f32> {
+        record(&[(20.0, 32), (80.0, 32), (25.0, 16), (90.0, 32), (30.0, 16)])
+    }
+
+    #[test]
+    fn a_drum_and_bass_record_has_its_main_drop_before_halfway_and_house_after_its_first_third() {
+        let shape = shape(&after_a_long_intro());
+        assert_eq!(shape.main_drop().map(|run| run.from), Some(80), "with no genre");
+        let dnb = shape.clone().arranged_as(Arranged::of(&genre("drum-and-bass", "dnb", 1.0)));
+        assert_eq!(dnb.choose().0.map(|run| run.from), Some(32));
+        assert_eq!(dnb.choose().1, Chosen::Biggest);
+        let house = shape.arranged_as(Arranged::of(&genre("house", "house", 1.0)));
+        assert_eq!(house.choose(), (house.after_the_breakdown(), Chosen::Biggest));
+    }
+
+    #[test]
+    fn of_the_drops_before_halfway_drum_and_bass_cues_the_biggest_not_the_first() {
+        // Intro, a drop that climbs three times out of it, a short break, a
+        // drop that climbs four and a half, the breakdown, the drop again.
+        let bars = |second| {
+            record(&[
+                (20.0, 16),
+                (60.0, 16),
+                (20.0, 8),
+                (second, 24),
+                (25.0, 16),
+                (90.0, 32),
+                (20.0, 16),
+            ])
+        };
+        let dnb = Arranged::of(&genre("drum-and-bass", "dnb", 1.0));
+        let shape = shape(&bars(90.0)).arranged_as(dnb);
+        assert_eq!(shape.choose().0.map(|run| run.from), Some(40));
+        // Climbing 3.2 times is within a tenth of the first's 3.0, so as big,
+        // and of two as big drum and bass cues the earlier.
+        let shape = super::shape(&bars(64.0)).arranged_as(dnb);
+        assert_eq!(shape.choose().0.map(|run| run.from), Some(16));
+    }
+
+    #[test]
+    fn of_the_drops_after_its_first_third_house_cues_the_biggest_not_the_one_after_its_breakdown() {
+        // Intro, drop, a 32-bar breakdown ending in a build that leaves little
+        // for the drop after it to climb over, then a short break with
+        // everything out and the drop that climbs furthest out of it.
+        let bars = record(&[
+            (20.0, 8),
+            (85.0, 24),
+            (20.0, 24),
+            (50.0, 8),
+            (85.0, 32),
+            (40.0, 8),
+            (90.0, 32),
+            (20.0, 8),
+        ]);
+        let shape = shape(&bars);
+        assert_eq!(shape.main_break().map(|run| (run.from, run.to)), Some((32, 64)));
+        assert_eq!(shape.after_the_breakdown().map(|run| run.from), Some(64));
+        assert_eq!(shape.choose().0.map(|run| run.from), Some(104));
+    }
+
+    #[test]
+    fn a_record_with_no_breakdown_has_its_main_drop_where_it_climbs_furthest_after_its_first_third()
+    {
+        // No break of eight bars, so before kinds were told apart the main
+        // drop was the loudest: the second, which comes out of a dip it barely
+        // climbs over. The third comes out of a dip it climbs well out of, and
+        // the first, out of the intro, is the groove setting out.
+        let bars = record(&[
+            (10.0, 8),
+            (80.0, 16),
+            (45.0, 4),
+            (88.0, 40),
+            (20.0, 4),
+            (84.0, 60),
+            (10.0, 8),
+        ]);
+        let shape = shape(&bars);
+        assert!(shape.breaks.is_empty());
+        assert_eq!(shape.after_the_breakdown().map(|run| run.from), Some(28), "the loudest");
+        assert_eq!(shape.choose(), (shape.drops.get(2).copied(), Chosen::Biggest));
+        assert_eq!(shape.drops[2].from, 72);
+    }
+
+    #[test]
+    fn a_record_whose_drops_never_climb_far_enough_keeps_its_main_drop_as_it_was() {
+        // A record that plays about as hard all the way through, as a
+        // hardcore one with its kick going under every break does.
+        let bars = record(&[(60.0, 16), (80.0, 40), (62.0, 16), (82.0, 40), (60.0, 16)]);
+        let shape = shape(&bars);
+        assert!(shape.drops.iter().all(|run| run.lift.is_some_and(|lift| lift < 1.5)));
+        assert_eq!(shape.choose(), (shape.after_the_breakdown(), Chosen::AsBefore));
+    }
+
+    #[test]
+    fn a_trance_record_has_its_main_drop_after_the_drums_drop_out_though_another_climbs_further() {
+        // Intro, drop, a long break with the kick still going and the bass
+        // out, drop, a short break with the drums out but more left above
+        // them, drop. Without a genre the drop out of the long break is the
+        // biggest; a trance breakdown is where the drums go.
+        let bars = record(&[
+            (20.0, 16),
+            (80.0, 32),
+            (30.0, 16),
+            (85.0, 32),
+            (40.0, 8),
+            (85.0, 32),
+            (20.0, 16),
+        ]);
+        let kicks =
+            record(&[(1.0, 16), (1.0, 32), (0.9, 16), (1.0, 32), (0.1, 8), (1.0, 32), (1.0, 16)]);
+        let shape = with_kicks(shape(&bars), &kicks);
+        assert_eq!(shape.main_drop().map(|run| run.from), Some(64));
+        let trance = shape.arranged_as(Arranged::of(&genre("trance", "trance", 1.0)));
+        assert_eq!(trance.choose(), (trance.drops.get(2).copied(), Chosen::Biggest));
+        assert_eq!(trance.drops[2].from, 104);
+        assert!(trance.drops[2].kept_kick.is_some_and(|kept| kept <= DRUMS_OUT));
+    }
+
+    #[test]
+    fn a_drop_with_too_few_bars_before_it_has_nothing_to_climb_out_of() {
+        let shape = shape(&record(&[(10.0, 4), (80.0, 32), (20.0, 16), (85.0, 32), (10.0, 8)]));
+        assert_eq!(shape.drops[0].from, 4);
+        assert_eq!(shape.drops[0].lift, None);
+        assert!(shape.drops[1].lift.is_some_and(|lift| lift > 4.0));
+        assert_eq!(shape.breaks[0].lift, None, "a break does not climb");
+    }
+
+    #[test]
+    fn the_surest_genre_says_how_a_record_is_arranged_and_the_first_of_two_as_sure() {
+        let (house, jungle) = (genre("house", "house", 0.4), genre("jungle", "dnb", 0.7));
+        assert_eq!(Arranged::of_genres(&[]), Arranged::UNKNOWN);
+        assert_eq!(Arranged::of_genres(&[house, jungle]).half, Half::First);
+        let (house, jungle) = (genre("house", "house", 1.0), genre("jungle", "dnb", 1.0));
+        assert_eq!(Arranged::of_genres(&[jungle, house]).genre, "jungle");
+        assert_eq!(Arranged::of_genres(&[house, jungle]).genre, "house");
+    }
+
+    #[test]
+    fn dubstep_cues_a_drop_before_halfway_and_breakbeat_filed_beside_it_one_after_its_first_third()
+    {
+        assert_eq!(Arranged::of(&genre("dubstep", "bass", 1.0)).half, Half::First);
+        assert_eq!(Arranged::of(&genre("breakbeat", "bass", 1.0)).half, Half::Later);
+        assert!(Arranged::of(&genre("trance", "trance", 1.0)).drums_out);
     }
 
     #[test]
@@ -516,10 +846,11 @@ mod tests {
         // drum stem it can be a stretch with the drums out and the synths
         // loud: as on a record whose drop after such a stretch began with its
         // drums barely in.
-        let run = |from, to, energy| Run { from, to, energy };
+        let run = |from, to, energy| Run { from, to, energy, lift: None, kept_kick: None };
         let shape = Shape {
             drops: vec![run(34, 56, 0.78), run(61, 96, 0.99), run(104, 150, 0.91)],
             breaks: vec![run(96, 104, 0.86)],
+            ..Shape::default()
         };
         assert_eq!(shape.main_drop().map(|run| run.from), Some(61));
     }
@@ -841,18 +1172,31 @@ mod tests {
         assert_eq!(bars(&bands, &grid).len(), 1);
     }
 
-    /// The comparison behind putting D after the breakdown, on real records:
-    /// for each record in `BOOTH_D_RECORDS`, where each rule puts D, with the
-    /// time to listen at.
+    /// The comparison behind choosing the main drop by the kind of record, on
+    /// real records: for each in `BOOTH_D_RECORDS`, every drop with how far it
+    /// climbs over the eight bars before it and how much of its kick those
+    /// kept, and the main drop as it was chosen before kinds were told apart
+    /// and as it is now. With `BOOTH_GENRE_MODEL`, each record is heard first
+    /// and placed by the genre it is heard as; without, by no genre at all.
     ///
     /// ```sh
-    /// BOOTH_D_RECORDS=<a folder of records> \
+    /// BOOTH_D_RECORDS=<a folder of records> BOOTH_GENRE_MODEL=<model.onnx> \
     ///     cargo test -p booth-cli --release --lib d_by_each_rule -- --ignored --nocapture
     /// ```
+    ///
+    /// On the 25 records from archive.org behind the downbeat and six more
+    /// for drum and bass and hardcore, heard by the model, three moved: I Need
+    /// House to the drop at 2:27 that the downbeat's reference heard as
+    /// everything coming in, and the two drum and bass records to the drop
+    /// after their intro. Without the model, two: I Need House, and one of the
+    /// drum and bass records off an eight-bar stretch weaker than its others.
     #[test]
     #[ignore = "needs records: BOOTH_D_RECORDS"]
     fn real_records_d_by_each_rule() {
         let records = std::path::PathBuf::from(std::env::var("BOOTH_D_RECORDS").unwrap());
+        let classifier = super::super::style::locate(None)
+            .filter(|_| std::env::var_os("BOOTH_GENRE_MODEL").is_some())
+            .map(|model| super::super::style::Classifier::load(&model).unwrap());
         let mut paths: Vec<std::path::PathBuf> =
             std::fs::read_dir(&records).unwrap().map(|entry| entry.unwrap().path()).collect();
         paths.sort();
@@ -864,25 +1208,38 @@ mod tests {
             let times: Vec<u32> = analysed.grid.beats.iter().map(|beat| beat.time_ms).collect();
             let phase = analysed.grid.beats.iter().position(|beat| beat.number == 1).unwrap_or(0);
             let grid = &times[phase..];
-            let shape = shape(&bars(&bands, grid));
-            let at = |run: Option<Run>| match run {
-                Some(run) => {
-                    let s = grid.get(run.from * 4).copied().unwrap_or(0) / 1000;
-                    format!("bar {} ({}:{:02})", run.from, s / 60, s % 60)
-                }
-                None => "none".to_string(),
+            let heard = classifier
+                .as_ref()
+                .map(|model| super::super::genre_tempo::heard(&model.classify(&audio).unwrap()))
+                .unwrap_or_default();
+            let shape = read(&bands, None, grid).arranged_as(Arranged::of_genres(&heard));
+            let at = |run: &Run| {
+                let s = grid.get(run.from * 4).copied().unwrap_or(0) / 1000;
+                format!("bar {} ({}:{:02})", run.from + 1, s / 60, s % 60)
             };
-            let (old, new) = (shape.loudest_drop(), shape.main_drop());
+            let said = |run: Option<Run>| run.as_ref().map_or("none".to_string(), at);
+            let (before, (now, how)) = (shape.after_the_breakdown(), shape.choose());
             total += 1;
-            differ += usize::from(old != new);
+            differ += usize::from(before != now);
             eprintln!(
-                "{}: B {}; loudest drop {}; after the breakdown {}{}",
+                "{} [{}]: before {}; now {} ({how:?}){}",
                 path.file_stem().unwrap().to_string_lossy(),
-                at(shape.main_break()),
-                at(old),
-                at(new),
-                if old != new { "  <- differ" } else { "" }
+                shape.arranged.genre,
+                said(before),
+                said(now),
+                if before != now { "  <- differ" } else { "" }
             );
+            for run in &shape.drops {
+                let number =
+                    |value: Option<f32>| value.map_or("-".to_string(), |v| format!("{v:.2}"));
+                eprintln!(
+                    "    drop {} for {} bars: lift {}, kick kept {}",
+                    at(run),
+                    run.bars(),
+                    number(run.lift),
+                    number(run.kept_kick)
+                );
+            }
         }
         eprintln!("{differ} of {total} differ");
     }
