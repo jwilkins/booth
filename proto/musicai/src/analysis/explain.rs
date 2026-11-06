@@ -377,14 +377,16 @@ fn shape(out: &mut String, analysis: &TrackAnalysis, bands: &[u8], drums: Option
         out,
         &format!(
             "Arranged as {}. The main drop is the biggest: of the drops {part} that climb {} \
-             times or more over the {} bars before them{}, the one that climbs furthest, and of \
-             two within a tenth of each other the {of_two}.",
+             times or more over the {} bars before them and play harder than the record's \
+             average of {:.4}{}, the one that climbs furthest, and of two within a tenth of each \
+             other the {of_two}.",
             match arranged.genre {
                 "" => "house and techno are, with no genre to say otherwise",
                 genre => genre,
             },
             arranged.lift,
             energy::BEFORE_BARS,
+            shape.average,
             match arranged.drums_out {
                 true => format!(
                     ", and of those the drums drop out before where there are any (the bars \

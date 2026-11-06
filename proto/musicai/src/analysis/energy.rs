@@ -221,6 +221,9 @@ pub struct Shape {
     pub breaks: Vec<Run>,
     /// How many bars the record runs to, for where in it a drop falls.
     pub bars: usize,
+    /// The record's average energy a bar, intro and outro and all, which the
+    /// main drop has to play harder than: see [`Shape::choose`].
+    pub average: f32,
     /// How its kind arranges its main drop: [`Arranged::UNKNOWN`] until
     /// somebody says what kind of record it is.
     pub arranged: Arranged,
@@ -242,11 +245,17 @@ impl Shape {
     ///
     /// The biggest drop: the one that climbs furthest over the bars before it,
     /// of those in the part of the record its kind puts the main drop in that
-    /// climb at least [`Arranged::lift`] times — and where the kind wants the
-    /// drums out before its drop and some of those have them out, of those.
-    /// Where nothing there climbs far enough, as before — see
-    /// [`Shape::after_the_breakdown`] — because a record that never holds back
-    /// still has its loud part.
+    /// climb at least [`Arranged::lift`] times and play harder than the
+    /// record's [`Shape::average`] — and where the kind wants the drums out
+    /// before its drop and some of those have them out, of those. Where nothing
+    /// there does all that, as before — see [`Shape::after_the_breakdown`] —
+    /// because a record that never holds back still has its loud part.
+    ///
+    /// Harder than the average as well as harder than the bars before it,
+    /// because a climb is measured against whatever came before, and a stretch
+    /// that comes out of near-silence climbs a long way without being loud. A
+    /// drop that plays softer than the record does on the whole is not the
+    /// part of it a set is built round, however quiet the bars before it.
     ///
     /// Not the first drop after the breakdown, which is what this was, nor the
     /// first drop that climbs far enough. Either is a place in the arrangement
@@ -264,6 +273,7 @@ impl Shape {
             .copied()
             .filter(|run| half.holds(run.from, self.bars))
             .filter(|run| run.lift.is_some_and(|lift| lift >= need))
+            .filter(|run| self.louder_than_average(run))
             .collect();
         let dropped_out = |run: &Run| run.kept_kick.is_some_and(|kept| kept <= DRUMS_OUT);
         if drums_out && climbing.iter().any(dropped_out) {
@@ -299,12 +309,29 @@ impl Shape {
     /// with its drums barely in — and then, as with no break at all, the main
     /// drop is the one with the most energy, between two alike the longer,
     /// then the earlier.
+    ///
+    /// The first drop after the breakdown that plays harder than the record's
+    /// [`Shape::average`], that is, passing over one that does not, for the
+    /// reason [`Shape::choose`] gives. On Get Free this put D on an eight-bar
+    /// stretch at 0.83 of the record's average straight after its breakdown,
+    /// and now puts it on the 33 bars at 1.17 that come in sixteen seconds
+    /// later.
     pub fn after_the_breakdown(&self) -> Option<Run> {
         let after_the_breakdown = self
             .main_break()
             .filter(|quiet| self.drops.iter().all(|drop| quiet.energy < drop.energy))
-            .and_then(|quiet| self.drops.iter().find(|drop| drop.from >= quiet.from).copied());
+            .and_then(|quiet| {
+                self.drops
+                    .iter()
+                    .find(|drop| drop.from >= quiet.from && self.louder_than_average(drop))
+                    .copied()
+            });
         after_the_breakdown.or_else(|| self.loudest_drop())
+    }
+
+    /// Whether a drop plays harder than the record does on average.
+    fn louder_than_average(&self, run: &Run) -> bool {
+        run.energy > self.average
     }
 
     /// The drop with the most energy in it. Between two alike, the longer,
@@ -461,7 +488,8 @@ pub fn shape(bars: &[f32]) -> Shape {
         .filter(|(from, to)| to - from >= RUN_BARS)
         .map(|(from, to)| run(from, to))
         .collect();
-    Shape { drops, breaks, bars: bars.len(), ..Shape::default() }
+    let average = bars.iter().sum::<f32>() / bars.len() as f32;
+    Shape { drops, breaks, bars: bars.len(), average, ..Shape::default() }
 }
 
 /// Bars `from` to `to`, and how much they play.
@@ -856,6 +884,45 @@ mod tests {
     }
 
     #[test]
+    fn a_drop_that_climbs_furthest_but_plays_softer_than_the_record_on_average_is_not_d() {
+        // Intro, drop, a short break that keeps something going, a long loud
+        // drop out of it, a break of near-silence, and a soft stretch that
+        // climbs a long way out of the silence and is still quieter than the
+        // record as a whole, then the outro.
+        let bars = record(&[
+            (10.0, 8),
+            (90.0, 24),
+            (40.0, 8),
+            (90.0, 40),
+            (10.0, 8),
+            (52.0, 16),
+            (10.0, 8),
+        ]);
+        let shape = shape(&bars);
+        let (loud, soft) = (shape.drops[1], shape.drops[2]);
+        assert_eq!((loud.from, soft.from), (40, 88));
+        assert!(soft.lift > loud.lift, "{soft:?} climbs further than {loud:?}");
+        assert!(soft.energy < shape.average, "{soft:?} against {}", shape.average);
+        assert_eq!(shape.choose(), (Some(loud), Chosen::Biggest));
+        assert_eq!(shape.after_the_breakdown(), Some(loud), "nor is it D as before");
+    }
+
+    #[test]
+    fn after_the_breakdown_a_stretch_softer_than_the_record_on_average_is_passed_over() {
+        // As on Get Free: eight bars at 0.83 of the record's average straight
+        // after the breakdown, and the drop proper after them.
+        let run = |from, to, energy| Run { from, to, energy, lift: None, kept_kick: None };
+        let shape = Shape {
+            drops: vec![run(32, 64, 0.9), run(80, 88, 0.5), run(92, 124, 0.7)],
+            breaks: vec![run(64, 80, 0.3)],
+            bars: 140,
+            average: 0.6,
+            ..Shape::default()
+        };
+        assert_eq!(shape.after_the_breakdown().map(|run| run.from), Some(92));
+    }
+
+    #[test]
     fn a_record_with_no_break_has_its_loudest_drop_as_d() {
         let bars = record(&[(20.0, 16), (80.0, 32), (60.0, 4), (90.0, 32), (20.0, 16)]);
         let shape = shape(&bars);
@@ -1194,6 +1261,11 @@ mod tests {
     /// from 2:50 to 4:54, Blunted My Transistor from 4:21 to 2:33, and Nebula
     /// from 2:39 to 1:15. Without the model, five: the same less Swords, and
     /// Get Free to its last drop, at 5:05, rather than its first.
+    ///
+    /// Requiring D to play harder than the record's average moved none of
+    /// those. It changed D as before on one record, Get Free, from the
+    /// eight bars at 4:00 to the drop at 4:16, and the biggest drop overrules
+    /// that there either way.
     #[test]
     #[ignore = "needs records: BOOTH_D_RECORDS"]
     fn real_records_d_by_each_rule() {

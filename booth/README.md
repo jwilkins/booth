@@ -1072,11 +1072,12 @@ which would put the hand on the wrong moment:
 - **C, the hook in a drop**, the best airing of the hook inside one, if it is at
   least eight bars from D. Nearer, the two pads play into the same moment.
 - **D, the main drop**, the biggest: the drop that climbs furthest out of the
-  stretch before it, in the part of the record its genre puts the main drop in
-  — before halfway for drum and bass and dubstep, after the first third for
-  everything else. A record where nothing there climbs far enough has the drop
-  after its breakdown, and one with no breakdown the drop with the most energy
-  in it.
+  stretch before it, of those that play harder than the record does on
+  average, in the part of the record its genre puts the main drop in — before
+  halfway for drum and bass and dubstep, after the first third for everything
+  else. A record where nothing there does both has the first drop after its
+  breakdown that is louder than its average, and one with no breakdown the drop
+  with the most energy in it.
 
 E to H are the rest, in time order, filled by what a set needs next: a way in,
 the intro or the build before the first drop; a way out, the outro; a build
@@ -1124,6 +1125,16 @@ one and a half times to count. Of 31 records, the drops out of a stretch that
 held back climbed 1.8 to 33 times, and the loud stretches of records that never
 hold back, which still read as drops, 0.99 to 1.45.
 
+It also has to play harder than the record does on average, intro and outro
+and breaks and all. A climb is measured against whatever came before it, and a
+stretch out of near-silence climbs a long way without being loud: a drop
+softer than the record on the whole is not the part of it a set is built round.
+Of the 31 records' drops, four were at or below their record's average, and
+none of them was the biggest drop where it was looked for. The one that had
+been D was on Get Free: an eight-bar stretch at 0.83 of the average straight
+after the breakdown, which the drop after the breakdown was before this, with
+33 bars at 1.17 coming in sixteen seconds later.
+
 Not the first drop after the breakdown, which is what D was before. That is a
 place in the arrangement rather than how hard a drop hits, and on the records
 here it is often not the biggest: on one, the drop out of a 32-bar breakdown
@@ -1131,9 +1142,10 @@ climbs 2.35 times and the one out of an eight-bar break later, with the drums
 taken out, 2.94. Measured against the whole breakdown rather than its last
 eight bars, the first climbs less still.
 
-Where nothing climbs far enough, D is still the drop after the breakdown, and
-with no breakdown the drop with the most energy, because a record that never
-holds back still has its loud part. A breakdown is the main break when it is
+Where nothing climbs far enough, D is still the drop after the breakdown — the
+first after it that is louder than the record's average — and with no breakdown
+the drop with the most energy, because a record that never holds back still has
+its loud part. A breakdown is the main break when it is
 quieter than every drop; one that is not — read with the drum stem, a stretch
 with the drums out and the synths at full can be — is a dip between two loud
 stretches, and the record is treated as having no breakdown.
