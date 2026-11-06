@@ -115,6 +115,10 @@ pub struct Genre {
     pub id: &'static str,
     /// What it is called, for the log: "Drum & Bass".
     pub name: &'static str,
+    /// Which of the table's twelve families it is in — "dnb", "house" — which
+    /// is what says how its records arrange their drops: see
+    /// [`super::energy::Arranged`].
+    pub family: &'static str,
     /// The tempos its scene plays it at, which its records are near rather
     /// than always inside.
     pub from_bpm: f64,
@@ -1490,7 +1494,7 @@ mod tests {
     }
 
     fn played(id: &'static str, from_bpm: f64, to_bpm: f64, sure: f32) -> Genre {
-        Genre { id, name: id, from_bpm, to_bpm, sure }
+        Genre { id, name: id, family: "", from_bpm, to_bpm, sure }
     }
 
     #[test]

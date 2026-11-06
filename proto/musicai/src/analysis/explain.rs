@@ -351,7 +351,7 @@ fn shape(out: &mut String, analysis: &TrackAnalysis, bands: &[u8], drums: Option
     let grid: Vec<u32> = analysis.grid.beats[downbeat..].iter().map(|beat| beat.time_ms).collect();
     let mix = energy::bars(bands, &grid);
     let drum_bars = drums.map(|drums| energy::bars(drums, &grid));
-    let shape = energy::read(bands, drums, &grid);
+    let shape = energy::read(bands, drums, &grid).arranged_as(analysis.arranged);
     let bar_at = |bar: usize| grid.get(bar * BEATS_PER_BAR).copied().map(clock).unwrap_or_default();
 
     paragraph(
@@ -367,11 +367,48 @@ fn shape(out: &mut String, analysis: &TrackAnalysis, bands: &[u8], drums: Option
             energy::RUN_BARS
         ),
     );
-    let main_drop = shape.main_drop();
+    let arranged = shape.arranged;
+    let (part, of_two) = match arranged.half {
+        energy::Half::First => ("before halfway", "earlier"),
+        energy::Half::Later => ("after the first third", "later"),
+    };
+    out.push('\n');
+    paragraph(
+        out,
+        &format!(
+            "Arranged as {}. The main drop is the biggest: of the drops {part} that climb {} \
+             times or more over the {} bars before them and play harder than the record's \
+             average of {:.4}{}, the one that climbs furthest, and of two within a tenth of each \
+             other the {of_two}.",
+            match arranged.genre {
+                "" => "house and techno are, with no genre to say otherwise",
+                genre => genre,
+            },
+            arranged.lift,
+            energy::BEFORE_BARS,
+            shape.average,
+            match arranged.drums_out {
+                true => format!(
+                    ", and of those the drums drop out before where there are any (the bars \
+                     before keep {} of the drop's kick or less)",
+                    energy::DRUMS_OUT
+                ),
+                false => String::new(),
+            },
+        ),
+    );
+    let (main_drop, chosen) = shape.choose();
     let main_break = shape.main_break();
+    let measured = |value: Option<f32>| value.map_or("   -".to_string(), |v| format!("{v:>4.2}"));
     let run = |kind: &str, run: &energy::Run, main: Option<energy::Run>, letter: &str| {
+        let climb = match kind {
+            "drop" => {
+                format!(", lift {}, kick kept {}", measured(run.lift), measured(run.kept_kick))
+            }
+            _ => String::new(),
+        };
         format!(
-            "  {kind:<6} bars {:>3}-{:<3} from {:<10} {:>3} bars, energy {:.4}{}",
+            "  {kind:<6} bars {:>3}-{:<3} from {:<10} {:>3} bars, energy {:.4}{climb}{}",
             run.from + 1,
             run.to,
             bar_at(run.from),
@@ -380,12 +417,19 @@ fn shape(out: &mut String, analysis: &TrackAnalysis, bands: &[u8], drums: Option
             if main == Some(*run) { letter } else { "" }
         )
     };
+    let main_drop_is = match chosen {
+        energy::Chosen::Biggest => "  <- the main drop, D",
+        energy::Chosen::AsBefore => {
+            "  <- the main drop, D: none climbs far enough where it should, so the drop after \
+             the breakdown, or the loudest"
+        }
+    };
     out.push('\n');
     if shape.drops.is_empty() {
         let _ = writeln!(out, "  No drops.");
     }
     for drop in &shape.drops {
-        let _ = writeln!(out, "{}", run("drop", drop, main_drop, "  <- the main drop, D"));
+        let _ = writeln!(out, "{}", run("drop", drop, main_drop, main_drop_is));
     }
     if shape.breaks.is_empty() {
         let _ = writeln!(out, "  No breaks.");

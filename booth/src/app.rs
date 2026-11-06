@@ -3455,7 +3455,10 @@ impl App {
         // stem's where there is one. No picture, no measurement: the first
         // section named each, as before.
         let shape = bands
-            .map(|bands| booth_cli::analysis::energy::read(bands, drums, &beats))
+            .map(|bands| {
+                booth_cli::analysis::energy::read(bands, drums, &beats)
+                    .arranged_as(arranged_for(track))
+            })
             .unwrap_or_default();
         cues::mark_the_main_ones(&mut candidates, &beats, &shape);
         let main_drop = candidates
@@ -14866,6 +14869,16 @@ fn heard_start(
     let before = starts.clone().filter(|&start| start < at_ms).max();
     let after = starts.filter(|&start| start > at_ms).min();
     booth_cli::analysis::place::line_start(at_ms, before, after, sounds).unwrap_or(at_ms)
+}
+
+/// How a track's kind of record arranges its main drop: by the genre it is
+/// filed under, and failing that the one that put its tempo in its octave.
+/// See [`booth_cli::analysis::energy::Arranged`].
+fn arranged_for(track: &Track) -> booth_cli::analysis::energy::Arranged {
+    use booth_cli::analysis::genre_tempo;
+    let mut genres = genre_tempo::tagged(&track.genre);
+    genres.extend(genre_tempo::called(&track.tempo_octave));
+    booth_cli::analysis::energy::Arranged::of_genres(&genres)
 }
 
 /// Where a record's drops are, as spans on its clock, for saying whether the

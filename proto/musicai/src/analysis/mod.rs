@@ -49,6 +49,9 @@ pub struct TrackAnalysis {
     /// The genre that said which octave the tempo is, and what it was heard
     /// at first where it moved it.
     pub octave: Option<tempo::Octave>,
+    /// How the record's kind arranges its main drop, which said where the
+    /// cues put it: see [`energy::Arranged`].
+    pub arranged: energy::Arranged,
 }
 
 impl TrackAnalysis {
@@ -98,8 +101,9 @@ pub fn analyze_drawn(audio: &Audio, bpm: Option<f64>, bands: &[u8]) -> TrackAnal
 /// The same, for a track with a rendered kit: `drums` is the three-band
 /// picture of its drum stem, which finds the breaks the mix's picture cannot.
 /// See [`energy::shape_with_drums`]. And `genres`, where the genre is known,
-/// is what says which octave its tempo is in: see [`tempo::detect_within`]
-/// and [`genre_tempo`].
+/// is what says which octave its tempo is in — see [`tempo::detect_within`]
+/// and [`genre_tempo`] — and how it arranges its main drop: see
+/// [`energy::Arranged`].
 pub fn analyze_with_drums(
     audio: &Audio,
     bpm: Option<f64>,
@@ -115,7 +119,9 @@ pub fn analyze_with_drums(
     // first heard one, so this is 0 to 3 beats in, and nothing downstream can
     // work it out from the times alone.
     let bar_phase = beats.grid.beats.iter().position(|beat| beat.number == 1).unwrap_or(0);
-    let cues = cues::suggest(&measured, bands, drums, &times, &structure, bar_phase);
+    let heard: Vec<tempo::Genre> = genres.iter().flatten().copied().collect();
+    let arranged = energy::Arranged::of_genres(&heard);
+    let cues = cues::suggest(&measured, bands, drums, &times, &structure, bar_phase, arranged);
     let key = key::detect(audio);
     let intensity = peak_intensity(&measured);
 
@@ -129,6 +135,7 @@ pub fn analyze_with_drums(
         intensity,
         downbeat: beats.downbeat,
         octave: beats.octave,
+        arranged,
     }
 }
 
