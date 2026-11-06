@@ -1184,12 +1184,16 @@ mod tests {
     ///     cargo test -p booth-cli --release --lib d_by_each_rule -- --ignored --nocapture
     /// ```
     ///
-    /// On the 25 records from archive.org behind the downbeat and six more
-    /// for drum and bass and hardcore, heard by the model, three moved: I Need
-    /// House to the drop at 2:27 that the downbeat's reference heard as
-    /// everything coming in, and the two drum and bass records to the drop
-    /// after their intro. Without the model, two: I Need House, and one of the
-    /// drum and bass records off an eight-bar stretch weaker than its others.
+    /// On the 26 records from archive.org behind the downbeat and six more
+    /// for drum and bass, dubstep and hardcore, heard by the model, six of 32
+    /// moved. I Need House went to the drop at 2:27 that the downbeat's
+    /// reference heard as everything coming in, off one at 0:46 a hair louder.
+    /// The two drum and bass records went to the drop after their intro,
+    /// Get Free from 4:00 to 0:43 and Swords from 4:00 to 1:36. And three went
+    /// off the drop after their longest break to a bigger one: Brain Dance
+    /// from 2:50 to 4:54, Blunted My Transistor from 4:21 to 2:33, and Nebula
+    /// from 2:39 to 1:15. Without the model, five: the same less Swords, and
+    /// Get Free to its last drop, at 5:05, rather than its first.
     #[test]
     #[ignore = "needs records: BOOTH_D_RECORDS"]
     fn real_records_d_by_each_rule() {
